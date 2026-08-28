@@ -107,27 +107,26 @@ public final class SharedUploadScheduler implements AutoCloseable {
         try {
             candidates = selectCandidates();
         } catch (RuntimeException e) {
-            uploadInProgress.set(false);
-            lastFailure.set(e);
-            return CompletableFuture.failedFuture(e);
+            return synchronousFailure(e);
         }
         if (candidates.isEmpty()) {
             uploadInProgress.set(false);
             return CompletableFuture.completedFuture(Optional.empty());
         }
 
-        long objectId = objectIdSupplier.getAsLong();
-        long createdTimeMs = currentTimeMsSupplier.getAsLong();
-        if (objectId < 0) {
-            uploadInProgress.set(false);
-            IllegalStateException error = new IllegalStateException("objectIdSupplier returned a negative object ID");
-            lastFailure.set(error);
-            return CompletableFuture.failedFuture(error);
+        final CompletableFuture<Optional<SharedObjectMetadata>> result;
+        try {
+            long objectId = objectIdSupplier.getAsLong();
+            long createdTimeMs = currentTimeMsSupplier.getAsLong();
+            if (objectId < 0) {
+                throw new IllegalStateException("objectIdSupplier returned a negative object ID");
+            }
+            result = uploader
+                .upload(objectId, createdTimeMs, candidates)
+                .thenApply(Optional::of);
+        } catch (RuntimeException e) {
+            return synchronousFailure(e);
         }
-
-        CompletableFuture<Optional<SharedObjectMetadata>> result = uploader
-            .upload(objectId, createdTimeMs, candidates)
-            .thenApply(Optional::of);
         return result.whenComplete((ignored, error) -> {
             if (error == null) {
                 lastFailure.set(null);
@@ -136,6 +135,12 @@ public final class SharedUploadScheduler implements AutoCloseable {
             }
             uploadInProgress.set(false);
         });
+    }
+
+    private CompletableFuture<Optional<SharedObjectMetadata>> synchronousFailure(RuntimeException error) {
+        lastFailure.set(error);
+        uploadInProgress.set(false);
+        return CompletableFuture.failedFuture(error);
     }
 
     public Optional<Throwable> lastFailure() {
