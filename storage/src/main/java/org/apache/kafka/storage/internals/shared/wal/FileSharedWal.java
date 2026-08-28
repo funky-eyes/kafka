@@ -517,7 +517,7 @@ public final class FileSharedWal implements SharedWal {
         try (Stream<Path> stream = Files.list(directory)) {
             return stream
                 .filter(Files::isRegularFile)
-                .filter(path -> SEGMENT_FILE_PATTERN.matcher(path.getFileName().toString()).matches())
+                .filter(FileSharedWal::isSegmentFile)
                 .sorted(Comparator.comparingLong(FileSharedWal::parseSegmentId))
                 .toList();
         }
@@ -527,8 +527,17 @@ public final class FileSharedWal implements SharedWal {
         return directory.resolve(String.format("wal-%020d.log", segmentId));
     }
 
+    private static boolean isSegmentFile(Path path) {
+        Path fileName = path.getFileName();
+        return fileName != null && SEGMENT_FILE_PATTERN.matcher(fileName.toString()).matches();
+    }
+
     private static long parseSegmentId(Path path) {
-        Matcher matcher = SEGMENT_FILE_PATTERN.matcher(path.getFileName().toString());
+        Path fileName = path.getFileName();
+        if (fileName == null) {
+            throw new IllegalArgumentException("WAL segment path has no file name: " + path);
+        }
+        Matcher matcher = SEGMENT_FILE_PATTERN.matcher(fileName.toString());
         if (!matcher.matches()) {
             throw new IllegalArgumentException("Not a WAL segment: " + path);
         }
