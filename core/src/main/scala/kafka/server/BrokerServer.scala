@@ -57,7 +57,7 @@ import org.apache.kafka.server.util.timer.{SystemTimer, SystemTimerReaper}
 import org.apache.kafka.server.util.{Deadline, FutureUtils, KafkaScheduler, NetworkPartitionMetadataClient, PartitionMetadataClient}
 import org.apache.kafka.server.{AssignmentsManager, BrokerFeatures, BrokerLifecycleManager, ClientMetricsManager, DefaultApiVersionManager, DelayedActionQueue, FetchManager, FetchSessionCacheShard, KRaftTopicCreator, NodeToControllerChannelManagerImpl, ProcessRole, RaftControllerNodeProvider}
 import org.apache.kafka.server.transaction.AddPartitionsToTxnManager
-import org.apache.kafka.storage.internals.log.LogDirFailureChannel
+import org.apache.kafka.storage.internals.log.{KafkaStorageExtension, LogDirFailureChannel, StorageExtensionContext, StorageExtensionLoader}
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats
 
 import java.time.Duration
@@ -111,6 +111,7 @@ class BrokerServer(
   var logDirFailureChannel: LogDirFailureChannel = _
   var logManager: LogManager = _
   var remoteLogManagerOpt: Option[RemoteLogManager] = None
+  var storageExtensionOpt: Option[KafkaStorageExtension] = None
 
   var tokenManager: DelegationTokenManager = _
 
@@ -217,6 +218,16 @@ class BrokerServer(
         time,
         brokerTopicStats,
         logDirFailureChannel)
+
+      val storageExtension = StorageExtensionLoader.load(new StorageExtensionContext(
+        config.originals(),
+        logManager.liveLogDirs.asJava,
+        config.brokerId,
+        time))
+      if (storageExtension.isPresent) {
+        storageExtensionOpt = Some(storageExtension.get())
+        logManager.setUnifiedLogFactory(storageExtension.get().unifiedLogFactory())
+      }
 
       lifecycleManager = new BrokerLifecycleManager(
         config,
@@ -859,6 +870,9 @@ class BrokerServer(
         val brokerEpoch = if (lifecycleManager != null) lifecycleManager.brokerEpoch else -1
         Utils.swallow(this.logger.underlying, () => logManager.shutdown(brokerEpoch))
       }
+
+      storageExtensionOpt.foreach(Utils.closeQuietly(_, "storage extension"))
+      storageExtensionOpt = None
 
       // Close remote log manager to give a chance to any of its underlying clients
       // (especially in RemoteStorageManager and RemoteLogMetadataManager) to close gracefully.
