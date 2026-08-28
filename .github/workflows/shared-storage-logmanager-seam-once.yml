@@ -27,13 +27,13 @@ permissions:
 
 jobs:
   apply-seam:
-    if: github.event.head_commit.message == 'KAFKA-Shared: add one-shot LogManager factory seam patch'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Checkout branch
+      - name: Checkout current development branch
         uses: actions/checkout@v5
         with:
+          ref: shared-wal-s3-4.3.1
           fetch-depth: 2
           persist-credentials: true
 
@@ -46,6 +46,10 @@ jobs:
 
           path = Path('core/src/main/scala/kafka/log/LogManager.scala')
           text = path.read_text()
+
+          if 'UnifiedLogCreationContext' in text and 'setUnifiedLogFactory' in text:
+              print('LogManager factory seam is already present; no source patch required.')
+              raise SystemExit(0)
 
           old_import = "import org.apache.kafka.storage.internals.log.{CleanerConfig, LogCleaner, LogConfig, LogDirFailureChannel, LogManager => JLogManager, LogOffsetsListener, ProducerStateManagerConfig, RemoteIndexCache, UnifiedLog}"
           new_import = "import org.apache.kafka.storage.internals.log.{CleanerConfig, LogCleaner, LogConfig, LogDirFailureChannel, LogManager => JLogManager, LogOffsetsListener, ProducerStateManagerConfig, RemoteIndexCache, UnifiedLog, UnifiedLogCreationContext, UnifiedLogFactory}"
@@ -164,7 +168,7 @@ jobs:
           text = text.replace(old_create, new_create)
 
           if 'UnifiedLog.create(' in text:
-            raise AssertionError('unexpected direct UnifiedLog.create remains in LogManager.scala')
+              raise AssertionError('unexpected direct UnifiedLog.create remains in LogManager.scala')
 
           path.write_text(text)
           PY
@@ -172,11 +176,14 @@ jobs:
           git diff --check
           git diff -- core/src/main/scala/kafka/log/LogManager.scala
 
-      - name: Commit seam
+      - name: Commit seam when needed
         shell: bash
         run: |
           set -euo pipefail
-          test -n "$(git status --porcelain core/src/main/scala/kafka/log/LogManager.scala)"
+          if git diff --quiet -- core/src/main/scala/kafka/log/LogManager.scala; then
+            echo 'No LogManager source change to commit.'
+            exit 0
+          fi
           git config user.name 'Jianbin Chen'
           git config user.email 'jianbin@apache.org'
           git add core/src/main/scala/kafka/log/LogManager.scala
