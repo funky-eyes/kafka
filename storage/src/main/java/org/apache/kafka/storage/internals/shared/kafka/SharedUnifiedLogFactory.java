@@ -24,6 +24,7 @@ import org.apache.kafka.storage.internals.epoch.LeaderEpochFileCache;
 import org.apache.kafka.storage.internals.log.LoadedLogOffsets;
 import org.apache.kafka.storage.internals.log.LogDirFailureChannel;
 import org.apache.kafka.storage.internals.log.LogLoader;
+import org.apache.kafka.storage.internals.log.LogOffsetsListener;
 import org.apache.kafka.storage.internals.log.LogSegmentFactory;
 import org.apache.kafka.storage.internals.log.LogSegments;
 import org.apache.kafka.storage.internals.log.ProducerStateManager;
@@ -48,9 +49,15 @@ import java.util.Optional;
  */
 public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
     private final SharedStorageEngine storage;
+    private final SharedCommitProgress commitProgress;
 
     public SharedUnifiedLogFactory(SharedStorageEngine storage) {
+        this(storage, new SharedCommitProgress());
+    }
+
+    public SharedUnifiedLogFactory(SharedStorageEngine storage, SharedCommitProgress commitProgress) {
         this.storage = Objects.requireNonNull(storage, "storage");
+        this.commitProgress = Objects.requireNonNull(commitProgress, "commitProgress");
     }
 
     @Override
@@ -128,6 +135,11 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
             context.logDirFailureChannel(),
             segmentFactory
         );
+        LogOffsetsListener offsetsListener = highWatermark -> {
+            // Kafka invokes this callback while log locks may be held. Keep the shared side O(1), non-blocking and I/O-free.
+            commitProgress.onHighWatermarkUpdated(sharedPartition, highWatermark);
+            context.logOffsetsListener().onHighWatermarkUpdated(highWatermark);
+        };
         return new UnifiedLog(
             offsets.logStartOffset(),
             localLog,
@@ -137,7 +149,7 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
             producerStateManager,
             Optional.of(effectiveTopicId),
             false,
-            context.logOffsetsListener()
+            offsetsListener
         );
     }
 
