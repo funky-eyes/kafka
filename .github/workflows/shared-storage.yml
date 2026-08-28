@@ -1,0 +1,126 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements. See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License. You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Shared Storage
+
+on:
+  push:
+    branches:
+      - shared-wal-s3-4.3.1
+    paths:
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/**'
+      - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/**'
+      - '.github/workflows/shared-storage.yml'
+  pull_request:
+    paths:
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/**'
+      - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/**'
+      - '.github/workflows/shared-storage.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shared-storage-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  storage-tests:
+    name: Storage tests (Java 25)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Setup Gradle
+        uses: ./.github/actions/setup-gradle
+        with:
+          java-version: 25
+          gradle-cache-read-only: true
+
+      - name: Compile shared storage sources
+        run: ./gradlew :storage:compileJava :storage:compileTestJava --no-scan
+
+      - name: Run shared storage tests
+        run: >-
+          ./gradlew :storage:test --no-scan
+          --tests 'org.apache.kafka.storage.internals.shared.*'
+          --tests 'org.apache.kafka.storage.internals.shared.metadata.*'
+          --tests 'org.apache.kafka.storage.internals.shared.object.*'
+          --tests 'org.apache.kafka.storage.internals.shared.wal.*'
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shared-storage-test-reports
+          path: storage/build/reports/tests/test
+          if-no-files-found: ignore
+          retention-days: 7
+
+  minio-environment:
+    name: MinIO E2E environment
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Start MinIO
+        run: |
+          docker run --detach \
+            --name kafka-shared-minio \
+            --publish 9000:9000 \
+            --env MINIO_ROOT_USER=minioadmin \
+            --env MINIO_ROOT_PASSWORD=minioadmin123 \
+            minio/minio:latest \
+            server /data --address :9000
+
+      - name: Wait for MinIO readiness
+        run: |
+          for i in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs kafka-shared-minio
+          exit 1
+
+      - name: Setup Gradle
+        uses: ./.github/actions/setup-gradle
+        with:
+          java-version: 25
+          gradle-cache-read-only: true
+
+      # Keep a real S3-compatible endpoint continuously available while the production ObjectStore adapter is developed.
+      # Once S3ObjectStore lands, this job will create a bucket and run the dedicated MinIO-backed E2E tests.
+      - name: Compile shared storage sources against E2E environment
+        env:
+          SHARED_STORAGE_S3_ENDPOINT: http://127.0.0.1:9000
+          SHARED_STORAGE_S3_ACCESS_KEY: minioadmin
+          SHARED_STORAGE_S3_SECRET_KEY: minioadmin123
+          SHARED_STORAGE_S3_BUCKET: kafka-shared-storage-e2e
+        run: ./gradlew :storage:compileJava :storage:compileTestJava --no-scan
+
+      - name: MinIO logs
+        if: always()
+        run: docker logs kafka-shared-minio || true

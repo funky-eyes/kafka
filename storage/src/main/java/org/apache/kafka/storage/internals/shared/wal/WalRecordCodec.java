@@ -1,0 +1,222 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.kafka.storage.internals.shared.wal;
+
+import java.io.EOFException;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.channels.FileChannel;
+import java.util.zip.CRC32C;
+
+final class WalRecordCodec {
+    static final int MAGIC = 0x4b535731; // KSW1
+    static final short VERSION = 1;
+    static final int PREFIX_BYTES = 16;
+    static final int FIXED_BODY_BYTES = 44;
+    static final int HEADER_BYTES = PREFIX_BYTES + FIXED_BODY_BYTES;
+    static final int MIN_RECORD_BYTES = HEADER_BYTES;
+    static final int MAX_RECORD_BYTES = 128 * 1024 * 1024;
+
+    private WalRecordCodec() {
+    }
+
+    /**
+     * Encodes only the WAL header and keeps the payload as a separate owned view.
+     *
+     * <p>This deliberately avoids materializing a second full-size buffer for Kafka RecordBatch payloads. The writer
+     * persists the header and payload with positional writes and one durability barrier for the drained group.</p>
+     */
+    static EncodedRecord encode(WalRecord record) {
+        ByteBuffer payload = record.payloadUnsafe();
+        int payloadLength = payload.remaining();
+        int totalLength = Math.addExact(HEADER_BYTES, payloadLength);
+        if (totalLength > MAX_RECORD_BYTES) {
+            throw new IllegalArgumentException("WAL record exceeds maximum size: " + totalLength);
+        }
+
+        ByteBuffer header = ByteBuffer.allocate(HEADER_BYTES).order(ByteOrder.BIG_ENDIAN);
+        header.putInt(MAGIC);
+        header.putShort(VERSION);
+        header.put(record.type().id());
+        header.put((byte) 0);
+        header.putInt(totalLength);
+        header.putInt(0); // CRC placeholder
+        header.putLong(record.topicIdHigh());
+        header.putLong(record.topicIdLow());
+        header.putInt(record.partition());
+        header.putInt(record.leaderEpoch());
+        header.putLong(record.firstOffset());
+        header.putLong(record.lastOffset());
+        header.putInt(payloadLength);
+
+        CRC32C crc = new CRC32C();
+        ByteBuffer fixedBody = header.duplicate();
+        fixedBody.flip();
+        fixedBody.position(PREFIX_BYTES);
+        crc.update(fixedBody);
+        crc.update(payload.duplicate());
+        header.putInt(12, (int) crc.getValue());
+        header.flip();
+
+        return new EncodedRecord(header, payload, totalLength);
+    }
+
+    static ReadResult read(FileChannel channel, long position) throws IOException {
+        long size = channel.size();
+        if (position == size) {
+            return ReadResult.eof(position);
+        }
+        long remaining = size - position;
+        if (remaining < PREFIX_BYTES) {
+            return ReadResult.partial(position);
+        }
+
+        ByteBuffer prefix = ByteBuffer.allocate(PREFIX_BYTES).order(ByteOrder.BIG_ENDIAN);
+        readFully(channel, prefix, position);
+        prefix.flip();
+
+        int magic = prefix.getInt();
+        short version = prefix.getShort();
+        byte typeId = prefix.get();
+        prefix.get(); // flags
+        int totalLength = prefix.getInt();
+        int expectedCrc = prefix.getInt();
+
+        if (magic != MAGIC) {
+            throw new WalCorruptionException("Invalid WAL magic at position " + position + ": " + Integer.toHexString(magic));
+        }
+        if (version != VERSION) {
+            throw new WalCorruptionException("Unsupported WAL version at position " + position + ": " + version);
+        }
+        if (totalLength < MIN_RECORD_BYTES || totalLength > MAX_RECORD_BYTES) {
+            throw new WalCorruptionException("Invalid WAL record length at position " + position + ": " + totalLength);
+        }
+        if (remaining < totalLength) {
+            return ReadResult.partial(position);
+        }
+
+        WalRecordType type;
+        try {
+            type = WalRecordType.forId(typeId);
+        } catch (IllegalArgumentException e) {
+            throw new WalCorruptionException("Invalid WAL record type at position " + position + ": " + typeId);
+        }
+
+        int bodyLength = totalLength - PREFIX_BYTES;
+        ByteBuffer body = ByteBuffer.allocate(bodyLength).order(ByteOrder.BIG_ENDIAN);
+        readFully(channel, body, position + PREFIX_BYTES);
+        body.flip();
+
+        CRC32C crc = new CRC32C();
+        crc.update(body.duplicate());
+        if ((int) crc.getValue() != expectedCrc) {
+            throw new WalCorruptionException("WAL checksum mismatch at position " + position);
+        }
+
+        long topicIdHigh = body.getLong();
+        long topicIdLow = body.getLong();
+        int partition = body.getInt();
+        int leaderEpoch = body.getInt();
+        long firstOffset = body.getLong();
+        long lastOffset = body.getLong();
+        int payloadLength = body.getInt();
+
+        if (payloadLength < 0 || payloadLength != body.remaining()) {
+            throw new WalCorruptionException("Invalid WAL payload length at position " + position + ": " + payloadLength);
+        }
+
+        ByteBuffer payload = body.slice();
+        WalRecord record;
+        try {
+            if (type == WalRecordType.DATA) {
+                // The read buffer is newly allocated and therefore already exclusively owned by this record.
+                record = WalRecord.dataOwned(topicIdHigh, topicIdLow, partition, leaderEpoch, firstOffset, lastOffset, payload);
+            } else {
+                if (payloadLength != 0 || firstOffset != lastOffset) {
+                    throw new IllegalArgumentException("invalid TRUNCATE record body");
+                }
+                record = WalRecord.truncate(topicIdHigh, topicIdLow, partition, leaderEpoch, firstOffset);
+            }
+        } catch (IllegalArgumentException e) {
+            throw new WalCorruptionException("Invalid WAL record body at position " + position + ": " + e.getMessage());
+        }
+        return ReadResult.complete(position, totalLength, record);
+    }
+
+    private static void readFully(FileChannel channel, ByteBuffer buffer, long position) throws IOException {
+        long currentPosition = position;
+        while (buffer.hasRemaining()) {
+            int read = channel.read(buffer, currentPosition);
+            if (read < 0) {
+                throw new EOFException("Unexpected EOF while reading WAL at position " + currentPosition);
+            }
+            if (read == 0) {
+                continue;
+            }
+            currentPosition += read;
+        }
+    }
+
+    static final class EncodedRecord {
+        private final ByteBuffer header;
+        private final ByteBuffer payload;
+        private final int totalLength;
+
+        private EncodedRecord(ByteBuffer header, ByteBuffer payload, int totalLength) {
+            this.header = header.asReadOnlyBuffer();
+            this.payload = payload.asReadOnlyBuffer();
+            this.totalLength = totalLength;
+        }
+
+        ByteBuffer header() {
+            return header.duplicate();
+        }
+
+        ByteBuffer payload() {
+            return payload.duplicate();
+        }
+
+        int headerLength() {
+            return header.remaining();
+        }
+
+        int totalLength() {
+            return totalLength;
+        }
+    }
+
+    enum ReadStatus {
+        COMPLETE,
+        EOF,
+        PARTIAL
+    }
+
+    record ReadResult(ReadStatus status, long position, int length, WalRecord record) {
+        static ReadResult complete(long position, int length, WalRecord record) {
+            return new ReadResult(ReadStatus.COMPLETE, position, length, record);
+        }
+
+        static ReadResult eof(long position) {
+            return new ReadResult(ReadStatus.EOF, position, 0, null);
+        }
+
+        static ReadResult partial(long position) {
+            return new ReadResult(ReadStatus.PARTIAL, position, 0, null);
+        }
+    }
+}
