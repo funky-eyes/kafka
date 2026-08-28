@@ -1,0 +1,138 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements. See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License. You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Apply Shared Broker Extension Seam Once
+
+on:
+  push:
+    branches:
+      - shared-wal-s3-4.3.1
+    paths:
+      - '.github/workflows/shared-storage-broker-seam-once.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply-seam:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout current development branch
+        uses: actions/checkout@v5
+        with:
+          ref: shared-wal-s3-4.3.1
+          fetch-depth: 200
+          persist-credentials: true
+
+      - name: Wait for normalized branch head
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 45); do
+            git fetch --no-tags origin "${GITHUB_REF_NAME}"
+            email=$(git show -s --format='%ae' "origin/${GITHUB_REF_NAME}")
+            if [ "${email}" = 'jianbin@apache.org' ]; then
+              git reset --hard "origin/${GITHUB_REF_NAME}"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo 'Timed out waiting for author normalization' >&2
+          exit 1
+
+      - name: Patch BrokerServer extension lifecycle
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path('core/src/main/scala/kafka/server/BrokerServer.scala')
+          text = path.read_text()
+          if 'StorageExtensionLoader.load' in text:
+              print('Broker storage extension seam already present.')
+              raise SystemExit(0)
+
+          old_import = 'import org.apache.kafka.storage.internals.log.LogDirFailureChannel'
+          new_import = 'import org.apache.kafka.storage.internals.log.{KafkaStorageExtension, LogDirFailureChannel, StorageExtensionContext, StorageExtensionLoader}'
+          assert text.count(old_import) == 1
+          text = text.replace(old_import, new_import)
+
+          field_anchor = '  var logManager: LogManager = _\n  var remoteLogManagerOpt: Option[RemoteLogManager] = None\n'
+          field_replacement = field_anchor + '  var storageExtensionOpt: Option[KafkaStorageExtension] = None\n'
+          assert text.count(field_anchor) == 1
+          text = text.replace(field_anchor, field_replacement)
+
+          create_anchor = '''      logManager = LogManager(config,
+        sharedServer.metaPropsEnsemble.errorLogDirs().asScala.toSeq,
+        metadataCache,
+        kafkaScheduler,
+        time,
+        brokerTopicStats,
+        logDirFailureChannel)
+'''
+          create_replacement = create_anchor + '''
+      val storageExtension = StorageExtensionLoader.load(new StorageExtensionContext(
+        config.originals(),
+        logManager.liveLogDirs.asJava,
+        config.brokerId,
+        time))
+      if (storageExtension.isPresent) {
+        storageExtensionOpt = Some(storageExtension.get())
+        logManager.setUnifiedLogFactory(storageExtension.get().unifiedLogFactory())
+      }
+'''
+          assert text.count(create_anchor) == 1
+          text = text.replace(create_anchor, create_replacement)
+
+          shutdown_anchor = '''      if (logManager != null) {
+        val brokerEpoch = if (lifecycleManager != null) lifecycleManager.brokerEpoch else -1
+        Utils.swallow(this.logger.underlying, () => logManager.shutdown(brokerEpoch))
+      }
+
+      // Close remote log manager to give a chance to any of its underlying clients
+'''
+          shutdown_replacement = '''      if (logManager != null) {
+        val brokerEpoch = if (lifecycleManager != null) lifecycleManager.brokerEpoch else -1
+        Utils.swallow(this.logger.underlying, () => logManager.shutdown(brokerEpoch))
+      }
+
+      storageExtensionOpt.foreach(Utils.closeQuietly(_, "storage extension"))
+      storageExtensionOpt = None
+
+      // Close remote log manager to give a chance to any of its underlying clients
+'''
+          assert text.count(shutdown_anchor) == 1
+          text = text.replace(shutdown_anchor, shutdown_replacement)
+          path.write_text(text)
+          PY
+
+          git diff --check
+          git diff -- core/src/main/scala/kafka/server/BrokerServer.scala
+
+      - name: Commit seam when needed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- core/src/main/scala/kafka/server/BrokerServer.scala; then
+            exit 0
+          fi
+          git config user.name 'Jianbin Chen'
+          git config user.email 'jianbin@apache.org'
+          git add core/src/main/scala/kafka/server/BrokerServer.scala
+          git commit -m 'KAFKA-Shared: wire broker storage extension lifecycle'
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
