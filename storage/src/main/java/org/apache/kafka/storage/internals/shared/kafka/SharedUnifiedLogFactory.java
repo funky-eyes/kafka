@@ -122,6 +122,7 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
             false,
             segmentFactory
         ).load();
+        commitProgress.onLogLoaded(sharedPartition, offsets.logStartOffset());
 
         SharedLocalLog localLog = new SharedLocalLog(
             dir,
