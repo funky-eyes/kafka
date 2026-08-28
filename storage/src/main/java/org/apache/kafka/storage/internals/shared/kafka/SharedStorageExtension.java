@@ -34,6 +34,7 @@ import java.util.Objects;
  */
 public final class SharedStorageExtension implements KafkaStorageExtension {
     private SharedStorageEngine storage;
+    private SharedCommitProgress commitProgress;
     private UnifiedLogFactory unifiedLogFactory;
 
     @Override
@@ -51,11 +52,15 @@ public final class SharedStorageExtension implements KafkaStorageExtension {
         );
         try {
             storage = new SharedStorageEngine(wal);
+            commitProgress = new SharedCommitProgress();
             unifiedLogFactory = new RoutingUnifiedLogFactory(
                 configuration,
-                new SharedUnifiedLogFactory(storage)
+                new SharedUnifiedLogFactory(storage, commitProgress)
             );
         } catch (Throwable t) {
+            storage = null;
+            commitProgress = null;
+            unifiedLogFactory = null;
             try {
                 wal.close();
             } catch (Throwable closeError) {
@@ -89,10 +94,18 @@ public final class SharedStorageExtension implements KafkaStorageExtension {
         return storage;
     }
 
+    public synchronized SharedCommitProgress commitProgress() {
+        if (commitProgress == null) {
+            throw new IllegalStateException("Shared storage extension has not been started");
+        }
+        return commitProgress;
+    }
+
     @Override
     public synchronized void close() throws IOException {
         SharedStorageEngine currentStorage = storage;
         storage = null;
+        commitProgress = null;
         unifiedLogFactory = null;
         if (currentStorage != null) {
             currentStorage.close();
