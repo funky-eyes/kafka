@@ -19,6 +19,7 @@ package org.apache.kafka.storage.internals.shared.kafka;
 import org.apache.kafka.common.record.internal.MemoryRecords;
 import org.apache.kafka.common.record.internal.MutableRecordBatch;
 import org.apache.kafka.common.utils.ByteBufferOutputStream;
+import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -28,7 +29,7 @@ import java.util.List;
  * Version-specific Kafka adapter kept outside the shared-storage engine.
  *
  * <p>Remote identity is defined at Kafka RecordBatch boundaries. This adapter materializes each mutable Kafka batch
- * into one owned buffer using Kafka's public batch serialization API. The engine therefore never depends on
+ * into one owned buffer using Kafka's stable batch serialization API. The engine therefore never depends on
  * MemoryRecords' private backing-buffer layout.</p>
  */
 public final class KafkaRecordBatchAdapter {
@@ -54,6 +55,24 @@ public final class KafkaRecordBatchAdapter {
                 batch.partitionLeaderEpoch(),
                 batch.maxTimestamp(),
                 serialized.asReadOnlyBuffer()
+            ));
+        }
+        return List.copyOf(result);
+    }
+
+    /**
+     * Converts one Kafka MemoryRecords append into the exact atomic group consumed by SharedStorageEngine.
+     * Each returned ByteBuffer is exclusively owned by the resulting batch group.
+     */
+    public static List<SharedStorageEngine.OwnedDataBatch> toOwnedDataBatches(MemoryRecords records) {
+        List<SerializedBatch> serialized = serializeBatches(records);
+        List<SharedStorageEngine.OwnedDataBatch> result = new ArrayList<>(serialized.size());
+        for (SerializedBatch batch : serialized) {
+            result.add(new SharedStorageEngine.OwnedDataBatch(
+                batch.leaderEpoch(),
+                batch.firstOffset(),
+                batch.lastOffset(),
+                batch.bytes()
             ));
         }
         return List.copyOf(result);
