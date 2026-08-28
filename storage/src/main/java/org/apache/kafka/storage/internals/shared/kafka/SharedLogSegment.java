@@ -546,7 +546,7 @@ public final class SharedLogSegment extends LogSegment {
             throw new IOException("Shared WAL payload length mismatch at " + location);
         }
         MemoryRecords records = MemoryRecords.readableRecords(record.payload());
-        Iterator<RecordBatch> iterator = records.batches().iterator();
+        Iterator<? extends RecordBatch> iterator = records.batches().iterator();
         if (!iterator.hasNext()) {
             throw new IOException("Shared WAL DATA entry contains no Kafka RecordBatch at " + location);
         }
