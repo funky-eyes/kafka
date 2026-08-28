@@ -19,10 +19,22 @@ package org.apache.kafka.storage.internals.shared.wal;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 
 public interface SharedWal extends AutoCloseable {
-    CompletableFuture<WalAppendResult> append(WalRecord record);
+    /**
+     * Atomically admits and durably appends a logical group of WAL records.
+     *
+     * <p>The returned future completes only after every record in the group crosses the same durability barrier.
+     * Implementations must never report a successful prefix of the group.</p>
+     */
+    CompletableFuture<List<WalAppendResult>> appendBatch(List<WalRecord> records);
+
+    default CompletableFuture<WalAppendResult> append(WalRecord record) {
+        Objects.requireNonNull(record, "record");
+        return appendBatch(List.of(record)).thenApply(results -> results.get(0));
+    }
 
     WalRecord read(WalLocation location) throws IOException;
 
