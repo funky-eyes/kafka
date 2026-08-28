@@ -40,7 +40,7 @@ import org.apache.kafka.metadata.properties.{MetaProperties, MetaPropertiesEnsem
 import java.util.{Collections, Optional, OptionalLong, Properties}
 import org.apache.kafka.server.metrics.KafkaMetricsGroup
 import org.apache.kafka.server.util.{FileLock, Scheduler}
-import org.apache.kafka.storage.internals.log.{CleanerConfig, LogCleaner, LogConfig, LogDirFailureChannel, LogManager => JLogManager, LogOffsetsListener, ProducerStateManagerConfig, RemoteIndexCache, UnifiedLog}
+import org.apache.kafka.storage.internals.log.{CleanerConfig, LogCleaner, LogConfig, LogDirFailureChannel, LogManager => JLogManager, LogOffsetsListener, ProducerStateManagerConfig, RemoteIndexCache, UnifiedLog, UnifiedLogCreationContext, UnifiedLogFactory}
 import org.apache.kafka.storage.internals.checkpoint.{CleanShutdownFileHandler, OffsetCheckpointFile}
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats
 
@@ -161,6 +161,30 @@ class LogManager(logDirs: Seq[File],
 
   @volatile private var _cleaner: LogCleaner = _
   private[kafka] def cleaner: LogCleaner = _cleaner
+
+  @volatile private var unifiedLogFactory: UnifiedLogFactory = UnifiedLogFactory.DEFAULT
+  @volatile private var unifiedLogFactoryFrozen = false
+
+  /**
+   * Installs a log factory before the first log is created or loaded. The default factory is Kafka's original
+   * UnifiedLog.create path, so classic storage behavior remains unchanged unless an extension explicitly injects
+   * another implementation before startup.
+   */
+  def setUnifiedLogFactory(factory: UnifiedLogFactory): Unit = this.synchronized {
+    if (factory == null)
+      throw new NullPointerException("factory")
+    if (unifiedLogFactoryFrozen)
+      throw new IllegalStateException("UnifiedLogFactory cannot be changed after log creation has started")
+    unifiedLogFactory = factory
+  }
+
+  private def createUnifiedLog(context: UnifiedLogCreationContext): UnifiedLog = {
+    val factory = this.synchronized {
+      unifiedLogFactoryFrozen = true
+      unifiedLogFactory
+    }
+    factory.create(context)
+  }
 
   metricsGroup.newGauge("OfflineLogDirectoryCount", () => offlineLogDirs.size)
   metricsGroup.newGauge("CordonedLogDirectoryCount", () => cordonedLogDirs().size)
@@ -345,7 +369,7 @@ class LogManager(logDirs: Seq[File],
     val logRecoveryPoint = recoveryPoints.getOrDefault(topicPartition, 0L)
     val logStartOffset = logStartOffsets.getOrDefault(topicPartition, 0L)
 
-    val log = UnifiedLog.create(
+    val log = createUnifiedLog(new UnifiedLogCreationContext(
       logDir,
       config,
       logStartOffset,
@@ -361,7 +385,7 @@ class LogManager(logDirs: Seq[File],
       Optional.empty,
       numRemainingSegments,
       remoteStorageSystemEnable,
-      LogOffsetsListener.NO_OP_OFFSETS_LISTENER)
+      LogOffsetsListener.NO_OP_OFFSETS_LISTENER))
 
     if (logDir.getName.endsWith(UnifiedLog.DELETE_DIR_SUFFIX)) {
       addLogToBeDeleted(log)
@@ -1071,7 +1095,7 @@ class LogManager(logDirs: Seq[File],
           .get // If Failure, will throw
 
         val config = fetchLogConfig(topicPartition.topic)
-        val log = UnifiedLog.create(
+        val log = createUnifiedLog(new UnifiedLogCreationContext(
           logDir,
           config,
           0L,
@@ -1087,7 +1111,7 @@ class LogManager(logDirs: Seq[File],
           topicId,
           new ConcurrentHashMap[String, Integer](),
           remoteStorageSystemEnable,
-          LogOffsetsListener.NO_OP_OFFSETS_LISTENER)
+          LogOffsetsListener.NO_OP_OFFSETS_LISTENER))
 
         if (isFuture)
           futureLogs.put(topicPartition, log)
