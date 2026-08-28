@@ -129,20 +129,10 @@ public final class SharedLocalLog extends LocalLog {
         }
 
         prepareFilesForRoll(newOffset);
-        segments().lastSegment().ifPresent(segment -> {
-            try {
-                segment.onBecomeInactiveSegment();
-            } catch (IOException e) {
-                throw new SegmentRollIOException(e);
-            }
-        });
-
-        LogSegment newSegment;
-        try {
-            newSegment = openSharedSegment(newOffset);
-        } catch (SegmentRollIOException e) {
-            throw e.ioException;
+        if (segments().lastSegment().isPresent()) {
+            segments().lastSegment().get().onBecomeInactiveSegment();
         }
+        LogSegment newSegment = openSharedSegment(newOffset);
         segments().add(newSegment);
         updateLogEndOffset(nextOffsetMetadata().messageOffset);
         logger().info("Rolled new shared log segment at offset {} in {} ms.",
@@ -211,14 +201,5 @@ public final class SharedLocalLog extends LocalLog {
             config().preallocate,
             ""
         );
-    }
-
-    private static final class SegmentRollIOException extends RuntimeException {
-        private final IOException ioException;
-
-        private SegmentRollIOException(IOException ioException) {
-            super(ioException);
-            this.ioException = ioException;
-        }
     }
 }
