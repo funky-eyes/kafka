@@ -190,6 +190,44 @@ public final class SharedStorageEngine implements AutoCloseable {
     }
 
     /**
+     * Returns ordered live WAL locations intersecting {@code [startOffset, endOffsetExclusive)}.
+     * This metadata-only view is used by the Kafka compatibility adapter to rebuild logical segment state without
+     * loading the whole WAL payload into memory.
+     */
+    public List<WalLocation> localLocations(
+        SharedPartitionId partition,
+        long startOffset,
+        long endOffsetExclusive
+    ) {
+        Objects.requireNonNull(partition, "partition");
+        if (startOffset < 0 || endOffsetExclusive < startOffset) {
+            throw new IllegalArgumentException(
+                "Invalid local WAL range [" + startOffset + ", " + endOffsetExclusive + ")");
+        }
+        if (startOffset == endOffsetExclusive) {
+            return List.of();
+        }
+
+        List<WalLocation> result = new ArrayList<>();
+        for (WalLocation location : walIndex.ranges(walKey(partition))) {
+            if (location.lastOffset() < startOffset) {
+                continue;
+            }
+            if (location.firstOffset() >= endOffsetExclusive) {
+                break;
+            }
+            result.add(location);
+        }
+        return List.copyOf(result);
+    }
+
+    /** Reads the exact WAL locations returned by {@link #localLocations(SharedPartitionId, long, long)}. */
+    public List<WalRecord> readLocalLocations(List<WalLocation> locations) throws IOException {
+        Objects.requireNonNull(locations, "locations");
+        return wal.readBatch(List.copyOf(locations));
+    }
+
+    /**
      * Reads complete Kafka RecordBatches from the local WAL starting at the batch containing {@code startOffset}.
      * No batch is split. If {@code minOneBatch} is true, the first batch may exceed {@code maxBytes}.
      */

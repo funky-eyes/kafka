@@ -23,6 +23,8 @@ import org.apache.kafka.common.record.internal.Record;
 import org.apache.kafka.common.record.internal.RecordBatch;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.storage.internals.epoch.LeaderEpochFileCache;
+import org.apache.kafka.storage.internals.log.AppendOrigin;
+import org.apache.kafka.storage.internals.log.CompletedTxn;
 import org.apache.kafka.storage.internals.log.FetchDataInfo;
 import org.apache.kafka.storage.internals.log.LazyIndex;
 import org.apache.kafka.storage.internals.log.LogConfig;
@@ -32,6 +34,7 @@ import org.apache.kafka.storage.internals.log.LogSegment;
 import org.apache.kafka.storage.internals.log.LogSegmentOffsetOverflowException;
 import org.apache.kafka.storage.internals.log.OffsetIndex;
 import org.apache.kafka.storage.internals.log.OffsetPosition;
+import org.apache.kafka.storage.internals.log.ProducerAppendInfo;
 import org.apache.kafka.storage.internals.log.ProducerStateManager;
 import org.apache.kafka.storage.internals.log.RollParams;
 import org.apache.kafka.storage.internals.log.TimeIndex;
@@ -39,13 +42,16 @@ import org.apache.kafka.storage.internals.log.TimestampOffset;
 import org.apache.kafka.storage.internals.log.TransactionIndex;
 import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
+import org.apache.kafka.storage.internals.shared.wal.WalLocation;
 import org.apache.kafka.storage.internals.shared.wal.WalRecord;
 
 import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -54,6 +60,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentNavigableMap;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.ExecutionException;
+import java.util.stream.Stream;
 
 /**
  * Kafka 4.3.x compatibility segment backed by SharedStorageEngine rather than a per-partition .log payload file.
@@ -67,6 +74,8 @@ import java.util.concurrent.ExecutionException;
  * the physical position of a batch in the broker-wide WAL.</p>
  */
 public final class SharedLogSegment extends LogSegment {
+    private static final int RECOVERY_READ_BATCH_SIZE = 256;
+
     private final SharedStorageEngine storage;
     private final SharedPartitionId partition;
     private final int indexIntervalBytes;
@@ -136,7 +145,7 @@ public final class SharedLogSegment extends LogSegment {
             throw new IOException("Shared logical segment payload placeholder is not empty: " +
                 LogFileUtils.logFile(dir, baseOffset, fileSuffix));
         }
-        return new SharedLogSegment(
+        SharedLogSegment segment = new SharedLogSegment(
             placeholder,
             LazyIndex.forOffset(LogFileUtils.offsetIndexFile(dir, baseOffset, fileSuffix), baseOffset, maxIndexSize),
             LazyIndex.forTime(LogFileUtils.timeIndexFile(dir, baseOffset, fileSuffix), baseOffset, maxIndexSize),
@@ -147,6 +156,10 @@ public final class SharedLogSegment extends LogSegment {
             storage,
             partition
         );
+        if (fileAlreadyExists) {
+            segment.restoreLogicalMetadata(dir);
+        }
+        return segment;
     }
 
     @Override
@@ -234,6 +247,19 @@ public final class SharedLogSegment extends LogSegment {
             offsetIndex().isFull() ||
             timeIndex().isFull() ||
             !offsetIndex().canAppendOffset(rollParams.maxOffsetInMessages());
+    }
+
+    @Override
+    public FileRecords.LogOffsetPosition translateOffset(long offset) {
+        BatchMetadata metadata = findBatch(offset);
+        if (metadata == null) {
+            return null;
+        }
+        return new FileRecords.LogOffsetPosition(
+            metadata.firstOffset,
+            metadata.virtualPosition,
+            metadata.sizeInBytes
+        );
     }
 
     @Override
@@ -362,8 +388,36 @@ public final class SharedLogSegment extends LogSegment {
     }
 
     @Override
-    public int recover(ProducerStateManager producerStateManager, LeaderEpochFileCache leaderEpochCache) {
-        // Shared recovery is driven from WAL/object metadata. Do not scan the intentionally empty FileRecords placeholder.
+    public int recover(ProducerStateManager producerStateManager, LeaderEpochFileCache leaderEpochCache) throws IOException {
+        offsetIndex().reset();
+        timeIndex().reset();
+        txnIndex().reset();
+        int lastIndexPosition = 0;
+        for (WalBatch recovered : readWalBatches(baseOffset(), nextLogicalSegmentBaseOffset(log().file().getParentFile()))) {
+            RecordBatch batch = recovered.batch();
+            BatchMetadata metadata = batches.get(recovered.location().firstOffset());
+            if (metadata == null) {
+                throw new IOException("Missing recovered shared batch metadata at offset " + recovered.location().firstOffset());
+            }
+            if (metadata.virtualPosition - lastIndexPosition > indexIntervalBytes) {
+                offsetIndex().append(metadata.lastOffset, metadata.virtualPosition);
+                timeIndex().maybeAppend(maxTimestampAt(metadata.firstOffset), metadata.lastOffset);
+                lastIndexPosition = metadata.virtualPosition;
+            }
+            if (batch.magic() >= RecordBatch.MAGIC_VALUE_V2) {
+                int leaderEpoch = batch.partitionLeaderEpoch();
+                if (leaderEpoch >= 0 &&
+                    (leaderEpochCache.latestEpoch().isEmpty() || leaderEpoch > leaderEpochCache.latestEpoch().get())) {
+                    leaderEpochCache.assign(leaderEpoch, batch.baseOffset());
+                }
+                updateProducerState(producerStateManager, batch);
+            }
+        }
+        offsetIndex().trimToValidSize();
+        if (maxTimestampAndOffset.timestamp() >= 0) {
+            timeIndex().maybeAppend(maxTimestampAndOffset.timestamp(), maxTimestampAndOffset.offset(), true);
+        }
+        timeIndex().trimToValidSize();
         return 0;
     }
 
@@ -436,6 +490,116 @@ public final class SharedLogSegment extends LogSegment {
         super.setLastModified(ms);
     }
 
+    private void restoreLogicalMetadata(File dir) throws IOException {
+        long endOffsetExclusive = nextLogicalSegmentBaseOffset(dir);
+        int position = 0;
+        for (WalBatch recovered : readWalBatches(baseOffset(), endOffsetExclusive)) {
+            WalLocation location = recovered.location();
+            if (location.firstOffset() < baseOffset() || location.lastOffset() >= endOffsetExclusive) {
+                throw new IOException(
+                    "WAL batch crosses shared logical segment boundary: base=" + baseOffset() +
+                        ", end=" + endOffsetExclusive + ", location=" + location);
+            }
+            RecordBatch batch = recovered.batch();
+            BatchMetadata metadata = new BatchMetadata(
+                location.firstOffset(),
+                location.lastOffset(),
+                position,
+                location.payloadLength(),
+                batch.maxTimestamp(),
+                location.leaderEpoch()
+            );
+            batches.put(location.firstOffset(), metadata);
+            position = Math.addExact(position, location.payloadLength());
+        }
+        logicalSize = position;
+        bytesSinceLastIndexEntry = 0;
+        recomputeTailMetadata();
+        long placeholderLastModified = log().file().lastModified();
+        if (placeholderLastModified > 0) {
+            lastModifiedMs = placeholderLastModified;
+        }
+    }
+
+    private List<WalBatch> readWalBatches(long startOffset, long endOffsetExclusive) throws IOException {
+        List<WalLocation> locations = storage.localLocations(partition, startOffset, endOffsetExclusive);
+        if (locations.isEmpty()) {
+            return List.of();
+        }
+        List<WalBatch> result = new ArrayList<>(locations.size());
+        for (int start = 0; start < locations.size(); start += RECOVERY_READ_BATCH_SIZE) {
+            int end = Math.min(start + RECOVERY_READ_BATCH_SIZE, locations.size());
+            List<WalLocation> chunk = locations.subList(start, end);
+            List<WalRecord> records = storage.readLocalLocations(chunk);
+            if (records.size() != chunk.size()) {
+                throw new IOException("Shared WAL recovery read count mismatch");
+            }
+            for (int i = 0; i < chunk.size(); i++) {
+                result.add(decodeWalBatch(chunk.get(i), records.get(i)));
+            }
+        }
+        return List.copyOf(result);
+    }
+
+    private static WalBatch decodeWalBatch(WalLocation location, WalRecord record) throws IOException {
+        if (record.payload().remaining() != location.payloadLength()) {
+            throw new IOException("Shared WAL payload length mismatch at " + location);
+        }
+        MemoryRecords records = MemoryRecords.readableRecords(record.payload());
+        Iterator<RecordBatch> iterator = records.batches().iterator();
+        if (!iterator.hasNext()) {
+            throw new IOException("Shared WAL DATA entry contains no Kafka RecordBatch at " + location);
+        }
+        RecordBatch batch = iterator.next();
+        if (iterator.hasNext()) {
+            throw new IOException("Shared WAL DATA entry contains multiple Kafka RecordBatches at " + location);
+        }
+        batch.ensureValid();
+        if (batch.sizeInBytes() != location.payloadLength() ||
+            batch.baseOffset() != location.firstOffset() ||
+            batch.lastOffset() != location.lastOffset() ||
+            batch.partitionLeaderEpoch() != location.leaderEpoch()) {
+            throw new IOException("Shared WAL Kafka RecordBatch metadata mismatch at " + location);
+        }
+        return new WalBatch(location, batch);
+    }
+
+    private long nextLogicalSegmentBaseOffset(File dir) throws IOException {
+        try (Stream<Path> paths = Files.list(dir.toPath())) {
+            return paths
+                .filter(Files::isRegularFile)
+                .map(Path::toFile)
+                .filter(LogFileUtils::isLogFile)
+                .mapToLong(LogFileUtils::offsetFromFile)
+                .filter(offset -> offset > baseOffset())
+                .min()
+                .orElse(Long.MAX_VALUE);
+        }
+    }
+
+    private long maxTimestampAt(long inclusiveLastOffset) {
+        long maxTimestamp = RecordBatch.NO_TIMESTAMP;
+        for (BatchMetadata metadata : batches.headMap(inclusiveLastOffset, true).values()) {
+            maxTimestamp = Math.max(maxTimestamp, metadata.maxTimestamp);
+        }
+        return maxTimestamp;
+    }
+
+    private void updateProducerState(ProducerStateManager producerStateManager, RecordBatch batch) throws IOException {
+        if (batch.hasProducerId()) {
+            ProducerAppendInfo appendInfo = producerStateManager.prepareUpdate(batch.producerId(), AppendOrigin.REPLICATION);
+            Optional<CompletedTxn> completedTxn = appendInfo.append(batch, Optional.empty());
+            producerStateManager.update(appendInfo);
+            if (completedTxn.isPresent()) {
+                CompletedTxn txn = completedTxn.get();
+                long lastStableOffset = producerStateManager.lastStableOffset(txn);
+                updateTxnIndex(txn, lastStableOffset);
+                producerStateManager.completeTxn(txn);
+            }
+        }
+        producerStateManager.updateMapEndOffset(batch.lastOffset() + 1);
+    }
+
     private BatchMetadata findBatch(long offset) {
         Map.Entry<Long, BatchMetadata> floor = batches.floorEntry(offset);
         if (floor != null && floor.getValue().lastOffset >= offset) {
@@ -458,6 +622,7 @@ public final class SharedLogSegment extends LogSegment {
             lastOffset = baseOffset() - 1;
             maxTimestampAndOffset = TimestampOffset.UNKNOWN;
             latestLeaderEpoch = RecordBatch.NO_PARTITION_LEADER_EPOCH;
+            firstBatchTimestamp = RecordBatch.NO_TIMESTAMP;
             return;
         }
         BatchMetadata last = batches.lastEntry().getValue();
@@ -501,6 +666,9 @@ public final class SharedLogSegment extends LogSegment {
     }
 
     private record ReadWindow(int maxBytes, boolean firstEntryIncomplete) {
+    }
+
+    private record WalBatch(WalLocation location, RecordBatch batch) {
     }
 
     private record BatchMetadata(
