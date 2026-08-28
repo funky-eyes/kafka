@@ -57,7 +57,7 @@ import org.apache.kafka.server.util.timer.{SystemTimer, SystemTimerReaper}
 import org.apache.kafka.server.util.{Deadline, FutureUtils, KafkaScheduler, NetworkPartitionMetadataClient, PartitionMetadataClient}
 import org.apache.kafka.server.{AssignmentsManager, BrokerFeatures, BrokerLifecycleManager, ClientMetricsManager, DefaultApiVersionManager, DelayedActionQueue, FetchManager, FetchSessionCacheShard, KRaftTopicCreator, NodeToControllerChannelManagerImpl, ProcessRole, RaftControllerNodeProvider}
 import org.apache.kafka.server.transaction.AddPartitionsToTxnManager
-import org.apache.kafka.storage.internals.log.{KafkaStorageExtension, LogDirFailureChannel, StorageExtensionContext, StorageExtensionLoader}
+import org.apache.kafka.storage.internals.log.{KafkaStorageExtension, LogDirFailureChannel, StorageExtensionBrokerContext, StorageExtensionContext, StorageExtensionLoader}
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats
 
 import java.time.Duration
@@ -619,6 +619,18 @@ class BrokerServer(
       FutureUtils.waitWithLogging(logger.underlying, logIdent,
         "all of the SocketServer Acceptors to be started",
         enableRequestProcessingFuture, startupDeadline, time)
+
+      storageExtensionOpt.foreach(extension => {
+        val extensionReadyContext = new StorageExtensionBrokerContext(
+          clusterId,
+          config.brokerId,
+          listenerInfo.listeners().values().asScala.toList.asJava,
+          config.originals(),
+          time)
+        FutureUtils.waitWithLogging(logger.underlying, logIdent,
+          "the storage extension to become broker-ready",
+          extension.onBrokerReady(extensionReadyContext), startupDeadline, time)
+      })
 
       remoteLogManagerOpt.foreach(rlm =>
         rlm.remoteLogMetadataManager() match {
