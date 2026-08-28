@@ -398,69 +398,65 @@ public final class FileSharedWal implements SharedWal {
 
     private RecoveryState recoverSegments() throws IOException {
         List<Path> segments = segmentFiles();
-        GroupStart pendingGroupStart = null;
-        int pendingRecordCount = 0;
-        long maxGroupId = -1L;
-        GroupStart truncateFrom = null;
-
-        outer:
-        for (int segmentIndex = 0; segmentIndex < segments.size(); segmentIndex++) {
-            Path segment = segments.get(segmentIndex);
-            try (FileChannel channel = FileChannel.open(segment, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
-                long position = 0;
-                while (true) {
-                    WalRecordCodec.ReadResult result = WalRecordCodec.read(channel, position);
-                    if (result.status() == WalRecordCodec.ReadStatus.EOF) {
-                        break;
-                    }
-                    if (result.status() == WalRecordCodec.ReadStatus.PARTIAL) {
-                        truncateFrom = pendingGroupStart != null
-                            ? pendingGroupStart
-                            : new GroupStart(segmentIndex, position);
-                        break outer;
-                    }
-
-                    WalRecord record = result.record();
-                    if (record.type() == WalRecordType.GROUP_COMMIT) {
-                        if (pendingGroupStart == null || pendingRecordCount != record.groupRecordCount()) {
-                            throw new WalCorruptionException(
-                                "Invalid WAL group commit marker id=" + record.groupId() +
-                                    ", expectedRecords=" + record.groupRecordCount() +
-                                    ", pendingRecords=" + pendingRecordCount);
-                        }
-                        maxGroupId = Math.max(maxGroupId, record.groupId());
-                        pendingGroupStart = null;
-                        pendingRecordCount = 0;
-                    } else {
-                        if (pendingGroupStart == null) {
-                            pendingGroupStart = new GroupStart(segmentIndex, position);
-                        }
-                        pendingRecordCount++;
-                    }
-                    position += result.length();
-                }
-            }
-        }
-
-        if (truncateFrom == null && pendingGroupStart != null) {
-            truncateFrom = pendingGroupStart;
-        }
-        if (truncateFrom != null) {
-            truncateIncompleteTail(segments, truncateFrom);
+        RecoveryScan scan = scanSegments(segments);
+        if (scan.truncateFrom() != null) {
+            truncateIncompleteTail(segments, scan.truncateFrom());
             segments = segmentFiles();
         }
 
+        SegmentSummary summary = summarizeSegments(segments);
+        ensureRecoveredCapacity(summary.totalBytes());
+        return new RecoveryState(
+            summary.totalBytes(),
+            summary.lastSegmentId(),
+            summary.lastSegmentId() + 1,
+            scan.maxGroupId() + 1
+        );
+    }
+
+    private RecoveryScan scanSegments(List<Path> segments) throws IOException {
+        RecoveryAccumulator accumulator = new RecoveryAccumulator();
+        for (int segmentIndex = 0; segmentIndex < segments.size(); segmentIndex++) {
+            if (scanSegment(segments.get(segmentIndex), segmentIndex, accumulator)) {
+                break;
+            }
+        }
+        return accumulator.finish();
+    }
+
+    private boolean scanSegment(Path segment, int segmentIndex, RecoveryAccumulator accumulator) throws IOException {
+        try (FileChannel channel = FileChannel.open(segment, StandardOpenOption.READ)) {
+            long position = 0;
+            while (true) {
+                WalRecordCodec.ReadResult result = WalRecordCodec.read(channel, position);
+                if (result.status() == WalRecordCodec.ReadStatus.EOF) {
+                    return false;
+                }
+                if (result.status() == WalRecordCodec.ReadStatus.PARTIAL) {
+                    accumulator.markPartial(segmentIndex, position);
+                    return true;
+                }
+                accumulator.accept(result.record(), segmentIndex, position);
+                position += result.length();
+            }
+        }
+    }
+
+    private SegmentSummary summarizeSegments(List<Path> segments) throws IOException {
         long totalBytes = 0;
         long lastSegmentId = -1;
         for (Path segment : segments) {
             totalBytes = Math.addExact(totalBytes, Files.size(segment));
             lastSegmentId = Math.max(lastSegmentId, parseSegmentId(segment));
         }
-        if (totalBytes > capacityBytes) {
+        return new SegmentSummary(totalBytes, lastSegmentId);
+    }
+
+    private void ensureRecoveredCapacity(long recoveredBytes) throws WalCapacityExceededException {
+        if (recoveredBytes > capacityBytes) {
             throw new WalCapacityExceededException(
-                "Recovered WAL exceeds configured capacity: used=" + totalBytes + ", capacity=" + capacityBytes);
+                "Recovered WAL exceeds configured capacity: used=" + recoveredBytes + ", capacity=" + capacityBytes);
         }
-        return new RecoveryState(totalBytes, lastSegmentId, lastSegmentId + 1, maxGroupId + 1);
     }
 
     private void truncateIncompleteTail(List<Path> segments, GroupStart start) throws IOException {
@@ -574,6 +570,47 @@ public final class FileSharedWal implements SharedWal {
         }
     }
 
+    private static final class RecoveryAccumulator {
+        private GroupStart pendingGroupStart;
+        private int pendingRecordCount;
+        private long maxGroupId = -1L;
+        private GroupStart truncateFrom;
+
+        private void accept(WalRecord record, int segmentIndex, long position) throws WalCorruptionException {
+            if (record.type() == WalRecordType.GROUP_COMMIT) {
+                acceptCommit(record);
+                return;
+            }
+            if (pendingGroupStart == null) {
+                pendingGroupStart = new GroupStart(segmentIndex, position);
+            }
+            pendingRecordCount++;
+        }
+
+        private void acceptCommit(WalRecord record) throws WalCorruptionException {
+            if (pendingGroupStart == null || pendingRecordCount != record.groupRecordCount()) {
+                throw new WalCorruptionException(
+                    "Invalid WAL group commit marker id=" + record.groupId() +
+                        ", expectedRecords=" + record.groupRecordCount() +
+                        ", pendingRecords=" + pendingRecordCount);
+            }
+            maxGroupId = Math.max(maxGroupId, record.groupId());
+            pendingGroupStart = null;
+            pendingRecordCount = 0;
+        }
+
+        private void markPartial(int segmentIndex, long position) {
+            truncateFrom = pendingGroupStart != null
+                ? pendingGroupStart
+                : new GroupStart(segmentIndex, position);
+        }
+
+        private RecoveryScan finish() {
+            GroupStart effectiveTruncate = truncateFrom != null ? truncateFrom : pendingGroupStart;
+            return new RecoveryScan(effectiveTruncate, maxGroupId);
+        }
+    }
+
     private static final class PendingAppend {
         private final List<WalRecordCodec.EncodedRecord> encodedRecords;
         private final int userRecordCount;
@@ -626,6 +663,12 @@ public final class FileSharedWal implements SharedWal {
     }
 
     private record GroupStart(int segmentIndex, long position) {
+    }
+
+    private record RecoveryScan(GroupStart truncateFrom, long maxGroupId) {
+    }
+
+    private record SegmentSummary(long totalBytes, long lastSegmentId) {
     }
 
     private record RecoveryState(long usedBytes, long lastSegmentId, long nextSegmentId, long nextGroupId) {
