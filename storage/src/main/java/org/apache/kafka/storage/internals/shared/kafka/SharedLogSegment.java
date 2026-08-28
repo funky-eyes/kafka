@@ -51,9 +51,9 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ConcurrentNavigableMap;
 import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.ExecutionException;
 
 /**
  * Kafka 4.3.x compatibility segment backed by SharedStorageEngine rather than a per-partition .log payload file.
@@ -251,53 +251,61 @@ public final class SharedLogSegment extends LogSegment {
             return null;
         }
 
-        LogOffsetMetadata offsetMetadata = new LogOffsetMetadata(
-            start.firstOffset,
-            baseOffset(),
-            start.virtualPosition
-        );
-        if (maxSize == 0 || maxPositionOpt.isEmpty()) {
+        LogOffsetMetadata offsetMetadata = offsetMetadata(start);
+        Optional<ReadWindow> window = readWindow(start, maxSize, maxPositionOpt, minOneMessage);
+        if (window.isEmpty()) {
             return new FetchDataInfo(offsetMetadata, MemoryRecords.EMPTY);
         }
-        long maxPosition = Math.min(maxPositionOpt.get(), Integer.MAX_VALUE);
-        if (start.virtualPosition >= maxPosition) {
-            return new FetchDataInfo(offsetMetadata, MemoryRecords.EMPTY);
-        }
-        if (!minOneMessage && start.sizeInBytes > maxSize) {
+        if (window.get().firstEntryIncomplete()) {
             return new FetchDataInfo(offsetMetadata, MemoryRecords.EMPTY, true, Optional.empty());
         }
 
-        int allowedBytes = minOneMessage ? Math.max(maxSize, start.sizeInBytes) : maxSize;
-        List<WalRecord> selected = new ArrayList<>();
-        int totalBytes = 0;
-        for (BatchMetadata metadata : batches.tailMap(start.firstOffset, true).values()) {
-            if (metadata.virtualPosition >= maxPosition) {
-                break;
-            }
-            if (metadata.virtualPosition + metadata.sizeInBytes > maxPosition) {
-                break;
-            }
-            if (!selected.isEmpty() && (long) totalBytes + metadata.sizeInBytes > allowedBytes) {
-                break;
-            }
-            if (selected.isEmpty() && metadata.sizeInBytes > allowedBytes) {
-                break;
-            }
-            WalRecord record = storage.readLocal(partition, metadata.firstOffset)
-                .orElseThrow(() -> new IOException(
-                    "Shared WAL batch missing for " + partition + " at offset " + metadata.firstOffset));
-            selected.add(record);
-            totalBytes = Math.addExact(totalBytes, metadata.sizeInBytes);
-            if (totalBytes >= allowedBytes) {
-                break;
-            }
+        SharedStorageEngine.LocalReadResult readResult = storage.readLocalBatches(
+            partition,
+            start.firstOffset,
+            window.get().maxBytes(),
+            minOneMessage
+        );
+        return materializeFetch(offsetMetadata, readResult);
+    }
+
+    private LogOffsetMetadata offsetMetadata(BatchMetadata start) {
+        return new LogOffsetMetadata(start.firstOffset, baseOffset(), start.virtualPosition);
+    }
+
+    private Optional<ReadWindow> readWindow(
+        BatchMetadata start,
+        int maxSize,
+        Optional<Long> maxPositionOpt,
+        boolean minOneMessage
+    ) {
+        if (maxSize == 0 || maxPositionOpt.isEmpty()) {
+            return Optional.empty();
+        }
+        long maxPosition = Math.min(maxPositionOpt.get(), Integer.MAX_VALUE);
+        if (start.virtualPosition >= maxPosition ||
+            (long) start.virtualPosition + start.sizeInBytes > maxPosition) {
+            return Optional.empty();
+        }
+        if (!minOneMessage && start.sizeInBytes > maxSize) {
+            return Optional.of(new ReadWindow(0, true));
         }
 
-        if (selected.isEmpty()) {
-            return new FetchDataInfo(offsetMetadata, MemoryRecords.EMPTY);
+        int allowedBytes = minOneMessage ? Math.max(maxSize, start.sizeInBytes) : maxSize;
+        long positionBytes = maxPosition - start.virtualPosition;
+        int maxBytes = (int) Math.min(allowedBytes, positionBytes);
+        return Optional.of(new ReadWindow(maxBytes, false));
+    }
+
+    private static FetchDataInfo materializeFetch(
+        LogOffsetMetadata offsetMetadata,
+        SharedStorageEngine.LocalReadResult readResult
+    ) {
+        if (readResult.records().isEmpty()) {
+            return new FetchDataInfo(offsetMetadata, MemoryRecords.EMPTY, readResult.firstBatchIncomplete(), Optional.empty());
         }
-        ByteBuffer data = ByteBuffer.allocate(totalBytes);
-        for (WalRecord record : selected) {
+        ByteBuffer data = ByteBuffer.allocate(readResult.sizeInBytes());
+        for (WalRecord record : readResult.records()) {
             data.put(record.payload());
         }
         data.flip();
@@ -490,6 +498,9 @@ public final class SharedLogSegment extends LogSegment {
             }
             throw new IOException("Shared WAL append failed", cause);
         }
+    }
+
+    private record ReadWindow(int maxBytes, boolean firstEntryIncomplete) {
     }
 
     private record BatchMetadata(
