@@ -25,7 +25,12 @@ on:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/log/LogLoader.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/log/LocalLog.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/log/LogSegmentFactory.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/log/UnifiedLogCreationContext.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/log/UnifiedLogFactory.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/log/LogLoaderSegmentFactoryTest.java'
+      - 'core/src/main/scala/kafka/log/LogManager.scala'
+      - 'core/src/main/java/kafka/server/builders/LogManagerBuilder.java'
+      - 'core/src/test/**/kafka/log/**'
       - '.github/workflows/shared-storage.yml'
   pull_request:
     paths:
@@ -34,7 +39,12 @@ on:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/log/LogLoader.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/log/LocalLog.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/log/LogSegmentFactory.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/log/UnifiedLogCreationContext.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/log/UnifiedLogFactory.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/log/LogLoaderSegmentFactoryTest.java'
+      - 'core/src/main/scala/kafka/log/LogManager.scala'
+      - 'core/src/main/java/kafka/server/builders/LogManagerBuilder.java'
+      - 'core/src/test/**/kafka/log/**'
       - '.github/workflows/shared-storage.yml'
   workflow_dispatch:
 
@@ -66,7 +76,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          ./gradlew :storage:compileJava :storage:compileTestJava --no-scan 2>&1 | tee shared-storage-compile.log
+          ./gradlew :storage:compileJava :storage:compileTestJava :core:compileScala --no-scan 2>&1 | tee shared-storage-compile.log
 
       - name: Run shared storage tests
         shell: bash
@@ -156,7 +166,7 @@ jobs:
           SHARED_STORAGE_S3_BUCKET: kafka-shared-storage-e2e
         run: |
           set -o pipefail
-          ./gradlew :storage:compileJava :storage:compileTestJava --no-scan 2>&1 | tee shared-storage-minio-compile.log
+          ./gradlew :storage:compileJava :storage:compileTestJava :core:compileScala --no-scan 2>&1 | tee shared-storage-minio-compile.log
 
       - name: Upload MinIO compile log
         if: always()
