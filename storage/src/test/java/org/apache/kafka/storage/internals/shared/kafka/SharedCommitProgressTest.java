@@ -39,6 +39,35 @@ class SharedCommitProgressTest {
     }
 
     @Test
+    void snapshotsKafkaLogStartAndHighWatermarkAsOneCommitWindow() {
+        SharedCommitProgress progress = new SharedCommitProgress();
+        SharedPartitionId partition = new SharedPartitionId(1L, 2L, 6);
+
+        progress.onLogLoaded(partition, 20L);
+        assertEquals(20L, progress.partitionProgress(partition).orElseThrow().logStartOffset());
+        assertEquals(20L, progress.partitionProgress(partition).orElseThrow().highWatermark());
+
+        progress.onHighWatermarkUpdated(partition, 50L);
+        SharedCommitProgress.PartitionProgress snapshot = progress.snapshot().get(partition);
+        assertEquals(20L, snapshot.logStartOffset());
+        assertEquals(50L, snapshot.highWatermark());
+    }
+
+    @Test
+    void logReloadCanReplaceLogStartWithoutInventingAHighWatermark() {
+        SharedCommitProgress progress = new SharedCommitProgress();
+        SharedPartitionId partition = new SharedPartitionId(1L, 2L, 7);
+
+        progress.onLogLoaded(partition, 10L);
+        progress.onHighWatermarkUpdated(partition, 40L);
+        progress.onLogLoaded(partition, 25L);
+
+        SharedCommitProgress.PartitionProgress snapshot = progress.partitionProgress(partition).orElseThrow();
+        assertEquals(25L, snapshot.logStartOffset());
+        assertEquals(40L, snapshot.highWatermark());
+    }
+
+    @Test
     void removesPartitionProgress() {
         SharedCommitProgress progress = new SharedCommitProgress();
         SharedPartitionId partition = new SharedPartitionId(1L, 2L, 4);
@@ -50,13 +79,17 @@ class SharedCommitProgressTest {
     }
 
     @Test
-    void rejectsNegativeHighWatermark() {
+    void rejectsNegativeOffsets() {
         SharedCommitProgress progress = new SharedCommitProgress();
         SharedPartitionId partition = new SharedPartitionId(1L, 2L, 5);
 
         assertThrows(
             IllegalArgumentException.class,
             () -> progress.onHighWatermarkUpdated(partition, -1L)
+        );
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> progress.onLogLoaded(partition, -1L)
         );
     }
 }
