@@ -35,6 +35,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -42,9 +43,13 @@ import java.util.stream.Stream;
 /**
  * Broker-wide append-only WAL with a single writer and natural group commit.
  *
- * <p>Append futures are completed only after every record in the drained writer batch is persisted with
+ * <p>Each logical append group is encoded as one or more data/control records followed by a GROUP_COMMIT marker.
+ * Replay exposes the group only when its commit marker is present and valid. This makes a multi-RecordBatch Kafka
+ * append crash-atomic even when the group crosses physical WAL segments.</p>
+ *
+ * <p>Append futures complete only after the full drained writer batch is persisted with
  * {@link FileChannel#force(boolean)}. When a new segment is created, its parent directory is also flushed before
- * the append future completes. This is the durability boundary consumed by Kafka's leader and follower append paths.</p>
+ * futures complete.</p>
  */
 public final class FileSharedWal implements SharedWal {
     private static final Pattern SEGMENT_FILE_PATTERN = Pattern.compile("wal-(\\d{20})\\.log");
@@ -56,6 +61,7 @@ public final class FileSharedWal implements SharedWal {
     private final LinkedBlockingQueue<PendingAppend> pendingAppends = new LinkedBlockingQueue<>();
     private final AtomicBoolean running = new AtomicBoolean(true);
     private final AtomicBoolean closed = new AtomicBoolean(false);
+    private final AtomicLong nextGroupId;
     private final Object lifecycleLock = new Object();
     private final Thread writerThread;
 
@@ -83,6 +89,7 @@ public final class FileSharedWal implements SharedWal {
         RecoveryState recovery = recoverSegments();
         this.usedBytes = recovery.usedBytes;
         this.nextSegmentId = recovery.nextSegmentId;
+        this.nextGroupId = new AtomicLong(recovery.nextGroupId);
         this.activeSegment = openActiveSegment(recovery.lastSegmentId);
 
         this.writerThread = new Thread(this::writerLoop, "shared-wal-writer");
@@ -91,19 +98,31 @@ public final class FileSharedWal implements SharedWal {
     }
 
     @Override
-    public CompletableFuture<WalAppendResult> append(WalRecord record) {
-        Objects.requireNonNull(record, "record");
-        CompletableFuture<WalAppendResult> future = new CompletableFuture<>();
-        WalRecordCodec.EncodedRecord encoded;
-        try {
-            encoded = WalRecordCodec.encode(record);
-        } catch (Throwable t) {
-            future.completeExceptionally(t);
+    public CompletableFuture<List<WalAppendResult>> appendBatch(List<WalRecord> records) {
+        Objects.requireNonNull(records, "records");
+        CompletableFuture<List<WalAppendResult>> future = new CompletableFuture<>();
+        if (records.isEmpty()) {
+            future.completeExceptionally(new IllegalArgumentException("records must not be empty"));
             return future;
         }
-        if (encoded.totalLength() > segmentBytes) {
-            future.completeExceptionally(new IllegalArgumentException(
-                "Encoded WAL record size " + encoded.totalLength() + " exceeds segmentBytes " + segmentBytes));
+
+        long groupId = nextGroupId.getAndIncrement();
+        List<WalRecordCodec.EncodedRecord> encoded = new ArrayList<>(records.size() + 1);
+        try {
+            for (WalRecord record : records) {
+                Objects.requireNonNull(record, "record");
+                if (record.type() == WalRecordType.GROUP_COMMIT) {
+                    throw new IllegalArgumentException("GROUP_COMMIT is internal and cannot be appended directly");
+                }
+                WalRecordCodec.EncodedRecord encodedRecord = WalRecordCodec.encode(record);
+                validateRecordFitsSegment(encodedRecord);
+                encoded.add(encodedRecord);
+            }
+            WalRecordCodec.EncodedRecord commit = WalRecordCodec.encode(WalRecord.groupCommit(groupId, records.size()));
+            validateRecordFitsSegment(commit);
+            encoded.add(commit);
+        } catch (Throwable t) {
+            future.completeExceptionally(t);
             return future;
         }
 
@@ -117,9 +136,16 @@ public final class FileSharedWal implements SharedWal {
                 future.completeExceptionally(new IllegalStateException("WAL is closed"));
                 return future;
             }
-            pendingAppends.add(new PendingAppend(encoded, future));
+            pendingAppends.add(new PendingAppend(encoded, records.size(), future));
         }
         return future;
+    }
+
+    private void validateRecordFitsSegment(WalRecordCodec.EncodedRecord encoded) {
+        if (encoded.totalLength() > segmentBytes) {
+            throw new IllegalArgumentException(
+                "Encoded WAL record size " + encoded.totalLength() + " exceeds segmentBytes " + segmentBytes);
+        }
     }
 
     @Override
@@ -168,28 +194,41 @@ public final class FileSharedWal implements SharedWal {
     @Override
     public void replay(WalReplayConsumer consumer) throws IOException {
         Objects.requireNonNull(consumer, "consumer");
-        List<Path> segments = segmentFiles();
-        for (int i = 0; i < segments.size(); i++) {
-            Path segment = segments.get(i);
+        List<ReplayEntry> pendingGroup = new ArrayList<>();
+        for (Path segment : segmentFiles()) {
             long segmentId = parseSegmentId(segment);
-            boolean lastSegment = i == segments.size() - 1;
             try (FileChannel channel = FileChannel.open(segment, StandardOpenOption.READ)) {
                 long position = 0;
                 while (true) {
                     WalRecordCodec.ReadResult result = WalRecordCodec.read(channel, position);
-                    if (result.status() == WalRecordCodec.ReadStatus.EOF) {
+                    if (result.status() == WalRecordCodec.ReadStatus.EOF ||
+                        result.status() == WalRecordCodec.ReadStatus.PARTIAL) {
                         break;
                     }
-                    if (result.status() == WalRecordCodec.ReadStatus.PARTIAL) {
-                        if (!lastSegment) {
-                            throw new WalCorruptionException("Partial WAL record found in sealed segment " + segment);
+                    WalRecord record = result.record();
+                    if (record.type() == WalRecordType.GROUP_COMMIT) {
+                        if (pendingGroup.size() != record.groupRecordCount()) {
+                            throw new WalCorruptionException(
+                                "WAL group commit count mismatch for group " + record.groupId() +
+                                    ": expected=" + record.groupRecordCount() + ", actual=" + pendingGroup.size());
                         }
-                        break;
+                        for (ReplayEntry entry : pendingGroup) {
+                            consumer.accept(entry.record, entry.appendResult);
+                        }
+                        pendingGroup.clear();
+                    } else {
+                        pendingGroup.add(new ReplayEntry(
+                            record,
+                            new WalAppendResult(segmentId, position, result.length())
+                        ));
                     }
-                    consumer.accept(result.record(), new WalAppendResult(segmentId, position, result.length()));
                     position += result.length();
                 }
             }
+        }
+        // recoverSegments() removes any incomplete final group, so non-empty state here indicates corruption/race.
+        if (!pendingGroup.isEmpty()) {
+            throw new WalCorruptionException("Incomplete WAL append group remained after recovery");
         }
     }
 
@@ -235,10 +274,10 @@ public final class FileSharedWal implements SharedWal {
     }
 
     private void writerLoop() {
-        List<PendingAppend> batch = new ArrayList<>(MAX_DRAINED_APPENDS);
+        List<PendingAppend> drained = new ArrayList<>(MAX_DRAINED_APPENDS);
         while (running.get() || !pendingAppends.isEmpty()) {
             try {
-                batch.clear();
+                drained.clear();
                 PendingAppend first = pendingAppends.take();
                 if (first.poison) {
                     if (!running.get() && pendingAppends.isEmpty()) {
@@ -246,8 +285,8 @@ public final class FileSharedWal implements SharedWal {
                     }
                     continue;
                 }
-                batch.add(first);
-                while (batch.size() < MAX_DRAINED_APPENDS) {
+                drained.add(first);
+                while (drained.size() < MAX_DRAINED_APPENDS) {
                     PendingAppend next = pendingAppends.poll();
                     if (next == null) {
                         break;
@@ -256,27 +295,27 @@ public final class FileSharedWal implements SharedWal {
                         pendingAppends.offer(next);
                         break;
                     }
-                    batch.add(next);
+                    drained.add(next);
                 }
-                writeBatch(batch);
+                writeDrainedGroups(drained);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                failWriter(new IOException("WAL writer interrupted", e), batch);
+                failWriter(new IOException("WAL writer interrupted", e), drained);
                 return;
             } catch (Throwable t) {
-                failWriter(t, batch);
+                failWriter(t, drained);
                 return;
             }
         }
     }
 
-    private void failWriter(Throwable t, List<PendingAppend> currentBatch) {
+    private void failWriter(Throwable t, List<PendingAppend> currentGroups) {
         synchronized (lifecycleLock) {
             failure = t;
             accepting = false;
             running.set(false);
         }
-        failPending(currentBatch, t);
+        failPending(currentGroups, t);
         PendingAppend append;
         while ((append = pendingAppends.poll()) != null) {
             if (!append.poison) {
@@ -285,33 +324,55 @@ public final class FileSharedWal implements SharedWal {
         }
     }
 
-    private void writeBatch(List<PendingAppend> batch) throws IOException {
-        long batchBytes = 0;
-        for (PendingAppend append : batch) {
-            batchBytes = Math.addExact(batchBytes, append.encoded.totalLength());
+    private void writeDrainedGroups(List<PendingAppend> groups) throws IOException {
+        List<PendingAppend> admitted = new ArrayList<>(groups.size());
+        long plannedBytes = 0;
+        int firstRejected = -1;
+        for (int i = 0; i < groups.size(); i++) {
+            PendingAppend group = groups.get(i);
+            long groupBytes = group.totalBytes();
+            if (usedBytes + plannedBytes + groupBytes > capacityBytes) {
+                firstRejected = i;
+                break;
+            }
+            admitted.add(group);
+            plannedBytes = Math.addExact(plannedBytes, groupBytes);
         }
-        if (usedBytes + batchBytes > capacityBytes) {
+
+        if (firstRejected >= 0) {
             WalCapacityExceededException error = new WalCapacityExceededException(
-                "WAL capacity exceeded: used=" + usedBytes + ", batch=" + batchBytes + ", capacity=" + capacityBytes);
-            failPending(batch, error);
+                "WAL capacity exceeded: used=" + usedBytes + ", admitted=" + plannedBytes +
+                    ", capacity=" + capacityBytes);
+            for (int i = firstRejected; i < groups.size(); i++) {
+                groups.get(i).future.completeExceptionally(error);
+            }
+        }
+        if (admitted.isEmpty()) {
             return;
         }
 
-        List<PendingResult> results = new ArrayList<>(batch.size());
-        for (PendingAppend append : batch) {
-            int length = append.encoded.totalLength();
-            ensureWritableSegment(length);
-            long position = activeSegment.position;
-            writeEncoded(activeSegment.channel, append.encoded, position);
-            activeSegment.position += length;
-            usedBytes += length;
-            results.add(new PendingResult(append.future, new WalAppendResult(activeSegment.id, position, length)));
+        List<GroupWriteResult> completedGroups = new ArrayList<>(admitted.size());
+        for (PendingAppend group : admitted) {
+            List<WalAppendResult> userResults = new ArrayList<>(group.userRecordCount);
+            for (int i = 0; i < group.encodedRecords.size(); i++) {
+                WalRecordCodec.EncodedRecord encoded = group.encodedRecords.get(i);
+                int length = encoded.totalLength();
+                ensureWritableSegment(length);
+                long position = activeSegment.position;
+                writeEncoded(activeSegment.channel, encoded, position);
+                activeSegment.position += length;
+                usedBytes += length;
+                if (i < group.userRecordCount) {
+                    userResults.add(new WalAppendResult(activeSegment.id, position, length));
+                }
+            }
+            completedGroups.add(new GroupWriteResult(group.future, List.copyOf(userResults)));
         }
 
-        // One durability barrier for the entire drained batch. Segment creation metadata is flushed as part of the same barrier.
+        // One durability barrier for all admitted append groups in this writer drain.
         forceSegment(activeSegment);
-        for (PendingResult result : results) {
-            result.future.complete(result.result);
+        for (GroupWriteResult completed : completedGroups) {
+            completed.future.complete(completed.results);
         }
     }
 
@@ -337,13 +398,14 @@ public final class FileSharedWal implements SharedWal {
 
     private RecoveryState recoverSegments() throws IOException {
         List<Path> segments = segmentFiles();
-        long totalBytes = 0;
-        long lastSegmentId = -1;
-        for (int i = 0; i < segments.size(); i++) {
-            Path segment = segments.get(i);
-            long segmentId = parseSegmentId(segment);
-            lastSegmentId = Math.max(lastSegmentId, segmentId);
-            boolean lastSegment = i == segments.size() - 1;
+        GroupStart pendingGroupStart = null;
+        int pendingRecordCount = 0;
+        long maxGroupId = -1L;
+        GroupStart truncateFrom = null;
+
+        outer:
+        for (int segmentIndex = 0; segmentIndex < segments.size(); segmentIndex++) {
+            Path segment = segments.get(segmentIndex);
             try (FileChannel channel = FileChannel.open(segment, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
                 long position = 0;
                 while (true) {
@@ -352,23 +414,68 @@ public final class FileSharedWal implements SharedWal {
                         break;
                     }
                     if (result.status() == WalRecordCodec.ReadStatus.PARTIAL) {
-                        if (!lastSegment) {
-                            throw new WalCorruptionException("Partial WAL record found in sealed segment " + segment);
+                        truncateFrom = pendingGroupStart != null
+                            ? pendingGroupStart
+                            : new GroupStart(segmentIndex, position);
+                        break outer;
+                    }
+
+                    WalRecord record = result.record();
+                    if (record.type() == WalRecordType.GROUP_COMMIT) {
+                        if (pendingGroupStart == null || pendingRecordCount != record.groupRecordCount()) {
+                            throw new WalCorruptionException(
+                                "Invalid WAL group commit marker id=" + record.groupId() +
+                                    ", expectedRecords=" + record.groupRecordCount() +
+                                    ", pendingRecords=" + pendingRecordCount);
                         }
-                        channel.truncate(position);
-                        channel.force(false);
-                        break;
+                        maxGroupId = Math.max(maxGroupId, record.groupId());
+                        pendingGroupStart = null;
+                        pendingRecordCount = 0;
+                    } else {
+                        if (pendingGroupStart == null) {
+                            pendingGroupStart = new GroupStart(segmentIndex, position);
+                        }
+                        pendingRecordCount++;
                     }
                     position += result.length();
                 }
-                totalBytes += channel.size();
             }
+        }
+
+        if (truncateFrom == null && pendingGroupStart != null) {
+            truncateFrom = pendingGroupStart;
+        }
+        if (truncateFrom != null) {
+            truncateIncompleteTail(segments, truncateFrom);
+            segments = segmentFiles();
+        }
+
+        long totalBytes = 0;
+        long lastSegmentId = -1;
+        for (Path segment : segments) {
+            totalBytes = Math.addExact(totalBytes, Files.size(segment));
+            lastSegmentId = Math.max(lastSegmentId, parseSegmentId(segment));
         }
         if (totalBytes > capacityBytes) {
             throw new WalCapacityExceededException(
                 "Recovered WAL exceeds configured capacity: used=" + totalBytes + ", capacity=" + capacityBytes);
         }
-        return new RecoveryState(totalBytes, lastSegmentId, lastSegmentId + 1);
+        return new RecoveryState(totalBytes, lastSegmentId, lastSegmentId + 1, maxGroupId + 1);
+    }
+
+    private void truncateIncompleteTail(List<Path> segments, GroupStart start) throws IOException {
+        Path first = segments.get(start.segmentIndex);
+        try (FileChannel channel = FileChannel.open(first, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
+            channel.truncate(start.position);
+            channel.force(false);
+        }
+        boolean deleted = false;
+        for (int i = start.segmentIndex + 1; i < segments.size(); i++) {
+            deleted |= Files.deleteIfExists(segments.get(i));
+        }
+        if (deleted) {
+            Utils.flushDir(directory.toAbsolutePath().normalize());
+        }
     }
 
     private SegmentWriter openActiveSegment(long lastSegmentId) throws IOException {
@@ -404,6 +511,9 @@ public final class FileSharedWal implements SharedWal {
             throw new WalCorruptionException("WAL location length mismatch: expected=" + location.length() +
                 ", actual=" + result.length());
         }
+        if (result.record().type() == WalRecordType.GROUP_COMMIT) {
+            throw new WalCorruptionException("WAL data location unexpectedly points to GROUP_COMMIT: " + location);
+        }
         return result.record();
     }
 
@@ -431,8 +541,7 @@ public final class FileSharedWal implements SharedWal {
 
     private static void writeEncoded(FileChannel channel, WalRecordCodec.EncodedRecord encoded, long position) throws IOException {
         long currentPosition = position;
-        ByteBuffer header = encoded.header();
-        currentPosition += writeFully(channel, header, currentPosition);
+        currentPosition += writeFully(channel, encoded.header(), currentPosition);
         ByteBuffer payload = encoded.payload();
         if (payload.hasRemaining()) {
             currentPosition += writeFully(channel, payload, currentPosition);
@@ -457,39 +566,69 @@ public final class FileSharedWal implements SharedWal {
         return totalWritten;
     }
 
-    private static void failPending(List<PendingAppend> batch, Throwable t) {
-        for (PendingAppend append : batch) {
-            append.future.completeExceptionally(t);
+    private static void failPending(List<PendingAppend> groups, Throwable t) {
+        for (PendingAppend group : groups) {
+            if (!group.poison) {
+                group.future.completeExceptionally(t);
+            }
         }
     }
 
     private static final class PendingAppend {
-        private final WalRecordCodec.EncodedRecord encoded;
-        private final CompletableFuture<WalAppendResult> future;
+        private final List<WalRecordCodec.EncodedRecord> encodedRecords;
+        private final int userRecordCount;
+        private final CompletableFuture<List<WalAppendResult>> future;
         private final boolean poison;
 
-        private PendingAppend(WalRecordCodec.EncodedRecord encoded, CompletableFuture<WalAppendResult> future) {
-            this(encoded, future, false);
+        private PendingAppend(
+            List<WalRecordCodec.EncodedRecord> encodedRecords,
+            int userRecordCount,
+            CompletableFuture<List<WalAppendResult>> future
+        ) {
+            this(encodedRecords, userRecordCount, future, false);
         }
 
-        private PendingAppend(WalRecordCodec.EncodedRecord encoded, CompletableFuture<WalAppendResult> future, boolean poison) {
-            this.encoded = encoded;
+        private PendingAppend(
+            List<WalRecordCodec.EncodedRecord> encodedRecords,
+            int userRecordCount,
+            CompletableFuture<List<WalAppendResult>> future,
+            boolean poison
+        ) {
+            this.encodedRecords = encodedRecords;
+            this.userRecordCount = userRecordCount;
             this.future = future;
             this.poison = poison;
         }
 
+        private long totalBytes() {
+            long total = 0;
+            for (WalRecordCodec.EncodedRecord encoded : encodedRecords) {
+                total = Math.addExact(total, encoded.totalLength());
+            }
+            return total;
+        }
+
         private static PendingAppend poison() {
-            return new PendingAppend(null, new CompletableFuture<>(), true);
+            return new PendingAppend(List.of(), 0, new CompletableFuture<>(), true);
         }
     }
 
-    private record PendingResult(CompletableFuture<WalAppendResult> future, WalAppendResult result) {
+    private record GroupWriteResult(
+        CompletableFuture<List<WalAppendResult>> future,
+        List<WalAppendResult> results
+    ) {
+    }
+
+    private record ReplayEntry(WalRecord record, WalAppendResult appendResult) {
     }
 
     private record IndexedLocation(int index, WalLocation location) {
     }
 
-    private record RecoveryState(long usedBytes, long lastSegmentId, long nextSegmentId) {
+    private record GroupStart(int segmentIndex, long position) {
+    }
+
+    private record RecoveryState(long usedBytes, long lastSegmentId, long nextSegmentId, long nextGroupId) {
     }
 
     private static final class SegmentWriter implements AutoCloseable {
