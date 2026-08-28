@@ -22,6 +22,7 @@ import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 import org.apache.kafka.storage.internals.shared.wal.PartitionWalIndex;
 import org.apache.kafka.storage.internals.shared.wal.SharedWal;
+import org.apache.kafka.storage.internals.shared.wal.WalAppendResult;
 import org.apache.kafka.storage.internals.shared.wal.WalLocation;
 import org.apache.kafka.storage.internals.shared.wal.WalPartitionKey;
 import org.apache.kafka.storage.internals.shared.wal.WalRecord;
@@ -74,6 +75,62 @@ public final class SharedStorageEngine implements AutoCloseable {
         ByteBuffer ownedKafkaRecordBatch
     ) {
         return appendRecord(partition, leaderEpoch, firstOffset, lastOffset, ownedKafkaRecordBatch, true);
+    }
+
+    /**
+     * Durably appends all Kafka RecordBatches from one logical Kafka append as one crash-atomic WAL group.
+     *
+     * <p>This is the preferred Kafka-adapter API. The WAL performs one admission decision for the entire group and
+     * replay exposes none of the batches unless the group's commit marker is durable. Buffers are owned by the caller
+     * before this call and ownership is transferred to the WAL.</p>
+     */
+    public CompletableFuture<List<WalLocation>> appendOwnedBatchGroup(
+        SharedPartitionId partition,
+        List<OwnedDataBatch> batches
+    ) {
+        Objects.requireNonNull(partition, "partition");
+        Objects.requireNonNull(batches, "batches");
+        if (batches.isEmpty()) {
+            return CompletableFuture.failedFuture(new IllegalArgumentException("batches must not be empty"));
+        }
+
+        List<WalRecord> records = new ArrayList<>(batches.size());
+        for (OwnedDataBatch batch : batches) {
+            Objects.requireNonNull(batch, "batch");
+            records.add(WalRecord.dataOwned(
+                partition.topicIdHigh(),
+                partition.topicIdLow(),
+                partition.partition(),
+                batch.leaderEpoch(),
+                batch.firstOffset(),
+                batch.lastOffset(),
+                batch.bytes()
+            ));
+        }
+
+        return wal.appendBatch(records).thenApply(results -> applyDurableGroup(records, results));
+    }
+
+    private List<WalLocation> applyDurableGroup(List<WalRecord> records, List<WalAppendResult> results) {
+        if (records.size() != results.size()) {
+            throw new IllegalStateException(
+                "WAL append group result mismatch: records=" + records.size() + ", results=" + results.size());
+        }
+        List<WalLocation> locations = new ArrayList<>(records.size());
+        for (int i = 0; i < records.size(); i++) {
+            WalRecord record = records.get(i);
+            WalAppendResult result = results.get(i);
+            walIndex.apply(record, result);
+            locations.add(new WalLocation(
+                result.segmentId(),
+                result.position(),
+                result.length(),
+                record.leaderEpoch(),
+                record.firstOffset(),
+                record.lastOffset()
+            ));
+        }
+        return List.copyOf(locations);
     }
 
     private CompletableFuture<WalLocation> appendRecord(
@@ -240,6 +297,24 @@ public final class SharedStorageEngine implements AutoCloseable {
 
     private static WalPartitionKey walKey(SharedPartitionId partition) {
         return new WalPartitionKey(partition.topicIdHigh(), partition.topicIdLow(), partition.partition());
+    }
+
+    public record OwnedDataBatch(
+        int leaderEpoch,
+        long firstOffset,
+        long lastOffset,
+        ByteBuffer bytes
+    ) {
+        public OwnedDataBatch {
+            if (firstOffset < 0 || lastOffset < firstOffset) {
+                throw new IllegalArgumentException("invalid batch offset range");
+            }
+            Objects.requireNonNull(bytes, "bytes");
+            if (!bytes.hasRemaining()) {
+                throw new IllegalArgumentException("batch bytes must not be empty");
+            }
+            bytes = bytes.asReadOnlyBuffer();
+        }
     }
 
     public record LocalReadResult(
