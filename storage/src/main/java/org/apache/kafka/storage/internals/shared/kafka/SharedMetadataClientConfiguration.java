@@ -166,6 +166,14 @@ public final class SharedMetadataClientConfiguration {
         return minInSyncReplicas;
     }
 
+    public int brokerId() {
+        return brokerId;
+    }
+
+    public String clusterId() {
+        return clusterId;
+    }
+
     private Properties commonProperties() {
         Properties result = new Properties();
         result.putAll(commonClientProperties);
