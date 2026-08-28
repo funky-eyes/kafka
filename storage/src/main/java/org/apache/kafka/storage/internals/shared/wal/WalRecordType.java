@@ -18,7 +18,8 @@ package org.apache.kafka.storage.internals.shared.wal;
 
 public enum WalRecordType {
     DATA((byte) 1),
-    TRUNCATE((byte) 2);
+    TRUNCATE((byte) 2),
+    GROUP_COMMIT((byte) 3);
 
     private final byte id;
 
