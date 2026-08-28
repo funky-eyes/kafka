@@ -40,6 +40,8 @@ class SharedStorageConfigurationTest {
 
         assertEquals(SharedStorageConfiguration.DEFAULT_WAL_CAPACITY_BYTES, config.walCapacityBytes());
         assertEquals(SharedStorageConfiguration.DEFAULT_WAL_SEGMENT_BYTES, config.walSegmentBytes());
+        assertEquals(SharedStorageConfiguration.DEFAULT_OBJECT_TARGET_BYTES, config.objectTargetBytes());
+        assertEquals(SharedStorageConfiguration.DEFAULT_UPLOAD_INTERVAL_MS, config.uploadIntervalMs());
         assertTrue(config.walDir().startsWith(logDir.toPath().toAbsolutePath()));
         assertTrue(config.useSharedStorage("events"));
         assertFalse(config.useSharedStorage("__consumer_offsets"));
@@ -64,6 +66,20 @@ class SharedStorageConfigurationTest {
     }
 
     @Test
+    void parsesExplicitUploadTuning() {
+        Map<String, Object> originals = new HashMap<>();
+        originals.put(SharedStorageConfiguration.OBJECT_TARGET_BYTES_CONFIG, "67108864");
+        originals.put(SharedStorageConfiguration.UPLOAD_INTERVAL_MS_CONFIG, 250L);
+
+        SharedStorageConfiguration config = SharedStorageConfiguration.from(
+            context(originals, TestUtils.tempDirectory())
+        );
+
+        assertEquals(64L * 1024 * 1024, config.objectTargetBytes());
+        assertEquals(250L, config.uploadIntervalMs());
+    }
+
+    @Test
     void validatesWalCapacityAndSegmentSize() {
         Map<String, Object> originals = new HashMap<>();
         originals.put(SharedStorageConfiguration.WAL_CAPACITY_BYTES_CONFIG, 1024L);
@@ -72,6 +88,24 @@ class SharedStorageConfigurationTest {
         assertThrows(
             IllegalArgumentException.class,
             () -> SharedStorageConfiguration.from(context(originals, TestUtils.tempDirectory()))
+        );
+    }
+
+    @Test
+    void rejectsNonPositiveUploadTuning() {
+        File logDir = TestUtils.tempDirectory();
+        Map<String, Object> targetBytes = new HashMap<>();
+        targetBytes.put(SharedStorageConfiguration.OBJECT_TARGET_BYTES_CONFIG, 0L);
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> SharedStorageConfiguration.from(context(targetBytes, logDir))
+        );
+
+        Map<String, Object> interval = new HashMap<>();
+        interval.put(SharedStorageConfiguration.UPLOAD_INTERVAL_MS_CONFIG, -1L);
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> SharedStorageConfiguration.from(context(interval, logDir))
         );
     }
 
