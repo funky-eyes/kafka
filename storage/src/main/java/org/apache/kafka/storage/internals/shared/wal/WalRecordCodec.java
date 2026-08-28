@@ -143,14 +143,22 @@ final class WalRecordCodec {
         ByteBuffer payload = body.slice();
         WalRecord record;
         try {
-            if (type == WalRecordType.DATA) {
-                // The read buffer is newly allocated and therefore already exclusively owned by this record.
-                record = WalRecord.dataOwned(topicIdHigh, topicIdLow, partition, leaderEpoch, firstOffset, lastOffset, payload);
-            } else {
-                if (payloadLength != 0 || firstOffset != lastOffset) {
-                    throw new IllegalArgumentException("invalid TRUNCATE record body");
+            switch (type) {
+                case DATA -> record = WalRecord.dataOwned(
+                    topicIdHigh, topicIdLow, partition, leaderEpoch, firstOffset, lastOffset, payload);
+                case TRUNCATE -> {
+                    if (payloadLength != 0 || firstOffset != lastOffset) {
+                        throw new IllegalArgumentException("invalid TRUNCATE record body");
+                    }
+                    record = WalRecord.truncate(topicIdHigh, topicIdLow, partition, leaderEpoch, firstOffset);
                 }
-                record = WalRecord.truncate(topicIdHigh, topicIdLow, partition, leaderEpoch, firstOffset);
+                case GROUP_COMMIT -> {
+                    if (payloadLength != 0 || topicIdLow != 0L || leaderEpoch != 0 || firstOffset != 0L || lastOffset != 0L) {
+                        throw new IllegalArgumentException("invalid GROUP_COMMIT record body");
+                    }
+                    record = WalRecord.groupCommit(topicIdHigh, partition);
+                }
+                default -> throw new IllegalArgumentException("unsupported record type " + type);
             }
         } catch (IllegalArgumentException e) {
             throw new WalCorruptionException("Invalid WAL record body at position " + position + ": " + e.getMessage());
@@ -189,10 +197,6 @@ final class WalRecordCodec {
 
         ByteBuffer payload() {
             return payload.duplicate();
-        }
-
-        int headerLength() {
-            return header.remaining();
         }
 
         int totalLength() {
