@@ -60,6 +60,7 @@ public class LogLoader {
     private final ProducerStateManager producerStateManager;
     private final ConcurrentMap<String, Integer> numRemainingSegments;
     private final boolean isRemoteLogEnabled;
+    private final LogSegmentFactory segmentFactory;
     private final Logger logger;
     private final String logPrefix;
 
@@ -94,6 +95,40 @@ public class LogLoader {
             ProducerStateManager producerStateManager,
             ConcurrentMap<String, Integer> numRemainingSegments,
             boolean isRemoteLogEnabled) {
+        this(
+                dir,
+                topicPartition,
+                config,
+                scheduler,
+                time,
+                logDirFailureChannel,
+                hadCleanShutdown,
+                segments,
+                logStartOffsetCheckpoint,
+                recoveryPointCheckpoint,
+                leaderEpochCache,
+                producerStateManager,
+                numRemainingSegments,
+                isRemoteLogEnabled,
+                LogSegmentFactory.DEFAULT);
+    }
+
+    public LogLoader(
+            File dir,
+            TopicPartition topicPartition,
+            LogConfig config,
+            Scheduler scheduler,
+            Time time,
+            LogDirFailureChannel logDirFailureChannel,
+            boolean hadCleanShutdown,
+            LogSegments segments,
+            long logStartOffsetCheckpoint,
+            long recoveryPointCheckpoint,
+            LeaderEpochFileCache leaderEpochCache,
+            ProducerStateManager producerStateManager,
+            ConcurrentMap<String, Integer> numRemainingSegments,
+            boolean isRemoteLogEnabled,
+            LogSegmentFactory segmentFactory) {
         this.dir = dir;
         this.topicPartition = topicPartition;
         this.config = config;
@@ -108,6 +143,7 @@ public class LogLoader {
         this.producerStateManager = producerStateManager;
         this.numRemainingSegments = numRemainingSegments;
         this.isRemoteLogEnabled = isRemoteLogEnabled;
+        this.segmentFactory = segmentFactory;
         this.logPrefix = "[LogLoader partition=" + topicPartition + ", dir=" + dir.getParent() + "] ";
         this.logger = new LogContext(logPrefix).logger(LogLoader.class);
     }
@@ -142,7 +178,7 @@ public class LogLoader {
                 continue;
             }
             long baseOffset = LogFileUtils.offsetFromFile(swapFile);
-            LogSegment segment = LogSegment.open(swapFile.getParentFile(),
+            LogSegment segment = segmentFactory.open(swapFile.getParentFile(),
                     baseOffset,
                     config,
                     time,
@@ -212,7 +248,15 @@ public class LogLoader {
             segments.lastSegment().get().resizeIndexes(config.maxIndexSize);
         } else {
             if (segments.isEmpty()) {
-                segments.add(LogSegment.open(dir, 0, config, time, config.initFileSize(), false));
+                segments.add(segmentFactory.open(
+                        dir,
+                        0,
+                        config,
+                        time,
+                        false,
+                        config.initFileSize(),
+                        false,
+                        ""));
             }
             recoveryOffsets = new RecoveryOffsets(0L, 0L);
         }
@@ -373,7 +417,7 @@ public class LogLoader {
                 // if it's a log file, load the corresponding log segment
                 long baseOffset = LogFileUtils.offsetFromFile(file);
                 boolean timeIndexFileNewlyCreated = !LogFileUtils.timeIndexFile(dir, baseOffset).exists();
-                LogSegment segment = LogSegment.open(dir, baseOffset, config, time, true, 0, false, "");
+                LogSegment segment = segmentFactory.open(dir, baseOffset, config, time, true, 0, false, "");
                 try {
                     segment.sanityCheck(timeIndexFileNewlyCreated);
                 } catch (NoSuchFileException nsfe) {
@@ -494,7 +538,15 @@ public class LogLoader {
         Optional<Long> logEndOffsetOptional = deleteSegmentsIfLogStartGreaterThanLogEnd();
         if (segments.isEmpty()) {
             // no existing segments, create a new mutable segment beginning at logStartOffset
-            segments.add(LogSegment.open(dir, logStartOffsetCheckpoint, config, time, config.initFileSize(), config.preallocate));
+            segments.add(segmentFactory.open(
+                    dir,
+                    logStartOffsetCheckpoint,
+                    config,
+                    time,
+                    false,
+                    config.initFileSize(),
+                    config.preallocate,
+                    ""));
         }
 
         // Update the recovery point if there was a clean shutdown and did not perform any changes to
