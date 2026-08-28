@@ -77,57 +77,104 @@ final class WalRecordCodec {
     }
 
     static ReadResult read(FileChannel channel, long position) throws IOException {
-        long size = channel.size();
-        if (position == size) {
+        long remaining = channel.size() - position;
+        if (remaining == 0) {
             return ReadResult.eof(position);
         }
-        long remaining = size - position;
         if (remaining < PREFIX_BYTES) {
             return ReadResult.partial(position);
         }
 
-        ByteBuffer prefix = ByteBuffer.allocate(PREFIX_BYTES).order(ByteOrder.BIG_ENDIAN);
-        readFully(channel, prefix, position);
-        prefix.flip();
-
-        int magic = prefix.getInt();
-        short version = prefix.getShort();
-        byte typeId = prefix.get();
-        prefix.get(); // flags
-        int totalLength = prefix.getInt();
-        int expectedCrc = prefix.getInt();
-
-        if (magic != MAGIC) {
-            throw new WalCorruptionException("Invalid WAL magic at position " + position + ": " + Integer.toHexString(magic));
-        }
-        if (version != VERSION) {
-            throw new WalCorruptionException("Unsupported WAL version at position " + position + ": " + version);
-        }
-        if (totalLength < MIN_RECORD_BYTES || totalLength > MAX_RECORD_BYTES) {
-            throw new WalCorruptionException("Invalid WAL record length at position " + position + ": " + totalLength);
-        }
-        if (remaining < totalLength) {
+        Prefix prefix = readPrefix(channel, position);
+        validatePrefix(prefix, position);
+        if (remaining < prefix.totalLength()) {
             return ReadResult.partial(position);
         }
 
-        WalRecordType type;
+        WalRecordType type = recordType(prefix.typeId(), position);
+        ByteBuffer body = readAndValidateBody(channel, position, prefix);
+        WalRecord record = decodeRecord(type, body, position);
+        return ReadResult.complete(position, prefix.totalLength(), record);
+    }
+
+    private static Prefix readPrefix(FileChannel channel, long position) throws IOException {
+        ByteBuffer buffer = ByteBuffer.allocate(PREFIX_BYTES).order(ByteOrder.BIG_ENDIAN);
+        readFully(channel, buffer, position);
+        buffer.flip();
+        return new Prefix(
+            buffer.getInt(),
+            buffer.getShort(),
+            buffer.get(),
+            buffer.get(),
+            buffer.getInt(),
+            buffer.getInt()
+        );
+    }
+
+    private static void validatePrefix(Prefix prefix, long position) throws WalCorruptionException {
+        if (prefix.magic() != MAGIC) {
+            throw new WalCorruptionException(
+                "Invalid WAL magic at position " + position + ": " + Integer.toHexString(prefix.magic()));
+        }
+        if (prefix.version() != VERSION) {
+            throw new WalCorruptionException(
+                "Unsupported WAL version at position " + position + ": " + prefix.version());
+        }
+        if (prefix.flags() != 0) {
+            throw new WalCorruptionException(
+                "Unsupported WAL flags at position " + position + ": " + prefix.flags());
+        }
+        if (prefix.totalLength() < MIN_RECORD_BYTES || prefix.totalLength() > MAX_RECORD_BYTES) {
+            throw new WalCorruptionException(
+                "Invalid WAL record length at position " + position + ": " + prefix.totalLength());
+        }
+    }
+
+    private static WalRecordType recordType(byte typeId, long position) throws WalCorruptionException {
         try {
-            type = WalRecordType.forId(typeId);
+            return WalRecordType.forId(typeId);
         } catch (IllegalArgumentException e) {
             throw new WalCorruptionException("Invalid WAL record type at position " + position + ": " + typeId);
         }
+    }
 
-        int bodyLength = totalLength - PREFIX_BYTES;
+    private static ByteBuffer readAndValidateBody(
+        FileChannel channel,
+        long position,
+        Prefix prefix
+    ) throws IOException {
+        int bodyLength = prefix.totalLength() - PREFIX_BYTES;
         ByteBuffer body = ByteBuffer.allocate(bodyLength).order(ByteOrder.BIG_ENDIAN);
         readFully(channel, body, position + PREFIX_BYTES);
         body.flip();
 
         CRC32C crc = new CRC32C();
         crc.update(body.duplicate());
-        if ((int) crc.getValue() != expectedCrc) {
+        if ((int) crc.getValue() != prefix.expectedCrc()) {
             throw new WalCorruptionException("WAL checksum mismatch at position " + position);
         }
+        return body;
+    }
 
+    private static WalRecord decodeRecord(
+        WalRecordType type,
+        ByteBuffer body,
+        long position
+    ) throws WalCorruptionException {
+        DecodedBody decoded = decodeBody(body, position);
+        try {
+            return switch (type) {
+                case DATA -> decodeData(decoded);
+                case TRUNCATE -> decodeTruncate(decoded);
+                case GROUP_COMMIT -> decodeGroupCommit(decoded);
+            };
+        } catch (IllegalArgumentException e) {
+            throw new WalCorruptionException(
+                "Invalid WAL record body at position " + position + ": " + e.getMessage());
+        }
+    }
+
+    private static DecodedBody decodeBody(ByteBuffer body, long position) throws WalCorruptionException {
         long topicIdHigh = body.getLong();
         long topicIdLow = body.getLong();
         int partition = body.getInt();
@@ -135,35 +182,60 @@ final class WalRecordCodec {
         long firstOffset = body.getLong();
         long lastOffset = body.getLong();
         int payloadLength = body.getInt();
-
         if (payloadLength < 0 || payloadLength != body.remaining()) {
-            throw new WalCorruptionException("Invalid WAL payload length at position " + position + ": " + payloadLength);
+            throw new WalCorruptionException(
+                "Invalid WAL payload length at position " + position + ": " + payloadLength);
         }
+        return new DecodedBody(
+            topicIdHigh,
+            topicIdLow,
+            partition,
+            leaderEpoch,
+            firstOffset,
+            lastOffset,
+            body.slice()
+        );
+    }
 
-        ByteBuffer payload = body.slice();
-        WalRecord record;
-        try {
-            switch (type) {
-                case DATA -> record = WalRecord.dataOwned(
-                    topicIdHigh, topicIdLow, partition, leaderEpoch, firstOffset, lastOffset, payload);
-                case TRUNCATE -> {
-                    if (payloadLength != 0 || firstOffset != lastOffset) {
-                        throw new IllegalArgumentException("invalid TRUNCATE record body");
-                    }
-                    record = WalRecord.truncate(topicIdHigh, topicIdLow, partition, leaderEpoch, firstOffset);
-                }
-                case GROUP_COMMIT -> {
-                    if (payloadLength != 0 || topicIdLow != 0L || leaderEpoch != 0 || firstOffset != 0L || lastOffset != 0L) {
-                        throw new IllegalArgumentException("invalid GROUP_COMMIT record body");
-                    }
-                    record = WalRecord.groupCommit(topicIdHigh, partition);
-                }
-                default -> throw new IllegalArgumentException("unsupported record type " + type);
-            }
-        } catch (IllegalArgumentException e) {
-            throw new WalCorruptionException("Invalid WAL record body at position " + position + ": " + e.getMessage());
+    private static WalRecord decodeData(DecodedBody body) {
+        return WalRecord.dataOwned(
+            body.topicIdHigh(),
+            body.topicIdLow(),
+            body.partition(),
+            body.leaderEpoch(),
+            body.firstOffset(),
+            body.lastOffset(),
+            body.payload()
+        );
+    }
+
+    private static WalRecord decodeTruncate(DecodedBody body) {
+        requireEmptyPayload(body, "TRUNCATE");
+        if (body.firstOffset() != body.lastOffset()) {
+            throw new IllegalArgumentException("TRUNCATE first and last offsets must match");
         }
-        return ReadResult.complete(position, totalLength, record);
+        return WalRecord.truncate(
+            body.topicIdHigh(),
+            body.topicIdLow(),
+            body.partition(),
+            body.leaderEpoch(),
+            body.firstOffset()
+        );
+    }
+
+    private static WalRecord decodeGroupCommit(DecodedBody body) {
+        requireEmptyPayload(body, "GROUP_COMMIT");
+        if (body.topicIdLow() != 0L || body.leaderEpoch() != 0 ||
+            body.firstOffset() != 0L || body.lastOffset() != 0L) {
+            throw new IllegalArgumentException("invalid GROUP_COMMIT record body");
+        }
+        return WalRecord.groupCommit(body.topicIdHigh(), body.partition());
+    }
+
+    private static void requireEmptyPayload(DecodedBody body, String type) {
+        if (body.payload().hasRemaining()) {
+            throw new IllegalArgumentException(type + " must not contain payload bytes");
+        }
     }
 
     private static void readFully(FileChannel channel, ByteBuffer buffer, long position) throws IOException {
@@ -173,10 +245,9 @@ final class WalRecordCodec {
             if (read < 0) {
                 throw new EOFException("Unexpected EOF while reading WAL at position " + currentPosition);
             }
-            if (read == 0) {
-                continue;
+            if (read > 0) {
+                currentPosition += read;
             }
-            currentPosition += read;
         }
     }
 
@@ -202,6 +273,27 @@ final class WalRecordCodec {
         int totalLength() {
             return totalLength;
         }
+    }
+
+    private record Prefix(
+        int magic,
+        short version,
+        byte typeId,
+        byte flags,
+        int totalLength,
+        int expectedCrc
+    ) {
+    }
+
+    private record DecodedBody(
+        long topicIdHigh,
+        long topicIdLow,
+        int partition,
+        int leaderEpoch,
+        long firstOffset,
+        long lastOffset,
+        ByteBuffer payload
+    ) {
     }
 
     enum ReadStatus {
