@@ -20,17 +20,41 @@ public record WalLocation(
     long segmentId,
     long position,
     int length,
+    int payloadLength,
     int leaderEpoch,
     long firstOffset,
     long lastOffset
 ) {
     public WalLocation {
-        if (segmentId < 0 || position < 0 || length <= 0) {
+        if (segmentId < 0 || position < 0 || length < WalRecordCodec.HEADER_BYTES) {
             throw new IllegalArgumentException("invalid physical WAL location");
+        }
+        if (payloadLength < 0 || payloadLength != length - WalRecordCodec.HEADER_BYTES) {
+            throw new IllegalArgumentException("invalid WAL payload length");
         }
         if (firstOffset < 0 || lastOffset < firstOffset) {
             throw new IllegalArgumentException("invalid logical WAL range");
         }
+    }
+
+    /** Compatibility constructor for indexed DATA records. */
+    public WalLocation(
+        long segmentId,
+        long position,
+        int length,
+        int leaderEpoch,
+        long firstOffset,
+        long lastOffset
+    ) {
+        this(
+            segmentId,
+            position,
+            length,
+            length - WalRecordCodec.HEADER_BYTES,
+            leaderEpoch,
+            firstOffset,
+            lastOffset
+        );
     }
 
     public boolean contains(long offset) {
