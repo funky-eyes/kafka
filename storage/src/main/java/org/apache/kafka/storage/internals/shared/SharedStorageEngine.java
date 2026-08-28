@@ -125,6 +125,7 @@ public final class SharedStorageEngine implements AutoCloseable {
                 result.segmentId(),
                 result.position(),
                 result.length(),
+                record.payload().remaining(),
                 record.leaderEpoch(),
                 record.firstOffset(),
                 record.lastOffset()
@@ -153,7 +154,14 @@ public final class SharedStorageEngine implements AutoCloseable {
         return wal.append(record).thenApply(result -> {
             walIndex.apply(record, result);
             return new WalLocation(
-                result.segmentId(), result.position(), result.length(), leaderEpoch, firstOffset, lastOffset);
+                result.segmentId(),
+                result.position(),
+                result.length(),
+                record.payload().remaining(),
+                leaderEpoch,
+                firstOffset,
+                lastOffset
+            );
         });
     }
 
@@ -191,6 +199,21 @@ public final class SharedStorageEngine implements AutoCloseable {
         int maxBytes,
         boolean minOneBatch
     ) throws IOException {
+        validateLocalRead(partition, startOffset, maxBytes);
+        ReadSelection selection = selectLocalBatches(partition, startOffset, maxBytes, minOneBatch);
+        if (selection.locations().isEmpty()) {
+            return new LocalReadResult(selection.firstBatchOffset(), List.of(), 0, selection.firstBatchIncomplete());
+        }
+        List<WalRecord> records = wal.readBatch(selection.locations());
+        return new LocalReadResult(
+            selection.firstBatchOffset(),
+            records,
+            selection.sizeInBytes(),
+            selection.firstBatchIncomplete()
+        );
+    }
+
+    private static void validateLocalRead(SharedPartitionId partition, long startOffset, int maxBytes) {
         Objects.requireNonNull(partition, "partition");
         if (startOffset < 0) {
             throw new IllegalArgumentException("startOffset must be non-negative");
@@ -198,43 +221,47 @@ public final class SharedStorageEngine implements AutoCloseable {
         if (maxBytes < 0) {
             throw new IllegalArgumentException("maxBytes must be non-negative");
         }
+    }
 
+    private ReadSelection selectLocalBatches(
+        SharedPartitionId partition,
+        long startOffset,
+        int maxBytes,
+        boolean minOneBatch
+    ) {
         List<WalLocation> selected = new ArrayList<>();
         int selectedBytes = 0;
-        long firstBatchOffset = -1L;
+        long firstBatchOffset = startOffset;
         for (WalLocation location : walIndex.ranges(walKey(partition))) {
             if (location.lastOffset() < startOffset) {
                 continue;
             }
-
-            WalRecord record = wal.read(location);
-            int batchBytes = record.payload().remaining();
             if (selected.isEmpty()) {
-                firstBatchOffset = record.firstOffset();
-                if (maxBytes == 0 && !minOneBatch) {
-                    break;
-                }
-                if (batchBytes > maxBytes && !minOneBatch) {
-                    break;
-                }
-            } else if ((long) selectedBytes + batchBytes > maxBytes) {
+                firstBatchOffset = location.firstOffset();
+            }
+            if (!canSelectLocation(location, selectedBytes, selected.isEmpty(), maxBytes, minOneBatch)) {
                 break;
             }
-
             selected.add(location);
-            selectedBytes = Math.addExact(selectedBytes, batchBytes);
+            selectedBytes = Math.addExact(selectedBytes, location.payloadLength());
             if (selectedBytes >= maxBytes && !(selected.size() == 1 && minOneBatch)) {
                 break;
             }
         }
+        return new ReadSelection(firstBatchOffset, List.copyOf(selected), selectedBytes, false);
+    }
 
-        if (selected.isEmpty()) {
-            return new LocalReadResult(startOffset, List.of(), 0, false);
+    private static boolean canSelectLocation(
+        WalLocation location,
+        int selectedBytes,
+        boolean first,
+        int maxBytes,
+        boolean minOneBatch
+    ) {
+        if (first) {
+            return minOneBatch || (maxBytes > 0 && location.payloadLength() <= maxBytes);
         }
-
-        List<WalRecord> records = wal.readBatch(selected);
-        boolean firstBatchIncomplete = records.get(0).payload().remaining() > maxBytes && !minOneBatch;
-        return new LocalReadResult(firstBatchOffset, records, selectedBytes, firstBatchIncomplete);
+        return (long) selectedBytes + location.payloadLength() <= maxBytes;
     }
 
     public List<WalRecord> readUploadCandidates(List<UploadCandidate> candidates) throws IOException {
@@ -326,6 +353,14 @@ public final class SharedStorageEngine implements AutoCloseable {
         public LocalReadResult {
             records = List.copyOf(records);
         }
+    }
+
+    private record ReadSelection(
+        long firstBatchOffset,
+        List<WalLocation> locations,
+        int sizeInBytes,
+        boolean firstBatchIncomplete
+    ) {
     }
 
     public record UploadCandidate(SharedPartitionId partition, OffsetRange offsets, WalLocation location) {
