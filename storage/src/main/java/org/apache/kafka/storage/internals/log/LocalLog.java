@@ -82,7 +82,6 @@ public class LocalLog {
     private final Time time;
     private final TopicPartition topicPartition;
     private final LogDirFailureChannel logDirFailureChannel;
-    private final LogSegmentFactory segmentFactory;
     private final Logger logger;
 
     private volatile LogOffsetMetadata nextOffsetMetadata;
@@ -115,29 +114,6 @@ public class LocalLog {
                     Time time,
                     TopicPartition topicPartition,
                     LogDirFailureChannel logDirFailureChannel) {
-        this(
-                dir,
-                config,
-                segments,
-                recoveryPoint,
-                nextOffsetMetadata,
-                scheduler,
-                time,
-                topicPartition,
-                logDirFailureChannel,
-                LogSegmentFactory.DEFAULT);
-    }
-
-    public LocalLog(File dir,
-                    LogConfig config,
-                    LogSegments segments,
-                    long recoveryPoint,
-                    LogOffsetMetadata nextOffsetMetadata,
-                    Scheduler scheduler,
-                    Time time,
-                    TopicPartition topicPartition,
-                    LogDirFailureChannel logDirFailureChannel,
-                    LogSegmentFactory segmentFactory) {
         this.dir = dir;
         this.config = config;
         this.segments = segments;
@@ -147,7 +123,6 @@ public class LocalLog {
         this.time = time;
         this.topicPartition = topicPartition;
         this.logDirFailureChannel = logDirFailureChannel;
-        this.segmentFactory = segmentFactory;
         this.logIdent = "[LocalLog partition=" + topicPartition + ", dir=" + dir + "] ";
         this.logger = new LogContext(logIdent).logger(LocalLog.class);
         // Last time the log was flushed
@@ -448,15 +423,12 @@ public class LocalLog {
         if (newOffset == segmentToDelete.baseOffset()) {
             segmentToDelete.changeFileSuffixes("", LogFileUtils.DELETED_FILE_SUFFIX);
         }
-        LogSegment newSegment = segmentFactory.open(
-                dir,
+        LogSegment newSegment = LogSegment.open(dir,
                 newOffset,
                 config,
                 time,
-                false,
                 config.initFileSize(),
-                config.preallocate,
-                "");
+                config.preallocate);
         segments.add(newSegment);
 
         reason.logReason(List.of(segmentToDelete));
@@ -656,15 +628,12 @@ public class LocalLog {
                         segments.lastSegment().get().onBecomeInactiveSegment();
                     }
                 }
-                LogSegment newSegment = segmentFactory.open(
-                        dir,
+                LogSegment newSegment = LogSegment.open(dir,
                         newOffset,
                         config,
                         time,
-                        false,
                         config.initFileSize(),
-                        config.preallocate,
-                        "");
+                        config.preallocate);
                 segments.add(newSegment);
 
                 // We need to update the segment base offset and append position data of the metadata when log rolls.
@@ -746,7 +715,8 @@ public class LocalLog {
 
     /**
      * Return a new directory name in the following format: "${topic}-${partitionId}.${uniqueId}${suffix}".
-     * If the topic name is too long, it will be truncated to prevent the total name from exceeding 255 characters.
+     * If the topic name is too long, it will be truncated to prevent the total name
+     * from exceeding 255 characters.
      */
     private static String logDirNameWithSuffixCappedLength(TopicPartition topicPartition, String suffix) {
         String uniqueId = UUID.randomUUID().toString().replaceAll("-", "");
@@ -761,26 +731,11 @@ public class LocalLog {
     }
 
     /**
-     * Return a directory name in the following format: "${topic}-${partitionId}".
+     * Return a directory name for the given topic partition. The name will be in the following
+     * format: topic-partition where topic, partition are variables.
      */
     public static String logDirName(TopicPartition topicPartition) {
         return topicPartition.topic() + "-" + topicPartition.partition();
-    }
-
-    public static TopicPartition parseTopicPartitionName(File dir) throws IOException {
-        String dirName = dir.getName();
-        if (dirName.endsWith(DELETE_DIR_SUFFIX) || dirName.endsWith(FUTURE_DIR_SUFFIX) || dirName.endsWith(STRAY_DIR_SUFFIX)) {
-            dirName = dirName.substring(0, dirName.lastIndexOf('.'));
-        }
-        int index = dirName.lastIndexOf('-');
-        if (index < 0) throw exception(dir);
-        String topic = dirName.substring(0, index);
-        String partitionString = dirName.substring(index + 1);
-        try {
-            return new TopicPartition(topic, Integer.parseInt(partitionString));
-        } catch (NumberFormatException nfe) {
-            throw exception(dir);
-        }
     }
 
     private static KafkaException exception(File dir) throws IOException {
@@ -789,22 +744,71 @@ public class LocalLog {
                 "Kafka's log directories (and children) should only contain Kafka topic data.");
     }
 
+    /**
+     * Parse the topic and partition out of the directory name of a log
+     */
+    public static TopicPartition parseTopicPartitionName(File dir) throws IOException {
+        if (dir == null) {
+            throw new KafkaException("dir should not be null");
+        }
+        String dirName = dir.getName();
+        if (!dirName.contains("-")) {
+            throw exception(dir);
+        }
+        if (dirName.endsWith(DELETE_DIR_SUFFIX) && !DELETE_DIR_PATTERN.matcher(dirName).matches() ||
+                dirName.endsWith(FUTURE_DIR_SUFFIX) && !FUTURE_DIR_PATTERN.matcher(dirName).matches() ||
+                dirName.endsWith(STRAY_DIR_SUFFIX) && !STRAY_DIR_PATTERN.matcher(dirName).matches()) {
+            throw exception(dir);
+        }
+        String name = (dirName.endsWith(DELETE_DIR_SUFFIX) || dirName.endsWith(FUTURE_DIR_SUFFIX) || dirName.endsWith(STRAY_DIR_SUFFIX))
+            ? dirName.substring(0, dirName.lastIndexOf('.'))
+            : dirName;
+
+        int index = name.lastIndexOf('-');
+        String topic = name.substring(0, index);
+        String partitionString = name.substring(index + 1);
+        if (topic.isEmpty() || partitionString.isEmpty()) {
+            throw exception(dir);
+        }
+        try {
+            return new TopicPartition(topic, Integer.parseInt(partitionString));
+        } catch (NumberFormatException nfe) {
+            throw exception(dir);
+        }
+    }
+
+    /**
+     * Wraps the value of iterator.next() in an Optional instance.
+     *
+     * @param iterator given iterator to iterate over
+     * @return if a next element exists, Optional#empty otherwise.
+     * @param <T> the type of object held within the iterator
+     */
     public static <T> Optional<T> nextItem(Iterator<T> iterator) {
-        if (iterator.hasNext()) return Optional.of(iterator.next());
-        else return Optional.empty();
+        return iterator.hasNext() ? Optional.of(iterator.next()) : Optional.empty();
     }
 
     private static FetchDataInfo emptyFetchDataInfo(LogOffsetMetadata fetchOffsetMetadata, boolean includeAbortedTxns) {
         Optional<List<FetchResponseData.AbortedTransaction>> abortedTransactions = includeAbortedTxns
-                ? Optional.of(Collections.emptyList())
-                : Optional.empty();
+            ? Optional.of(List.of())
+            : Optional.empty();
         return new FetchDataInfo(fetchOffsetMetadata, MemoryRecords.EMPTY, false, abortedTransactions);
     }
 
+    /**
+     * Invokes the provided function and handles any IOException raised by the function by marking the
+     * provided directory offline.
+     *
+     * @param logDirFailureChannel Used to asynchronously handle log directory failure.
+     * @param logDir               The log directory to be marked offline during an IOException.
+     * @param errorMsgSupplier     The supplier for the error message to be used when marking the log directory offline.
+     * @param function             The function to be executed.
+     * @return The value returned by the function after a successful invocation
+     */
     public static <T> T maybeHandleIOException(LogDirFailureChannel logDirFailureChannel,
                                                String logDir,
                                                Supplier<String> errorMsgSupplier,
-                                               StorageAction<T, IOException> function) {
+                                               StorageAction<T, IOException> function) throws KafkaStorageException {
         if (logDirFailureChannel.hasOfflineLogDir(logDir)) {
             throw new KafkaStorageException("The log dir " + logDir + " is already offline due to a previous IO exception.");
         }
@@ -817,27 +821,24 @@ public class LocalLog {
         }
     }
 
-    public interface SegmentDeletionReason {
-        void logReason(List<LogSegment> toDelete);
-    }
-
-    private static class LogTruncation implements SegmentDeletionReason {
-        private final Logger logger;
-
-        private LogTruncation(Logger logger) {
-            this.logger = logger;
-        }
-
-        @Override
-        public void logReason(List<LogSegment> toDelete) {
-            logger.info("Deleting segments as part of log truncation: {}", toDelete.stream()
-                    .map(LogSegment::toString)
-                    .collect(Collectors.joining(", ")));
-        }
-    }
-
     /**
      * Perform physical deletion of the index and log files for the given segment.
+     * Prior to the deletion, the index and log files are renamed by appending .deleted to the
+     * respective file name. Allows these files to be optionally deleted asynchronously.
+     * <br/>
+     * This method assumes that the file exists. It does not need to convert IOException
+     * (thrown from changeFileSuffixes) to KafkaStorageException because it is either called before
+     * all logs are loaded or the caller will catch and handle IOException.
+     *
+     * @param segmentsToDelete The segments to be deleted
+     * @param asyncDelete If true, the deletion of the segments is done asynchronously
+     * @param dir The directory in which the log will reside
+     * @param topicPartition The topic
+     * @param config The log configuration settings
+     * @param scheduler The thread pool scheduler used for background actions
+     * @param logDirFailureChannel The LogDirFailureChannel to asynchronously handle log dir failure
+     * @param logPrefix The logging prefix
+     * @throws IOException if the file can't be renamed and still exists
      */
     public static void deleteSegmentFiles(Collection<LogSegment> segmentsToDelete,
                                           boolean asyncDelete,
@@ -877,14 +878,37 @@ public class LocalLog {
         return LogSegment.open(dir, baseOffset, logConfig, Time.SYSTEM, false, logConfig.initFileSize(), logConfig.preallocate, CLEANED_FILE_SUFFIX);
     }
 
+    /**
+     * Split a segment into one or more segments such that there is no offset overflow in any of them. The
+     * resulting segments will contain the exact same messages that are present in the input segment. On successful
+     * completion of this method, the input segment will be deleted and will be replaced by the resulting new segments.
+     * See replaceSegments for recovery logic, in case the broker dies in the middle of this operation.
+     * <p>
+     * Note that this method assumes we have already determined that the segment passed in contains records that cause
+     * offset overflow.
+     * <p>
+     * The split logic overloads the use of .clean files that LogCleaner typically uses to make the process of replacing
+     * the input segment with multiple new segments atomic and recoverable in the event of a crash. See replaceSegments
+     * and completeSwapOperations for the implementation to make this operation recoverable on crashes.
+     *
+     * @param segment Segment to split
+     * @param existingSegments The existing segments of the log
+     * @param dir The directory in which the log will reside
+     * @param topicPartition The topic
+     * @param config The log configuration settings
+     * @param scheduler The thread pool scheduler used for background actions
+     * @param logDirFailureChannel The LogDirFailureChannel to asynchronously handle log dir failure
+     * @param logPrefix The logging prefix
+     * @return List of new segments that replace the input segment
+     */
     public static SplitSegmentResult splitOverflowedSegment(LogSegment segment,
-                                                             LogSegments existingSegments,
-                                                             File dir,
-                                                             TopicPartition topicPartition,
-                                                             LogConfig config,
-                                                             Scheduler scheduler,
-                                                             LogDirFailureChannel logDirFailureChannel,
-                                                             String logPrefix) throws IOException {
+                                                     LogSegments existingSegments,
+                                                     File dir,
+                                                     TopicPartition topicPartition,
+                                                     LogConfig config,
+                                                     Scheduler scheduler,
+                                                     LogDirFailureChannel logDirFailureChannel,
+                                                     String logPrefix) throws IOException {
         require(isLogFile(segment.log().file()), "Cannot split file " + segment.log().file().getAbsoluteFile());
         require(segment.hasOverflow(), "Split operation is only permitted for segments with overflow, and the problem path is " + segment.log().file().getAbsoluteFile());
 
@@ -904,6 +928,7 @@ public class LocalLog {
                 }
                 position += bytesAppended;
             }
+            // prepare new segments
             int totalSizeOfNewSegments = 0;
             for (LogSegment splitSegment : newSegments) {
                 splitSegment.onBecomeInactiveSegment();
@@ -911,9 +936,11 @@ public class LocalLog {
                 splitSegment.setLastModified(segment.lastModified());
                 totalSizeOfNewSegments += splitSegment.log().sizeInBytes();
             }
+            // size of all the new segments combined must equal size of the original segment
             if (totalSizeOfNewSegments != segment.log().sizeInBytes()) {
                 throw new IllegalStateException("Inconsistent segment sizes after split before: " + segment.log().sizeInBytes() + " after: " + totalSizeOfNewSegments);
             }
+            // replace old segment with new ones
             LOG.info("{}Replacing overflowed segment {} with split segments {}", logPrefix, segment, newSegments);
             List<LogSegment> deletedSegments = replaceSegments(existingSegments, newSegments, List.of(segment),
                     dir, topicPartition, config, scheduler, logDirFailureChannel, logPrefix, false);
@@ -927,6 +954,50 @@ public class LocalLog {
         }
     }
 
+    /**
+     * Swap one or more new segment in place and delete one or more existing segments in a crash-safe
+     * manner. The old segments will be asynchronously deleted.
+     * <br/>
+     * This method does not need to convert IOException to KafkaStorageException because it is either
+     * called before all logs are loaded or the caller will catch and handle IOException
+     * <br/>
+     * The sequence of operations is:
+     * <ol>
+     * <li>Cleaner creates one or more new segments with suffix .cleaned and invokes replaceSegments() on
+     *   the Log instance. If broker crashes at this point, the clean-and-swap operation is aborted and
+     *   the .cleaned files are deleted on recovery in LogLoader.
+     * </li>
+     * <li>New segments are renamed .swap. If the broker crashes before all segments were renamed to .swap, the
+     *   clean-and-swap operation is aborted - .cleaned as well as .swap files are deleted on recovery in
+     *   LogLoader. We detect this situation by maintaining a specific order in which files are renamed
+     *   from .cleaned to .swap. Basically, files are renamed in descending order of offsets. On recovery,
+     *   all .swap files whose offset is greater than the minimum-offset .clean file are deleted.
+     * </li>
+     * <li>If the broker crashes after all new segments were renamed to .swap, the operation is completed,
+     *   the swap operation is resumed on recovery as described in the next step.
+     * </li>
+     * <li>Old segment files are renamed to .deleted and asynchronous delete is scheduled. If the broker
+     *   crashes, any .deleted files left behind are deleted on recovery in LogLoader.
+     *   replaceSegments() is then invoked to complete the swap with newSegment recreated from the
+     *   .swap file and oldSegments containing segments which were not renamed before the crash.
+     * </li>
+     * <li>Swap segment(s) are renamed to replace the existing segments, completing this operation.
+     *   If the broker crashes, any .deleted files which may be left behind are deleted
+     *   on recovery in LogLoader.
+     * </li>
+     * </ol>
+     *
+     * @param existingSegments The existing segments of the log
+     * @param newSegments The new log segment to add to the log
+     * @param oldSegments The old log segments to delete from the log
+     * @param dir The directory in which the log will reside
+     * @param topicPartition The topic
+     * @param config The log configuration settings
+     * @param scheduler The thread pool scheduler used for background actions
+     * @param logDirFailureChannel The LogDirFailureChannel to asynchronously handle log dir failure
+     * @param logPrefix The logging prefix
+     * @param isRecoveredSwapFile true if the new segment was created from a swap file during recovery after a crash
+     */
     public static List<LogSegment> replaceSegments(LogSegments existingSegments,
                                                    List<LogSegment> newSegments,
                                                    List<LogSegment> oldSegments,
@@ -939,11 +1010,16 @@ public class LocalLog {
                                                    boolean isRecoveredSwapFile) throws IOException {
         List<LogSegment> sortedNewSegments = new ArrayList<>(newSegments);
         sortedNewSegments.sort(Comparator.comparingLong(LogSegment::baseOffset));
+        // Some old segments may have been removed from index and scheduled for async deletion after the caller reads segments
+        // but before this method is executed. We want to filter out those segments to avoid calling deleteSegmentFiles()
+        // multiple times for the same segment.
         List<LogSegment> sortedOldSegments = oldSegments.stream()
                 .filter(seg -> existingSegments.contains(seg.baseOffset()))
                 .sorted(Comparator.comparingLong(LogSegment::baseOffset))
                 .toList();
 
+        // need to do this in two phases to be crash safe AND do the deletion asynchronously
+        // if we crash in the middle of this we complete the swap in loadSegments()
         List<LogSegment> reversedSegmentsList = new ArrayList<>(sortedNewSegments);
         Collections.reverse(reversedSegmentsList);
 
@@ -955,8 +1031,10 @@ public class LocalLog {
         }
         Set<Long> newSegmentBaseOffsets = sortedNewSegments.stream().map(LogSegment::baseOffset).collect(Collectors.toSet());
 
+        // delete the old files
         List<LogSegment> deletedNotReplaced = new ArrayList<>();
         for (LogSegment segment : sortedOldSegments) {
+            // remove the index entry
             if (segment.baseOffset() != sortedNewSegments.get(0).baseOffset()) {
                 existingSegments.remove(segment.baseOffset());
             }
@@ -974,6 +1052,7 @@ public class LocalLog {
             }
         }
 
+        // okay we are safe now, remove the swap suffix
         for (LogSegment logSegment : sortedNewSegments) {
             logSegment.changeFileSuffixes(SWAP_FILE_SUFFIX, "");
         }
@@ -981,6 +1060,12 @@ public class LocalLog {
         return deletedNotReplaced;
     }
 
+    /**
+     * Holds the result of splitting a segment into one or more segments, see LocalLog.splitOverflowedSegment().
+     *
+     * @param deletedSegments segments deleted when splitting a segment
+     * @param newSegments     new segments created when splitting a segment
+     */
     public record SplitSegmentResult(List<LogSegment> deletedSegments, List<LogSegment> newSegments) {
     }
 }
