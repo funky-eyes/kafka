@@ -51,6 +51,7 @@ public final class SharedStorageEngine implements AutoCloseable {
         wal.replay(walIndex::apply);
     }
 
+    /** Defensive-copy append for generic callers. */
     public CompletableFuture<WalLocation> appendData(
         SharedPartitionId partition,
         int leaderEpoch,
@@ -58,17 +59,40 @@ public final class SharedStorageEngine implements AutoCloseable {
         long lastOffset,
         ByteBuffer kafkaRecordBatch
     ) {
+        return appendRecord(partition, leaderEpoch, firstOffset, lastOffset, kafkaRecordBatch, false);
+    }
+
+    /**
+     * Zero-additional-copy append for adapters that already own an immutable Kafka RecordBatch buffer.
+     * The caller transfers ownership and must never mutate the bytes after this call.
+     */
+    public CompletableFuture<WalLocation> appendOwnedData(
+        SharedPartitionId partition,
+        int leaderEpoch,
+        long firstOffset,
+        long lastOffset,
+        ByteBuffer ownedKafkaRecordBatch
+    ) {
+        return appendRecord(partition, leaderEpoch, firstOffset, lastOffset, ownedKafkaRecordBatch, true);
+    }
+
+    private CompletableFuture<WalLocation> appendRecord(
+        SharedPartitionId partition,
+        int leaderEpoch,
+        long firstOffset,
+        long lastOffset,
+        ByteBuffer kafkaRecordBatch,
+        boolean owned
+    ) {
         Objects.requireNonNull(partition, "partition");
         Objects.requireNonNull(kafkaRecordBatch, "kafkaRecordBatch");
-        WalRecord record = WalRecord.data(
-            partition.topicIdHigh(),
-            partition.topicIdLow(),
-            partition.partition(),
-            leaderEpoch,
-            firstOffset,
-            lastOffset,
-            kafkaRecordBatch
-        );
+        WalRecord record = owned
+            ? WalRecord.dataOwned(
+                partition.topicIdHigh(), partition.topicIdLow(), partition.partition(), leaderEpoch,
+                firstOffset, lastOffset, kafkaRecordBatch)
+            : WalRecord.data(
+                partition.topicIdHigh(), partition.topicIdLow(), partition.partition(), leaderEpoch,
+                firstOffset, lastOffset, kafkaRecordBatch);
         return wal.append(record).thenApply(result -> {
             walIndex.apply(record, result);
             return new WalLocation(
@@ -98,6 +122,62 @@ public final class SharedStorageEngine implements AutoCloseable {
             return Optional.empty();
         }
         return Optional.of(wal.read(location.get()));
+    }
+
+    /**
+     * Reads complete Kafka RecordBatches from the local WAL starting at the batch containing {@code startOffset}.
+     * No batch is split. If {@code minOneBatch} is true, the first batch may exceed {@code maxBytes}.
+     */
+    public LocalReadResult readLocalBatches(
+        SharedPartitionId partition,
+        long startOffset,
+        int maxBytes,
+        boolean minOneBatch
+    ) throws IOException {
+        Objects.requireNonNull(partition, "partition");
+        if (startOffset < 0) {
+            throw new IllegalArgumentException("startOffset must be non-negative");
+        }
+        if (maxBytes < 0) {
+            throw new IllegalArgumentException("maxBytes must be non-negative");
+        }
+
+        List<WalLocation> selected = new ArrayList<>();
+        int selectedBytes = 0;
+        long firstBatchOffset = -1L;
+        for (WalLocation location : walIndex.ranges(walKey(partition))) {
+            if (location.lastOffset() < startOffset) {
+                continue;
+            }
+
+            WalRecord record = wal.read(location);
+            int batchBytes = record.payload().remaining();
+            if (selected.isEmpty()) {
+                firstBatchOffset = record.firstOffset();
+                if (maxBytes == 0 && !minOneBatch) {
+                    break;
+                }
+                if (batchBytes > maxBytes && !minOneBatch) {
+                    break;
+                }
+            } else if ((long) selectedBytes + batchBytes > maxBytes) {
+                break;
+            }
+
+            selected.add(location);
+            selectedBytes = Math.addExact(selectedBytes, batchBytes);
+            if (selectedBytes >= maxBytes && !(selected.size() == 1 && minOneBatch)) {
+                break;
+            }
+        }
+
+        if (selected.isEmpty()) {
+            return new LocalReadResult(startOffset, List.of(), 0, false);
+        }
+
+        List<WalRecord> records = wal.readBatch(selected);
+        boolean firstBatchIncomplete = records.get(0).payload().remaining() > maxBytes && !minOneBatch;
+        return new LocalReadResult(firstBatchOffset, records, selectedBytes, firstBatchIncomplete);
     }
 
     public List<WalRecord> readUploadCandidates(List<UploadCandidate> candidates) throws IOException {
@@ -160,6 +240,17 @@ public final class SharedStorageEngine implements AutoCloseable {
 
     private static WalPartitionKey walKey(SharedPartitionId partition) {
         return new WalPartitionKey(partition.topicIdHigh(), partition.topicIdLow(), partition.partition());
+    }
+
+    public record LocalReadResult(
+        long firstBatchOffset,
+        List<WalRecord> records,
+        int sizeInBytes,
+        boolean firstBatchIncomplete
+    ) {
+        public LocalReadResult {
+            records = List.copyOf(records);
+        }
     }
 
     public record UploadCandidate(SharedPartitionId partition, OffsetRange offsets, WalLocation location) {
