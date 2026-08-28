@@ -1,0 +1,77 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements. See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License. You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Normalize Shared Storage Author
+
+on:
+  push:
+    branches:
+      - shared-wal-s3-4.3.1
+
+permissions:
+  contents: write
+
+concurrency:
+  group: shared-storage-author-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  normalize-author:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Normalize development commit identity
+        env:
+          BASE_SHA: 26b251a451ce941d3d7a55e6487bcb7f16b5ad48
+          TARGET_NAME: Jianbin Chen
+          TARGET_EMAIL: jianbin@apache.org
+        run: |
+          set -euo pipefail
+
+          bad_count=$(git log "${BASE_SHA}..HEAD" --format='%ae %ce' | \
+            awk -v email="${TARGET_EMAIL}" '$1 != email || $2 != email { count++ } END { print count+0 }')
+          if [ "${bad_count}" -eq 0 ]; then
+            echo "All development commits already use ${TARGET_EMAIL}."
+            exit 0
+          fi
+
+          export FILTER_BRANCH_SQUELCH_WARNING=1
+          export TARGET_NAME TARGET_EMAIL BASE_SHA
+          git filter-branch --force --env-filter '
+            if git merge-base --is-ancestor "$BASE_SHA" "$GIT_COMMIT" && [ "$GIT_COMMIT" != "$BASE_SHA" ]; then
+              export GIT_AUTHOR_NAME="$TARGET_NAME"
+              export GIT_AUTHOR_EMAIL="$TARGET_EMAIL"
+              export GIT_COMMITTER_NAME="$TARGET_NAME"
+              export GIT_COMMITTER_EMAIL="$TARGET_EMAIL"
+            fi
+          ' -- "${BASE_SHA}..HEAD"
+
+          git push --force-with-lease origin "HEAD:${GITHUB_REF_NAME}"
+
+      - name: Verify identity
+        env:
+          BASE_SHA: 26b251a451ce941d3d7a55e6487bcb7f16b5ad48
+          TARGET_EMAIL: jianbin@apache.org
+        run: |
+          set -euo pipefail
+          git log "${BASE_SHA}..HEAD" --format='%h %an <%ae> / %cn <%ce>'
+          test -z "$(git log "${BASE_SHA}..HEAD" --format='%ae%n%ce' | grep -vFx "${TARGET_EMAIL}" || true)"
