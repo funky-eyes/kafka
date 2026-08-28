@@ -32,11 +32,13 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.Optional;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SharedUploadSchedulerTest {
@@ -116,6 +118,50 @@ class SharedUploadSchedulerTest {
 
                 assertEquals(1, metadata.ranges().size());
                 assertEquals(new OffsetRange(0L, 10L), metadata.ranges().get(0).offsets());
+            }
+        }
+    }
+
+    @Test
+    void releasesSingleFlightGuardWhenObjectIdSupplierFailsSynchronously() throws Exception {
+        InMemoryObjectStore objectStore = new InMemoryObjectStore();
+        InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
+        try (SharedStorageEngine engine = engine("id-supplier-failure")) {
+            append(engine, P0, 0L, 9L, new byte[] {1, 2, 3});
+            SharedCommitProgress progress = new SharedCommitProgress();
+            progress.onLogLoaded(P0, 0L);
+            progress.onHighWatermarkUpdated(P0, 10L);
+            SharedObjectUploader uploader = new SharedObjectUploader(
+                objectStore,
+                metadataStore,
+                new SharedObjectPacker(),
+                engine
+            );
+            AtomicLong attempts = new AtomicLong();
+            try (SharedUploadScheduler scheduler = new SharedUploadScheduler(
+                engine,
+                progress,
+                uploader,
+                () -> {
+                    if (attempts.getAndIncrement() == 0L) {
+                        throw new IllegalStateException("simulated allocator failure");
+                    }
+                    return 101L;
+                },
+                () -> 1_000L,
+                1024L
+            )) {
+                CompletionException failure = assertThrows(
+                    CompletionException.class,
+                    () -> scheduler.tryUploadOnce().join()
+                );
+                assertTrue(failure.getCause() instanceof IllegalStateException);
+                assertTrue(scheduler.lastFailure().isPresent());
+
+                Optional<SharedObjectMetadata> retry = scheduler.tryUploadOnce().get(10, TimeUnit.SECONDS);
+                assertTrue(retry.isPresent());
+                assertEquals(101L, retry.get().objectId());
+                assertFalse(scheduler.lastFailure().isPresent());
             }
         }
     }
