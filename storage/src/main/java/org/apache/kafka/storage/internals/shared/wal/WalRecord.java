@@ -152,6 +152,32 @@ public final class WalRecord {
         );
     }
 
+    /**
+     * Commit marker for one atomic append group.
+     *
+     * <p>GROUP_COMMIT is an internal WAL control record. Its group id is encoded in topicIdHigh and its record count
+     * in partition; the remaining fields are zero. Data/control records preceding this marker become replay-visible
+     * only after the marker itself is durable.</p>
+     */
+    public static WalRecord groupCommit(long groupId, int recordCount) {
+        if (groupId < 0) {
+            throw new IllegalArgumentException("groupId must be non-negative");
+        }
+        if (recordCount <= 0) {
+            throw new IllegalArgumentException("recordCount must be positive");
+        }
+        return new WalRecord(
+            WalRecordType.GROUP_COMMIT,
+            groupId,
+            0L,
+            recordCount,
+            0,
+            0L,
+            0L,
+            EMPTY_PAYLOAD
+        );
+    }
+
     public WalRecordType type() {
         return type;
     }
@@ -185,6 +211,20 @@ public final class WalRecord {
             throw new IllegalStateException("Not a TRUNCATE record");
         }
         return firstOffset;
+    }
+
+    public long groupId() {
+        if (type != WalRecordType.GROUP_COMMIT) {
+            throw new IllegalStateException("Not a GROUP_COMMIT record");
+        }
+        return topicIdHigh;
+    }
+
+    public int groupRecordCount() {
+        if (type != WalRecordType.GROUP_COMMIT) {
+            throw new IllegalStateException("Not a GROUP_COMMIT record");
+        }
+        return partition;
     }
 
     public ByteBuffer payload() {
