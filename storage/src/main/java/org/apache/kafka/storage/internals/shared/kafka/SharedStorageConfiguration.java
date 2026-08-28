@@ -32,15 +32,21 @@ public final class SharedStorageConfiguration {
     public static final String WAL_DIR_CONFIG = "shared.storage.wal.dir";
     public static final String WAL_CAPACITY_BYTES_CONFIG = "shared.storage.wal.capacity.bytes";
     public static final String WAL_SEGMENT_BYTES_CONFIG = "shared.storage.wal.segment.bytes";
+    public static final String OBJECT_TARGET_BYTES_CONFIG = "shared.storage.object.target.bytes";
+    public static final String UPLOAD_INTERVAL_MS_CONFIG = "shared.storage.upload.interval.ms";
     public static final String TOPICS_CONFIG = "shared.storage.topics";
     public static final String TOPIC_PATTERN_CONFIG = "shared.storage.topic.pattern";
 
     public static final long DEFAULT_WAL_CAPACITY_BYTES = 2L * 1024 * 1024 * 1024;
     public static final long DEFAULT_WAL_SEGMENT_BYTES = 64L * 1024 * 1024;
+    public static final long DEFAULT_OBJECT_TARGET_BYTES = 32L * 1024 * 1024;
+    public static final long DEFAULT_UPLOAD_INTERVAL_MS = 100L;
 
     private final Path walDir;
     private final long walCapacityBytes;
     private final long walSegmentBytes;
+    private final long objectTargetBytes;
+    private final long uploadIntervalMs;
     private final Set<String> topics;
     private final Pattern topicPattern;
 
@@ -48,12 +54,16 @@ public final class SharedStorageConfiguration {
         Path walDir,
         long walCapacityBytes,
         long walSegmentBytes,
+        long objectTargetBytes,
+        long uploadIntervalMs,
         Set<String> topics,
         Pattern topicPattern
     ) {
         this.walDir = walDir;
         this.walCapacityBytes = walCapacityBytes;
         this.walSegmentBytes = walSegmentBytes;
+        this.objectTargetBytes = objectTargetBytes;
+        this.uploadIntervalMs = uploadIntervalMs;
         this.topics = topics;
         this.topicPattern = topicPattern;
     }
@@ -84,10 +94,28 @@ public final class SharedStorageConfiguration {
             throw new IllegalArgumentException(
                 WAL_SEGMENT_BYTES_CONFIG + " must not exceed " + WAL_CAPACITY_BYTES_CONFIG);
         }
+        long objectTargetBytes = positiveLong(
+            context.originals().get(OBJECT_TARGET_BYTES_CONFIG),
+            DEFAULT_OBJECT_TARGET_BYTES,
+            OBJECT_TARGET_BYTES_CONFIG
+        );
+        long uploadIntervalMs = positiveLong(
+            context.originals().get(UPLOAD_INTERVAL_MS_CONFIG),
+            DEFAULT_UPLOAD_INTERVAL_MS,
+            UPLOAD_INTERVAL_MS_CONFIG
+        );
 
         Set<String> topics = parseTopics(context.originals().get(TOPICS_CONFIG));
         Pattern topicPattern = parsePattern(context.originals().get(TOPIC_PATTERN_CONFIG));
-        return new SharedStorageConfiguration(walDir, walCapacityBytes, walSegmentBytes, topics, topicPattern);
+        return new SharedStorageConfiguration(
+            walDir,
+            walCapacityBytes,
+            walSegmentBytes,
+            objectTargetBytes,
+            uploadIntervalMs,
+            topics,
+            topicPattern
+        );
     }
 
     public Path walDir() {
@@ -100,6 +128,14 @@ public final class SharedStorageConfiguration {
 
     public long walSegmentBytes() {
         return walSegmentBytes;
+    }
+
+    public long objectTargetBytes() {
+        return objectTargetBytes;
+    }
+
+    public long uploadIntervalMs() {
+        return uploadIntervalMs;
     }
 
     /**
