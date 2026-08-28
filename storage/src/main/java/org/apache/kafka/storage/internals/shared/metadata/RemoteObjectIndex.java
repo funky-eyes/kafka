@@ -36,6 +36,7 @@ public final class RemoteObjectIndex {
     private final ConcurrentHashMap<SharedPartitionId, ConcurrentNavigableMap<Long, RangeReference>> byPartition =
         new ConcurrentHashMap<>();
     private final ConcurrentHashMap<SharedPartitionId, PartitionRemoteCoverage> coverage = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<SharedPartitionId, Object> partitionLocks = new ConcurrentHashMap<>();
 
     public void add(SharedObjectMetadata object) {
         for (SharedObjectRange range : object.ranges()) {
@@ -69,14 +70,16 @@ public final class RemoteObjectIndex {
     }
 
     private void addRange(long objectId, SharedObjectRange range) {
-        ConcurrentNavigableMap<Long, RangeReference> ranges =
-            byPartition.computeIfAbsent(range.partition(), ignored -> new ConcurrentSkipListMap<>());
-        synchronized (ranges) {
+        SharedPartitionId partition = range.partition();
+        Object partitionLock = partitionLocks.computeIfAbsent(partition, ignored -> new Object());
+        synchronized (partitionLock) {
+            ConcurrentNavigableMap<Long, RangeReference> ranges =
+                byPartition.computeIfAbsent(partition, ignored -> new ConcurrentSkipListMap<>());
             RangeReference incoming = new RangeReference(objectId, range);
             Map.Entry<Long, RangeReference> floor = ranges.floorEntry(range.offsets().startOffset());
             if (floor != null && overlaps(floor.getValue().range().offsets(), range.offsets())) {
                 if (sameLogicalRange(floor.getValue().range(), range)) {
-                    coverage(range.partition()).add(range.offsets());
+                    coverage(partition).add(range.offsets());
                     return;
                 }
                 throw conflict(floor.getValue(), incoming);
@@ -85,14 +88,14 @@ public final class RemoteObjectIndex {
             Map.Entry<Long, RangeReference> next = ranges.ceilingEntry(range.offsets().startOffset());
             if (next != null && overlaps(next.getValue().range().offsets(), range.offsets())) {
                 if (sameLogicalRange(next.getValue().range(), range)) {
-                    coverage(range.partition()).add(range.offsets());
+                    coverage(partition).add(range.offsets());
                     return;
                 }
                 throw conflict(next.getValue(), incoming);
             }
 
             ranges.put(range.offsets().startOffset(), incoming);
-            coverage(range.partition()).add(range.offsets());
+            coverage(partition).add(range.offsets());
         }
     }
 
