@@ -21,6 +21,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
@@ -30,6 +31,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -66,6 +68,55 @@ class FileSharedWalTest {
     }
 
     @Test
+    void shouldAppendAndReplayMultiRecordGroupAtomically() throws Exception {
+        Path walDir = tempDir.resolve("wal-group");
+        try (FileSharedWal wal = new FileSharedWal(walDir, 1024 * 1024, 4096)) {
+            List<WalAppendResult> results = wal.appendBatch(List.of(
+                WalRecord.data(10, 20, 0, 1, 0, 0, new byte[]{1}),
+                WalRecord.data(10, 20, 0, 1, 1, 1, new byte[]{2})
+            )).get(10, TimeUnit.SECONDS);
+            assertEquals(2, results.size());
+        }
+
+        List<WalRecord> replayed = new ArrayList<>();
+        try (FileSharedWal wal = new FileSharedWal(walDir, 1024 * 1024, 4096)) {
+            wal.replay((record, ignored) -> replayed.add(record));
+        }
+        assertEquals(2, replayed.size());
+        assertEquals(0, replayed.get(0).firstOffset());
+        assertEquals(1, replayed.get(1).firstOffset());
+    }
+
+    @Test
+    void shouldDiscardWholeUncommittedGroupAcrossSegmentsAfterCrash() throws Exception {
+        Path walDir = tempDir.resolve("wal-group-crash");
+        // 200 bytes forces two 160-byte DATA records and the 60-byte GROUP_COMMIT marker into separate segments.
+        try (FileSharedWal wal = new FileSharedWal(walDir, 1024 * 1024, 200)) {
+            wal.appendBatch(List.of(
+                WalRecord.data(30, 40, 1, 2, 0, 0, new byte[100]),
+                WalRecord.data(30, 40, 1, 2, 1, 1, new byte[100])
+            )).get(10, TimeUnit.SECONDS);
+        }
+
+        Path commitSegment = walDir.resolve("wal-00000000000000000002.log");
+        assertTrue(Files.exists(commitSegment));
+        try (FileChannel channel = FileChannel.open(commitSegment, StandardOpenOption.WRITE)) {
+            channel.truncate(0);
+            channel.force(false);
+        }
+
+        List<WalRecord> replayed = new ArrayList<>();
+        try (FileSharedWal wal = new FileSharedWal(walDir, 1024 * 1024, 200)) {
+            wal.replay((record, ignored) -> replayed.add(record));
+        }
+
+        assertTrue(replayed.isEmpty(), "an append group without its durable commit marker must be invisible");
+        assertEquals(0, Files.size(walDir.resolve("wal-00000000000000000000.log")));
+        assertFalse(Files.exists(walDir.resolve("wal-00000000000000000001.log")));
+        assertFalse(Files.exists(commitSegment));
+    }
+
+    @Test
     void shouldDiscardPartialTailDuringRecovery() throws Exception {
         Path walDir = tempDir.resolve("wal-partial");
         try (FileSharedWal wal = new FileSharedWal(walDir, 1024 * 1024, 4096)) {
@@ -82,7 +133,7 @@ class FileSharedWalTest {
         }
 
         try (FileSharedWal ignored = new FileSharedWal(walDir, 1024 * 1024, 4096)) {
-            assertEquals(validSize, java.nio.file.Files.size(segment));
+            assertEquals(validSize, Files.size(segment));
         }
     }
 
