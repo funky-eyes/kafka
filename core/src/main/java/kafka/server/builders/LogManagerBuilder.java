@@ -28,10 +28,12 @@ import org.apache.kafka.storage.internals.log.LogCleaner;
 import org.apache.kafka.storage.internals.log.LogConfig;
 import org.apache.kafka.storage.internals.log.LogDirFailureChannel;
 import org.apache.kafka.storage.internals.log.ProducerStateManagerConfig;
+import org.apache.kafka.storage.internals.log.UnifiedLogFactory;
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats;
 
 import java.io.File;
 import java.util.List;
+import java.util.Objects;
 
 import scala.jdk.javaapi.CollectionConverters;
 
@@ -56,6 +58,7 @@ public class LogManagerBuilder {
     private Time time = Time.SYSTEM;
     private boolean remoteStorageSystemEnable = false;
     private long initialTaskDelayMs = ServerLogConfigs.LOG_INITIAL_TASK_DELAY_MS_DEFAULT;
+    private UnifiedLogFactory unifiedLogFactory = UnifiedLogFactory.DEFAULT;
 
     public LogManagerBuilder setLogDirs(List<File> logDirs) {
         this.logDirs = logDirs;
@@ -147,6 +150,11 @@ public class LogManagerBuilder {
         return this;
     }
 
+    public LogManagerBuilder setUnifiedLogFactory(UnifiedLogFactory unifiedLogFactory) {
+        this.unifiedLogFactory = Objects.requireNonNull(unifiedLogFactory, "unifiedLogFactory");
+        return this;
+    }
+
     public LogManager build() {
         if (logDirs == null) throw new IllegalStateException("you must set logDirs");
         if (configRepository == null) throw new IllegalStateException("you must set configRepository");
@@ -155,7 +163,7 @@ public class LogManagerBuilder {
         if (scheduler == null) throw new IllegalStateException("you must set scheduler");
         if (brokerTopicStats == null) throw new IllegalStateException("you must set brokerTopicStats");
         if (logDirFailureChannel == null) throw new IllegalStateException("you must set logDirFailureChannel");
-        return new LogManager(CollectionConverters.asScala(logDirs).toSeq(),
+        LogManager logManager = new LogManager(CollectionConverters.asScala(logDirs).toSeq(),
                               CollectionConverters.asScala(initialOfflineDirs).toSeq(),
                               configRepository,
                               initialDefaultConfig,
@@ -176,5 +184,7 @@ public class LogManagerBuilder {
                               initialTaskDelayMs,
                               LogCleaner::new
                 );
+        logManager.setUnifiedLogFactory(unifiedLogFactory);
+        return logManager;
     }
 }
