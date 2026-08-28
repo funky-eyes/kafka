@@ -19,6 +19,8 @@ package org.apache.kafka.storage.internals.log;
 import org.apache.kafka.common.utils.Time;
 
 import java.io.File;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -34,7 +36,8 @@ public record StorageExtensionContext(
         Objects.requireNonNull(originals, "originals");
         Objects.requireNonNull(liveLogDirs, "liveLogDirs");
         Objects.requireNonNull(time, "time");
-        originals = Map.copyOf(originals);
+        // Kafka originals may legally contain nullable values. Map.copyOf would reject them.
+        originals = Collections.unmodifiableMap(new LinkedHashMap<>(originals));
         liveLogDirs = List.copyOf(liveLogDirs);
         if (liveLogDirs.isEmpty()) {
             throw new IllegalArgumentException("liveLogDirs must not be empty");
