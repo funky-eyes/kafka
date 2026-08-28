@@ -22,6 +22,7 @@ base {
 }
 
 dependencies {
+  implementation project(':clients')
   implementation project(':storage')
   implementation "software.amazon.awssdk:s3:${awsSdkVersion}"
   implementation "software.amazon.awssdk:url-connection-client:${awsSdkVersion}"
