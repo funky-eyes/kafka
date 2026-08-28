@@ -36,8 +36,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class StorageExtensionLoaderTest {
     @AfterEach
     void resetState() {
-        TestStorageExtension.started.set(false);
-        TestStorageExtension.closed.set(false);
+        TestStorageExtension.STARTED.set(false);
+        TestStorageExtension.CLOSED.set(false);
     }
 
     @Test
@@ -55,10 +55,10 @@ class StorageExtensionLoaderTest {
 
         Optional<KafkaStorageExtension> extension = StorageExtensionLoader.load(context);
         assertTrue(extension.isPresent());
-        assertTrue(TestStorageExtension.started.get());
-        assertFalse(TestStorageExtension.closed.get());
+        assertTrue(TestStorageExtension.STARTED.get());
+        assertFalse(TestStorageExtension.CLOSED.get());
         extension.get().close();
-        assertTrue(TestStorageExtension.closed.get());
+        assertTrue(TestStorageExtension.CLOSED.get());
     }
 
     @Test
@@ -76,12 +76,12 @@ class StorageExtensionLoaderTest {
     }
 
     public static final class TestStorageExtension implements KafkaStorageExtension {
-        private static final AtomicBoolean started = new AtomicBoolean(false);
-        private static final AtomicBoolean closed = new AtomicBoolean(false);
+        private static final AtomicBoolean STARTED = new AtomicBoolean(false);
+        private static final AtomicBoolean CLOSED = new AtomicBoolean(false);
 
         @Override
         public void start(StorageExtensionContext context) {
-            started.set(true);
+            STARTED.set(true);
         }
 
         @Override
@@ -91,7 +91,7 @@ class StorageExtensionLoaderTest {
 
         @Override
         public void close() {
-            closed.set(true);
+            CLOSED.set(true);
         }
     }
 }
