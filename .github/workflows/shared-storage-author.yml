@@ -33,11 +33,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Checkout full history
+      - name: Checkout development history
         uses: actions/checkout@v5
         with:
-          fetch-depth: 0
+          # The branch starts exactly at Kafka 4.3.1 and the shared-storage patch stack is intentionally small.
+          # Keep enough history to cover the entire patch stack without fetching the whole Kafka repository history.
+          fetch-depth: 200
           persist-credentials: true
+
+      - name: Ensure Kafka 4.3.1 base is available
+        env:
+          BASE_SHA: 26b251a451ce941d3d7a55e6487bcb7f16b5ad48
+        run: |
+          set -euo pipefail
+          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "${BASE_SHA}"
+          fi
 
       - name: Normalize development commit identity
         env:
