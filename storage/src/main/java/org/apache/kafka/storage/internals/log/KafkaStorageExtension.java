@@ -17,6 +17,8 @@
 package org.apache.kafka.storage.internals.log;
 
 import java.io.IOException;
+import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * Lifecycle contract for an optional broker storage extension.
@@ -29,6 +31,18 @@ public interface KafkaStorageExtension extends AutoCloseable {
     void start(StorageExtensionContext context) throws IOException;
 
     UnifiedLogFactory unifiedLogFactory();
+
+    /**
+     * Called after Kafka has opened its SocketServer acceptors but before BrokerServer transitions to STARTED.
+     *
+     * <p>Extensions that need ordinary Kafka clients can initialize them here. Broker startup waits for the returned
+     * future using Kafka's normal startup deadline, so failing the future fails broker startup rather than exposing an
+     * extension with partially recovered authoritative metadata. The default implementation is an immediate no-op.</p>
+     */
+    default CompletableFuture<Void> onBrokerReady(StorageExtensionBrokerContext context) {
+        Objects.requireNonNull(context, "context");
+        return CompletableFuture.completedFuture(null);
+    }
 
     @Override
     void close() throws IOException;
