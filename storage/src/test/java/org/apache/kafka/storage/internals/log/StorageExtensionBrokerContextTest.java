@@ -53,7 +53,7 @@ class StorageExtensionBrokerContextTest {
         assertEquals(List.of(endpoint), context.listeners());
         assertEquals("value", context.originals().get("key"));
         assertNull(context.originals().get("nullable"));
-        assertThrows(UnsupportedOperationException.class, () -> context.originals().put("x", "y"));
+        assertThrows(UnsupportedOperationException.class, () -> context.originals().clear());
         assertThrows(UnsupportedOperationException.class, () -> context.listeners().add(endpoint));
     }
 
