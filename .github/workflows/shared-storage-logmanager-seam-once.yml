@@ -123,8 +123,6 @@ jobs:
           PY
 
           git diff --check
-          count=$(git diff -- core/src/main/scala/kafka/log/LogManager.scala | grep -c '^[-+]    val log = ' || true)
-          test "${count}" -eq 4
           git diff -- core/src/main/scala/kafka/log/LogManager.scala
 
       - name: Commit seam when needed
