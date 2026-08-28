@@ -135,10 +135,14 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
             context.logDirFailureChannel(),
             segmentFactory
         );
-        LogOffsetsListener offsetsListener = highWatermark -> {
-            // Kafka invokes this callback while log locks may be held. Keep the shared side O(1), non-blocking and I/O-free.
-            commitProgress.onHighWatermarkUpdated(sharedPartition, highWatermark);
-            context.logOffsetsListener().onHighWatermarkUpdated(highWatermark);
+        LogOffsetsListener delegate = context.logOffsetsListener();
+        LogOffsetsListener offsetsListener = new LogOffsetsListener() {
+            @Override
+            public void onHighWatermarkUpdated(long highWatermark) {
+                // Kafka may hold log locks here. Keep the shared side O(1), non-blocking and I/O-free.
+                commitProgress.onHighWatermarkUpdated(sharedPartition, highWatermark);
+                delegate.onHighWatermarkUpdated(highWatermark);
+            }
         };
         return new UnifiedLog(
             offsets.logStartOffset(),
