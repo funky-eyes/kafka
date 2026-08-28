@@ -16,6 +16,8 @@
  */
 package org.apache.kafka.storage.internals.shared.s3;
 
+import org.junit.jupiter.api.Test;
+
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
@@ -23,8 +25,6 @@ import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.S3Configuration;
 import software.amazon.awssdk.services.s3.model.CreateBucketRequest;
 import software.amazon.awssdk.services.s3.model.S3Exception;
-
-import org.junit.jupiter.api.Test;
 
 import java.net.URI;
 import java.nio.ByteBuffer;
@@ -118,7 +118,7 @@ class S3ObjectStoreTest {
     private static S3Client testClient(S3ObjectStoreConfig config) {
         var builder = S3Client.builder()
             .region(Region.of(config.region()))
-            .credentialsProvider(DefaultCredentialsProvider.create())
+            .credentialsProvider(DefaultCredentialsProvider.builder().build())
             .httpClientBuilder(UrlConnectionHttpClient.builder())
             .serviceConfiguration(S3Configuration.builder()
                 .pathStyleAccessEnabled(config.pathStyleAccess())
