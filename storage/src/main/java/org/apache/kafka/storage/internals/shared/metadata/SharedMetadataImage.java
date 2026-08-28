@@ -28,14 +28,15 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 
 /**
  * In-memory image rebuilt from the compacted shared-storage metadata topic.
  *
- * <p>The image is deliberately fail-closed. Authoritative getters are unavailable until the initial replay reaches the
- * captured topic end offset and {@link #markReady()} is called. Live records may continue to be applied afterwards.
- * Illegal state regressions, such as re-preparing an already committed object or moving a broker sequence watermark
- * backwards, are treated as corruption rather than silently reconciled.</p>
+ * <p>The image is deliberately fail-closed. Authoritative getters are unavailable while the initial replay is still
+ * recovering and after a live replay failure. Illegal state regressions, such as re-preparing an already committed
+ * object or moving a broker sequence watermark backwards, are treated as corruption rather than silently reconciled.</p>
  */
 public final class SharedMetadataImage {
     private static final long INITIAL_SEQUENCE = 1L;
@@ -43,9 +44,13 @@ public final class SharedMetadataImage {
     private final Map<Long, PreparedObject> preparedObjects = new HashMap<>();
     private final Map<Long, SharedObjectMetadata> committedObjects = new HashMap<>();
     private final Map<Integer, Long> brokerSequenceWatermarks = new HashMap<>();
-    private boolean ready;
+    private State state = State.RECOVERING;
+    private Throwable failure;
 
     public synchronized void apply(byte[] keyBytes, byte[] valueBytes) {
+        if (state == State.FAILED) {
+            throw failedState();
+        }
         MetadataKey key = SharedMetadataRecordCodec.decodeKey(keyBytes);
         MetadataValue value = SharedMetadataRecordCodec.decodeValue(key, valueBytes);
         switch (key.type()) {
@@ -105,11 +110,32 @@ public final class SharedMetadataImage {
     }
 
     public synchronized void markReady() {
-        ready = true;
+        if (state == State.FAILED) {
+            throw failedState();
+        }
+        state = State.READY;
+    }
+
+    public synchronized void markFailed(Throwable cause) {
+        Objects.requireNonNull(cause, "cause");
+        if (state != State.FAILED) {
+            state = State.FAILED;
+            failure = cause;
+        } else if (failure != cause) {
+            failure.addSuppressed(cause);
+        }
+    }
+
+    public synchronized State state() {
+        return state;
     }
 
     public synchronized boolean isReady() {
-        return ready;
+        return state == State.READY;
+    }
+
+    public synchronized Optional<Throwable> failure() {
+        return Optional.ofNullable(failure);
     }
 
     public synchronized List<SharedObjectMetadata> committedObjects() {
@@ -136,13 +162,26 @@ public final class SharedMetadataImage {
     }
 
     private void requireReady() {
-        if (!ready) {
-            throw new IllegalStateException("Shared metadata image is not ready");
+        if (state == State.RECOVERING) {
+            throw new IllegalStateException("Shared metadata image is still recovering");
         }
+        if (state == State.FAILED) {
+            throw failedState();
+        }
+    }
+
+    private IllegalStateException failedState() {
+        return new IllegalStateException("Shared metadata image has failed and is no longer authoritative", failure);
     }
 
     private static IllegalStateException corruption(String message) {
         return new IllegalStateException("Corrupt shared-storage metadata image: " + message);
+    }
+
+    public enum State {
+        RECOVERING,
+        READY,
+        FAILED
     }
 
     public record PreparedObject(long objectId, long createdTimeMs) {
