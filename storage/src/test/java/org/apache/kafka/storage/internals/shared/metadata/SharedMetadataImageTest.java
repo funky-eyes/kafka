@@ -21,6 +21,8 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -34,13 +36,54 @@ class SharedMetadataImageTest {
             SharedMetadataRecordCodec.committedObjectValue(metadata(objectId, 101L))
         );
 
+        assertEquals(SharedMetadataImage.State.RECOVERING, image.state());
+        assertFalse(image.isReady());
         assertThrows(IllegalStateException.class, image::committedObjects);
         assertThrows(IllegalStateException.class, image::preparedObjects);
         assertThrows(IllegalStateException.class, () -> image.brokerReservedExclusiveSequence(1));
 
         image.markReady();
+        assertEquals(SharedMetadataImage.State.READY, image.state());
         assertTrue(image.isReady());
         assertEquals(List.of(metadata(objectId, 101L)), image.committedObjects());
+    }
+
+    @Test
+    void liveReplayFailurePermanentlyFailsClosed() {
+        SharedMetadataImage image = new SharedMetadataImage();
+        long objectId = BrokerObjectId.compose(1, 2L);
+        byte[] key = SharedMetadataRecordCodec.objectKey(objectId);
+        image.apply(key, SharedMetadataRecordCodec.committedObjectValue(metadata(objectId, 102L)));
+        image.markReady();
+
+        RuntimeException cause = new RuntimeException("metadata consumer failed");
+        image.markFailed(cause);
+
+        assertEquals(SharedMetadataImage.State.FAILED, image.state());
+        assertFalse(image.isReady());
+        assertSame(cause, image.failure().orElseThrow());
+        IllegalStateException readFailure = assertThrows(IllegalStateException.class, image::committedObjects);
+        assertSame(cause, readFailure.getCause());
+        IllegalStateException applyFailure = assertThrows(
+            IllegalStateException.class,
+            () -> image.apply(key, null)
+        );
+        assertSame(cause, applyFailure.getCause());
+        assertThrows(IllegalStateException.class, image::markReady);
+    }
+
+    @Test
+    void firstFailureRemainsPrimaryAndLaterFailuresAreSuppressed() {
+        SharedMetadataImage image = new SharedMetadataImage();
+        RuntimeException first = new RuntimeException("first");
+        RuntimeException second = new RuntimeException("second");
+
+        image.markFailed(first);
+        image.markFailed(second);
+
+        assertSame(first, image.failure().orElseThrow());
+        assertEquals(1, first.getSuppressed().length);
+        assertSame(second, first.getSuppressed()[0]);
     }
 
     @Test
