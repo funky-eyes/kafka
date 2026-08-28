@@ -76,45 +76,53 @@ jobs:
           assert text.count(field_anchor) == 1
           text = text.replace(field_anchor, field_replacement)
 
-          create_anchor = '''      logManager = LogManager(config,
-        sharedServer.metaPropsEnsemble.errorLogDirs().asScala.toSeq,
-        metadataCache,
-        kafkaScheduler,
-        time,
-        brokerTopicStats,
-        logDirFailureChannel)
-'''
-          create_replacement = create_anchor + '''
-      val storageExtension = StorageExtensionLoader.load(new StorageExtensionContext(
-        config.originals(),
-        logManager.liveLogDirs.asJava,
-        config.brokerId,
-        time))
-      if (storageExtension.isPresent) {
-        storageExtensionOpt = Some(storageExtension.get())
-        logManager.setUnifiedLogFactory(storageExtension.get().unifiedLogFactory())
-      }
-'''
+          create_lines = [
+              '      logManager = LogManager(config,',
+              '        sharedServer.metaPropsEnsemble.errorLogDirs().asScala.toSeq,',
+              '        metadataCache,',
+              '        kafkaScheduler,',
+              '        time,',
+              '        brokerTopicStats,',
+              '        logDirFailureChannel)',
+          ]
+          create_anchor = '\n'.join(create_lines) + '\n'
+          create_addition = '\n'.join([
+              '',
+              '      val storageExtension = StorageExtensionLoader.load(new StorageExtensionContext(',
+              '        config.originals(),',
+              '        logManager.liveLogDirs.asJava,',
+              '        config.brokerId,',
+              '        time))',
+              '      if (storageExtension.isPresent) {',
+              '        storageExtensionOpt = Some(storageExtension.get())',
+              '        logManager.setUnifiedLogFactory(storageExtension.get().unifiedLogFactory())',
+              '      }',
+              '',
+          ])
           assert text.count(create_anchor) == 1
-          text = text.replace(create_anchor, create_replacement)
+          text = text.replace(create_anchor, create_anchor + create_addition)
 
-          shutdown_anchor = '''      if (logManager != null) {
-        val brokerEpoch = if (lifecycleManager != null) lifecycleManager.brokerEpoch else -1
-        Utils.swallow(this.logger.underlying, () => logManager.shutdown(brokerEpoch))
-      }
-
-      // Close remote log manager to give a chance to any of its underlying clients
-'''
-          shutdown_replacement = '''      if (logManager != null) {
-        val brokerEpoch = if (lifecycleManager != null) lifecycleManager.brokerEpoch else -1
-        Utils.swallow(this.logger.underlying, () => logManager.shutdown(brokerEpoch))
-      }
-
-      storageExtensionOpt.foreach(Utils.closeQuietly(_, "storage extension"))
-      storageExtensionOpt = None
-
-      // Close remote log manager to give a chance to any of its underlying clients
-'''
+          shutdown_lines = [
+              '      if (logManager != null) {',
+              '        val brokerEpoch = if (lifecycleManager != null) lifecycleManager.brokerEpoch else -1',
+              '        Utils.swallow(this.logger.underlying, () => logManager.shutdown(brokerEpoch))',
+              '      }',
+              '',
+              '      // Close remote log manager to give a chance to any of its underlying clients',
+          ]
+          shutdown_anchor = '\n'.join(shutdown_lines) + '\n'
+          shutdown_replacement = '\n'.join([
+              '      if (logManager != null) {',
+              '        val brokerEpoch = if (lifecycleManager != null) lifecycleManager.brokerEpoch else -1',
+              '        Utils.swallow(this.logger.underlying, () => logManager.shutdown(brokerEpoch))',
+              '      }',
+              '',
+              '      storageExtensionOpt.foreach(Utils.closeQuietly(_, "storage extension"))',
+              '      storageExtensionOpt = None',
+              '',
+              '      // Close remote log manager to give a chance to any of its underlying clients',
+              '',
+          ])
           assert text.count(shutdown_anchor) == 1
           text = text.replace(shutdown_anchor, shutdown_replacement)
           path.write_text(text)
