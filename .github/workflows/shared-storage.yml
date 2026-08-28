@@ -22,11 +22,19 @@ on:
     paths:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/**'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/**'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/log/LogLoader.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/log/LocalLog.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/log/LogSegmentFactory.java'
+      - 'storage/src/test/java/org/apache/kafka/storage/internals/log/LogLoaderSegmentFactoryTest.java'
       - '.github/workflows/shared-storage.yml'
   pull_request:
     paths:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/**'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/**'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/log/LogLoader.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/log/LocalLog.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/log/LogSegmentFactory.java'
+      - 'storage/src/test/java/org/apache/kafka/storage/internals/log/LogLoaderSegmentFactoryTest.java'
       - '.github/workflows/shared-storage.yml'
   workflow_dispatch:
 
@@ -79,6 +87,17 @@ jobs:
           path: |
             shared-storage-compile.log
             shared-storage-test.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload static analysis reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shared-storage-static-analysis
+          path: |
+            storage/build/reports/spotbugs
+            storage/build/reports/checkstyle
           if-no-files-found: ignore
           retention-days: 7
 
