@@ -1,0 +1,200 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.kafka.storage.internals.shared.kafka;
+
+import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
+import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
+import org.apache.kafka.storage.internals.shared.object.SharedObjectUploader;
+
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.LongSupplier;
+
+/**
+ * Asynchronously converts Kafka-committed broker WAL batches into cross-partition shared objects.
+ *
+ * <p>The Kafka high-watermark callback never calls this class. It only updates {@link SharedCommitProgress}. This
+ * scheduler snapshots those commit windows on its own thread, filters candidates strictly below Kafka HW, merges them
+ * by physical WAL order and delegates the durable object/metadata protocol to {@link SharedObjectUploader}.</p>
+ */
+public final class SharedUploadScheduler implements AutoCloseable {
+    private final SharedStorageEngine engine;
+    private final SharedCommitProgress commitProgress;
+    private final SharedObjectUploader uploader;
+    private final LongSupplier objectIdSupplier;
+    private final LongSupplier currentTimeMsSupplier;
+    private final long targetObjectBytes;
+    private final AtomicBoolean uploadInProgress = new AtomicBoolean();
+    private final AtomicBoolean closed = new AtomicBoolean();
+    private final AtomicReference<Throwable> lastFailure = new AtomicReference<>();
+
+    private ScheduledExecutorService executor;
+
+    public SharedUploadScheduler(
+        SharedStorageEngine engine,
+        SharedCommitProgress commitProgress,
+        SharedObjectUploader uploader,
+        LongSupplier objectIdSupplier,
+        LongSupplier currentTimeMsSupplier,
+        long targetObjectBytes
+    ) {
+        this.engine = Objects.requireNonNull(engine, "engine");
+        this.commitProgress = Objects.requireNonNull(commitProgress, "commitProgress");
+        this.uploader = Objects.requireNonNull(uploader, "uploader");
+        this.objectIdSupplier = Objects.requireNonNull(objectIdSupplier, "objectIdSupplier");
+        this.currentTimeMsSupplier = Objects.requireNonNull(currentTimeMsSupplier, "currentTimeMsSupplier");
+        if (targetObjectBytes <= 0) {
+            throw new IllegalArgumentException("targetObjectBytes must be positive");
+        }
+        this.targetObjectBytes = targetObjectBytes;
+    }
+
+    public synchronized void start(long intervalMs) {
+        if (intervalMs <= 0) {
+            throw new IllegalArgumentException("intervalMs must be positive");
+        }
+        if (closed.get()) {
+            throw new IllegalStateException("Shared upload scheduler is closed");
+        }
+        if (executor != null) {
+            throw new IllegalStateException("Shared upload scheduler is already started");
+        }
+        executor = Executors.newSingleThreadScheduledExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "kafka-shared-storage-uploader");
+            thread.setDaemon(true);
+            return thread;
+        });
+        executor.scheduleWithFixedDelay(this::runScheduledUpload, intervalMs, intervalMs, TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * Starts at most one asynchronous object upload and returns empty when there is no committed work or another upload
+     * is already active. This method never blocks on object-store or metadata-store I/O.
+     */
+    public CompletableFuture<Optional<SharedObjectMetadata>> tryUploadOnce() {
+        if (closed.get()) {
+            return CompletableFuture.failedFuture(new IllegalStateException("Shared upload scheduler is closed"));
+        }
+        if (!uploadInProgress.compareAndSet(false, true)) {
+            return CompletableFuture.completedFuture(Optional.empty());
+        }
+
+        final List<SharedStorageEngine.UploadCandidate> candidates;
+        try {
+            candidates = selectCandidates();
+        } catch (RuntimeException e) {
+            uploadInProgress.set(false);
+            lastFailure.set(e);
+            return CompletableFuture.failedFuture(e);
+        }
+        if (candidates.isEmpty()) {
+            uploadInProgress.set(false);
+            return CompletableFuture.completedFuture(Optional.empty());
+        }
+
+        long objectId = objectIdSupplier.getAsLong();
+        long createdTimeMs = currentTimeMsSupplier.getAsLong();
+        if (objectId < 0) {
+            uploadInProgress.set(false);
+            IllegalStateException error = new IllegalStateException("objectIdSupplier returned a negative object ID");
+            lastFailure.set(error);
+            return CompletableFuture.failedFuture(error);
+        }
+
+        CompletableFuture<Optional<SharedObjectMetadata>> result = uploader
+            .upload(objectId, createdTimeMs, candidates)
+            .thenApply(Optional::of);
+        return result.whenComplete((ignored, error) -> {
+            if (error == null) {
+                lastFailure.set(null);
+            } else {
+                lastFailure.set(error);
+            }
+            uploadInProgress.set(false);
+        });
+    }
+
+    public Optional<Throwable> lastFailure() {
+        return Optional.ofNullable(lastFailure.get());
+    }
+
+    List<SharedStorageEngine.UploadCandidate> selectCandidates() {
+        List<SharedStorageEngine.UploadCandidate> committed = new ArrayList<>();
+        for (Map.Entry<org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId,
+            SharedCommitProgress.PartitionProgress> entry : commitProgress.snapshot().entrySet()) {
+            SharedCommitProgress.PartitionProgress progress = entry.getValue();
+            if (progress.highWatermark() <= progress.logStartOffset()) {
+                continue;
+            }
+            committed.addAll(engine.uploadCandidates(
+                entry.getKey(),
+                progress.logStartOffset(),
+                progress.highWatermark()
+            ));
+        }
+        committed.sort(Comparator
+            .comparingLong((SharedStorageEngine.UploadCandidate candidate) -> candidate.location().segmentId())
+            .thenComparingLong(candidate -> candidate.location().position()));
+
+        if (committed.isEmpty()) {
+            return List.of();
+        }
+        List<SharedStorageEngine.UploadCandidate> selected = new ArrayList<>();
+        long selectedBytes = 0L;
+        for (SharedStorageEngine.UploadCandidate candidate : committed) {
+            int payloadBytes = candidate.location().payloadLength();
+            if (!selected.isEmpty() && selectedBytes + payloadBytes > targetObjectBytes) {
+                break;
+            }
+            selected.add(candidate);
+            selectedBytes = Math.addExact(selectedBytes, payloadBytes);
+            if (selectedBytes >= targetObjectBytes) {
+                break;
+            }
+        }
+        return List.copyOf(selected);
+    }
+
+    private void runScheduledUpload() {
+        tryUploadOnce().whenComplete((ignored, error) -> {
+            if (error != null) {
+                lastFailure.set(error);
+            }
+        });
+    }
+
+    @Override
+    public synchronized void close() {
+        if (!closed.compareAndSet(false, true)) {
+            return;
+        }
+        if (executor != null) {
+            executor.shutdownNow();
+            executor = null;
+        }
+    }
+}
