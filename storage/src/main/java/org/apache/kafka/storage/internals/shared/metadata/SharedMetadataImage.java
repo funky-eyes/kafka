@@ -17,6 +17,8 @@
 package org.apache.kafka.storage.internals.shared.metadata;
 
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.BrokerSequenceValue;
+import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.CleanupClaimedValue;
+import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.CleanupDeletedValue;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.CommittedObjectValue;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.MetadataKey;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.MetadataValue;
@@ -36,16 +38,17 @@ import java.util.function.Consumer;
  * In-memory image rebuilt from the compacted shared-storage metadata topic.
  *
  * <p>The image is deliberately fail-closed. Authoritative getters are unavailable while the initial replay is still
- * recovering and after a live replay failure. Illegal state regressions, such as re-preparing an already committed
- * object or moving a broker sequence watermark backwards, are treated as corruption rather than silently reconciled.
- * A non-blocking committed-object listener may be installed so every broker can mirror replayed/live metadata into its
- * local remote-range index without polling the Kafka metadata topic from the storage engine.</p>
+ * recovering and after a live replay failure. Cleanup fences use a distinct compacted key from object metadata. The
+ * single metadata partition therefore supplies the total order between COMMIT and cleanup while compaction preserves
+ * both winners' evidence. A cleanup fence that precedes a delayed COMMIT wins; a cleanup record after a committed object
+ * is a losing claim and is ignored.</p>
  */
 public final class SharedMetadataImage {
     private static final long INITIAL_SEQUENCE = 1L;
 
     private final Map<Long, PreparedObject> preparedObjects = new HashMap<>();
     private final Map<Long, SharedObjectMetadata> committedObjects = new HashMap<>();
+    private final Map<Long, CleanupObject> cleanupObjects = new HashMap<>();
     private final Map<Integer, Long> brokerSequenceWatermarks = new HashMap<>();
     private final Consumer<SharedObjectMetadata> committedObjectListener;
     private State state = State.RECOVERING;
@@ -67,6 +70,7 @@ public final class SharedMetadataImage {
         MetadataValue value = SharedMetadataRecordCodec.decodeValue(key, valueBytes);
         switch (key.type()) {
             case OBJECT -> applyObject(key.id(), value);
+            case OBJECT_CLEANUP -> applyCleanup(key.id(), value);
             case BROKER_SEQUENCE -> applyBrokerSequence(Math.toIntExact(key.id()), value);
         }
     }
@@ -78,6 +82,15 @@ public final class SharedMetadataImage {
             return;
         }
         if (value instanceof PreparedObjectValue prepared) {
+            CleanupObject cleanup = cleanupObjects.get(objectId);
+            if (cleanup != null) {
+                // A cleanup key can survive compaction while an older PREPARE is rewritten or replayed. Never resurrect
+                // a generation that is already fenced for physical deletion.
+                if (cleanup.createdTimeMs != prepared.createdTimeMs()) {
+                    throw corruption("object " + objectId + " cleanup fence conflicts with PREPARE timestamp");
+                }
+                return;
+            }
             if (committedObjects.containsKey(objectId)) {
                 throw corruption("object " + objectId + " regressed from COMMITTED to PREPARED");
             }
@@ -94,20 +107,60 @@ public final class SharedMetadataImage {
                 throw corruption(
                     "object key " + objectId + " does not match committed metadata " + metadata.objectId());
             }
+            if (cleanupObjects.containsKey(objectId)) {
+                // The cleanup record has an earlier offset in the authoritative partition, so this is a losing delayed
+                // COMMIT. Keep the fence and ignore the object value; both keys remain available after compaction.
+                return;
+            }
             SharedObjectMetadata existing = committedObjects.putIfAbsent(objectId, metadata);
             if (existing != null && !existing.equals(metadata)) {
                 throw corruption("object " + objectId + " has conflicting COMMITTED metadata");
             }
-            // A compacted topic may expose COMMIT without its earlier PREPARE, so PREPARE is not required here.
             preparedObjects.remove(objectId);
             if (existing == null) {
-                // This listener must remain non-blocking. A failure means this broker can no longer trust its remote
-                // index, so propagate it to the replay loop and fail the image closed.
                 committedObjectListener.accept(metadata);
             }
             return;
         }
         throw corruption("object " + objectId + " has incompatible metadata value " + value.getClass().getName());
+    }
+
+    private void applyCleanup(long objectId, MetadataValue value) {
+        if (value == TombstoneValue.INSTANCE) {
+            throw corruption("object cleanup fence must never be tombstoned for object " + objectId);
+        }
+        if (!(value instanceof CleanupClaimedValue) && !(value instanceof CleanupDeletedValue)) {
+            throw corruption("object " + objectId + " has incompatible cleanup metadata value");
+        }
+        long createdTimeMs = value instanceof CleanupClaimedValue claimed
+            ? claimed.createdTimeMs()
+            : ((CleanupDeletedValue) value).createdTimeMs();
+
+        if (committedObjects.containsKey(objectId)) {
+            // COMMIT has the lower authoritative offset, therefore the cleanup attempt lost and must be a no-op.
+            return;
+        }
+
+        PreparedObject prepared = preparedObjects.get(objectId);
+        if (prepared != null && prepared.createdTimeMs() != createdTimeMs) {
+            throw corruption("object " + objectId + " cleanup timestamp does not match PREPARE");
+        }
+
+        CleanupState candidateState = value instanceof CleanupDeletedValue
+            ? CleanupState.DELETED
+            : CleanupState.CLAIMED;
+        CleanupObject existing = cleanupObjects.get(objectId);
+        if (existing != null) {
+            if (existing.createdTimeMs != createdTimeMs) {
+                throw corruption("object " + objectId + " has conflicting cleanup generations");
+            }
+            if (existing.state == CleanupState.DELETED && candidateState == CleanupState.CLAIMED) {
+                // Duplicate/late claim cannot move a terminal fence backwards.
+                return;
+            }
+        }
+        cleanupObjects.put(objectId, new CleanupObject(createdTimeMs, candidateState));
+        preparedObjects.remove(objectId);
     }
 
     private void applyBrokerSequence(int brokerId, MetadataValue value) {
@@ -162,11 +215,40 @@ public final class SharedMetadataImage {
         return List.copyOf(result);
     }
 
-    public synchronized List<PreparedObject> preparedObjects() {
+    public synchronized Optional<SharedObjectMetadata> committedObject(long objectId) {
         requireReady();
-        List<PreparedObject> result = new ArrayList<>(preparedObjects.values());
-        result.sort(Comparator.comparingLong(PreparedObject::objectId));
+        return Optional.ofNullable(committedObjects.get(objectId));
+    }
+
+    public synchronized List<ObjectMetadataStore.PreparedObject> preparedObjects() {
+        requireReady();
+        List<ObjectMetadataStore.PreparedObject> result = preparedObjects.values().stream()
+            .map(prepared -> new ObjectMetadataStore.PreparedObject(prepared.objectId, prepared.createdTimeMs))
+            .sorted(Comparator.comparingLong(ObjectMetadataStore.PreparedObject::objectId))
+            .toList();
         return List.copyOf(result);
+    }
+
+    public synchronized List<ObjectMetadataStore.PreparedObject> cleanupClaimedObjects() {
+        requireReady();
+        List<ObjectMetadataStore.PreparedObject> result = cleanupObjects.entrySet().stream()
+            .filter(entry -> entry.getValue().state == CleanupState.CLAIMED)
+            .map(entry -> new ObjectMetadataStore.PreparedObject(entry.getKey(), entry.getValue().createdTimeMs))
+            .sorted(Comparator.comparingLong(ObjectMetadataStore.PreparedObject::objectId))
+            .toList();
+        return List.copyOf(result);
+    }
+
+    public synchronized boolean cleanupClaimed(long objectId, long createdTimeMs) {
+        requireReady();
+        CleanupObject cleanup = cleanupObjects.get(objectId);
+        return cleanup != null && cleanup.createdTimeMs == createdTimeMs && cleanup.state == CleanupState.CLAIMED;
+    }
+
+    public synchronized boolean cleanupFenced(long objectId, long createdTimeMs) {
+        requireReady();
+        CleanupObject cleanup = cleanupObjects.get(objectId);
+        return cleanup != null && cleanup.createdTimeMs == createdTimeMs;
     }
 
     public synchronized long brokerReservedExclusiveSequence(int brokerId) {
@@ -201,6 +283,14 @@ public final class SharedMetadataImage {
         FAILED
     }
 
-    public record PreparedObject(long objectId, long createdTimeMs) {
+    private enum CleanupState {
+        CLAIMED,
+        DELETED
+    }
+
+    private record PreparedObject(long objectId, long createdTimeMs) {
+    }
+
+    private record CleanupObject(long createdTimeMs, CleanupState state) {
     }
 }
