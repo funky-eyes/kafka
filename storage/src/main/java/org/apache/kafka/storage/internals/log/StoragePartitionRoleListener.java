@@ -24,9 +24,10 @@ import java.util.Collection;
  * Notification seam for physical storage implementations that need to know which local replicas currently own
  * leader-only background work.
  *
- * <p>Kafka remains the sole authority for leader election. Implementations must treat this callback as a notification
- * only: it may run while ReplicaManager state-change synchronization is held, so it must not block or perform I/O.
- * The default listener is a no-op and therefore leaves classic Kafka behavior unchanged.</p>
+ * <p>Kafka remains the sole authority for leader election and replica assignment. Implementations must treat these
+ * callbacks as notifications only: they may run while ReplicaManager state-change synchronization is held, so they
+ * must not block or perform I/O. The default listener is a no-op and therefore leaves classic Kafka behavior
+ * unchanged.</p>
  */
 @FunctionalInterface
 public interface StoragePartitionRoleListener {
@@ -42,4 +43,13 @@ public interface StoragePartitionRoleListener {
         Collection<TopicIdPartition> leaders,
         Collection<TopicIdPartition> followers
     );
+
+    /**
+     * Reports partitions for which this broker is no longer a replica.
+     *
+     * <p>This is a default method so the role listener remains a functional interface and existing extensions do not
+     * need an implementation when they have no per-partition background ownership to release.</p>
+     */
+    default void onPartitionsRemoved(Collection<TopicIdPartition> partitions) {
+    }
 }
