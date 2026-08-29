@@ -22,6 +22,7 @@ import org.apache.kafka.storage.internals.shared.metadata.ObjectMetadataStore;
 import org.apache.kafka.storage.internals.shared.metadata.OffsetRange;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
+import org.apache.kafka.storage.internals.shared.object.SharedObjectUploadHook.Phase;
 import org.apache.kafka.storage.internals.shared.wal.FileSharedWal;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -30,10 +31,12 @@ import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -77,6 +80,61 @@ class SharedObjectUploaderTest {
                     assertArrayEquals(new byte[]{4, 5}, bytes(storedPayload));
                 }
             }
+        }
+    }
+
+    @Test
+    void shouldPauseAtExactProtocolPhaseWithoutAdvancingRemoteCoverage() throws Exception {
+        InMemoryObjectStore objectStore = new InMemoryObjectStore();
+        InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
+        ActiveObjectUploads activeUploads = new ActiveObjectUploads();
+        CompletableFuture<Void> afterPutReached = new CompletableFuture<>();
+        CompletableFuture<Void> afterPutRelease = new CompletableFuture<>();
+        List<Phase> observed = new CopyOnWriteArrayList<>();
+        SharedObjectUploadHook hook = (phase, context) -> {
+            observed.add(phase);
+            assertEquals(150L, context.objectId());
+            assertEquals(1_500L, context.createdTimeMs());
+            if (phase == Phase.AFTER_PUT) {
+                afterPutReached.complete(null);
+                return afterPutRelease;
+            }
+            return CompletableFuture.completedFuture(null);
+        };
+
+        try (SharedStorageEngine engine = engine("phase-barrier")) {
+            append(engine, P0, 10, 19, new byte[]{5, 6, 7});
+            SharedObjectUploader uploader = new SharedObjectUploader(
+                objectStore,
+                metadataStore,
+                new SharedObjectPacker(),
+                engine,
+                activeUploads,
+                hook
+            );
+
+            CompletableFuture<SharedObjectMetadata> upload = uploader.upload(
+                150,
+                1_500,
+                engine.uploadCandidates(P0, 10, 20)
+            );
+            afterPutReached.get(10, TimeUnit.SECONDS);
+
+            assertFalse(upload.isDone());
+            assertTrue(activeUploads.contains(150));
+            assertTrue(objectStore.contains(150));
+            assertTrue(metadataStore.isPrepared(150));
+            assertFalse(metadataStore.isCommitted(150));
+            assertFalse(engine.remoteIndex().coverage(P0).covers(new OffsetRange(10, 20)));
+            assertEquals(List.of(Phase.AFTER_PREPARE, Phase.AFTER_PUT), observed);
+
+            afterPutRelease.complete(null);
+            upload.get(10, TimeUnit.SECONDS);
+
+            assertFalse(activeUploads.contains(150));
+            assertTrue(metadataStore.isCommitted(150));
+            assertTrue(engine.remoteIndex().coverage(P0).covers(new OffsetRange(10, 20)));
+            assertEquals(List.of(Phase.AFTER_PREPARE, Phase.AFTER_PUT, Phase.AFTER_COMMIT), observed);
         }
     }
 

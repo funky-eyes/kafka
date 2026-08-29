@@ -19,6 +19,8 @@ package org.apache.kafka.storage.internals.shared.object;
 import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
 import org.apache.kafka.storage.internals.shared.metadata.ObjectMetadataStore;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
+import org.apache.kafka.storage.internals.shared.object.SharedObjectUploadHook.Phase;
+import org.apache.kafka.storage.internals.shared.object.SharedObjectUploadHook.UploadContext;
 
 import java.io.IOException;
 import java.util.List;
@@ -36,6 +38,7 @@ public final class SharedObjectUploader {
     private final SharedObjectPacker packer;
     private final SharedStorageEngine engine;
     private final ActiveObjectUploads activeUploads;
+    private final SharedObjectUploadHook uploadHook;
 
     public SharedObjectUploader(
         ObjectStore objectStore,
@@ -43,7 +46,14 @@ public final class SharedObjectUploader {
         SharedObjectPacker packer,
         SharedStorageEngine engine
     ) {
-        this(objectStore, metadataStore, packer, engine, new ActiveObjectUploads());
+        this(
+            objectStore,
+            metadataStore,
+            packer,
+            engine,
+            new ActiveObjectUploads(),
+            SharedObjectUploadHook.NOOP
+        );
     }
 
     public SharedObjectUploader(
@@ -53,11 +63,23 @@ public final class SharedObjectUploader {
         SharedStorageEngine engine,
         ActiveObjectUploads activeUploads
     ) {
+        this(objectStore, metadataStore, packer, engine, activeUploads, SharedObjectUploadHook.NOOP);
+    }
+
+    public SharedObjectUploader(
+        ObjectStore objectStore,
+        ObjectMetadataStore metadataStore,
+        SharedObjectPacker packer,
+        SharedStorageEngine engine,
+        ActiveObjectUploads activeUploads,
+        SharedObjectUploadHook uploadHook
+    ) {
         this.objectStore = Objects.requireNonNull(objectStore, "objectStore");
         this.metadataStore = Objects.requireNonNull(metadataStore, "metadataStore");
         this.packer = Objects.requireNonNull(packer, "packer");
         this.engine = Objects.requireNonNull(engine, "engine");
         this.activeUploads = Objects.requireNonNull(activeUploads, "activeUploads");
+        this.uploadHook = Objects.requireNonNull(uploadHook, "uploadHook");
     }
 
     public CompletableFuture<SharedObjectMetadata> upload(
@@ -66,8 +88,10 @@ public final class SharedObjectUploader {
         List<SharedStorageEngine.UploadCandidate> candidates
     ) {
         final PackedObject packed;
+        final UploadContext context;
         try {
             packed = packer.pack(objectId, candidates, engine);
+            context = new UploadContext(objectId, createdTimeMs, packed.metadata());
             activeUploads.begin(objectId);
         } catch (IOException | RuntimeException e) {
             return CompletableFuture.failedFuture(e);
@@ -76,8 +100,11 @@ public final class SharedObjectUploader {
         CompletableFuture<SharedObjectMetadata> result;
         try {
             result = metadataStore.prepare(objectId, createdTimeMs)
+                .thenCompose(ignored -> invokeHook(Phase.AFTER_PREPARE, context))
                 .thenCompose(ignored -> objectStore.put(objectId, packed.bytes()))
+                .thenCompose(ignored -> invokeHook(Phase.AFTER_PUT, context))
                 .thenCompose(ignored -> metadataStore.commit(packed.metadata()))
+                .thenCompose(ignored -> invokeHook(Phase.AFTER_COMMIT, context))
                 .thenApply(ignored -> {
                     engine.commitRemoteObject(packed.metadata());
                     return packed.metadata();
@@ -87,5 +114,12 @@ public final class SharedObjectUploader {
             return CompletableFuture.failedFuture(e);
         }
         return result.whenComplete((ignored, error) -> activeUploads.end(objectId));
+    }
+
+    private CompletableFuture<Void> invokeHook(Phase phase, UploadContext context) {
+        return Objects.requireNonNull(
+            uploadHook.onPhase(phase, context),
+            "SharedObjectUploadHook returned null for " + phase
+        );
     }
 }
