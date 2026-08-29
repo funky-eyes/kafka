@@ -70,6 +70,28 @@ class SharedMetadataImageTest {
     }
 
     @Test
+    void observesDistinctPhysicalDuplicatesIndependently() {
+        List<SharedObjectMetadata> observed = new ArrayList<>();
+        SharedMetadataImage image = new SharedMetadataImage(observed::add);
+        long firstObjectId = BrokerObjectId.compose(1, 13L);
+        long secondObjectId = BrokerObjectId.compose(2, 13L);
+        SharedObjectMetadata first = metadata(firstObjectId, 113L);
+        SharedObjectMetadata second = metadata(secondObjectId, 113L);
+
+        image.apply(
+            SharedMetadataRecordCodec.objectKey(firstObjectId),
+            SharedMetadataRecordCodec.committedObjectValue(first)
+        );
+        image.apply(
+            SharedMetadataRecordCodec.objectKey(secondObjectId),
+            SharedMetadataRecordCodec.committedObjectValue(second)
+        );
+
+        // Both physical objects are replayed. RemoteObjectIndex performs the logical range deduplication separately.
+        assertEquals(List.of(first, second), observed);
+    }
+
+    @Test
     void committedObjectListenerFailurePropagatesSoCallerCanFailImageClosed() {
         RuntimeException observerFailure = new RuntimeException("remote index rejected metadata");
         SharedMetadataImage image = new SharedMetadataImage(metadata -> {
