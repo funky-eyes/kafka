@@ -33,6 +33,7 @@ import org.apache.kafka.storage.internals.shared.object.ActiveObjectUploads;
 import org.apache.kafka.storage.internals.shared.object.OrphanCleanupScheduler;
 import org.apache.kafka.storage.internals.shared.object.OrphanObjectCleaner;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectPacker;
+import org.apache.kafka.storage.internals.shared.object.SharedObjectUploadHook;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectUploader;
 import org.apache.kafka.storage.internals.shared.wal.FileSharedWal;
 import org.apache.kafka.storage.internals.shared.wal.SharedWal;
@@ -194,12 +195,15 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
                 initialBlock
             );
             ActiveObjectUploads activeUploads = new ActiveObjectUploads();
+            SharedObjectUploadHook uploadHook =
+                FileSharedObjectUploadBarrier.from(context.originals(), context.brokerId());
             SharedObjectUploader uploader = new SharedObjectUploader(
                 newObjectStore,
                 newMetadataStore,
                 new SharedObjectPacker(),
                 engine,
-                activeUploads
+                activeUploads,
+                uploadHook
             );
             newUploadScheduler = new SharedUploadScheduler(
                 engine,
