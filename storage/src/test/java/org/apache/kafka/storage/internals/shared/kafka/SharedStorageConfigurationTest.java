@@ -23,6 +23,7 @@ import org.apache.kafka.test.TestUtils;
 import org.junit.jupiter.api.Test;
 
 import java.io.File;
+import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -37,16 +38,60 @@ class SharedStorageConfigurationTest {
     void defaultsToAllNonInternalTopicsAndBrokerWideWalDefaults() {
         File logDir = TestUtils.tempDirectory();
         SharedStorageConfiguration config = SharedStorageConfiguration.from(context(Map.of(), logDir));
+        Path kafkaLogDir = logDir.toPath().toAbsolutePath().normalize();
+        Path expectedWalDir = kafkaLogDir
+            .resolveSibling(kafkaLogDir.getFileName() + ".shared-storage")
+            .resolve("broker-3")
+            .resolve("wal")
+            .normalize();
 
         assertEquals(SharedStorageConfiguration.DEFAULT_WAL_CAPACITY_BYTES, config.walCapacityBytes());
         assertEquals(SharedStorageConfiguration.DEFAULT_WAL_SEGMENT_BYTES, config.walSegmentBytes());
         assertEquals(SharedStorageConfiguration.DEFAULT_OBJECT_TARGET_BYTES, config.objectTargetBytes());
         assertEquals(SharedStorageConfiguration.DEFAULT_UPLOAD_INTERVAL_MS, config.uploadIntervalMs());
-        assertTrue(config.walDir().startsWith(logDir.toPath().toAbsolutePath()));
+        assertEquals(expectedWalDir, config.walDir());
+        assertFalse(config.walDir().startsWith(kafkaLogDir));
+        assertEquals(kafkaLogDir.getParent(), config.walDir().getParent().getParent().getParent());
         assertTrue(config.useSharedStorage("events"));
         assertFalse(config.useSharedStorage("__consumer_offsets"));
         assertFalse(config.useSharedStorage("__transaction_state"));
         assertFalse(config.useSharedStorage("__shared_storage_metadata"));
+    }
+
+    @Test
+    void explicitWalDirectoryMustNotBeNestedInsideAnyKafkaLogRoot() {
+        File firstLogDir = TestUtils.tempDirectory();
+        File secondLogDir = TestUtils.tempDirectory();
+        Path nestedWalDir = secondLogDir.toPath().resolve(".shared-wal");
+        Map<String, Object> originals = Map.of(
+            SharedStorageConfiguration.WAL_DIR_CONFIG,
+            nestedWalDir.toString()
+        );
+        StorageExtensionContext context = new StorageExtensionContext(
+            originals,
+            List.of(firstLogDir, secondLogDir),
+            3,
+            Time.SYSTEM
+        );
+
+        IllegalArgumentException error = assertThrows(
+            IllegalArgumentException.class,
+            () -> SharedStorageConfiguration.from(context)
+        );
+        assertTrue(error.getMessage().contains("must be outside every Kafka log directory"));
+    }
+
+    @Test
+    void explicitSiblingWalDirectoryIsAccepted() {
+        File logDir = TestUtils.tempDirectory();
+        Path kafkaLogDir = logDir.toPath().toAbsolutePath().normalize();
+        Path siblingWalDir = kafkaLogDir.resolveSibling("dedicated-shared-wal");
+        SharedStorageConfiguration config = SharedStorageConfiguration.from(context(
+            Map.of(SharedStorageConfiguration.WAL_DIR_CONFIG, siblingWalDir.toString()),
+            logDir
+        ));
+
+        assertEquals(siblingWalDir, config.walDir());
     }
 
     @Test

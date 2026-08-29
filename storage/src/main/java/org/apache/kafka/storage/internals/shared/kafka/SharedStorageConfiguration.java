@@ -18,6 +18,7 @@ package org.apache.kafka.storage.internals.shared.kafka;
 
 import org.apache.kafka.storage.internals.log.StorageExtensionContext;
 
+import java.io.File;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collections;
@@ -72,13 +73,9 @@ public final class SharedStorageConfiguration {
         Objects.requireNonNull(context, "context");
         Object configuredWalDir = context.originals().get(WAL_DIR_CONFIG);
         Path walDir = configuredWalDir == null || configuredWalDir.toString().isBlank()
-            ? context.liveLogDirs().get(0).toPath()
-                .resolve(".shared-storage")
-                .resolve("broker-" + context.brokerId())
-                .resolve("wal")
-                .toAbsolutePath()
-                .normalize()
+            ? defaultWalDir(context.liveLogDirs().get(0), context.brokerId())
             : Path.of(configuredWalDir.toString().trim()).toAbsolutePath().normalize();
+        validateWalDirOutsideKafkaLogRoots(walDir, context);
 
         long walCapacityBytes = positiveLong(
             context.originals().get(WAL_CAPACITY_BYTES_CONFIG),
@@ -116,6 +113,31 @@ public final class SharedStorageConfiguration {
             topics,
             topicPattern
         );
+    }
+
+    private static Path defaultWalDir(File firstKafkaLogDir, int brokerId) {
+        Path kafkaLogDir = firstKafkaLogDir.toPath().toAbsolutePath().normalize();
+        Path fileName = kafkaLogDir.getFileName();
+        if (fileName == null) {
+            throw new IllegalArgumentException(
+                "Kafka log directory cannot be the filesystem root when deriving " + WAL_DIR_CONFIG);
+        }
+        return kafkaLogDir
+            .resolveSibling(fileName + ".shared-storage")
+            .resolve("broker-" + brokerId)
+            .resolve("wal")
+            .normalize();
+    }
+
+    private static void validateWalDirOutsideKafkaLogRoots(Path walDir, StorageExtensionContext context) {
+        for (File logDir : context.liveLogDirs()) {
+            Path kafkaLogRoot = logDir.toPath().toAbsolutePath().normalize();
+            if (walDir.startsWith(kafkaLogRoot)) {
+                throw new IllegalArgumentException(
+                    WAL_DIR_CONFIG + " must be outside every Kafka log directory because LogManager scans their " +
+                        "children as topic-partition directories: walDir=" + walDir + ", kafkaLogDir=" + kafkaLogRoot);
+            }
+        }
     }
 
     public Path walDir() {
