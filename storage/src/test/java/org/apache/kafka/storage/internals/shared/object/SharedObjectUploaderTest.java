@@ -35,8 +35,8 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SharedObjectUploaderTest {
     private static final SharedPartitionId P0 = new SharedPartitionId(1, 2, 0);
@@ -101,8 +101,28 @@ class SharedObjectUploaderTest {
             }
 
             @Override
+            public CompletableFuture<Boolean> claimCleanup(long objectId, long expectedCreatedTimeMs) {
+                return preparedStore.claimCleanup(objectId, expectedCreatedTimeMs);
+            }
+
+            @Override
+            public CompletableFuture<Void> completeCleanup(long objectId) {
+                return preparedStore.completeCleanup(objectId);
+            }
+
+            @Override
             public List<SharedObjectMetadata> committedObjects() {
                 return List.of();
+            }
+
+            @Override
+            public List<PreparedObject> preparedObjects() {
+                return preparedStore.preparedObjects();
+            }
+
+            @Override
+            public List<PreparedObject> cleanupClaimedObjects() {
+                return preparedStore.cleanupClaimedObjects();
             }
         };
 
