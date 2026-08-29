@@ -117,8 +117,25 @@ jobs:
           ./gradlew :core:test \
             --tests 'kafka.server.SharedStorageIndependentProcessSigkillTest' \
             --no-scan 2>&1 | tee shared-storage-sigkill-e2e.log
-          grep -q 'GATE3_SIGKILL brokerId=' shared-storage-sigkill-e2e.log
-          grep -q 'GATE3_RECOVERED oldLeader=' shared-storage-sigkill-e2e.log
+
+          result_xml="$(find core/build/test-results build/junit-xml \
+            -type f \
+            -name 'TEST-kafka.server.SharedStorageIndependentProcessSigkillTest.xml' \
+            -print -quit 2>/dev/null || true)"
+          test -n "$result_xml"
+          grep -q '<testsuite ' "$result_xml"
+          grep -q 'failures="0"' "$result_xml"
+          grep -q 'errors="0"' "$result_xml"
+          grep -q 'skipped="0"' "$result_xml"
+          grep -q 'GATE3_SIGKILL brokerId=' "$result_xml"
+          grep -q 'GATE3_RECOVERED oldLeader=' "$result_xml"
+
+          {
+            grep 'GATE3_SIGKILL brokerId=' "$result_xml"
+            grep 'GATE3_RECOVERED oldLeader=' "$result_xml"
+            printf 'GATE3_SUCCESS commit=%s\n' "$GITHUB_SHA"
+          } > shared-storage-sigkill-proof.txt
+          cat shared-storage-sigkill-proof.txt
 
       - name: Show committed S3 objects
         if: always()
@@ -137,9 +154,11 @@ jobs:
             shared-storage-sigkill-build.log
             shared-storage-sigkill-runtime.txt
             shared-storage-sigkill-e2e.log
+            shared-storage-sigkill-proof.txt
             shared-storage-sigkill-objects.log
             core/build/reports/tests/test
             core/build/test-results/test
+            build/junit-xml/core
           if-no-files-found: ignore
           retention-days: 7
 
