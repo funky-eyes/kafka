@@ -71,10 +71,22 @@ jobs:
               raise SystemExit(f'expected UnifiedLog listener field once, got {text.count(field)}')
           text = text.replace(field, replacement, 1)
 
-          callback = 'logOffsetsListener.onHighWatermarkUpdated(highWatermarkMetadata.messageOffset);'
-          if text.count(callback) != 2:
-              raise SystemExit(f'expected two direct HW callbacks, got {text.count(callback)}')
-          text = text.replace(callback, 'notifyHighWatermarkUpdated(highWatermarkMetadata.messageOffset);')
+          constructor_callback = 'logOffsetsListener.onHighWatermarkUpdated(highWatermarkMetadata.messageOffset);'
+          runtime_callback = 'logOffsetsListener.onHighWatermarkUpdated(newHighWatermark.messageOffset);'
+          if text.count(constructor_callback) != 1:
+              raise SystemExit(f'expected constructor HW callback once, got {text.count(constructor_callback)}')
+          if text.count(runtime_callback) != 1:
+              raise SystemExit(f'expected runtime HW callback once, got {text.count(runtime_callback)}')
+          text = text.replace(
+              constructor_callback,
+              'notifyHighWatermarkUpdated(highWatermarkMetadata.messageOffset);',
+              1,
+          )
+          text = text.replace(
+              runtime_callback,
+              'notifyHighWatermarkUpdated(newHighWatermark.messageOffset);',
+              1,
+          )
 
           setter = '\n'.join([
               '    public void setLogOffsetsListener(LogOffsetsListener listener) {',
