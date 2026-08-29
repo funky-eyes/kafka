@@ -227,6 +227,7 @@ class BrokerServer(
       if (storageExtension.isPresent) {
         storageExtensionOpt = Some(storageExtension.get())
         logManager.setUnifiedLogFactory(storageExtension.get().unifiedLogFactory())
+        logManager.setStoragePartitionRoleListener(storageExtension.get().partitionRoleListener())
       }
 
       lifecycleManager = new BrokerLifecycleManager(

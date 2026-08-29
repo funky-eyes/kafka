@@ -2405,6 +2405,13 @@ class ReplicaManager(val config: KafkaConfig,
         replicaAlterLogDirsManager.shutdownIdleFetcherThreads()
 
         remoteLogManager.foreach(rlm => rlm.onLeadershipChange((leaderChangedPartitions.toSet: Set[TopicPartitionLog]).asJava, (followerChangedPartitions.toSet: Set[TopicPartitionLog]).asJava, localChanges.topicIds()))
+        val storageLeaderChanges = leaderChangedPartitions.flatMap { partition =>
+          partition.topicId.map(topicId => new TopicIdPartition(topicId, partition.topicPartition))
+        }.asJava
+        val storageFollowerChanges = followerChangedPartitions.flatMap { partition =>
+          partition.topicId.map(topicId => new TopicIdPartition(topicId, partition.topicPartition))
+        }.asJava
+        logManager.onLeadershipChange(storageLeaderChanges, storageFollowerChanges)
       }
 
       if (metadataVersion.isDirectoryAssignmentSupported) {

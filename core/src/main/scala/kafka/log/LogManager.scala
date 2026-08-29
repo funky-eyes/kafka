@@ -24,7 +24,7 @@ import java.util.concurrent._
 import java.util.concurrent.atomic.AtomicInteger
 import kafka.server.{KafkaConfig, KafkaRaftServer}
 import kafka.utils.Logging
-import org.apache.kafka.common.{DirectoryId, KafkaException, TopicPartition, Uuid}
+import org.apache.kafka.common.{DirectoryId, KafkaException, TopicIdPartition, TopicPartition, Uuid}
 import org.apache.kafka.common.utils.{Exit, KafkaThread, Time, Utils}
 import org.apache.kafka.common.errors.{InconsistentTopicIdException, KafkaStorageException, LogDirNotFoundException}
 import org.apache.kafka.coordinator.transaction.{TransactionLogConfig, TransactionStateManagerConfig}
@@ -40,7 +40,7 @@ import org.apache.kafka.metadata.properties.{MetaProperties, MetaPropertiesEnsem
 import java.util.{Collections, Optional, OptionalLong, Properties}
 import org.apache.kafka.server.metrics.KafkaMetricsGroup
 import org.apache.kafka.server.util.{FileLock, Scheduler}
-import org.apache.kafka.storage.internals.log.{CleanerConfig, LogCleaner, LogConfig, LogDirFailureChannel, LogManager => JLogManager, LogOffsetsListener, ProducerStateManagerConfig, RemoteIndexCache, UnifiedLog, UnifiedLogCreationContext, UnifiedLogFactory}
+import org.apache.kafka.storage.internals.log.{CleanerConfig, LogCleaner, LogConfig, LogDirFailureChannel, LogManager => JLogManager, LogOffsetsListener, ProducerStateManagerConfig, RemoteIndexCache, StoragePartitionRoleListener, UnifiedLog, UnifiedLogCreationContext, UnifiedLogFactory}
 import org.apache.kafka.storage.internals.checkpoint.{CleanShutdownFileHandler, OffsetCheckpointFile}
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats
 
@@ -163,6 +163,7 @@ class LogManager(logDirs: Seq[File],
   private[kafka] def cleaner: LogCleaner = _cleaner
 
   @volatile private var unifiedLogFactory: UnifiedLogFactory = UnifiedLogFactory.DEFAULT
+  @volatile private var storagePartitionRoleListener: StoragePartitionRoleListener = StoragePartitionRoleListener.NO_OP
   @volatile private var unifiedLogFactoryFrozen = false
 
   /**
@@ -176,6 +177,20 @@ class LogManager(logDirs: Seq[File],
     if (unifiedLogFactoryFrozen)
       throw new IllegalStateException("UnifiedLogFactory cannot be changed after log creation has started")
     unifiedLogFactory = factory
+  }
+
+  /** Installs the non-blocking storage role observer before partition loading begins. */
+  def setStoragePartitionRoleListener(listener: StoragePartitionRoleListener): Unit = this.synchronized {
+    if (listener == null)
+      throw new NullPointerException("listener")
+    if (unifiedLogFactoryFrozen)
+      throw new IllegalStateException("StoragePartitionRoleListener cannot be changed after log creation has started")
+    storagePartitionRoleListener = listener
+  }
+
+  /** Reports completed local role transitions to the optional physical-storage observer. */
+  def onLeadershipChange(leaders: util.Collection[TopicIdPartition], followers: util.Collection[TopicIdPartition]): Unit = {
+    storagePartitionRoleListener.onLeadershipChange(leaders, followers)
   }
 
   private def createUnifiedLog(context: UnifiedLogCreationContext): UnifiedLog = {
