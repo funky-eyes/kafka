@@ -28,13 +28,19 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class SharedMetadataRecordCodecTest {
     @Test
-    void roundTripsPermanentObjectAndBrokerKeys() {
+    void roundTripsPermanentObjectCleanupAndBrokerKeys() {
         long objectId = BrokerObjectId.compose(7, 123L);
         SharedMetadataRecordCodec.MetadataKey objectKey = SharedMetadataRecordCodec.decodeKey(
             SharedMetadataRecordCodec.objectKey(objectId)
         );
         assertEquals(SharedMetadataRecordCodec.KeyType.OBJECT, objectKey.type());
         assertEquals(objectId, objectKey.id());
+
+        SharedMetadataRecordCodec.MetadataKey cleanupKey = SharedMetadataRecordCodec.decodeKey(
+            SharedMetadataRecordCodec.objectCleanupKey(objectId)
+        );
+        assertEquals(SharedMetadataRecordCodec.KeyType.OBJECT_CLEANUP, cleanupKey.type());
+        assertEquals(objectId, cleanupKey.id());
 
         SharedMetadataRecordCodec.MetadataKey brokerKey = SharedMetadataRecordCodec.decodeKey(
             SharedMetadataRecordCodec.brokerSequenceKey(7)
@@ -73,6 +79,33 @@ class SharedMetadataRecordCodecTest {
             SharedMetadataRecordCodec.TombstoneValue.INSTANCE,
             SharedMetadataRecordCodec.decodeValue(key, null)
         );
+    }
+
+    @Test
+    void roundTripsCleanupClaimAndDeletedFenceValues() {
+        long objectId = BrokerObjectId.compose(4, 45L);
+        long createdTimeMs = 12_346L;
+        SharedMetadataRecordCodec.MetadataKey key = SharedMetadataRecordCodec.decodeKey(
+            SharedMetadataRecordCodec.objectCleanupKey(objectId)
+        );
+
+        SharedMetadataRecordCodec.CleanupClaimedValue claimed = assertInstanceOf(
+            SharedMetadataRecordCodec.CleanupClaimedValue.class,
+            SharedMetadataRecordCodec.decodeValue(
+                key,
+                SharedMetadataRecordCodec.cleanupClaimedValue(createdTimeMs)
+            )
+        );
+        assertEquals(createdTimeMs, claimed.createdTimeMs());
+
+        SharedMetadataRecordCodec.CleanupDeletedValue deleted = assertInstanceOf(
+            SharedMetadataRecordCodec.CleanupDeletedValue.class,
+            SharedMetadataRecordCodec.decodeValue(
+                key,
+                SharedMetadataRecordCodec.cleanupDeletedValue(createdTimeMs)
+            )
+        );
+        assertEquals(createdTimeMs, deleted.createdTimeMs());
     }
 
     @Test
@@ -115,6 +148,17 @@ class SharedMetadataRecordCodecTest {
             () -> SharedMetadataRecordCodec.decodeValue(objectKey, badVersion)
         );
 
+        SharedMetadataRecordCodec.MetadataKey cleanupKey = SharedMetadataRecordCodec.decodeKey(
+            SharedMetadataRecordCodec.objectCleanupKey(objectId)
+        );
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> SharedMetadataRecordCodec.decodeValue(
+                cleanupKey,
+                SharedMetadataRecordCodec.preparedObjectValue(1L)
+            )
+        );
+
         SharedMetadataRecordCodec.MetadataKey brokerKey = SharedMetadataRecordCodec.decodeKey(
             SharedMetadataRecordCodec.brokerSequenceKey(1)
         );
@@ -141,6 +185,10 @@ class SharedMetadataRecordCodecTest {
         assertThrows(
             IllegalArgumentException.class,
             () -> SharedMetadataRecordCodec.objectKey(0L)
+        );
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> SharedMetadataRecordCodec.objectCleanupKey(0L)
         );
         assertThrows(
             IllegalArgumentException.class,
