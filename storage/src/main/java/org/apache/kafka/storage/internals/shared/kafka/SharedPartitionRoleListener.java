@@ -25,10 +25,10 @@ import java.util.Collection;
 import java.util.Objects;
 
 /**
- * Routes Kafka replica-role notifications into the shared-storage commit tracker.
+ * Routes Kafka replica-role and assignment notifications into the shared-storage commit tracker.
  *
- * <p>Only topics selected for shared storage are tracked. The callback performs bounded in-memory map updates only;
- * it never starts object-store or metadata-store I/O on Kafka's metadata application thread.</p>
+ * <p>Only topics selected for shared storage are tracked. The callbacks perform bounded in-memory map updates only;
+ * they never start object-store or metadata-store I/O on Kafka's metadata application thread.</p>
  */
 public final class SharedPartitionRoleListener implements StoragePartitionRoleListener {
     private final SharedStorageConfiguration configuration;
@@ -51,6 +51,17 @@ public final class SharedPartitionRoleListener implements StoragePartitionRoleLi
         Objects.requireNonNull(followers, "followers");
         leaders.forEach(partition -> updateRole(partition, true));
         followers.forEach(partition -> updateRole(partition, false));
+    }
+
+    @Override
+    public void onPartitionsRemoved(Collection<TopicIdPartition> partitions) {
+        Objects.requireNonNull(partitions, "partitions");
+        partitions.forEach(partition -> {
+            Objects.requireNonNull(partition, "partition");
+            if (configuration.useSharedStorage(partition.topic())) {
+                commitProgress.remove(sharedPartitionId(partition));
+            }
+        });
     }
 
     private void updateRole(TopicIdPartition partition, boolean leader) {
