@@ -120,7 +120,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
     @Override
     public synchronized CompletableFuture<Void> onBrokerReady(StorageExtensionBrokerContext context) {
         Objects.requireNonNull(context, "context");
-        if (storage == null || bootstrapExecutor == null) {
+        if (storage == null || bootstrapExecutor == null || storageConfiguration == null || commitProgress == null) {
             return CompletableFuture.failedFuture(
                 new IllegalStateException("S3 shared storage extension has not been started"));
         }
@@ -131,10 +131,13 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             return brokerReadyFuture;
         }
 
+        SharedStorageConfiguration configuration = storageConfiguration;
+        SharedStorageEngine engine = storage;
+        SharedCommitProgress progress = commitProgress;
         ExecutorService executor = bootstrapExecutor;
         brokerReadyFuture = CompletableFuture.runAsync(() -> {
             try {
-                initializeRemotePlane(context);
+                initializeRemotePlane(context, configuration, engine, progress);
             } catch (IOException e) {
                 throw new CompletionException(e);
             }
@@ -142,7 +145,12 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         return brokerReadyFuture;
     }
 
-    private void initializeRemotePlane(StorageExtensionBrokerContext context) throws IOException {
+    private void initializeRemotePlane(
+        StorageExtensionBrokerContext context,
+        SharedStorageConfiguration configuration,
+        SharedStorageEngine engine,
+        SharedCommitProgress progress
+    ) throws IOException {
         KafkaObjectMetadataStore newMetadataStore = null;
         S3ObjectStore newObjectStore = null;
         SharedUploadScheduler newUploadScheduler = null;
@@ -152,7 +160,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
                 SharedMetadataClientConfiguration.from(context);
             newMetadataStore = KafkaObjectMetadataStore.open(metadataConfiguration);
             for (SharedObjectMetadata metadata : newMetadataStore.committedObjects()) {
-                storage.commitRemoteObject(metadata);
+                engine.commitRemoteObject(metadata);
             }
 
             S3ObjectStoreConfig objectStoreConfig = objectStoreConfiguration(context);
@@ -170,25 +178,25 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
                 newObjectStore,
                 newMetadataStore,
                 new SharedObjectPacker(),
-                storage
+                engine
             );
             newUploadScheduler = new SharedUploadScheduler(
-                storage,
-                commitProgress,
+                engine,
+                progress,
                 uploader,
                 objectIds,
                 context.time()::milliseconds,
-                storageConfiguration.objectTargetBytes()
+                configuration.objectTargetBytes()
             );
 
             synchronized (this) {
-                if (closed) {
-                    throw new IOException("S3 shared storage extension closed during remote bootstrap");
+                if (closed || storage != engine) {
+                    throw new IOException("S3 shared storage extension closed or restarted during remote bootstrap");
                 }
                 metadataStore = newMetadataStore;
                 objectStore = newObjectStore;
                 uploadScheduler = newUploadScheduler;
-                newUploadScheduler.start(storageConfiguration.uploadIntervalMs());
+                newUploadScheduler.start(configuration.uploadIntervalMs());
                 installed = true;
             }
         } finally {
@@ -237,6 +245,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             uploadScheduler = null;
             metadataStore = null;
             objectStore = null;
+            storageConfiguration = null;
             storage = null;
             commitProgress = null;
             unifiedLogFactory = null;
