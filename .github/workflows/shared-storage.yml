@@ -87,7 +87,7 @@ permissions:
 
 concurrency:
   group: shared-storage-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   storage-tests:
