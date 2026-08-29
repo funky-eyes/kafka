@@ -77,90 +77,109 @@ public final class SharedMetadataImage {
 
     private void applyObject(long objectId, MetadataValue value) {
         if (value == TombstoneValue.INSTANCE) {
-            preparedObjects.remove(objectId);
-            committedObjects.remove(objectId);
+            applyObjectTombstone(objectId);
             return;
         }
         if (value instanceof PreparedObjectValue prepared) {
-            CleanupObject cleanup = cleanupObjects.get(objectId);
-            if (cleanup != null) {
-                // A cleanup key can survive compaction while an older PREPARE is rewritten or replayed. Never resurrect
-                // a generation that is already fenced for physical deletion.
-                if (cleanup.createdTimeMs != prepared.createdTimeMs()) {
-                    throw corruption("object " + objectId + " cleanup fence conflicts with PREPARE timestamp");
-                }
-                return;
-            }
-            if (committedObjects.containsKey(objectId)) {
-                throw corruption("object " + objectId + " regressed from COMMITTED to PREPARED");
-            }
-            PreparedObject candidate = new PreparedObject(objectId, prepared.createdTimeMs());
-            PreparedObject existing = preparedObjects.putIfAbsent(objectId, candidate);
-            if (existing != null && !existing.equals(candidate)) {
-                throw corruption("object " + objectId + " was prepared with conflicting timestamps");
-            }
+            applyPreparedObject(objectId, prepared);
             return;
         }
         if (value instanceof CommittedObjectValue committed) {
-            SharedObjectMetadata metadata = committed.metadata();
-            if (metadata.objectId() != objectId) {
-                throw corruption(
-                    "object key " + objectId + " does not match committed metadata " + metadata.objectId());
-            }
-            if (cleanupObjects.containsKey(objectId)) {
-                // The cleanup record has an earlier offset in the authoritative partition, so this is a losing delayed
-                // COMMIT. Keep the fence and ignore the object value; both keys remain available after compaction.
-                return;
-            }
-            SharedObjectMetadata existing = committedObjects.putIfAbsent(objectId, metadata);
-            if (existing != null && !existing.equals(metadata)) {
-                throw corruption("object " + objectId + " has conflicting COMMITTED metadata");
-            }
-            preparedObjects.remove(objectId);
-            if (existing == null) {
-                committedObjectListener.accept(metadata);
-            }
+            applyCommittedObject(objectId, committed);
             return;
         }
         throw corruption("object " + objectId + " has incompatible metadata value " + value.getClass().getName());
     }
 
-    private void applyCleanup(long objectId, MetadataValue value) {
-        if (value == TombstoneValue.INSTANCE) {
-            throw corruption("object cleanup fence must never be tombstoned for object " + objectId);
-        }
-        if (!(value instanceof CleanupClaimedValue) && !(value instanceof CleanupDeletedValue)) {
-            throw corruption("object " + objectId + " has incompatible cleanup metadata value");
-        }
-        long createdTimeMs = value instanceof CleanupClaimedValue claimed
-            ? claimed.createdTimeMs()
-            : ((CleanupDeletedValue) value).createdTimeMs();
+    private void applyObjectTombstone(long objectId) {
+        preparedObjects.remove(objectId);
+        committedObjects.remove(objectId);
+    }
 
+    private void applyPreparedObject(long objectId, PreparedObjectValue prepared) {
+        CleanupObject cleanup = cleanupObjects.get(objectId);
+        if (cleanup != null) {
+            validateCleanupTimestamp(objectId, cleanup.createdTimeMs, prepared.createdTimeMs());
+            return;
+        }
+        if (committedObjects.containsKey(objectId)) {
+            throw corruption("object " + objectId + " regressed from COMMITTED to PREPARED");
+        }
+        PreparedObject candidate = new PreparedObject(objectId, prepared.createdTimeMs());
+        PreparedObject existing = preparedObjects.putIfAbsent(objectId, candidate);
+        if (existing != null && !existing.equals(candidate)) {
+            throw corruption("object " + objectId + " was prepared with conflicting timestamps");
+        }
+    }
+
+    private void applyCommittedObject(long objectId, CommittedObjectValue committed) {
+        SharedObjectMetadata metadata = committed.metadata();
+        if (metadata.objectId() != objectId) {
+            throw corruption(
+                "object key " + objectId + " does not match committed metadata " + metadata.objectId());
+        }
+        if (cleanupObjects.containsKey(objectId)) {
+            // The cleanup record has an earlier offset in the authoritative partition, so this is a losing delayed
+            // COMMIT. Keep the fence and ignore the object value; both keys remain available after compaction.
+            return;
+        }
+        SharedObjectMetadata existing = committedObjects.putIfAbsent(objectId, metadata);
+        if (existing != null && !existing.equals(metadata)) {
+            throw corruption("object " + objectId + " has conflicting COMMITTED metadata");
+        }
+        preparedObjects.remove(objectId);
+        if (existing == null) {
+            committedObjectListener.accept(metadata);
+        }
+    }
+
+    private void applyCleanup(long objectId, MetadataValue value) {
+        CleanupRecord cleanup = cleanupRecord(objectId, value);
         if (committedObjects.containsKey(objectId)) {
             // COMMIT has the lower authoritative offset, therefore the cleanup attempt lost and must be a no-op.
             return;
         }
+        validatePreparedCleanupTimestamp(objectId, cleanup.createdTimeMs());
+        applyCleanupState(objectId, cleanup);
+    }
 
-        PreparedObject prepared = preparedObjects.get(objectId);
-        if (prepared != null && prepared.createdTimeMs() != createdTimeMs) {
-            throw corruption("object " + objectId + " cleanup timestamp does not match PREPARE");
+    private CleanupRecord cleanupRecord(long objectId, MetadataValue value) {
+        if (value == TombstoneValue.INSTANCE) {
+            throw corruption("object cleanup fence must never be tombstoned for object " + objectId);
         }
+        if (value instanceof CleanupClaimedValue claimed) {
+            return new CleanupRecord(claimed.createdTimeMs(), CleanupState.CLAIMED);
+        }
+        if (value instanceof CleanupDeletedValue deleted) {
+            return new CleanupRecord(deleted.createdTimeMs(), CleanupState.DELETED);
+        }
+        throw corruption("object " + objectId + " has incompatible cleanup metadata value");
+    }
 
-        CleanupState candidateState = value instanceof CleanupDeletedValue
-            ? CleanupState.DELETED
-            : CleanupState.CLAIMED;
+    private void validatePreparedCleanupTimestamp(long objectId, long createdTimeMs) {
+        PreparedObject prepared = preparedObjects.get(objectId);
+        if (prepared != null) {
+            validateCleanupTimestamp(objectId, prepared.createdTimeMs(), createdTimeMs);
+        }
+    }
+
+    private void applyCleanupState(long objectId, CleanupRecord candidate) {
         CleanupObject existing = cleanupObjects.get(objectId);
         if (existing != null) {
-            if (existing.createdTimeMs != createdTimeMs) {
-                throw corruption("object " + objectId + " has conflicting cleanup generations");
-            }
-            if (existing.state == CleanupState.DELETED && candidateState == CleanupState.CLAIMED) {
+            validateCleanupTimestamp(objectId, existing.createdTimeMs, candidate.createdTimeMs());
+            if (existing.state == CleanupState.DELETED && candidate.state() == CleanupState.CLAIMED) {
                 // Duplicate/late claim cannot move a terminal fence backwards.
                 return;
             }
         }
-        cleanupObjects.put(objectId, new CleanupObject(createdTimeMs, candidateState));
+        cleanupObjects.put(objectId, new CleanupObject(candidate.createdTimeMs(), candidate.state()));
         preparedObjects.remove(objectId);
+    }
+
+    private static void validateCleanupTimestamp(long objectId, long expected, long actual) {
+        if (expected != actual) {
+            throw corruption("object " + objectId + " has conflicting cleanup generations");
+        }
     }
 
     private void applyBrokerSequence(int brokerId, MetadataValue value) {
@@ -292,5 +311,8 @@ public final class SharedMetadataImage {
     }
 
     private record CleanupObject(long createdTimeMs, CleanupState state) {
+    }
+
+    private record CleanupRecord(long createdTimeMs, CleanupState state) {
     }
 }
