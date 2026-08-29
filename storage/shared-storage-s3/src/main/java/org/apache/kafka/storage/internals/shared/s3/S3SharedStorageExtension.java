@@ -29,7 +29,9 @@ import org.apache.kafka.storage.internals.shared.kafka.SharedStorageConfiguratio
 import org.apache.kafka.storage.internals.shared.kafka.SharedUnifiedLogFactory;
 import org.apache.kafka.storage.internals.shared.kafka.SharedUploadScheduler;
 import org.apache.kafka.storage.internals.shared.metadata.BrokerObjectId;
-
+import org.apache.kafka.storage.internals.shared.object.ActiveObjectUploads;
+import org.apache.kafka.storage.internals.shared.object.OrphanCleanupScheduler;
+import org.apache.kafka.storage.internals.shared.object.OrphanObjectCleaner;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectPacker;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectUploader;
 import org.apache.kafka.storage.internals.shared.wal.FileSharedWal;
@@ -53,7 +55,7 @@ import java.util.function.LongSupplier;
  * <p>{@link #start(StorageExtensionContext)} performs only local WAL recovery and installs the shared log factory, so
  * Kafka can load partitions before network listeners are available. {@link #onBrokerReady(StorageExtensionBrokerContext)}
  * then replays the classic metadata topic, fences the broker-scoped object-ID allocator, restores remote coverage and
- * finally starts the asynchronous S3 uploader. Kafka's broker-startup deadline gates the returned future.</p>
+ * finally starts asynchronous S3 upload and orphan cleanup. Kafka's broker-startup deadline gates the returned future.</p>
  */
 public final class S3SharedStorageExtension implements KafkaStorageExtension {
     private static final int DEFAULT_OBJECT_ID_BLOCK_SIZE = 4_096;
@@ -69,6 +71,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
     private KafkaObjectMetadataStore metadataStore;
     private S3ObjectStore objectStore;
     private SharedUploadScheduler uploadScheduler;
+    private OrphanCleanupScheduler orphanCleanupScheduler;
     private boolean closed;
 
     @Override
@@ -168,6 +171,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         KafkaObjectMetadataStore newMetadataStore = null;
         S3ObjectStore newObjectStore = null;
         SharedUploadScheduler newUploadScheduler = null;
+        OrphanCleanupScheduler newOrphanCleanupScheduler = null;
         boolean installed = false;
         try {
             SharedMetadataClientConfiguration metadataConfiguration =
@@ -189,11 +193,13 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
                 DEFAULT_OBJECT_ID_BLOCK_SIZE,
                 initialBlock
             );
+            ActiveObjectUploads activeUploads = new ActiveObjectUploads();
             SharedObjectUploader uploader = new SharedObjectUploader(
                 newObjectStore,
                 newMetadataStore,
                 new SharedObjectPacker(),
-                engine
+                engine,
+                activeUploads
             );
             newUploadScheduler = new SharedUploadScheduler(
                 engine,
@@ -203,6 +209,11 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
                 context.time()::milliseconds,
                 configuration.objectTargetBytes()
             );
+            newOrphanCleanupScheduler = new OrphanCleanupScheduler(
+                new OrphanObjectCleaner(newObjectStore, newMetadataStore, activeUploads),
+                context.time()::milliseconds,
+                configuration.orphanGraceMs()
+            );
 
             synchronized (this) {
                 if (closed || storage != engine) {
@@ -211,11 +222,14 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
                 metadataStore = newMetadataStore;
                 objectStore = newObjectStore;
                 uploadScheduler = newUploadScheduler;
+                orphanCleanupScheduler = newOrphanCleanupScheduler;
                 newUploadScheduler.start(configuration.uploadIntervalMs());
+                newOrphanCleanupScheduler.start(configuration.orphanCleanupIntervalMs());
                 installed = true;
             }
         } finally {
             if (!installed) {
+                closeIgnoringFailure(newOrphanCleanupScheduler);
                 closeIgnoringFailure(newUploadScheduler);
                 closeIgnoringFailure(newObjectStore);
                 closeIgnoringFailure(newMetadataStore);
@@ -241,6 +255,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         CompletableFuture<Void> readyFuture;
         ExecutorService executor;
         SharedUploadScheduler scheduler;
+        OrphanCleanupScheduler cleanupScheduler;
         KafkaObjectMetadataStore metadata;
         S3ObjectStore objects;
         SharedStorageEngine engine;
@@ -252,12 +267,14 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             readyFuture = brokerReadyFuture;
             executor = bootstrapExecutor;
             scheduler = uploadScheduler;
+            cleanupScheduler = orphanCleanupScheduler;
             metadata = metadataStore;
             objects = objectStore;
             engine = storage;
             brokerReadyFuture = null;
             bootstrapExecutor = null;
             uploadScheduler = null;
+            orphanCleanupScheduler = null;
             metadataStore = null;
             objectStore = null;
             storageConfiguration = null;
@@ -276,6 +293,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         }
 
         IOException failure = null;
+        failure = close(failure, cleanupScheduler);
         failure = close(failure, scheduler);
         failure = close(failure, metadata);
         failure = close(failure, objects);
