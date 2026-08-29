@@ -26,7 +26,6 @@ import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.io.File;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
@@ -40,36 +39,21 @@ class SharedPartitionRoleListenerTest {
 
     @Test
     void routesOnlySelectedUserTopicsAndTracksLeaderDemotion() {
-        SharedStorageConfiguration configuration = SharedStorageConfiguration.from(new StorageExtensionContext(
-            Map.of(SharedStorageConfiguration.TOPICS_CONFIG, "shared-topic"),
-            List.of(tempDir.toFile()),
-            1,
-            new MockTime()
+        SharedStorageConfiguration configuration = configuration(Map.of(
+            SharedStorageConfiguration.TOPICS_CONFIG,
+            "shared-topic"
         ));
         SharedCommitProgress progress = new SharedCommitProgress();
         SharedPartitionRoleListener listener = new SharedPartitionRoleListener(configuration, progress);
 
         Uuid sharedTopicId = Uuid.randomUuid();
-        TopicIdPartition shared = new TopicIdPartition(
-            sharedTopicId,
-            new TopicPartition("shared-topic", 0)
-        );
-        TopicIdPartition classic = new TopicIdPartition(
-            Uuid.randomUuid(),
-            new TopicPartition("classic-topic", 0)
-        );
-        TopicIdPartition internal = new TopicIdPartition(
-            Uuid.randomUuid(),
-            new TopicPartition("__consumer_offsets", 0)
-        );
+        TopicIdPartition shared = topicPartition(sharedTopicId, "shared-topic", 0);
+        TopicIdPartition classic = topicPartition(Uuid.randomUuid(), "classic-topic", 0);
+        TopicIdPartition internal = topicPartition(Uuid.randomUuid(), "__consumer_offsets", 0);
 
         listener.onLeadershipChange(List.of(shared, classic, internal), List.of());
 
-        SharedPartitionId sharedId = new SharedPartitionId(
-            sharedTopicId.getMostSignificantBits(),
-            sharedTopicId.getLeastSignificantBits(),
-            0
-        );
+        SharedPartitionId sharedId = sharedPartitionId(sharedTopicId, 0);
         assertEquals(
             SharedCommitProgress.ReplicaRole.LEADER,
             progress.partitionProgress(sharedId).orElseThrow().role()
@@ -82,5 +66,48 @@ class SharedPartitionRoleListenerTest {
             progress.partitionProgress(sharedId).orElseThrow().role()
         );
         assertFalse(progress.partitionProgress(sharedId).orElseThrow().isLeader());
+    }
+
+    @Test
+    void defaultAllUserTopicRoutingStillNeverTracksInternalTopics() {
+        SharedStorageConfiguration configuration = configuration(Map.of());
+        SharedCommitProgress progress = new SharedCommitProgress();
+        SharedPartitionRoleListener listener = new SharedPartitionRoleListener(configuration, progress);
+
+        Uuid userTopicId = Uuid.randomUuid();
+        listener.onLeadershipChange(
+            List.of(
+                topicPartition(userTopicId, "user-topic", 1),
+                topicPartition(Uuid.randomUuid(), "__transaction_state", 1)
+            ),
+            List.of()
+        );
+
+        assertEquals(1, progress.snapshot().size());
+        assertEquals(
+            SharedCommitProgress.ReplicaRole.LEADER,
+            progress.partitionProgress(sharedPartitionId(userTopicId, 1)).orElseThrow().role()
+        );
+    }
+
+    private SharedStorageConfiguration configuration(Map<String, ?> originals) {
+        return SharedStorageConfiguration.from(new StorageExtensionContext(
+            originals,
+            List.of(tempDir.toFile()),
+            1,
+            new MockTime()
+        ));
+    }
+
+    private static TopicIdPartition topicPartition(Uuid topicId, String topic, int partition) {
+        return new TopicIdPartition(topicId, new TopicPartition(topic, partition));
+    }
+
+    private static SharedPartitionId sharedPartitionId(Uuid topicId, int partition) {
+        return new SharedPartitionId(
+            topicId.getMostSignificantBits(),
+            topicId.getLeastSignificantBits(),
+            partition
+        );
     }
 }
