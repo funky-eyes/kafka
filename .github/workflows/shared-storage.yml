@@ -210,14 +210,35 @@ jobs:
             :storage:shared-storage-s3:compileTestJava \
             :storage:shared-storage-s3:test \
             --tests 'org.apache.kafka.storage.internals.shared.s3.S3ObjectStoreTest' \
+            -x :storage:shared-storage-s3:checkstyleMain \
+            -x :storage:shared-storage-s3:checkstyleTest \
+            -x :storage:shared-storage-s3:spotbugsMain \
+            -x :storage:shared-storage-s3:spotbugsTest \
             --no-scan 2>&1 | tee shared-storage-minio-e2e.log
 
-      - name: Upload MinIO E2E log
+      - name: Run S3 static analysis diagnostics
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew \
+            :storage:shared-storage-s3:checkstyleMain \
+            :storage:shared-storage-s3:checkstyleTest \
+            :storage:shared-storage-s3:spotbugsMain \
+            :storage:shared-storage-s3:spotbugsTest \
+            --no-scan 2>&1 | tee shared-storage-s3-static-analysis.log
+
+      - name: Upload MinIO E2E diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: shared-storage-minio-e2e-log
-          path: shared-storage-minio-e2e.log
+          path: |
+            shared-storage-minio-e2e.log
+            shared-storage-s3-static-analysis.log
+            storage/shared-storage-s3/build/reports/spotbugs
+            storage/shared-storage-s3/build/reports/checkstyle
           if-no-files-found: ignore
           retention-days: 7
 
