@@ -48,6 +48,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 
 /**
  * Authoritative shared-object metadata store backed by the classic compacted Kafka topic
@@ -55,8 +56,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *
  * <p>The topic is always a classic Kafka log. Startup manually assigns its single partition, captures a read-committed
  * end offset and replays from the beginning to that boundary before marking the metadata image READY. A daemon consumer
- * then tails live records. Any unexpected live-consumer or replay failure marks the image FAILED so remote reads and
- * uploads fail closed rather than continuing from stale metadata.</p>
+ * then tails live records. Any unexpected live-consumer, replay or committed-object observer failure marks the image
+ * FAILED so remote reads and uploads fail closed rather than continuing from stale metadata.</p>
  */
 public final class KafkaObjectMetadataStore implements ObjectMetadataStore, AutoCloseable {
     private static final TopicPartition METADATA_PARTITION =
@@ -92,14 +93,26 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
     }
 
     public static KafkaObjectMetadataStore open(SharedMetadataClientConfiguration configuration) throws IOException {
+        return open(configuration, ignored -> { });
+    }
+
+    /**
+     * Opens the metadata store and mirrors every newly observed committed object to the supplied non-blocking listener.
+     * The listener is invoked for both initial replay and live records, including commits produced by other brokers.
+     */
+    public static KafkaObjectMetadataStore open(
+        SharedMetadataClientConfiguration configuration,
+        Consumer<SharedObjectMetadata> committedObjectListener
+    ) throws IOException {
         Objects.requireNonNull(configuration, "configuration");
+        Objects.requireNonNull(committedObjectListener, "committedObjectListener");
         KafkaObjectMetadataStore store = new KafkaObjectMetadataStore(
             configuration,
             Admin.create(configuration.adminProperties()),
             new KafkaProducer<>(configuration.producerProperties()),
             new KafkaProducer<>(configuration.sequenceProducerProperties()),
             new KafkaConsumer<>(configuration.consumerProperties()),
-            new SharedMetadataImage()
+            new SharedMetadataImage(committedObjectListener)
         );
         try {
             store.initialize();

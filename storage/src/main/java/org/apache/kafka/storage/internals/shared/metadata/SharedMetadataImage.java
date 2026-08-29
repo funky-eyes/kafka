@@ -30,13 +30,16 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.Consumer;
 
 /**
  * In-memory image rebuilt from the compacted shared-storage metadata topic.
  *
  * <p>The image is deliberately fail-closed. Authoritative getters are unavailable while the initial replay is still
  * recovering and after a live replay failure. Illegal state regressions, such as re-preparing an already committed
- * object or moving a broker sequence watermark backwards, are treated as corruption rather than silently reconciled.</p>
+ * object or moving a broker sequence watermark backwards, are treated as corruption rather than silently reconciled.
+ * A non-blocking committed-object listener may be installed so every broker can mirror replayed/live metadata into its
+ * local remote-range index without polling the Kafka metadata topic from the storage engine.</p>
  */
 public final class SharedMetadataImage {
     private static final long INITIAL_SEQUENCE = 1L;
@@ -44,8 +47,17 @@ public final class SharedMetadataImage {
     private final Map<Long, PreparedObject> preparedObjects = new HashMap<>();
     private final Map<Long, SharedObjectMetadata> committedObjects = new HashMap<>();
     private final Map<Integer, Long> brokerSequenceWatermarks = new HashMap<>();
+    private final Consumer<SharedObjectMetadata> committedObjectListener;
     private State state = State.RECOVERING;
     private Throwable failure;
+
+    public SharedMetadataImage() {
+        this(ignored -> { });
+    }
+
+    public SharedMetadataImage(Consumer<SharedObjectMetadata> committedObjectListener) {
+        this.committedObjectListener = Objects.requireNonNull(committedObjectListener, "committedObjectListener");
+    }
 
     public synchronized void apply(byte[] keyBytes, byte[] valueBytes) {
         if (state == State.FAILED) {
@@ -88,6 +100,11 @@ public final class SharedMetadataImage {
             }
             // A compacted topic may expose COMMIT without its earlier PREPARE, so PREPARE is not required here.
             preparedObjects.remove(objectId);
+            if (existing == null) {
+                // This listener must remain non-blocking. A failure means this broker can no longer trust its remote
+                // index, so propagate it to the replay loop and fail the image closed.
+                committedObjectListener.accept(metadata);
+            }
             return;
         }
         throw corruption("object " + objectId + " has incompatible metadata value " + value.getClass().getName());

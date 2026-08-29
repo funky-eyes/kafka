@@ -18,6 +18,7 @@ package org.apache.kafka.storage.internals.shared.metadata;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -46,6 +47,44 @@ class SharedMetadataImageTest {
         assertEquals(SharedMetadataImage.State.READY, image.state());
         assertTrue(image.isReady());
         assertEquals(List.of(metadata(objectId, 101L)), image.committedObjects());
+    }
+
+    @Test
+    void notifiesEachNewCommittedObjectExactlyOnceDuringReplayOrLiveApply() {
+        List<SharedObjectMetadata> observed = new ArrayList<>();
+        SharedMetadataImage image = new SharedMetadataImage(observed::add);
+        long objectId = BrokerObjectId.compose(1, 11L);
+        byte[] key = SharedMetadataRecordCodec.objectKey(objectId);
+        SharedObjectMetadata committed = metadata(objectId, 111L);
+
+        image.apply(key, SharedMetadataRecordCodec.preparedObjectValue(10L));
+        assertTrue(observed.isEmpty());
+
+        byte[] committedValue = SharedMetadataRecordCodec.committedObjectValue(committed);
+        image.apply(key, committedValue);
+        assertEquals(List.of(committed), observed);
+
+        // Replaying an identical COMMIT record is idempotent and must not duplicate the observer side effect.
+        image.apply(key, committedValue);
+        assertEquals(List.of(committed), observed);
+    }
+
+    @Test
+    void committedObjectListenerFailurePropagatesSoCallerCanFailImageClosed() {
+        RuntimeException observerFailure = new RuntimeException("remote index rejected metadata");
+        SharedMetadataImage image = new SharedMetadataImage(metadata -> {
+            throw observerFailure;
+        });
+        long objectId = BrokerObjectId.compose(1, 12L);
+
+        RuntimeException error = assertThrows(
+            RuntimeException.class,
+            () -> image.apply(
+                SharedMetadataRecordCodec.objectKey(objectId),
+                SharedMetadataRecordCodec.committedObjectValue(metadata(objectId, 112L))
+            )
+        );
+        assertSame(observerFailure, error);
     }
 
     @Test
