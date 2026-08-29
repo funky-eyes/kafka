@@ -31,22 +31,33 @@ import java.util.concurrent.CompletableFuture;
  * loses and the object is left untouched. If the claim is ordered first, all delayed COMMIT attempts are fenced before
  * the physical delete starts.</p>
  *
- * <p>A failed physical delete leaves the claim in place and is retried on a later pass. A crash or metadata failure
- * after a successful physical delete but before {@code completeCleanup} is also safe: object deletion is idempotent and
- * the durable CLAIMED state remains discoverable for retry.</p>
+ * <p>CLAIMED is intentionally kept durable after a successful delete. A remote PUT that was already in flight when a
+ * broker crashed may become visible after the first DELETE. Keeping the claim discoverable makes later passes issue the
+ * idempotent DELETE again, so an arbitrarily late physical write cannot turn into a permanent orphan. A terminal DELETED
+ * metadata state may only be used by a future store implementation that can prove write quiescence.</p>
  */
 public final class OrphanObjectCleaner {
     private final ObjectStore objectStore;
     private final ObjectMetadataStore metadataStore;
+    private final ActiveObjectUploads activeUploads;
 
     public OrphanObjectCleaner(ObjectStore objectStore, ObjectMetadataStore metadataStore) {
+        this(objectStore, metadataStore, new ActiveObjectUploads());
+    }
+
+    public OrphanObjectCleaner(
+        ObjectStore objectStore,
+        ObjectMetadataStore metadataStore,
+        ActiveObjectUploads activeUploads
+    ) {
         this.objectStore = Objects.requireNonNull(objectStore, "objectStore");
         this.metadataStore = Objects.requireNonNull(metadataStore, "metadataStore");
+        this.activeUploads = Objects.requireNonNull(activeUploads, "activeUploads");
     }
 
     /**
      * Cleans PREPARED objects created at or before {@code cutoffCreatedTimeMs}, plus all previously claimed cleanups.
-     * The returned count is the number of physical delete/finalize sequences completed by this pass.
+     * The returned count is the number of physical DELETE operations completed by this pass.
      */
     public CompletableFuture<Integer> clean(long cutoffCreatedTimeMs) {
         if (cutoffCreatedTimeMs < 0) {
@@ -56,19 +67,23 @@ public final class OrphanObjectCleaner {
 
         Map<Long, ObjectMetadataStore.PreparedObject> alreadyClaimed = new LinkedHashMap<>();
         for (ObjectMetadataStore.PreparedObject object : metadataStore.cleanupClaimedObjects()) {
-            alreadyClaimed.put(object.objectId(), object);
+            if (!activeUploads.contains(object.objectId())) {
+                alreadyClaimed.put(object.objectId(), object);
+            }
         }
 
         Map<Long, ObjectMetadataStore.PreparedObject> candidates = new LinkedHashMap<>();
         for (ObjectMetadataStore.PreparedObject object : metadataStore.preparedObjects()) {
-            if (object.createdTimeMs() <= cutoffCreatedTimeMs && !alreadyClaimed.containsKey(object.objectId())) {
+            if (object.createdTimeMs() <= cutoffCreatedTimeMs
+                && !activeUploads.contains(object.objectId())
+                && !alreadyClaimed.containsKey(object.objectId())) {
                 candidates.put(object.objectId(), object);
             }
         }
 
         CompletableFuture<Integer> result = CompletableFuture.completedFuture(0);
         for (ObjectMetadataStore.PreparedObject claimed : alreadyClaimed.values()) {
-            result = result.thenCompose(count -> deleteAndFinalize(claimed.objectId()).thenApply(ignored -> count + 1));
+            result = result.thenCompose(count -> deleteClaimed(claimed.objectId()).thenApply(ignored -> count + 1));
         }
         for (ObjectMetadataStore.PreparedObject candidate : candidates.values()) {
             result = result.thenCompose(count -> claimAndDelete(candidate).thenApply(deleted -> count + (deleted ? 1 : 0)));
@@ -82,12 +97,11 @@ public final class OrphanObjectCleaner {
                 if (!claimed) {
                     return CompletableFuture.completedFuture(false);
                 }
-                return deleteAndFinalize(candidate.objectId()).thenApply(ignored -> true);
+                return deleteClaimed(candidate.objectId()).thenApply(ignored -> true);
             });
     }
 
-    private CompletableFuture<Void> deleteAndFinalize(long objectId) {
-        return objectStore.delete(objectId)
-            .thenCompose(ignored -> metadataStore.completeCleanup(objectId));
+    private CompletableFuture<Void> deleteClaimed(long objectId) {
+        return objectStore.delete(objectId);
     }
 }
