@@ -20,6 +20,9 @@ import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectUploader;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -43,6 +46,8 @@ import java.util.function.LongSupplier;
  * {@link SharedObjectUploader}.</p>
  */
 public final class SharedUploadScheduler implements AutoCloseable {
+    private static final Logger LOG = LoggerFactory.getLogger(SharedUploadScheduler.class);
+
     private final SharedStorageEngine engine;
     private final SharedCommitProgress commitProgress;
     private final SharedObjectUploader uploader;
@@ -52,6 +57,7 @@ public final class SharedUploadScheduler implements AutoCloseable {
     private final AtomicBoolean uploadInProgress = new AtomicBoolean();
     private final AtomicBoolean closed = new AtomicBoolean();
     private final AtomicReference<Throwable> lastFailure = new AtomicReference<>();
+    private final AtomicReference<SelectionSummary> lastSelectionSummary = new AtomicReference<>();
 
     private ScheduledExecutorService executor;
 
@@ -89,6 +95,11 @@ public final class SharedUploadScheduler implements AutoCloseable {
             thread.setDaemon(true);
             return thread;
         });
+        LOG.info(
+            "Started shared upload scheduler with intervalMs={} and targetObjectBytes={}",
+            intervalMs,
+            targetObjectBytes
+        );
         executor.scheduleWithFixedDelay(this::runScheduledUpload, intervalMs, intervalMs, TimeUnit.MILLISECONDS);
     }
 
@@ -133,6 +144,7 @@ public final class SharedUploadScheduler implements AutoCloseable {
                 lastFailure.set(null);
             } else {
                 lastFailure.set(error);
+                LOG.warn("Shared object upload failed", error);
             }
             uploadInProgress.set(false);
         });
@@ -141,6 +153,7 @@ public final class SharedUploadScheduler implements AutoCloseable {
     private CompletableFuture<Optional<SharedObjectMetadata>> synchronousFailure(RuntimeException error) {
         lastFailure.set(error);
         uploadInProgress.set(false);
+        LOG.warn("Shared upload scheduling failed before the asynchronous object PUT started", error);
         return CompletableFuture.failedFuture(error);
     }
 
@@ -149,19 +162,35 @@ public final class SharedUploadScheduler implements AutoCloseable {
     }
 
     List<SharedStorageEngine.UploadCandidate> selectCandidates() {
+        Map<org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId,
+            SharedCommitProgress.PartitionProgress> snapshot = commitProgress.snapshot();
         List<SharedStorageEngine.UploadCandidate> committed = new ArrayList<>();
+        int leaderPartitions = 0;
+        int openCommitWindows = 0;
         for (Map.Entry<org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId,
-            SharedCommitProgress.PartitionProgress> entry : commitProgress.snapshot().entrySet()) {
+            SharedCommitProgress.PartitionProgress> entry : snapshot.entrySet()) {
             SharedCommitProgress.PartitionProgress progress = entry.getValue();
-            if (!progress.isLeader() || progress.highWatermark() <= progress.logStartOffset()) {
+            if (!progress.isLeader()) {
                 continue;
             }
+            leaderPartitions++;
+            if (progress.highWatermark() <= progress.logStartOffset()) {
+                continue;
+            }
+            openCommitWindows++;
             committed.addAll(engine.uploadCandidates(
                 entry.getKey(),
                 progress.logStartOffset(),
                 progress.highWatermark()
             ));
         }
+        logSelectionSummary(new SelectionSummary(
+            snapshot.size(),
+            leaderPartitions,
+            openCommitWindows,
+            committed.size()
+        ));
+
         committed.sort(Comparator
             .comparingLong((SharedStorageEngine.UploadCandidate candidate) -> candidate.location().segmentId())
             .thenComparingLong(candidate -> candidate.location().position()));
@@ -185,6 +214,19 @@ public final class SharedUploadScheduler implements AutoCloseable {
         return List.copyOf(selected);
     }
 
+    private void logSelectionSummary(SelectionSummary summary) {
+        SelectionSummary previous = lastSelectionSummary.getAndSet(summary);
+        if (!summary.equals(previous)) {
+            LOG.info(
+                "Shared upload gate state changed: trackedPartitions={}, leaders={}, openCommitWindows={}, candidates={}",
+                summary.trackedPartitions(),
+                summary.leaderPartitions(),
+                summary.openCommitWindows(),
+                summary.candidateCount()
+            );
+        }
+    }
+
     private void runScheduledUpload() {
         tryUploadOnce().whenComplete((ignored, error) -> {
             if (error != null) {
@@ -202,5 +244,13 @@ public final class SharedUploadScheduler implements AutoCloseable {
             executor.shutdownNow();
             executor = null;
         }
+    }
+
+    private record SelectionSummary(
+        int trackedPartitions,
+        int leaderPartitions,
+        int openCommitWindows,
+        int candidateCount
+    ) {
     }
 }
