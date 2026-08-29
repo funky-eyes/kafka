@@ -120,16 +120,59 @@ class OrphanObjectCleanerTest {
 
         assertEquals(1, cleaner.clean(1_000L).get());
         assertFalse(delegate.contains(objectId));
-        assertTrue(metadata.isDeleted(objectId));
+        assertTrue(metadata.isCleanupClaimed(objectId));
+    }
+
+    @Test
+    void latePutAfterSuccessfulDeleteIsRemovedByLaterPass() throws Exception {
+        InMemoryObjectStore objects = new InMemoryObjectStore();
+        InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
+        long objectId = 104L;
+        metadata.prepare(objectId, 400L).get();
+        objects.put(objectId, ByteBuffer.wrap(new byte[] {4})).get();
+        OrphanObjectCleaner cleaner = new OrphanObjectCleaner(objects, metadata);
+
+        assertEquals(1, cleaner.clean(1_000L).get());
+        assertFalse(objects.contains(objectId));
+        assertTrue(metadata.isCleanupClaimed(objectId));
+
+        // Models an S3 PUT that had already escaped the crashed uploader and became visible after the first DELETE.
+        objects.put(objectId, ByteBuffer.wrap(new byte[] {5})).get();
+        assertTrue(objects.contains(objectId));
+
+        assertEquals(1, cleaner.clean(1_000L).get());
+        assertFalse(objects.contains(objectId));
+        assertTrue(metadata.isCleanupClaimed(objectId));
+    }
+
+    @Test
+    void activePreparedUploadIsNeverClaimed() throws Exception {
+        InMemoryObjectStore objects = new InMemoryObjectStore();
+        InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
+        ActiveObjectUploads activeUploads = new ActiveObjectUploads();
+        long objectId = 105L;
+        metadata.prepare(objectId, 500L).get();
+        objects.put(objectId, ByteBuffer.wrap(new byte[] {6})).get();
+        activeUploads.begin(objectId);
+
+        OrphanObjectCleaner cleaner = new OrphanObjectCleaner(objects, metadata, activeUploads);
+        assertEquals(0, cleaner.clean(10_000L).get());
+        assertTrue(objects.contains(objectId));
+        assertTrue(metadata.isPrepared(objectId));
+
+        activeUploads.end(objectId);
+        assertEquals(1, cleaner.clean(10_000L).get());
+        assertFalse(objects.contains(objectId));
+        assertTrue(metadata.isCleanupClaimed(objectId));
     }
 
     @Test
     void youngPreparedObjectIsNotClaimed() throws Exception {
         InMemoryObjectStore objects = new InMemoryObjectStore();
         InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
-        long objectId = 104L;
+        long objectId = 106L;
         metadata.prepare(objectId, 2_000L).get();
-        objects.put(objectId, ByteBuffer.wrap(new byte[] {4})).get();
+        objects.put(objectId, ByteBuffer.wrap(new byte[] {7})).get();
 
         assertEquals(0, new OrphanObjectCleaner(objects, metadata).clean(1_999L).get());
         assertTrue(objects.contains(objectId));
