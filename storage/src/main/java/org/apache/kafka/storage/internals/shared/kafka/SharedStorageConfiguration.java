@@ -35,6 +35,8 @@ public final class SharedStorageConfiguration {
     public static final String WAL_SEGMENT_BYTES_CONFIG = "shared.storage.wal.segment.bytes";
     public static final String OBJECT_TARGET_BYTES_CONFIG = "shared.storage.object.target.bytes";
     public static final String UPLOAD_INTERVAL_MS_CONFIG = "shared.storage.upload.interval.ms";
+    public static final String ORPHAN_CLEANUP_INTERVAL_MS_CONFIG = "shared.storage.orphan.cleanup.interval.ms";
+    public static final String ORPHAN_GRACE_MS_CONFIG = "shared.storage.orphan.grace.ms";
     public static final String TOPICS_CONFIG = "shared.storage.topics";
     public static final String TOPIC_PATTERN_CONFIG = "shared.storage.topic.pattern";
 
@@ -42,12 +44,16 @@ public final class SharedStorageConfiguration {
     public static final long DEFAULT_WAL_SEGMENT_BYTES = 64L * 1024 * 1024;
     public static final long DEFAULT_OBJECT_TARGET_BYTES = 32L * 1024 * 1024;
     public static final long DEFAULT_UPLOAD_INTERVAL_MS = 100L;
+    public static final long DEFAULT_ORPHAN_CLEANUP_INTERVAL_MS = 60_000L;
+    public static final long DEFAULT_ORPHAN_GRACE_MS = 10L * 60 * 1_000;
 
     private final Path walDir;
     private final long walCapacityBytes;
     private final long walSegmentBytes;
     private final long objectTargetBytes;
     private final long uploadIntervalMs;
+    private final long orphanCleanupIntervalMs;
+    private final long orphanGraceMs;
     private final Set<String> topics;
     private final Pattern topicPattern;
 
@@ -57,6 +63,8 @@ public final class SharedStorageConfiguration {
         long walSegmentBytes,
         long objectTargetBytes,
         long uploadIntervalMs,
+        long orphanCleanupIntervalMs,
+        long orphanGraceMs,
         Set<String> topics,
         Pattern topicPattern
     ) {
@@ -65,6 +73,8 @@ public final class SharedStorageConfiguration {
         this.walSegmentBytes = walSegmentBytes;
         this.objectTargetBytes = objectTargetBytes;
         this.uploadIntervalMs = uploadIntervalMs;
+        this.orphanCleanupIntervalMs = orphanCleanupIntervalMs;
+        this.orphanGraceMs = orphanGraceMs;
         this.topics = topics;
         this.topicPattern = topicPattern;
     }
@@ -101,6 +111,16 @@ public final class SharedStorageConfiguration {
             DEFAULT_UPLOAD_INTERVAL_MS,
             UPLOAD_INTERVAL_MS_CONFIG
         );
+        long orphanCleanupIntervalMs = positiveLong(
+            context.originals().get(ORPHAN_CLEANUP_INTERVAL_MS_CONFIG),
+            DEFAULT_ORPHAN_CLEANUP_INTERVAL_MS,
+            ORPHAN_CLEANUP_INTERVAL_MS_CONFIG
+        );
+        long orphanGraceMs = positiveLong(
+            context.originals().get(ORPHAN_GRACE_MS_CONFIG),
+            DEFAULT_ORPHAN_GRACE_MS,
+            ORPHAN_GRACE_MS_CONFIG
+        );
 
         Set<String> topics = parseTopics(context.originals().get(TOPICS_CONFIG));
         Pattern topicPattern = parsePattern(context.originals().get(TOPIC_PATTERN_CONFIG));
@@ -110,6 +130,8 @@ public final class SharedStorageConfiguration {
             walSegmentBytes,
             objectTargetBytes,
             uploadIntervalMs,
+            orphanCleanupIntervalMs,
+            orphanGraceMs,
             topics,
             topicPattern
         );
@@ -158,6 +180,14 @@ public final class SharedStorageConfiguration {
 
     public long uploadIntervalMs() {
         return uploadIntervalMs;
+    }
+
+    public long orphanCleanupIntervalMs() {
+        return orphanCleanupIntervalMs;
+    }
+
+    public long orphanGraceMs() {
+        return orphanGraceMs;
     }
 
     /**
