@@ -20,9 +20,6 @@ import org.apache.kafka.storage.internals.shared.object.SharedObjectUploadHook;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectUploadHook.Phase;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectUploadHook.UploadContext;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
@@ -40,8 +37,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 final class FileSharedObjectUploadBarrier implements SharedObjectUploadHook {
     static final String PAUSE_AFTER_CONFIG = "shared.storage.test.upload.pause.after";
     static final String BARRIER_DIR_CONFIG = "shared.storage.test.upload.barrier.dir";
-
-    private static final Logger LOG = LoggerFactory.getLogger(FileSharedObjectUploadBarrier.class);
 
     private final Phase targetPhase;
     private final Path barrierDir;
@@ -100,13 +95,6 @@ final class FileSharedObjectUploadBarrier implements SharedObjectUploadHook {
 
         try {
             writeReachedMarker(context);
-            LOG.warn(
-                "Shared upload correctness barrier reached: brokerId={}, phase={}, objectId={}, marker={}",
-                brokerId,
-                phase,
-                context.objectId(),
-                reachedFile()
-            );
         } catch (IOException e) {
             pause.completeExceptionally(e);
         }
