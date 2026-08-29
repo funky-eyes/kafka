@@ -21,18 +21,22 @@ import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class InMemoryObjectMetadataStore implements ObjectMetadataStore {
     private final ConcurrentHashMap<Long, Entry> entries = new ConcurrentHashMap<>();
 
     @Override
     public CompletableFuture<Void> prepare(long objectId, long createdTimeMs) {
-        if (objectId < 0) {
-            return CompletableFuture.failedFuture(new IllegalArgumentException("objectId must be non-negative"));
+        if (objectId <= 0) {
+            return CompletableFuture.failedFuture(new IllegalArgumentException("objectId must be positive"));
         }
-        Entry existing = entries.putIfAbsent(objectId, new Entry(createdTimeMs, null));
+        if (createdTimeMs < 0) {
+            return CompletableFuture.failedFuture(new IllegalArgumentException("createdTimeMs must be non-negative"));
+        }
+        Entry existing = entries.putIfAbsent(objectId, Entry.prepared(createdTimeMs));
         if (existing != null) {
-            return CompletableFuture.failedFuture(new IllegalStateException("Object already prepared: " + objectId));
+            return CompletableFuture.failedFuture(new IllegalStateException("Object already exists: " + objectId));
         }
         return CompletableFuture.completedFuture(null);
     }
@@ -41,19 +45,21 @@ public final class InMemoryObjectMetadataStore implements ObjectMetadataStore {
     public CompletableFuture<Void> commit(SharedObjectMetadata metadata) {
         Objects.requireNonNull(metadata, "metadata");
         try {
-            Entry updated = entries.compute(metadata.objectId(), (id, existing) -> {
+            entries.compute(metadata.objectId(), (id, existing) -> {
                 if (existing == null) {
                     throw new IllegalStateException("Object was not prepared: " + id);
                 }
-                if (existing.metadata != null && !existing.metadata.equals(metadata)) {
-                    throw new RemoteMetadataConflictException("Object commit changed immutable metadata: " + id);
+                if (existing.state == EntryState.CLEANUP_CLAIMED || existing.state == EntryState.DELETED) {
+                    throw new IllegalStateException("Object is fenced from commit by orphan cleanup: " + id);
                 }
-                return new Entry(existing.createdTimeMs, metadata);
+                if (existing.state == EntryState.COMMITTED) {
+                    if (!existing.metadata.equals(metadata)) {
+                        throw new RemoteMetadataConflictException("Object commit changed immutable metadata: " + id);
+                    }
+                    return existing;
+                }
+                return Entry.committed(existing.createdTimeMs, metadata);
             });
-            if (updated == null) {
-                return CompletableFuture.failedFuture(new IllegalStateException(
-                    "Unable to commit object " + metadata.objectId()));
-            }
             return CompletableFuture.completedFuture(null);
         } catch (RuntimeException e) {
             return CompletableFuture.failedFuture(e);
@@ -67,23 +73,114 @@ public final class InMemoryObjectMetadataStore implements ObjectMetadataStore {
     }
 
     @Override
+    public CompletableFuture<Boolean> claimCleanup(long objectId, long expectedCreatedTimeMs) {
+        if (objectId <= 0) {
+            return CompletableFuture.failedFuture(new IllegalArgumentException("objectId must be positive"));
+        }
+        if (expectedCreatedTimeMs < 0) {
+            return CompletableFuture.failedFuture(new IllegalArgumentException("expectedCreatedTimeMs must be non-negative"));
+        }
+        AtomicBoolean claimed = new AtomicBoolean(false);
+        entries.computeIfPresent(objectId, (id, existing) -> {
+            if (existing.state == EntryState.PREPARED && existing.createdTimeMs == expectedCreatedTimeMs) {
+                claimed.set(true);
+                return Entry.cleanupClaimed(existing.createdTimeMs);
+            }
+            return existing;
+        });
+        return CompletableFuture.completedFuture(claimed.get());
+    }
+
+    @Override
+    public CompletableFuture<Void> completeCleanup(long objectId) {
+        try {
+            entries.compute(objectId, (id, existing) -> {
+                if (existing == null) {
+                    throw new IllegalStateException("Object cleanup was not claimed: " + id);
+                }
+                if (existing.state == EntryState.DELETED) {
+                    return existing;
+                }
+                if (existing.state != EntryState.CLEANUP_CLAIMED) {
+                    throw new IllegalStateException("Object cleanup is not claimed: " + id);
+                }
+                return Entry.deleted(existing.createdTimeMs);
+            });
+            return CompletableFuture.completedFuture(null);
+        } catch (RuntimeException e) {
+            return CompletableFuture.failedFuture(e);
+        }
+    }
+
+    @Override
     public List<SharedObjectMetadata> committedObjects() {
         return entries.entrySet().stream()
-            .filter(entry -> entry.getValue().metadata != null)
+            .filter(entry -> entry.getValue().state == EntryState.COMMITTED)
             .sorted(Comparator.comparingLong(java.util.Map.Entry::getKey))
             .map(entry -> entry.getValue().metadata)
             .toList();
     }
 
+    @Override
+    public List<PreparedObject> preparedObjects() {
+        return objectsInState(EntryState.PREPARED);
+    }
+
+    @Override
+    public List<PreparedObject> cleanupClaimedObjects() {
+        return objectsInState(EntryState.CLEANUP_CLAIMED);
+    }
+
     public boolean isPrepared(long objectId) {
-        return entries.containsKey(objectId);
+        Entry entry = entries.get(objectId);
+        return entry != null && entry.state == EntryState.PREPARED;
     }
 
     public boolean isCommitted(long objectId) {
         Entry entry = entries.get(objectId);
-        return entry != null && entry.metadata != null;
+        return entry != null && entry.state == EntryState.COMMITTED;
     }
 
-    private record Entry(long createdTimeMs, SharedObjectMetadata metadata) {
+    public boolean isCleanupClaimed(long objectId) {
+        Entry entry = entries.get(objectId);
+        return entry != null && entry.state == EntryState.CLEANUP_CLAIMED;
+    }
+
+    public boolean isDeleted(long objectId) {
+        Entry entry = entries.get(objectId);
+        return entry != null && entry.state == EntryState.DELETED;
+    }
+
+    private List<PreparedObject> objectsInState(EntryState state) {
+        return entries.entrySet().stream()
+            .filter(entry -> entry.getValue().state == state)
+            .sorted(Comparator.comparingLong(java.util.Map.Entry::getKey))
+            .map(entry -> new PreparedObject(entry.getKey(), entry.getValue().createdTimeMs))
+            .toList();
+    }
+
+    private enum EntryState {
+        PREPARED,
+        COMMITTED,
+        CLEANUP_CLAIMED,
+        DELETED
+    }
+
+    private record Entry(long createdTimeMs, SharedObjectMetadata metadata, EntryState state) {
+        private static Entry prepared(long createdTimeMs) {
+            return new Entry(createdTimeMs, null, EntryState.PREPARED);
+        }
+
+        private static Entry committed(long createdTimeMs, SharedObjectMetadata metadata) {
+            return new Entry(createdTimeMs, Objects.requireNonNull(metadata, "metadata"), EntryState.COMMITTED);
+        }
+
+        private static Entry cleanupClaimed(long createdTimeMs) {
+            return new Entry(createdTimeMs, null, EntryState.CLEANUP_CLAIMED);
+        }
+
+        private static Entry deleted(long createdTimeMs) {
+            return new Entry(createdTimeMs, null, EntryState.DELETED);
+        }
     }
 }
