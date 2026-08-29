@@ -29,7 +29,7 @@ import org.apache.kafka.storage.internals.shared.kafka.SharedStorageConfiguratio
 import org.apache.kafka.storage.internals.shared.kafka.SharedUnifiedLogFactory;
 import org.apache.kafka.storage.internals.shared.kafka.SharedUploadScheduler;
 import org.apache.kafka.storage.internals.shared.metadata.BrokerObjectId;
-import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
+
 import org.apache.kafka.storage.internals.shared.object.SharedObjectPacker;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectUploader;
 import org.apache.kafka.storage.internals.shared.wal.FileSharedWal;
@@ -172,10 +172,11 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         try {
             SharedMetadataClientConfiguration metadataConfiguration =
                 SharedMetadataClientConfiguration.from(context);
-            newMetadataStore = KafkaObjectMetadataStore.open(metadataConfiguration);
-            for (SharedObjectMetadata metadata : newMetadataStore.committedObjects()) {
-                engine.commitRemoteObject(metadata);
-            }
+            // Initial replay and live commits from every broker update this engine's remote coverage.
+            newMetadataStore = KafkaObjectMetadataStore.open(
+                metadataConfiguration,
+                engine::commitRemoteObject
+            );
 
             S3ObjectStoreConfig objectStoreConfig = objectStoreConfiguration(context);
             newObjectStore = new S3ObjectStore(objectStoreConfig);
