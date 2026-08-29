@@ -116,8 +116,10 @@ public class SharedStorageKRaftIntegrationTest {
             cluster.startup();
             cluster.waitForReadyBrokers();
 
+            String bootstrapServers = cluster.bootstrapServers();
+
             try (Admin admin = cluster.admin();
-                 KafkaProducer<String, String> producer = producer(cluster.bootstrapServers())) {
+                 KafkaProducer<String, String> producer = producer(bootstrapServers)) {
                 admin.createTopics(List.of(new NewTopic(TOPIC, 1, (short) 3)
                     .configs(Map.of(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2"))))
                     .all().get(30, TimeUnit.SECONDS);
@@ -132,7 +134,7 @@ public class SharedStorageKRaftIntegrationTest {
 
                 // Establish a known scheduler tick by waiting until the original leader has remotely committed warmup.
                 TestUtils.waitForCondition(
-                    () -> brokerCoverage(cluster.bootstrapServers(), partition, oldLeader).covers(warmupRange),
+                    () -> brokerCoverage(bootstrapServers, partition, oldLeader).covers(warmupRange),
                     90_000L,
                     () -> "Old leader " + oldLeader + " never remotely committed warmup range " + warmupRange
                 );
@@ -144,7 +146,7 @@ public class SharedStorageKRaftIntegrationTest {
                 );
 
                 // We are immediately after the previous scheduler tick. The failover tranche must still be WAL-only.
-                PartitionRemoteCoverage beforeCrash = allCoverage(cluster.bootstrapServers(), partition);
+                PartitionRemoteCoverage beforeCrash = allCoverage(bootstrapServers, partition);
                 assertFalse(
                     beforeCrash.covers(failoverRange),
                     "Failover tranche unexpectedly reached S3 before the leader was stopped"
@@ -170,13 +172,13 @@ public class SharedStorageKRaftIntegrationTest {
                 // This is the key recovery assertion: data acknowledged before the old leader stopped is uploaded from
                 // the new leader's replicated WAL, proven by the broker ID embedded in the committed object IDs.
                 TestUtils.waitForCondition(
-                    () -> brokerCoverage(cluster.bootstrapServers(), partition, newLeader).covers(failoverRange),
+                    () -> brokerCoverage(bootstrapServers, partition, newLeader).covers(failoverRange),
                     90_000L,
                     () -> "New leader " + newLeader + " never uploaded replicated failover range " + failoverRange
                 );
 
                 List<String> consumed = consumeAll(
-                    cluster.bootstrapServers(),
+                    bootstrapServers,
                     WARMUP_RECORDS + FAILOVER_RECORDS + POST_FAILOVER_RECORDS
                 );
                 List<String> expected = new ArrayList<>(consumed.size());
@@ -251,8 +253,13 @@ public class SharedStorageKRaftIntegrationTest {
         for (Map.Entry<Integer, org.apache.kafka.common.test.TestKitNode> broker :
             cluster.nodes().brokerNodes().entrySet()) {
             int brokerId = broker.getKey();
-            Path dataDir = Path.of(broker.getValue().logDataDirectories().iterator().next());
-            Path walDir = dataDir.resolve(".shared-storage").resolve("broker-" + brokerId).resolve("wal");
+            Path dataDir = Path.of(broker.getValue().logDataDirectories().iterator().next())
+                .toAbsolutePath()
+                .normalize();
+            Path walDir = dataDir
+                .resolveSibling(dataDir.getFileName() + ".shared-storage")
+                .resolve("broker-" + brokerId)
+                .resolve("wal");
             TestUtils.waitForCondition(
                 () -> walPayloadBytes(walDir) > 0L,
                 30_000L,
