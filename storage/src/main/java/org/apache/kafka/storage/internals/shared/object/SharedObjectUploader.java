@@ -35,6 +35,7 @@ public final class SharedObjectUploader {
     private final ObjectMetadataStore metadataStore;
     private final SharedObjectPacker packer;
     private final SharedStorageEngine engine;
+    private final ActiveObjectUploads activeUploads;
 
     public SharedObjectUploader(
         ObjectStore objectStore,
@@ -42,10 +43,21 @@ public final class SharedObjectUploader {
         SharedObjectPacker packer,
         SharedStorageEngine engine
     ) {
+        this(objectStore, metadataStore, packer, engine, new ActiveObjectUploads());
+    }
+
+    public SharedObjectUploader(
+        ObjectStore objectStore,
+        ObjectMetadataStore metadataStore,
+        SharedObjectPacker packer,
+        SharedStorageEngine engine,
+        ActiveObjectUploads activeUploads
+    ) {
         this.objectStore = Objects.requireNonNull(objectStore, "objectStore");
         this.metadataStore = Objects.requireNonNull(metadataStore, "metadataStore");
         this.packer = Objects.requireNonNull(packer, "packer");
         this.engine = Objects.requireNonNull(engine, "engine");
+        this.activeUploads = Objects.requireNonNull(activeUploads, "activeUploads");
     }
 
     public CompletableFuture<SharedObjectMetadata> upload(
@@ -56,16 +68,24 @@ public final class SharedObjectUploader {
         final PackedObject packed;
         try {
             packed = packer.pack(objectId, candidates, engine);
+            activeUploads.begin(objectId);
         } catch (IOException | RuntimeException e) {
             return CompletableFuture.failedFuture(e);
         }
 
-        return metadataStore.prepare(objectId, createdTimeMs)
-            .thenCompose(ignored -> objectStore.put(objectId, packed.bytes()))
-            .thenCompose(ignored -> metadataStore.commit(packed.metadata()))
-            .thenApply(ignored -> {
-                engine.commitRemoteObject(packed.metadata());
-                return packed.metadata();
-            });
+        CompletableFuture<SharedObjectMetadata> result;
+        try {
+            result = metadataStore.prepare(objectId, createdTimeMs)
+                .thenCompose(ignored -> objectStore.put(objectId, packed.bytes()))
+                .thenCompose(ignored -> metadataStore.commit(packed.metadata()))
+                .thenApply(ignored -> {
+                    engine.commitRemoteObject(packed.metadata());
+                    return packed.metadata();
+                });
+        } catch (RuntimeException e) {
+            activeUploads.end(objectId);
+            return CompletableFuture.failedFuture(e);
+        }
+        return result.whenComplete((ignored, error) -> activeUploads.end(objectId));
     }
 }
