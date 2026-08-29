@@ -1,0 +1,150 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements. See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License. You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Apply Shared Role Seam Once
+
+on:
+  push:
+    branches:
+      - shared-wal-s3-4.3.1
+    paths:
+      - '.github/workflows/shared-role-seam-once.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 200
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Wait for normalized branch head
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            git fetch origin shared-wal-s3-4.3.1 --force
+            head=$(git rev-parse origin/shared-wal-s3-4.3.1)
+            email=$(git show -s --format='%ae' "$head")
+            if [ "$email" = "jianbin@apache.org" ]; then
+              git reset --hard "$head"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Timed out waiting for author normalization" >&2
+          exit 1
+
+      - name: Apply exact role-notification seam
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one match, got {count}")
+              p.write_text(text.replace(old, new, 1))
+
+          replace_once(
+              "core/src/main/scala/kafka/log/LogManager.scala",
+              "import org.apache.kafka.common.{DirectoryId, KafkaException, TopicPartition, Uuid}",
+              "import org.apache.kafka.common.{DirectoryId, KafkaException, TopicIdPartition, TopicPartition, Uuid}"
+          )
+          replace_once(
+              "core/src/main/scala/kafka/log/LogManager.scala",
+              "LogOffsetsListener, ProducerStateManagerConfig, RemoteIndexCache, UnifiedLog, UnifiedLogCreationContext, UnifiedLogFactory}",
+              "LogOffsetsListener, ProducerStateManagerConfig, RemoteIndexCache, StoragePartitionRoleListener, UnifiedLog, UnifiedLogCreationContext, UnifiedLogFactory}"
+          )
+          replace_once(
+              "core/src/main/scala/kafka/log/LogManager.scala",
+              "  @volatile private var unifiedLogFactory: UnifiedLogFactory = UnifiedLogFactory.DEFAULT\n  @volatile private var unifiedLogFactoryFrozen = false\n",
+              "  @volatile private var unifiedLogFactory: UnifiedLogFactory = UnifiedLogFactory.DEFAULT\n  @volatile private var storagePartitionRoleListener: StoragePartitionRoleListener = StoragePartitionRoleListener.NO_OP\n  @volatile private var unifiedLogFactoryFrozen = false\n"
+          )
+          anchor = "  private def createUnifiedLog(context: UnifiedLogCreationContext): UnifiedLog = {\n"
+          addition = "\n".join([
+              "  /** Installs the non-blocking storage role observer before partition loading begins. */",
+              "  def setStoragePartitionRoleListener(listener: StoragePartitionRoleListener): Unit = this.synchronized {",
+              "    if (listener == null)",
+              "      throw new NullPointerException(\"listener\")",
+              "    if (unifiedLogFactoryFrozen)",
+              "      throw new IllegalStateException(\"StoragePartitionRoleListener cannot be changed after log creation has started\")",
+              "    storagePartitionRoleListener = listener",
+              "  }",
+              "",
+              "  /** Reports completed local role transitions to the optional physical-storage observer. */",
+              "  def onLeadershipChange(leaders: util.Collection[TopicIdPartition], followers: util.Collection[TopicIdPartition]): Unit = {",
+              "    storagePartitionRoleListener.onLeadershipChange(leaders, followers)",
+              "  }",
+              "",
+              ""
+          ])
+          replace_once(
+              "core/src/main/scala/kafka/log/LogManager.scala",
+              anchor,
+              addition + anchor
+          )
+
+          replace_once(
+              "core/src/main/scala/kafka/server/BrokerServer.scala",
+              "        logManager.setUnifiedLogFactory(storageExtension.get().unifiedLogFactory())\n",
+              "        logManager.setUnifiedLogFactory(storageExtension.get().unifiedLogFactory())\n        logManager.setStoragePartitionRoleListener(storageExtension.get().partitionRoleListener())\n"
+          )
+
+          remote_line = "        remoteLogManager.foreach(rlm => rlm.onLeadershipChange((leaderChangedPartitions.toSet: Set[TopicPartitionLog]).asJava, (followerChangedPartitions.toSet: Set[TopicPartitionLog]).asJava, localChanges.topicIds()))\n"
+          role_lines = "\n".join([
+              remote_line.rstrip("\n"),
+              "        val storageLeaderChanges = leaderChangedPartitions.flatMap { partition =>",
+              "          partition.topicId.map(topicId => new TopicIdPartition(topicId, partition.topicPartition))",
+              "        }.asJava",
+              "        val storageFollowerChanges = followerChangedPartitions.flatMap { partition =>",
+              "          partition.topicId.map(topicId => new TopicIdPartition(topicId, partition.topicPartition))",
+              "        }.asJava",
+              "        logManager.onLeadershipChange(storageLeaderChanges, storageFollowerChanges)",
+              ""
+          ])
+          replace_once(
+              "core/src/main/scala/kafka/server/ReplicaManager.scala",
+              remote_line,
+              role_lines
+          )
+          PY
+
+          rm .github/workflows/shared-role-seam-once.yml
+          git diff --check
+          test "$(grep -c 'setStoragePartitionRoleListener' core/src/main/scala/kafka/server/BrokerServer.scala)" -eq 1
+          test "$(grep -c 'logManager.onLeadershipChange' core/src/main/scala/kafka/server/ReplicaManager.scala)" -eq 1
+
+      - name: Commit exact patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "Jianbin Chen"
+          git config user.email "jianbin@apache.org"
+          git add core/src/main/scala/kafka/log/LogManager.scala \
+                  core/src/main/scala/kafka/server/BrokerServer.scala \
+                  core/src/main/scala/kafka/server/ReplicaManager.scala \
+                  .github/workflows/shared-role-seam-once.yml
+          git commit -m "KAFKA-Shared: notify storage extensions of replica roles"
+          git push origin HEAD:shared-wal-s3-4.3.1
