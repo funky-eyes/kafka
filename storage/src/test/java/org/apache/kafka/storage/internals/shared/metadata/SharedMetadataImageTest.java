@@ -41,6 +41,7 @@ class SharedMetadataImageTest {
         assertFalse(image.isReady());
         assertThrows(IllegalStateException.class, image::committedObjects);
         assertThrows(IllegalStateException.class, image::preparedObjects);
+        assertThrows(IllegalStateException.class, image::cleanupClaimedObjects);
         assertThrows(IllegalStateException.class, () -> image.brokerReservedExclusiveSequence(1));
 
         image.markReady();
@@ -87,7 +88,6 @@ class SharedMetadataImageTest {
             SharedMetadataRecordCodec.committedObjectValue(second)
         );
 
-        // Both physical objects are replayed. RemoteObjectIndex performs the logical range deduplication separately.
         assertEquals(List.of(first, second), observed);
     }
 
@@ -156,7 +156,7 @@ class SharedMetadataImageTest {
         image.apply(key, SharedMetadataRecordCodec.preparedObjectValue(500L));
         image.markReady();
         assertEquals(
-            List.of(new SharedMetadataImage.PreparedObject(objectId, 500L)),
+            List.of(new ObjectMetadataStore.PreparedObject(objectId, 500L)),
             image.preparedObjects()
         );
 
@@ -197,10 +197,63 @@ class SharedMetadataImageTest {
         image.markReady();
 
         assertEquals(
-            List.of(new SharedMetadataImage.PreparedObject(objectId, 999L)),
+            List.of(new ObjectMetadataStore.PreparedObject(objectId, 999L)),
             image.preparedObjects()
         );
         assertTrue(image.committedObjects().isEmpty());
+    }
+
+    @Test
+    void commitBeforeCleanupClaimWinsAndObjectRemainsCommitted() {
+        SharedMetadataImage image = new SharedMetadataImage();
+        long objectId = BrokerObjectId.compose(4, 31L);
+        long createdTimeMs = 1_001L;
+        SharedObjectMetadata committed = metadata(objectId, 304L);
+        image.apply(SharedMetadataRecordCodec.objectKey(objectId), SharedMetadataRecordCodec.preparedObjectValue(createdTimeMs));
+        image.apply(SharedMetadataRecordCodec.objectKey(objectId), SharedMetadataRecordCodec.committedObjectValue(committed));
+        image.apply(SharedMetadataRecordCodec.objectCleanupKey(objectId), SharedMetadataRecordCodec.cleanupClaimedValue(createdTimeMs));
+        image.markReady();
+
+        assertEquals(List.of(committed), image.committedObjects());
+        assertTrue(image.cleanupClaimedObjects().isEmpty());
+        assertFalse(image.cleanupFenced(objectId, createdTimeMs));
+    }
+
+    @Test
+    void cleanupClaimBeforeDelayedCommitWinsEvenWhenPrepareWasCompactedAway() {
+        SharedMetadataImage image = new SharedMetadataImage();
+        long objectId = BrokerObjectId.compose(4, 32L);
+        long createdTimeMs = 1_002L;
+        image.apply(SharedMetadataRecordCodec.objectCleanupKey(objectId), SharedMetadataRecordCodec.cleanupClaimedValue(createdTimeMs));
+        image.apply(
+            SharedMetadataRecordCodec.objectKey(objectId),
+            SharedMetadataRecordCodec.committedObjectValue(metadata(objectId, 305L))
+        );
+        image.markReady();
+
+        assertTrue(image.committedObjects().isEmpty());
+        assertEquals(
+            List.of(new ObjectMetadataStore.PreparedObject(objectId, createdTimeMs)),
+            image.cleanupClaimedObjects()
+        );
+        assertTrue(image.cleanupClaimed(objectId, createdTimeMs));
+    }
+
+    @Test
+    void deletedCleanupFenceIsTerminalAndSuppressesDelayedCommit() {
+        SharedMetadataImage image = new SharedMetadataImage();
+        long objectId = BrokerObjectId.compose(4, 33L);
+        long createdTimeMs = 1_003L;
+        image.apply(SharedMetadataRecordCodec.objectCleanupKey(objectId), SharedMetadataRecordCodec.cleanupDeletedValue(createdTimeMs));
+        image.apply(
+            SharedMetadataRecordCodec.objectKey(objectId),
+            SharedMetadataRecordCodec.committedObjectValue(metadata(objectId, 306L))
+        );
+        image.markReady();
+
+        assertTrue(image.committedObjects().isEmpty());
+        assertTrue(image.cleanupClaimedObjects().isEmpty());
+        assertTrue(image.cleanupFenced(objectId, createdTimeMs));
     }
 
     @Test
