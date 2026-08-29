@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.kafka.storage.internals.shared.kafka;
+package org.apache.kafka.storage.internals.shared.s3;
 
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.Config;
@@ -39,15 +39,12 @@ import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.Arrays;
-import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
