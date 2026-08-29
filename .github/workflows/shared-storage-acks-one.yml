@@ -1,0 +1,95 @@
+name: Shared Storage acks=1
+
+on:
+  push:
+    branches:
+      - shared-wal-s3-4.3.1
+  workflow_dispatch:
+
+concurrency:
+  group: shared-storage-acks-one-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  minio-acks-one:
+    name: MinIO acks=1 leader WAL E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Start MinIO
+        run: |
+          docker run --detach \
+            --name kafka-shared-minio-acks-one \
+            --publish 9000:9000 \
+            --env MINIO_ROOT_USER=minioadmin \
+            --env MINIO_ROOT_PASSWORD=minioadmin123 \
+            minio/minio:latest \
+            server /data --address :9000
+
+      - name: Wait for MinIO readiness
+        run: |
+          for i in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs kafka-shared-minio-acks-one
+          exit 1
+
+      - name: Ensure MinIO bucket exists
+        run: |
+          docker run --rm --network host --entrypoint /bin/sh minio/mc:latest -c '
+            mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
+            mc mb --ignore-existing local/kafka-shared-storage-e2e >/dev/null
+          '
+
+      - name: Setup Gradle
+        uses: ./.github/actions/setup-gradle
+        with:
+          java-version: 25
+          gradle-cache-read-only: true
+
+      - name: Run acks=1 durability boundary E2E
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin123
+          AWS_REGION: us-east-1
+          SHARED_STORAGE_S3_ENDPOINT: http://127.0.0.1:9000
+          SHARED_STORAGE_S3_REGION: us-east-1
+          SHARED_STORAGE_S3_BUCKET: kafka-shared-storage-e2e
+        run: |
+          set -o pipefail
+          ./gradlew :core:test \
+            --tests 'kafka.server.SharedStorageAcksOneKRaftIntegrationTest' \
+            --no-scan 2>&1 | tee shared-storage-acks-one-e2e.log
+
+      - name: Show committed S3 objects
+        if: always()
+        run: |
+          docker run --rm --network host --entrypoint /bin/sh minio/mc:latest -c '
+            mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
+            mc ls --recursive local/kafka-shared-storage-e2e || true
+          ' | tee shared-storage-acks-one-objects.log
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shared-storage-acks-one-e2e-log
+          path: |
+            shared-storage-acks-one-e2e.log
+            shared-storage-acks-one-objects.log
+            core/build/reports/tests/test
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: MinIO logs
+        if: always()
+        run: docker logs kafka-shared-minio-acks-one || true
