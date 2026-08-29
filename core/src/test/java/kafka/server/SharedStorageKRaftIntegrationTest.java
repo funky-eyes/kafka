@@ -124,7 +124,7 @@ public class SharedStorageKRaftIntegrationTest {
                     .configs(Map.of(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2"))))
                     .all().get(30, TimeUnit.SECONDS);
 
-                TopicDescription topic = describeTopic(admin, TOPIC);
+                TopicDescription topic = waitForTopicReady(admin, TOPIC);
                 SharedPartitionId partition = sharedPartitionId(topic.topicId(), 0);
                 int oldLeader = topic.partitions().get(0).leader().id();
 
@@ -226,6 +226,28 @@ public class SharedStorageKRaftIntegrationTest {
 
     private static TopicDescription describeTopic(Admin admin, String topic) throws Exception {
         return admin.describeTopics(List.of(topic)).allTopicNames().get(30, TimeUnit.SECONDS).get(topic);
+    }
+
+    private static TopicDescription waitForTopicReady(Admin admin, String topic) throws Exception {
+        TopicDescription[] ready = new TopicDescription[1];
+        TestUtils.waitForCondition(() -> {
+            try {
+                TopicDescription description = describeTopic(admin, topic);
+                if (description == null || description.partitions().size() != 1) {
+                    return false;
+                }
+                var partition = description.partitions().get(0);
+                if (partition.leader() == null || partition.leader().id() < 0 ||
+                    partition.replicas().size() != 3 || partition.isr().size() != 3) {
+                    return false;
+                }
+                ready[0] = description;
+                return true;
+            } catch (Exception ignored) {
+                return false;
+            }
+        }, 60_000L, () -> "Topic " + topic + " did not converge to one leader with all three replicas in ISR");
+        return ready[0];
     }
 
     private static int waitForNewLeader(Admin admin, int oldLeader) throws Exception {
