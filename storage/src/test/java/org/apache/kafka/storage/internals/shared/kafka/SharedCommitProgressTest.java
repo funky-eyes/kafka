@@ -39,32 +39,54 @@ class SharedCommitProgressTest {
     }
 
     @Test
-    void snapshotsKafkaLogStartAndHighWatermarkAsOneCommitWindow() {
+    void snapshotsKafkaLogStartHighWatermarkAndRoleAsOneCommitWindow() {
         SharedCommitProgress progress = new SharedCommitProgress();
         SharedPartitionId partition = new SharedPartitionId(1L, 2L, 6);
 
         progress.onLogLoaded(partition, 20L);
-        assertEquals(20L, progress.partitionProgress(partition).orElseThrow().logStartOffset());
-        assertEquals(20L, progress.partitionProgress(partition).orElseThrow().highWatermark());
+        SharedCommitProgress.PartitionProgress loaded = progress.partitionProgress(partition).orElseThrow();
+        assertEquals(20L, loaded.logStartOffset());
+        assertEquals(20L, loaded.highWatermark());
+        assertEquals(SharedCommitProgress.ReplicaRole.UNKNOWN, loaded.role());
 
         progress.onHighWatermarkUpdated(partition, 50L);
+        progress.onLeader(partition);
         SharedCommitProgress.PartitionProgress snapshot = progress.snapshot().get(partition);
         assertEquals(20L, snapshot.logStartOffset());
         assertEquals(50L, snapshot.highWatermark());
+        assertEquals(SharedCommitProgress.ReplicaRole.LEADER, snapshot.role());
     }
 
     @Test
-    void logReloadCanReplaceLogStartWithoutInventingAHighWatermark() {
+    void roleTransitionsDoNotChangeKafkaOffsets() {
+        SharedCommitProgress progress = new SharedCommitProgress();
+        SharedPartitionId partition = new SharedPartitionId(1L, 2L, 8);
+
+        progress.onLogLoaded(partition, 10L);
+        progress.onHighWatermarkUpdated(partition, 40L);
+        progress.onLeader(partition);
+        progress.onFollower(partition);
+
+        SharedCommitProgress.PartitionProgress snapshot = progress.partitionProgress(partition).orElseThrow();
+        assertEquals(10L, snapshot.logStartOffset());
+        assertEquals(40L, snapshot.highWatermark());
+        assertEquals(SharedCommitProgress.ReplicaRole.FOLLOWER, snapshot.role());
+    }
+
+    @Test
+    void logReloadCanReplaceLogStartWithoutInventingAHighWatermarkOrRole() {
         SharedCommitProgress progress = new SharedCommitProgress();
         SharedPartitionId partition = new SharedPartitionId(1L, 2L, 7);
 
         progress.onLogLoaded(partition, 10L);
         progress.onHighWatermarkUpdated(partition, 40L);
+        progress.onLeader(partition);
         progress.onLogLoaded(partition, 25L);
 
         SharedCommitProgress.PartitionProgress snapshot = progress.partitionProgress(partition).orElseThrow();
         assertEquals(25L, snapshot.logStartOffset());
         assertEquals(40L, snapshot.highWatermark());
+        assertEquals(SharedCommitProgress.ReplicaRole.LEADER, snapshot.role());
     }
 
     @Test

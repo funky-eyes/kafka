@@ -33,6 +33,15 @@ public interface KafkaStorageExtension extends AutoCloseable {
     UnifiedLogFactory unifiedLogFactory();
 
     /**
+     * Returns the non-blocking observer for Kafka's completed local leader/follower transitions.
+     *
+     * <p>The default is a no-op so classic storage and extensions that do not need role ownership are unchanged.</p>
+     */
+    default StoragePartitionRoleListener partitionRoleListener() {
+        return StoragePartitionRoleListener.NO_OP;
+    }
+
+    /**
      * Called after Kafka has opened its SocketServer acceptors but before BrokerServer transitions to STARTED.
      *
      * <p>Extensions that need ordinary Kafka clients can initialize them here. Broker startup waits for the returned

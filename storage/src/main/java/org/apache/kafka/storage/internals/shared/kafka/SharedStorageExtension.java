@@ -18,6 +18,7 @@ package org.apache.kafka.storage.internals.shared.kafka;
 
 import org.apache.kafka.storage.internals.log.KafkaStorageExtension;
 import org.apache.kafka.storage.internals.log.StorageExtensionContext;
+import org.apache.kafka.storage.internals.log.StoragePartitionRoleListener;
 import org.apache.kafka.storage.internals.log.UnifiedLogFactory;
 import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
 import org.apache.kafka.storage.internals.shared.wal.FileSharedWal;
@@ -36,6 +37,7 @@ public final class SharedStorageExtension implements KafkaStorageExtension {
     private SharedStorageEngine storage;
     private SharedCommitProgress commitProgress;
     private UnifiedLogFactory unifiedLogFactory;
+    private StoragePartitionRoleListener partitionRoleListener;
 
     @Override
     public synchronized void start(StorageExtensionContext context) throws IOException {
@@ -57,10 +59,12 @@ public final class SharedStorageExtension implements KafkaStorageExtension {
                 configuration,
                 new SharedUnifiedLogFactory(storage, commitProgress)
             );
+            partitionRoleListener = new SharedPartitionRoleListener(configuration, commitProgress);
         } catch (Throwable t) {
             storage = null;
             commitProgress = null;
             unifiedLogFactory = null;
+            partitionRoleListener = null;
             try {
                 wal.close();
             } catch (Throwable closeError) {
@@ -87,6 +91,14 @@ public final class SharedStorageExtension implements KafkaStorageExtension {
         return unifiedLogFactory;
     }
 
+    @Override
+    public synchronized StoragePartitionRoleListener partitionRoleListener() {
+        if (partitionRoleListener == null) {
+            throw new IllegalStateException("Shared storage extension has not been started");
+        }
+        return partitionRoleListener;
+    }
+
     public synchronized SharedStorageEngine storage() {
         if (storage == null) {
             throw new IllegalStateException("Shared storage extension has not been started");
@@ -107,6 +119,7 @@ public final class SharedStorageExtension implements KafkaStorageExtension {
         storage = null;
         commitProgress = null;
         unifiedLogFactory = null;
+        partitionRoleListener = null;
         if (currentStorage != null) {
             currentStorage.close();
         }

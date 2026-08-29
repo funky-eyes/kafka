@@ -19,10 +19,12 @@ package org.apache.kafka.storage.internals.shared.s3;
 import org.apache.kafka.storage.internals.log.KafkaStorageExtension;
 import org.apache.kafka.storage.internals.log.StorageExtensionBrokerContext;
 import org.apache.kafka.storage.internals.log.StorageExtensionContext;
+import org.apache.kafka.storage.internals.log.StoragePartitionRoleListener;
 import org.apache.kafka.storage.internals.log.UnifiedLogFactory;
 import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
 import org.apache.kafka.storage.internals.shared.kafka.RoutingUnifiedLogFactory;
 import org.apache.kafka.storage.internals.shared.kafka.SharedCommitProgress;
+import org.apache.kafka.storage.internals.shared.kafka.SharedPartitionRoleListener;
 import org.apache.kafka.storage.internals.shared.kafka.SharedStorageConfiguration;
 import org.apache.kafka.storage.internals.shared.kafka.SharedUnifiedLogFactory;
 import org.apache.kafka.storage.internals.shared.kafka.SharedUploadScheduler;
@@ -61,6 +63,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
     private SharedStorageEngine storage;
     private SharedCommitProgress commitProgress;
     private UnifiedLogFactory unifiedLogFactory;
+    private StoragePartitionRoleListener partitionRoleListener;
     private ExecutorService bootstrapExecutor;
     private CompletableFuture<Void> brokerReadyFuture;
     private KafkaObjectMetadataStore metadataStore;
@@ -88,6 +91,8 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
                 configuration,
                 new SharedUnifiedLogFactory(newStorage, newCommitProgress)
             );
+            StoragePartitionRoleListener newPartitionRoleListener =
+                new SharedPartitionRoleListener(configuration, newCommitProgress);
             ExecutorService newBootstrapExecutor = Executors.newSingleThreadExecutor(runnable -> {
                 Thread thread = new Thread(runnable, "kafka-shared-storage-bootstrap");
                 thread.setDaemon(true);
@@ -98,6 +103,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             storage = newStorage;
             commitProgress = newCommitProgress;
             unifiedLogFactory = newFactory;
+            partitionRoleListener = newPartitionRoleListener;
             bootstrapExecutor = newBootstrapExecutor;
         } catch (Throwable t) {
             try {
@@ -115,6 +121,14 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             throw new IllegalStateException("S3 shared storage extension has not been started");
         }
         return unifiedLogFactory;
+    }
+
+    @Override
+    public synchronized StoragePartitionRoleListener partitionRoleListener() {
+        if (partitionRoleListener == null) {
+            throw new IllegalStateException("S3 shared storage extension has not been started");
+        }
+        return partitionRoleListener;
     }
 
     @Override
@@ -249,6 +263,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             storage = null;
             commitProgress = null;
             unifiedLogFactory = null;
+            partitionRoleListener = null;
         }
 
         if (readyFuture != null && !readyFuture.isDone()) {

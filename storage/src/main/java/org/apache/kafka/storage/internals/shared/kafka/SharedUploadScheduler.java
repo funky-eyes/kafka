@@ -35,11 +35,12 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.LongSupplier;
 
 /**
- * Asynchronously converts Kafka-committed broker WAL batches into cross-partition shared objects.
+ * Asynchronously converts Kafka-committed leader WAL batches into cross-partition shared objects.
  *
- * <p>The Kafka high-watermark callback never calls this class. It only updates {@link SharedCommitProgress}. This
- * scheduler snapshots those commit windows on its own thread, filters candidates strictly below Kafka HW, merges them
- * by physical WAL order and delegates the durable object/metadata protocol to {@link SharedObjectUploader}.</p>
+ * <p>Kafka callbacks never call this class. They only update {@link SharedCommitProgress}. This scheduler snapshots
+ * those commit windows on its own thread, accepts current local leaders only, filters candidates strictly below Kafka
+ * HW, merges them by physical WAL order and delegates the durable object/metadata protocol to
+ * {@link SharedObjectUploader}.</p>
  */
 public final class SharedUploadScheduler implements AutoCloseable {
     private final SharedStorageEngine engine;
@@ -92,8 +93,8 @@ public final class SharedUploadScheduler implements AutoCloseable {
     }
 
     /**
-     * Starts at most one asynchronous object upload and returns empty when there is no committed work or another upload
-     * is already active. This method never blocks on object-store or metadata-store I/O.
+     * Starts at most one asynchronous object upload and returns empty when there is no committed leader work or another
+     * upload is already active. This method never blocks on object-store or metadata-store I/O.
      */
     public CompletableFuture<Optional<SharedObjectMetadata>> tryUploadOnce() {
         if (closed.get()) {
@@ -152,7 +153,7 @@ public final class SharedUploadScheduler implements AutoCloseable {
         for (Map.Entry<org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId,
             SharedCommitProgress.PartitionProgress> entry : commitProgress.snapshot().entrySet()) {
             SharedCommitProgress.PartitionProgress progress = entry.getValue();
-            if (progress.highWatermark() <= progress.logStartOffset()) {
+            if (!progress.isLeader() || progress.highWatermark() <= progress.logStartOffset()) {
                 continue;
             }
             committed.addAll(engine.uploadCandidates(

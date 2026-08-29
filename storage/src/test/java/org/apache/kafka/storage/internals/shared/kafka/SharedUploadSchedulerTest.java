@@ -56,9 +56,7 @@ class SharedUploadSchedulerTest {
             append(engine, P0, 0L, 9L, new byte[] {1, 2, 3});
             append(engine, P0, 10L, 19L, new byte[] {4, 5});
 
-            SharedCommitProgress progress = new SharedCommitProgress();
-            progress.onLogLoaded(P0, 0L);
-            progress.onHighWatermarkUpdated(P0, 10L);
+            SharedCommitProgress progress = leaderProgress(P0, 0L, 10L);
             try (SharedUploadScheduler scheduler = scheduler(engine, progress, objectStore, metadataStore, 1024L)) {
                 Optional<SharedObjectMetadata> result = scheduler.tryUploadOnce().get(10, TimeUnit.SECONDS);
 
@@ -73,7 +71,55 @@ class SharedUploadSchedulerTest {
     }
 
     @Test
-    void packsCommittedBatchesAcrossPartitionsInPhysicalWalOrder() throws Exception {
+    void followerAndUnknownReplicaNeverUploadCommittedWal() throws Exception {
+        InMemoryObjectStore objectStore = new InMemoryObjectStore();
+        InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
+        try (SharedStorageEngine engine = engine("follower-gate")) {
+            append(engine, P0, 0L, 9L, new byte[] {1, 2, 3});
+            SharedCommitProgress progress = new SharedCommitProgress();
+            progress.onLogLoaded(P0, 0L);
+            progress.onHighWatermarkUpdated(P0, 10L);
+
+            try (SharedUploadScheduler scheduler = scheduler(engine, progress, objectStore, metadataStore, 1024L)) {
+                assertTrue(scheduler.tryUploadOnce().get(10, TimeUnit.SECONDS).isEmpty());
+
+                progress.onFollower(P0);
+                assertTrue(scheduler.tryUploadOnce().get(10, TimeUnit.SECONDS).isEmpty());
+                assertFalse(engine.remoteIndex().coverage(P0).covers(new OffsetRange(0L, 10L)));
+            }
+        }
+    }
+
+    @Test
+    void leadershipTransitionEnablesAndDemotionStopsNewUploads() throws Exception {
+        InMemoryObjectStore objectStore = new InMemoryObjectStore();
+        InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
+        try (SharedStorageEngine engine = engine("role-transition")) {
+            append(engine, P0, 0L, 9L, new byte[] {1, 2, 3});
+            append(engine, P0, 10L, 19L, new byte[] {4, 5, 6});
+            SharedCommitProgress progress = new SharedCommitProgress();
+            progress.onLogLoaded(P0, 0L);
+            progress.onHighWatermarkUpdated(P0, 10L);
+            progress.onFollower(P0);
+
+            try (SharedUploadScheduler scheduler = scheduler(engine, progress, objectStore, metadataStore, 3L)) {
+                assertTrue(scheduler.tryUploadOnce().get(10, TimeUnit.SECONDS).isEmpty());
+
+                progress.onLeader(P0);
+                Optional<SharedObjectMetadata> firstUpload = scheduler.tryUploadOnce().get(10, TimeUnit.SECONDS);
+                assertTrue(firstUpload.isPresent());
+                assertTrue(engine.remoteIndex().coverage(P0).covers(new OffsetRange(0L, 10L)));
+
+                progress.onHighWatermarkUpdated(P0, 20L);
+                progress.onFollower(P0);
+                assertTrue(scheduler.tryUploadOnce().get(10, TimeUnit.SECONDS).isEmpty());
+                assertFalse(engine.remoteIndex().coverage(P0).covers(new OffsetRange(10L, 20L)));
+            }
+        }
+    }
+
+    @Test
+    void packsCommittedBatchesAcrossLeaderPartitionsInPhysicalWalOrder() throws Exception {
         InMemoryObjectStore objectStore = new InMemoryObjectStore();
         InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
         try (SharedStorageEngine engine = engine("cross-partition")) {
@@ -85,6 +131,8 @@ class SharedUploadSchedulerTest {
             progress.onLogLoaded(P1, 20L);
             progress.onHighWatermarkUpdated(P0, 10L);
             progress.onHighWatermarkUpdated(P1, 30L);
+            progress.onLeader(P0);
+            progress.onLeader(P1);
             try (SharedUploadScheduler scheduler = scheduler(engine, progress, objectStore, metadataStore, 1024L)) {
                 SharedObjectMetadata metadata = scheduler.tryUploadOnce()
                     .get(10, TimeUnit.SECONDS)
@@ -108,9 +156,7 @@ class SharedUploadSchedulerTest {
         try (SharedStorageEngine engine = engine("oversized")) {
             append(engine, P0, 0L, 9L, new byte[] {1, 2, 3, 4, 5, 6, 7, 8});
 
-            SharedCommitProgress progress = new SharedCommitProgress();
-            progress.onLogLoaded(P0, 0L);
-            progress.onHighWatermarkUpdated(P0, 10L);
+            SharedCommitProgress progress = leaderProgress(P0, 0L, 10L);
             try (SharedUploadScheduler scheduler = scheduler(engine, progress, objectStore, metadataStore, 4L)) {
                 SharedObjectMetadata metadata = scheduler.tryUploadOnce()
                     .get(10, TimeUnit.SECONDS)
@@ -128,9 +174,7 @@ class SharedUploadSchedulerTest {
         InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
         try (SharedStorageEngine engine = engine("id-supplier-failure")) {
             append(engine, P0, 0L, 9L, new byte[] {1, 2, 3});
-            SharedCommitProgress progress = new SharedCommitProgress();
-            progress.onLogLoaded(P0, 0L);
-            progress.onHighWatermarkUpdated(P0, 10L);
+            SharedCommitProgress progress = leaderProgress(P0, 0L, 10L);
             SharedObjectUploader uploader = new SharedObjectUploader(
                 objectStore,
                 metadataStore,
@@ -164,6 +208,18 @@ class SharedUploadSchedulerTest {
                 assertFalse(scheduler.lastFailure().isPresent());
             }
         }
+    }
+
+    private static SharedCommitProgress leaderProgress(
+        SharedPartitionId partition,
+        long logStartOffset,
+        long highWatermark
+    ) {
+        SharedCommitProgress progress = new SharedCommitProgress();
+        progress.onLogLoaded(partition, logStartOffset);
+        progress.onHighWatermarkUpdated(partition, highWatermark);
+        progress.onLeader(partition);
+        return progress;
     }
 
     private SharedStorageEngine engine(String name) throws Exception {
