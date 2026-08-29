@@ -27,7 +27,9 @@ import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.config.ConfigResource;
 import org.apache.kafka.common.config.TopicConfig;
+import org.apache.kafka.common.errors.InvalidReplicationFactorException;
 import org.apache.kafka.common.errors.ProducerFencedException;
+import org.apache.kafka.common.errors.RetriableException;
 import org.apache.kafka.common.errors.TopicExistsException;
 import org.apache.kafka.common.errors.WakeupException;
 import org.apache.kafka.storage.internals.shared.metadata.BrokerObjectId;
@@ -60,6 +62,7 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
     private static final TopicPartition METADATA_PARTITION =
         new TopicPartition(SharedMetadataClientConfiguration.TOPIC_NAME, 0);
     private static final Duration POLL_TIMEOUT = Duration.ofMillis(100L);
+    private static final long TOPIC_CREATE_RETRY_BACKOFF_MS = 250L;
     private static final long CLOSE_JOIN_TIMEOUT_MS = 30_000L;
 
     private final SharedMetadataClientConfiguration configuration;
@@ -123,13 +126,49 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
     }
 
     private void createTopicIfNeeded() throws Exception {
-        try {
-            admin.createTopics(List.of(configuration.newMetadataTopic())).all().get();
-        } catch (ExecutionException e) {
-            if (!(e.getCause() instanceof TopicExistsException)) {
-                throw e;
+        while (!closed.get()) {
+            try {
+                admin.createTopics(List.of(configuration.newMetadataTopic())).all().get();
+                return;
+            } catch (ExecutionException e) {
+                Throwable cause = unwrapExecutionException(e);
+                if (cause instanceof TopicExistsException) {
+                    return;
+                }
+                if (!isTransientTopicCreationFailure(cause)) {
+                    throw e;
+                }
+                awaitReplicaCapacity();
             }
         }
+        throw new InterruptedException("Shared metadata store closed while creating metadata topic");
+    }
+
+    /**
+     * A fresh RF=3 cluster may start brokers one at a time. Only wait for replica capacity after the controller has
+     * explicitly rejected topic creation for a transient reason; an already-existing RF=3 metadata topic must remain
+     * usable when the cluster is temporarily running with fewer than three active brokers.
+     */
+    private void awaitReplicaCapacity() throws Exception {
+        while (!closed.get()) {
+            try {
+                int activeBrokers = admin.describeCluster().nodes().get().size();
+                if (activeBrokers >= configuration.replicationFactor()) {
+                    return;
+                }
+            } catch (ExecutionException e) {
+                Throwable cause = unwrapExecutionException(e);
+                if (!(cause instanceof RetriableException)) {
+                    throw e;
+                }
+            }
+            Thread.sleep(TOPIC_CREATE_RETRY_BACKOFF_MS);
+        }
+        throw new InterruptedException("Shared metadata store closed while waiting for metadata replicas");
+    }
+
+    static boolean isTransientTopicCreationFailure(Throwable cause) {
+        return cause instanceof InvalidReplicationFactorException || cause instanceof RetriableException;
     }
 
     private void validateTopic() throws Exception {
