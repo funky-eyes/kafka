@@ -1,0 +1,76 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements. See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License. You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Shared Storage WAL Crash Windows
+
+on:
+  push:
+    branches:
+      - shared-wal-s3-4.3.1
+    paths:
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/wal/**'
+      - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/wal/**'
+      - '.github/workflows/shared-storage-wal-crash.yml'
+  pull_request:
+    paths:
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/wal/**'
+      - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/wal/**'
+      - '.github/workflows/shared-storage-wal-crash.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shared-storage-wal-crash-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  crash-window-gate:
+    name: WAL crash-window recovery gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Setup Gradle
+        uses: ./.github/actions/setup-gradle
+        with:
+          java-version: 25
+          gradle-cache-read-only: true
+
+      - name: Run deterministic WAL crash-window tests
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew :storage:test --no-scan \
+            --tests 'org.apache.kafka.storage.internals.shared.wal.FileSharedWalTest' \
+            --tests 'org.apache.kafka.storage.internals.shared.wal.FileSharedWalCrashWindowTest' \
+            2>&1 | tee shared-storage-wal-crash.log
+
+      - name: Upload crash-window diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shared-storage-wal-crash-window-log
+          path: |
+            shared-storage-wal-crash.log
+            storage/build/reports/tests/test
+            storage/build/reports/checkstyle
+          if-no-files-found: ignore
+          retention-days: 7
