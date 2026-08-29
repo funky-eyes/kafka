@@ -193,6 +193,11 @@ class LogManager(logDirs: Seq[File],
     storagePartitionRoleListener.onLeadershipChange(leaders, followers)
   }
 
+  /** Reports local replica removals before the local log is stopped or deleted. */
+  def onPartitionsRemoved(partitions: util.Collection[TopicIdPartition]): Unit = {
+    storagePartitionRoleListener.onPartitionsRemoved(partitions)
+  }
+
   private def createUnifiedLog(context: UnifiedLogCreationContext): UnifiedLog = {
     val factory = this.synchronized {
       unifiedLogFactoryFrozen = true

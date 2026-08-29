@@ -2365,6 +2365,12 @@ class ReplicaManager(val config: KafkaConfig,
       // Handle deleted partitions. We need to do this first because we might subsequently
       // create new partitions with the same names as the ones we are deleting here.
       if (!localChanges.deletes.isEmpty) {
+        val storageRemovals = localChanges.deletes.asScala.flatMap { tp =>
+          Option(delta.image().getTopic(tp.topic()))
+            .map(topic => new TopicIdPartition(topic.id(), tp))
+        }.asJava
+        logManager.onPartitionsRemoved(storageRemovals)
+
         val deletes = localChanges.deletes.asScala
           .map { tp =>
             val isCurrentLeader = Option(delta.image().getTopic(tp.topic()))
