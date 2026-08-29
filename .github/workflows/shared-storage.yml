@@ -20,6 +20,7 @@ on:
     branches:
       - shared-wal-s3-4.3.1
     paths:
+      - 'build.gradle'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/**'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/**'
       - 'storage/shared-storage-s3/**'
@@ -31,11 +32,13 @@ on:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/log/KafkaStorageExtension.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/log/StorageExtensionContext.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/log/StorageExtensionLoader.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/log/StoragePartitionRoleListener.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/log/LogLoaderSegmentFactoryTest.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/log/StorageExtensionLoaderTest.java'
       - 'core/src/main/scala/kafka/log/LogManager.scala'
       - 'core/src/main/java/kafka/server/builders/LogManagerBuilder.java'
       - 'core/src/main/scala/kafka/server/BrokerServer.scala'
+      - 'core/src/main/scala/kafka/server/ReplicaManager.scala'
       - 'core/src/test/**/kafka/log/**'
       - 'core/src/test/**/kafka/server/**'
       - 'checkstyle/import-control-shared-storage-s3.xml'
@@ -43,6 +46,7 @@ on:
       - '.github/workflows/shared-storage.yml'
   pull_request:
     paths:
+      - 'build.gradle'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/**'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/**'
       - 'storage/shared-storage-s3/**'
@@ -54,11 +58,13 @@ on:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/log/KafkaStorageExtension.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/log/StorageExtensionContext.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/log/StorageExtensionLoader.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/log/StoragePartitionRoleListener.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/log/LogLoaderSegmentFactoryTest.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/log/StorageExtensionLoaderTest.java'
       - 'core/src/main/scala/kafka/log/LogManager.scala'
       - 'core/src/main/java/kafka/server/builders/LogManagerBuilder.java'
       - 'core/src/main/scala/kafka/server/BrokerServer.scala'
+      - 'core/src/main/scala/kafka/server/ReplicaManager.scala'
       - 'core/src/test/**/kafka/log/**'
       - 'core/src/test/**/kafka/server/**'
       - 'checkstyle/import-control-shared-storage-s3.xml'
@@ -100,6 +106,7 @@ jobs:
             :storage:shared-storage-s3:compileJava \
             :storage:shared-storage-s3:compileTestJava \
             :core:compileScala \
+            :core:compileTestJava \
             --no-scan 2>&1 | tee shared-storage-compile.log
 
       - name: Run shared storage tests
@@ -154,13 +161,14 @@ jobs:
           path: |
             storage/build/reports/tests/test
             storage/shared-storage-s3/build/reports/tests/test
+            core/build/reports/tests/test
           if-no-files-found: ignore
           retention-days: 7
 
   minio-environment:
-    name: MinIO E2E environment
+    name: MinIO + 3-broker KRaft E2E
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -216,6 +224,38 @@ jobs:
             -x :storage:shared-storage-s3:spotbugsTest \
             --no-scan 2>&1 | tee shared-storage-minio-e2e.log
 
+      - name: Ensure MinIO bucket exists
+        shell: bash
+        run: |
+          docker run --rm --network host --entrypoint /bin/sh minio/mc:latest -c '
+            mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
+            mc mb --ignore-existing local/kafka-shared-storage-e2e >/dev/null
+          '
+
+      - name: Run replicated WAL leader failover E2E
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin123
+          AWS_REGION: us-east-1
+          SHARED_STORAGE_S3_ENDPOINT: http://127.0.0.1:9000
+          SHARED_STORAGE_S3_REGION: us-east-1
+          SHARED_STORAGE_S3_BUCKET: kafka-shared-storage-e2e
+        run: |
+          set -o pipefail
+          ./gradlew :core:test \
+            --tests 'kafka.server.SharedStorageKRaftIntegrationTest' \
+            --no-scan 2>&1 | tee shared-storage-kraft-e2e.log
+
+      - name: Show committed S3 objects
+        if: always()
+        shell: bash
+        run: |
+          docker run --rm --network host --entrypoint /bin/sh minio/mc:latest -c '
+            mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
+            mc ls --recursive local/kafka-shared-storage-e2e || true
+          ' | tee shared-storage-minio-objects.log
+
       - name: Run S3 static analysis diagnostics
         if: always()
         continue-on-error: true
@@ -236,9 +276,12 @@ jobs:
           name: shared-storage-minio-e2e-log
           path: |
             shared-storage-minio-e2e.log
+            shared-storage-kraft-e2e.log
+            shared-storage-minio-objects.log
             shared-storage-s3-static-analysis.log
             storage/shared-storage-s3/build/reports/spotbugs
             storage/shared-storage-s3/build/reports/checkstyle
+            core/build/reports/tests/test
           if-no-files-found: ignore
           retention-days: 7
 
