@@ -148,6 +148,52 @@ public class UnifiedLogTest {
     }
 
     @Test
+    public void shouldKeepAdditionalLogOffsetsListenerWhenPrimaryListenerIsReplaced() throws IOException {
+        try (UnifiedLog log = createLog(logDir, new LogConfig(new Properties()))) {
+            List<Long> firstPrimaryUpdates = new ArrayList<>();
+            List<Long> replacementPrimaryUpdates = new ArrayList<>();
+            List<Long> additionalUpdates = new ArrayList<>();
+
+            log.setLogOffsetsListener(new LogOffsetsListener() {
+                @Override
+                public void onHighWatermarkUpdated(long highWatermark) {
+                    firstPrimaryUpdates.add(highWatermark);
+                }
+            });
+            log.addLogOffsetsListener(new LogOffsetsListener() {
+                @Override
+                public void onHighWatermarkUpdated(long highWatermark) {
+                    additionalUpdates.add(highWatermark);
+                }
+            });
+            assertEquals(List.of(0L), additionalUpdates);
+
+            log.appendAsLeader(
+                MemoryRecords.withRecords(Compression.NONE, new SimpleRecord("one".getBytes())),
+                0
+            );
+            log.updateHighWatermark(log.logEndOffset());
+            assertEquals(List.of(1L), firstPrimaryUpdates);
+            assertEquals(List.of(0L, 1L), additionalUpdates);
+
+            log.setLogOffsetsListener(new LogOffsetsListener() {
+                @Override
+                public void onHighWatermarkUpdated(long highWatermark) {
+                    replacementPrimaryUpdates.add(highWatermark);
+                }
+            });
+            log.appendAsLeader(
+                MemoryRecords.withRecords(Compression.NONE, new SimpleRecord("two".getBytes())),
+                0
+            );
+            log.updateHighWatermark(log.logEndOffset());
+
+            assertEquals(List.of(1L), firstPrimaryUpdates);
+            assertEquals(List.of(2L), replacementPrimaryUpdates);
+            assertEquals(List.of(0L, 1L, 2L), additionalUpdates);
+        }
+    }
+    @Test
     public void shouldApplyEpochToMessageOnAppendIfLeader() throws IOException {
         SimpleRecord[] records = IntStream.range(0, 50)
             .mapToObj(id -> new SimpleRecord(String.valueOf(id).getBytes()))

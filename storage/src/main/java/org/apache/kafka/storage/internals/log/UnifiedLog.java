@@ -163,6 +163,7 @@ public class UnifiedLog implements AutoCloseable {
     private volatile LeaderEpochFileCache leaderEpochCache;
     private volatile Optional<Uuid> topicId;
     private volatile LogOffsetsListener logOffsetsListener;
+    private final List<LogOffsetsListener> additionalLogOffsetsListeners = new ArrayList<>();
 
     /**
      * A log which presents a unified view of local and tiered log segments.
@@ -236,7 +237,7 @@ public class UnifiedLog implements AutoCloseable {
         maybeIncrementFirstUnstableOffset();
         initializeTopicId();
 
-        logOffsetsListener.onHighWatermarkUpdated(highWatermarkMetadata.messageOffset);
+        notifyHighWatermarkUpdated(highWatermarkMetadata.messageOffset);
         newMetrics();
     }
 
@@ -473,6 +474,27 @@ public class UnifiedLog implements AutoCloseable {
     }
 
     /**
+     * Add an observer that remains registered when the primary log offsets listener is replaced.
+     * The observer is immediately initialized with the current high watermark.
+     */
+    public void addLogOffsetsListener(LogOffsetsListener listener) {
+        if (listener == null) {
+            throw new NullPointerException("listener");
+        }
+        synchronized (lock) {
+            additionalLogOffsetsListeners.add(listener);
+            listener.onHighWatermarkUpdated(highWatermarkMetadata.messageOffset);
+        }
+    }
+
+    private void notifyHighWatermarkUpdated(long highWatermark) {
+        logOffsetsListener.onHighWatermarkUpdated(highWatermark);
+        for (LogOffsetsListener listener : additionalLogOffsetsListeners) {
+            listener.onHighWatermarkUpdated(highWatermark);
+        }
+    }
+
+    /**
      * Initialize topic ID information for the log by maintaining the partition metadata file and setting the in-memory _topicId.
      * Set _topicId based on a few scenarios:
      *   - Recover topic ID if present. Ensure we do not try to assign a provided topicId that is inconsistent
@@ -629,7 +651,7 @@ public class UnifiedLog implements AutoCloseable {
             }
             highWatermarkMetadata = newHighWatermark;
             producerStateManager.onHighWatermarkUpdated(newHighWatermark.messageOffset);
-            logOffsetsListener.onHighWatermarkUpdated(newHighWatermark.messageOffset);
+            notifyHighWatermarkUpdated(newHighWatermark.messageOffset);
             maybeIncrementFirstUnstableOffset();
         }
         logger.trace("Setting high watermark {}", newHighWatermark);
