@@ -21,11 +21,13 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RemoteObjectIndexTest {
     private static final SharedPartitionId PARTITION = new SharedPartitionId(1, 2, 0);
+    private static final SharedPartitionId OTHER_PARTITION = new SharedPartitionId(3, 4, 1);
 
     @Test
     void shouldTrackHolesAndMergeCoverage() {
@@ -68,16 +70,62 @@ class RemoteObjectIndexTest {
             index.add(object(11, 50, 150, 777)));
     }
 
+    @Test
+    void objectConflictMustNotPublishEarlierRangesFromTheSameObject() {
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(object(10, OTHER_PARTITION, 0, 100, 900));
+
+        SharedObjectMetadata conflicting = new SharedObjectMetadata(
+            11,
+            200,
+            1234,
+            List.of(
+                range(PARTITION, 0, 100, 777),
+                range(OTHER_PARTITION, 0, 100, 901)
+            )
+        );
+
+        assertThrows(RemoteMetadataConflictException.class, () -> index.add(conflicting));
+        assertTrue(index.ranges(PARTITION).isEmpty());
+        assertFalse(index.coverage(PARTITION).covers(new OffsetRange(0, 100)));
+        assertEquals(1, index.ranges(OTHER_PARTITION).size());
+        assertEquals(10, index.find(OTHER_PARTITION, 50).orElseThrow().objectId());
+    }
+
     private static SharedObjectMetadata object(long objectId, long start, long end, long checksum) {
+        return object(objectId, PARTITION, start, end, checksum);
+    }
+
+    private static SharedObjectMetadata object(
+        long objectId,
+        SharedPartitionId partition,
+        long start,
+        long end,
+        long checksum
+    ) {
         int length = Math.toIntExact(end - start);
-        SharedObjectRange range = new SharedObjectRange(
-            PARTITION,
+        return new SharedObjectMetadata(
+            objectId,
+            length,
+            checksum,
+            List.of(range(partition, start, end, checksum))
+        );
+    }
+
+    private static SharedObjectRange range(
+        SharedPartitionId partition,
+        long start,
+        long end,
+        long checksum
+    ) {
+        int length = Math.toIntExact(end - start);
+        return new SharedObjectRange(
+            partition,
             new OffsetRange(start, end),
             3,
             0,
             length,
             checksum
         );
-        return new SharedObjectMetadata(objectId, length, checksum, List.of(range));
     }
 }

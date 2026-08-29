@@ -17,10 +17,13 @@
 package org.apache.kafka.storage.internals.shared.metadata;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.NavigableMap;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentNavigableMap;
 import java.util.concurrent.ConcurrentSkipListMap;
@@ -36,11 +39,47 @@ public final class RemoteObjectIndex {
     private final ConcurrentHashMap<SharedPartitionId, ConcurrentNavigableMap<Long, RangeReference>> byPartition =
         new ConcurrentHashMap<>();
     private final ConcurrentHashMap<SharedPartitionId, PartitionRemoteCoverage> coverage = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<SharedPartitionId, Object> partitionLocks = new ConcurrentHashMap<>();
 
-    public void add(SharedObjectMetadata object) {
+    /**
+     * Validates every range in an object before publishing any of them.
+     *
+     * <p>A single S3 object can contain ranges from many partitions. A conflict in one partition must not leave ranges
+     * from earlier partitions visible, otherwise a corruption event could expose a logically half-committed object.
+     * Remote metadata commits are infrequent compared with reads, so serializing writers here is an acceptable cost;
+     * readers remain lock-free over the concurrent range maps.</p>
+     */
+    public synchronized void add(SharedObjectMetadata object) {
+        Objects.requireNonNull(object, "object");
+        Map<SharedPartitionId, NavigableMap<Long, RangeReference>> stagedByPartition = new HashMap<>();
+        List<RangeReference> newRanges = new ArrayList<>();
+
         for (SharedObjectRange range : object.ranges()) {
-            addRange(object.objectId(), range);
+            SharedPartitionId partition = range.partition();
+            NavigableMap<Long, RangeReference> staged = stagedByPartition.computeIfAbsent(
+                partition,
+                this::copyExistingRanges
+            );
+            RangeReference incoming = new RangeReference(object.objectId(), range);
+            RangeReference overlapping = overlappingReference(staged, range.offsets());
+            if (overlapping != null) {
+                if (sameLogicalRange(overlapping.range(), range)) {
+                    continue;
+                }
+                throw conflict(overlapping, incoming);
+            }
+            staged.put(range.offsets().startOffset(), incoming);
+            newRanges.add(incoming);
+        }
+
+        // No validation below this point can fail for ordinary metadata. Publish only after the whole object validates.
+        for (RangeReference reference : newRanges) {
+            SharedObjectRange range = reference.range();
+            byPartition
+                .computeIfAbsent(range.partition(), ignored -> new ConcurrentSkipListMap<>())
+                .put(range.offsets().startOffset(), reference);
+        }
+        for (SharedObjectRange range : object.ranges()) {
+            coverage(range.partition()).add(range.offsets());
         }
     }
 
@@ -69,34 +108,28 @@ public final class RemoteObjectIndex {
         return List.copyOf(new ArrayList<>(ranges.values()));
     }
 
-    private void addRange(long objectId, SharedObjectRange range) {
-        SharedPartitionId partition = range.partition();
-        Object partitionLock = partitionLocks.computeIfAbsent(partition, ignored -> new Object());
-        synchronized (partitionLock) {
-            ConcurrentNavigableMap<Long, RangeReference> ranges =
-                byPartition.computeIfAbsent(partition, ignored -> new ConcurrentSkipListMap<>());
-            RangeReference incoming = new RangeReference(objectId, range);
-            Map.Entry<Long, RangeReference> floor = ranges.floorEntry(range.offsets().startOffset());
-            if (floor != null && overlaps(floor.getValue().range().offsets(), range.offsets())) {
-                if (sameLogicalRange(floor.getValue().range(), range)) {
-                    coverage(partition).add(range.offsets());
-                    return;
-                }
-                throw conflict(floor.getValue(), incoming);
-            }
-
-            Map.Entry<Long, RangeReference> next = ranges.ceilingEntry(range.offsets().startOffset());
-            if (next != null && overlaps(next.getValue().range().offsets(), range.offsets())) {
-                if (sameLogicalRange(next.getValue().range(), range)) {
-                    coverage(partition).add(range.offsets());
-                    return;
-                }
-                throw conflict(next.getValue(), incoming);
-            }
-
-            ranges.put(range.offsets().startOffset(), incoming);
-            coverage(partition).add(range.offsets());
+    private NavigableMap<Long, RangeReference> copyExistingRanges(SharedPartitionId partition) {
+        NavigableMap<Long, RangeReference> staged = new TreeMap<>();
+        NavigableMap<Long, RangeReference> existing = byPartition.get(partition);
+        if (existing != null) {
+            staged.putAll(existing);
         }
+        return staged;
+    }
+
+    private static RangeReference overlappingReference(
+        NavigableMap<Long, RangeReference> ranges,
+        OffsetRange offsets
+    ) {
+        Map.Entry<Long, RangeReference> floor = ranges.floorEntry(offsets.startOffset());
+        if (floor != null && overlaps(floor.getValue().range().offsets(), offsets)) {
+            return floor.getValue();
+        }
+        Map.Entry<Long, RangeReference> next = ranges.ceilingEntry(offsets.startOffset());
+        if (next != null && overlaps(next.getValue().range().offsets(), offsets)) {
+            return next.getValue();
+        }
+        return null;
     }
 
     private static boolean overlaps(OffsetRange left, OffsetRange right) {
