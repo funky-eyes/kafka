@@ -1148,6 +1148,7 @@ project(':core') {
     testImplementation testLog4j2Libs
     testImplementation libs.mockOAuth2Server
 
+    testRuntimeOnly project(':storage:shared-storage-s3')
     testRuntimeOnly runtimeTestLibs
   }
 
