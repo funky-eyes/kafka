@@ -69,6 +69,50 @@ class SharedPartitionRoleListenerTest {
     }
 
     @Test
+    void removedReplicaClearsCommitWindowAndUploadOwnership() {
+        SharedStorageConfiguration configuration = configuration(Map.of());
+        SharedCommitProgress progress = new SharedCommitProgress();
+        SharedPartitionRoleListener listener = new SharedPartitionRoleListener(configuration, progress);
+
+        Uuid topicId = Uuid.randomUuid();
+        TopicIdPartition partition = topicPartition(topicId, "shared-topic", 2);
+        SharedPartitionId sharedId = sharedPartitionId(topicId, 2);
+        progress.onLogLoaded(sharedId, 10L);
+        progress.onHighWatermarkUpdated(sharedId, 50L);
+        listener.onLeadershipChange(List.of(partition), List.of());
+
+        listener.onPartitionsRemoved(List.of(partition));
+
+        assertFalse(progress.partitionProgress(sharedId).isPresent());
+    }
+
+    @Test
+    void removedClassicOrInternalReplicaDoesNotTouchSharedTracking() {
+        SharedStorageConfiguration configuration = configuration(Map.of(
+            SharedStorageConfiguration.TOPICS_CONFIG,
+            "shared-topic"
+        ));
+        SharedCommitProgress progress = new SharedCommitProgress();
+        SharedPartitionRoleListener listener = new SharedPartitionRoleListener(configuration, progress);
+
+        Uuid sharedTopicId = Uuid.randomUuid();
+        TopicIdPartition shared = topicPartition(sharedTopicId, "shared-topic", 0);
+        SharedPartitionId sharedId = sharedPartitionId(sharedTopicId, 0);
+        listener.onLeadershipChange(List.of(shared), List.of());
+
+        listener.onPartitionsRemoved(List.of(
+            topicPartition(Uuid.randomUuid(), "classic-topic", 0),
+            topicPartition(Uuid.randomUuid(), "__consumer_offsets", 0)
+        ));
+
+        assertEquals(1, progress.snapshot().size());
+        assertEquals(
+            SharedCommitProgress.ReplicaRole.LEADER,
+            progress.partitionProgress(sharedId).orElseThrow().role()
+        );
+    }
+
+    @Test
     void defaultAllUserTopicRoutingStillNeverTracksInternalTopics() {
         SharedStorageConfiguration configuration = configuration(Map.of());
         SharedCommitProgress progress = new SharedCommitProgress();
