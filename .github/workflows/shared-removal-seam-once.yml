@@ -59,59 +59,72 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
-          def replace_once(path, old, new):
+          def replace_once(path, old_lines, new_lines):
               p = Path(path)
               text = p.read_text()
+              old = "\n".join(old_lines) + "\n"
+              new = "\n".join(new_lines) + "\n"
               count = text.count(old)
               if count != 1:
                   raise SystemExit(f"{path}: expected one match, got {count}")
               p.write_text(text.replace(old, new, 1))
 
-          log_manager = "core/src/main/scala/kafka/log/LogManager.scala"
-          old = """  /** Reports completed local role transitions to the optional physical-storage observer. */
-  def onLeadershipChange(leaders: util.Collection[TopicIdPartition], followers: util.Collection[TopicIdPartition]): Unit = {
-    storagePartitionRoleListener.onLeadershipChange(leaders, followers)
-  }
+          replace_once(
+              "core/src/main/scala/kafka/log/LogManager.scala",
+              [
+                  "  /** Reports completed local role transitions to the optional physical-storage observer. */",
+                  "  def onLeadershipChange(leaders: util.Collection[TopicIdPartition], followers: util.Collection[TopicIdPartition]): Unit = {",
+                  "    storagePartitionRoleListener.onLeadershipChange(leaders, followers)",
+                  "  }",
+                  ""
+              ],
+              [
+                  "  /** Reports completed local role transitions to the optional physical-storage observer. */",
+                  "  def onLeadershipChange(leaders: util.Collection[TopicIdPartition], followers: util.Collection[TopicIdPartition]): Unit = {",
+                  "    storagePartitionRoleListener.onLeadershipChange(leaders, followers)",
+                  "  }",
+                  "",
+                  "  /** Reports local replica removals before the local log is stopped or deleted. */",
+                  "  def onPartitionsRemoved(partitions: util.Collection[TopicIdPartition]): Unit = {",
+                  "    storagePartitionRoleListener.onPartitionsRemoved(partitions)",
+                  "  }",
+                  ""
+              ]
+          )
 
-"""
-          new = old + """  /** Reports local replica removals before the local log is stopped or deleted. */
-  def onPartitionsRemoved(partitions: util.Collection[TopicIdPartition]): Unit = {
-    storagePartitionRoleListener.onPartitionsRemoved(partitions)
-  }
-
-"""
-          replace_once(log_manager, old, new)
-
-          replica_manager = "core/src/main/scala/kafka/server/ReplicaManager.scala"
-          old_delete = """        val deletes = localChanges.deletes.asScala
-          .map { tp =>
-            val isCurrentLeader = Option(delta.image().getTopic(tp.topic()))
-              .map(image => image.partitions().get(tp.partition()))
-              .exists(partition => partition.leader == config.nodeId)
-            val deleteRemoteLog = delta.topicWasDeleted(tp.topic()) && isCurrentLeader
-            new StopPartition(tp, true, deleteRemoteLog, false)
-          }
-          .toSet
-        stateChangeLogger.info(s\"Deleting ${deletes.size} partition(s).\")
-"""
-          new_delete = """        val storageRemovals = localChanges.deletes.asScala.flatMap { tp =>
-          Option(delta.image().getTopic(tp.topic()))
-            .map(topic => new TopicIdPartition(topic.id(), tp))
-        }.asJava
-        logManager.onPartitionsRemoved(storageRemovals)
-
-        val deletes = localChanges.deletes.asScala
-          .map { tp =>
-            val isCurrentLeader = Option(delta.image().getTopic(tp.topic()))
-              .map(image => image.partitions().get(tp.partition()))
-              .exists(partition => partition.leader == config.nodeId)
-            val deleteRemoteLog = delta.topicWasDeleted(tp.topic()) && isCurrentLeader
-            new StopPartition(tp, true, deleteRemoteLog, false)
-          }
-          .toSet
-        stateChangeLogger.info(s\"Deleting ${deletes.size} partition(s).\")
-"""
-          replace_once(replica_manager, old_delete, new_delete)
+          replace_once(
+              "core/src/main/scala/kafka/server/ReplicaManager.scala",
+              [
+                  "        val deletes = localChanges.deletes.asScala",
+                  "          .map { tp =>",
+                  "            val isCurrentLeader = Option(delta.image().getTopic(tp.topic()))",
+                  "              .map(image => image.partitions().get(tp.partition()))",
+                  "              .exists(partition => partition.leader == config.nodeId)",
+                  "            val deleteRemoteLog = delta.topicWasDeleted(tp.topic()) && isCurrentLeader",
+                  "            new StopPartition(tp, true, deleteRemoteLog, false)",
+                  "          }",
+                  "          .toSet",
+                  "        stateChangeLogger.info(s\"Deleting ${deletes.size} partition(s).\")"
+              ],
+              [
+                  "        val storageRemovals = localChanges.deletes.asScala.flatMap { tp =>",
+                  "          Option(delta.image().getTopic(tp.topic()))",
+                  "            .map(topic => new TopicIdPartition(topic.id(), tp))",
+                  "        }.asJava",
+                  "        logManager.onPartitionsRemoved(storageRemovals)",
+                  "",
+                  "        val deletes = localChanges.deletes.asScala",
+                  "          .map { tp =>",
+                  "            val isCurrentLeader = Option(delta.image().getTopic(tp.topic()))",
+                  "              .map(image => image.partitions().get(tp.partition()))",
+                  "              .exists(partition => partition.leader == config.nodeId)",
+                  "            val deleteRemoteLog = delta.topicWasDeleted(tp.topic()) && isCurrentLeader",
+                  "            new StopPartition(tp, true, deleteRemoteLog, false)",
+                  "          }",
+                  "          .toSet",
+                  "        stateChangeLogger.info(s\"Deleting ${deletes.size} partition(s).\")"
+              ]
+          )
           PY
 
           rm .github/workflows/shared-removal-seam-once.yml
