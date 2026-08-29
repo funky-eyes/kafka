@@ -40,11 +40,15 @@ import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
 
 import java.io.IOException;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.NavigableMap;
 import java.util.Objects;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -56,8 +60,9 @@ import java.util.function.Consumer;
  *
  * <p>The topic is always a classic Kafka log. Startup manually assigns its single partition, captures a read-committed
  * end offset and replays from the beginning to that boundary before marking the metadata image READY. A daemon consumer
- * then tails live records. Any unexpected live-consumer, replay or committed-object observer failure marks the image
- * FAILED so remote reads and uploads fail closed rather than continuing from stale metadata.</p>
+ * then tails live records. Object state transitions complete only after that consumer has applied the producer-returned
+ * offset. This is essential for cross-broker COMMIT versus orphan-cleanup ordering: a producer acknowledgement alone is
+ * not evidence that its transition won against an earlier record from another broker.</p>
  */
 public final class KafkaObjectMetadataStore implements ObjectMetadataStore, AutoCloseable {
     private static final TopicPartition METADATA_PARTITION =
@@ -73,7 +78,10 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
     private final KafkaConsumer<byte[], byte[]> consumer;
     private final SharedMetadataImage image;
     private final AtomicBoolean closed = new AtomicBoolean();
+    private final Object appliedOffsetLock = new Object();
+    private final NavigableMap<Long, List<CompletableFuture<Void>>> appliedOffsetWaiters = new TreeMap<>();
 
+    private long appliedOffset = -1L;
     private volatile Thread consumerThread;
 
     private KafkaObjectMetadataStore(
@@ -119,6 +127,7 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
             return store;
         } catch (Throwable t) {
             store.image.markFailed(t);
+            store.failAppliedOffsetWaiters(t);
             try {
                 store.close();
             } catch (Throwable closeError) {
@@ -257,16 +266,54 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
         } catch (WakeupException e) {
             if (!closed.get()) {
                 image.markFailed(e);
+                failAppliedOffsetWaiters(e);
             }
         } catch (Throwable t) {
             image.markFailed(t);
+            failAppliedOffsetWaiters(t);
         }
     }
 
     private void applyRecords(ConsumerRecords<byte[], byte[]> records) {
         for (ConsumerRecord<byte[], byte[]> record : records.records(METADATA_PARTITION)) {
             image.apply(record.key(), record.value());
+            markApplied(record.offset());
         }
+    }
+
+    private void markApplied(long offset) {
+        List<CompletableFuture<Void>> completed = new ArrayList<>();
+        synchronized (appliedOffsetLock) {
+            if (offset > appliedOffset) {
+                appliedOffset = offset;
+            }
+            while (!appliedOffsetWaiters.isEmpty() && appliedOffsetWaiters.firstKey() <= appliedOffset) {
+                completed.addAll(appliedOffsetWaiters.pollFirstEntry().getValue());
+            }
+        }
+        completed.forEach(waiter -> waiter.complete(null));
+    }
+
+    private CompletableFuture<Void> awaitApplied(long offset) {
+        synchronized (appliedOffsetLock) {
+            if (appliedOffset >= offset) {
+                return CompletableFuture.completedFuture(null);
+            }
+            CompletableFuture<Void> waiter = new CompletableFuture<>();
+            appliedOffsetWaiters.computeIfAbsent(offset, ignored -> new ArrayList<>()).add(waiter);
+            return waiter;
+        }
+    }
+
+    private void failAppliedOffsetWaiters(Throwable cause) {
+        List<CompletableFuture<Void>> failed = new ArrayList<>();
+        synchronized (appliedOffsetLock) {
+            for (Map.Entry<Long, List<CompletableFuture<Void>>> entry : appliedOffsetWaiters.entrySet()) {
+                failed.addAll(entry.getValue());
+            }
+            appliedOffsetWaiters.clear();
+        }
+        failed.forEach(waiter -> waiter.completeExceptionally(cause));
     }
 
     @Override
@@ -274,8 +321,8 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
         if (createdTimeMs < 0) {
             return CompletableFuture.failedFuture(new IllegalArgumentException("createdTimeMs must be non-negative"));
         }
-        return writeObjectRecord(
-            objectId,
+        return writeRecord(
+            SharedMetadataRecordCodec.objectKey(objectId),
             SharedMetadataRecordCodec.preparedObjectValue(createdTimeMs)
         );
     }
@@ -283,15 +330,46 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
     @Override
     public CompletableFuture<Void> commit(SharedObjectMetadata metadata) {
         Objects.requireNonNull(metadata, "metadata");
-        return writeObjectRecord(
-            metadata.objectId(),
+        return writeRecord(
+            SharedMetadataRecordCodec.objectKey(metadata.objectId()),
             SharedMetadataRecordCodec.committedObjectValue(metadata)
-        );
+        ).thenCompose(ignored -> image.committedObject(metadata.objectId())
+            .filter(metadata::equals)
+            .map(committed -> CompletableFuture.<Void>completedFuture(null))
+            .orElseGet(() -> CompletableFuture.failedFuture(new IllegalStateException(
+                "Object COMMIT lost to orphan cleanup fence: " + metadata.objectId()))));
     }
 
     @Override
     public CompletableFuture<Void> delete(long objectId) {
-        return writeObjectRecord(objectId, null);
+        return writeRecord(SharedMetadataRecordCodec.objectKey(objectId), null);
+    }
+
+    @Override
+    public CompletableFuture<Boolean> claimCleanup(long objectId, long expectedCreatedTimeMs) {
+        if (expectedCreatedTimeMs < 0) {
+            return CompletableFuture.failedFuture(new IllegalArgumentException("expectedCreatedTimeMs must be non-negative"));
+        }
+        return writeRecord(
+            SharedMetadataRecordCodec.objectCleanupKey(objectId),
+            SharedMetadataRecordCodec.cleanupClaimedValue(expectedCreatedTimeMs)
+        ).thenApply(ignored -> image.cleanupFenced(objectId, expectedCreatedTimeMs));
+    }
+
+    @Override
+    public CompletableFuture<Void> completeCleanup(long objectId) {
+        ObjectMetadataStore.PreparedObject claimed = image.cleanupClaimedObjects().stream()
+            .filter(object -> object.objectId() == objectId)
+            .findFirst()
+            .orElse(null);
+        if (claimed == null) {
+            // Already DELETED is an idempotent success. Callers only complete a cleanup after a successful claim.
+            return CompletableFuture.completedFuture(null);
+        }
+        return writeRecord(
+            SharedMetadataRecordCodec.objectCleanupKey(objectId),
+            SharedMetadataRecordCodec.cleanupDeletedValue(claimed.createdTimeMs())
+        );
     }
 
     @Override
@@ -299,8 +377,14 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
         return image.committedObjects();
     }
 
-    public List<SharedMetadataImage.PreparedObject> preparedObjects() {
+    @Override
+    public List<ObjectMetadataStore.PreparedObject> preparedObjects() {
         return image.preparedObjects();
+    }
+
+    @Override
+    public List<ObjectMetadataStore.PreparedObject> cleanupClaimedObjects() {
+        return image.cleanupClaimedObjects();
     }
 
     public SharedMetadataImage.State state() {
@@ -351,10 +435,7 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
         }
     }
 
-    private CompletableFuture<Void> writeObjectRecord(long objectId, byte[] value) {
-        if (objectId <= 0) {
-            return CompletableFuture.failedFuture(new IllegalArgumentException("objectId must be positive"));
-        }
+    private CompletableFuture<Void> writeRecord(byte[] key, byte[] value) {
         if (closed.get()) {
             return CompletableFuture.failedFuture(new IllegalStateException("Shared metadata store is closed"));
         }
@@ -362,7 +443,6 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
             return CompletableFuture.failedFuture(new IllegalStateException(
                 "Shared metadata image is not authoritative: " + image.state()));
         }
-        byte[] key = SharedMetadataRecordCodec.objectKey(objectId);
         CompletableFuture<Void> result = new CompletableFuture<>();
         producer.send(new ProducerRecord<>(
             SharedMetadataClientConfiguration.TOPIC_NAME,
@@ -374,13 +454,13 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
                 result.completeExceptionally(exception);
                 return;
             }
-            try {
-                image.apply(key, value);
-                result.complete(null);
-            } catch (Throwable t) {
-                image.markFailed(t);
-                result.completeExceptionally(t);
-            }
+            awaitApplied(metadata.offset()).whenComplete((ignored, applyError) -> {
+                if (applyError != null) {
+                    result.completeExceptionally(applyError);
+                } else {
+                    result.complete(null);
+                }
+            });
         });
         return result;
     }
@@ -399,6 +479,7 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
         if (!closed.compareAndSet(false, true)) {
             return;
         }
+        failAppliedOffsetWaiters(new IllegalStateException("Shared metadata store is closed"));
         consumer.wakeup();
         Thread thread = consumerThread;
         if (thread != null && thread != Thread.currentThread()) {
