@@ -32,6 +32,19 @@ dependencies {
   testRuntimeOnly runtimeTestLibs
 }
 
+/**
+ * Stages the extension jar and every runtime dependency into one directory for true external-JVM integration gates.
+ * This is intentionally separate from Kafka's release packaging decision: process tests must not depend on the core
+ * test JVM silently providing the S3 plugin or AWS SDK classes.
+ */
+tasks.register("stageProcessRuntime", Sync) {
+  dependsOn jar
+  from(configurations.runtimeClasspath)
+  from(tasks.jar)
+  into "${layout.buildDirectory.get().asFile.path}/process-runtime"
+  duplicatesStrategy 'exclude'
+}
+
 javadoc {
   enabled = false
 }
