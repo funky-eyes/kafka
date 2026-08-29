@@ -59,33 +59,43 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
-          extension = Path("storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3/S3SharedStorageExtension.java")
-          source = extension.read_text()
-          old_import = "import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;\n"
-          if source.count(old_import) != 1:
-              raise SystemExit("expected SharedObjectMetadata import exactly once")
-          source = source.replace(old_import, "", 1)
-          old = """            newMetadataStore = KafkaObjectMetadataStore.open(metadataConfiguration);
-            for (SharedObjectMetadata metadata : newMetadataStore.committedObjects()) {
-                engine.commitRemoteObject(metadata);
-            }
-"""
-          new = """            // Initial replay and live commits from every broker update this engine's remote coverage.
-            newMetadataStore = KafkaObjectMetadataStore.open(
-                metadataConfiguration,
-                engine::commitRemoteObject
-            );
-"""
-          if source.count(old) != 1:
-              raise SystemExit(f"expected metadata replay block once, got {source.count(old)}")
-          extension.write_text(source.replace(old, new, 1))
+          def replace_once(path, old_lines, new_lines):
+              p = Path(path)
+              text = p.read_text()
+              old = "\n".join(old_lines) + "\n"
+              new = "\n".join(new_lines) + "\n"
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one match, got {count}")
+              p.write_text(text.replace(old, new, 1))
 
-          test = Path("core/src/test/java/kafka/server/SharedStorageKRaftIntegrationTest.java")
-          source = test.read_text()
-          unused = "import static org.junit.jupiter.api.Assertions.assertTrue;\n"
-          if source.count(unused) != 1:
-              raise SystemExit(f"expected unused assertTrue import once, got {source.count(unused)}")
-          test.write_text(source.replace(unused, "", 1))
+          extension = "storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3/S3SharedStorageExtension.java"
+          replace_once(
+              extension,
+              ["import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;"],
+              []
+          )
+          replace_once(
+              extension,
+              [
+                  "            newMetadataStore = KafkaObjectMetadataStore.open(metadataConfiguration);",
+                  "            for (SharedObjectMetadata metadata : newMetadataStore.committedObjects()) {",
+                  "                engine.commitRemoteObject(metadata);",
+                  "            }"
+              ],
+              [
+                  "            // Initial replay and live commits from every broker update this engine's remote coverage.",
+                  "            newMetadataStore = KafkaObjectMetadataStore.open(",
+                  "                metadataConfiguration,",
+                  "                engine::commitRemoteObject",
+                  "            );"
+              ]
+          )
+          replace_once(
+              "core/src/test/java/kafka/server/SharedStorageKRaftIntegrationTest.java",
+              ["import static org.junit.jupiter.api.Assertions.assertTrue;"],
+              []
+          )
           PY
 
           rm .github/workflows/shared-live-metadata-once.yml
