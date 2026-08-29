@@ -39,6 +39,7 @@ public final class SharedMetadataRecordCodec {
     private static final byte OBJECT_COMMITTED = 2;
     private static final byte BROKER_SEQUENCE_RESERVED = 3;
     private static final int VALUE_HEADER_BYTES = Short.BYTES + Byte.BYTES;
+    private static final int COMMITTED_OBJECT_HEADER_BYTES = Long.BYTES + Long.BYTES + Integer.BYTES;
     private static final int RANGE_BYTES = Long.BYTES + Long.BYTES + Integer.BYTES + Integer.BYTES +
         Long.BYTES + Long.BYTES + Long.BYTES + Integer.BYTES + Long.BYTES;
     private static final long SEQUENCE_LIMIT_EXCLUSIVE = BrokerObjectId.MAX_SEQUENCE + 1L;
@@ -110,10 +111,7 @@ public final class SharedMetadataRecordCodec {
         } catch (ArithmeticException e) {
             throw new IllegalArgumentException("too many shared object ranges", e);
         }
-        int totalBytes = Math.addExact(
-            VALUE_HEADER_BYTES + Long.BYTES + Long.BYTES + Integer.BYTES,
-            rangeBytes
-        );
+        int totalBytes = Math.addExact(VALUE_HEADER_BYTES + COMMITTED_OBJECT_HEADER_BYTES, rangeBytes);
         ByteBuffer buffer = ByteBuffer.allocate(totalBytes)
             .putShort(VALUE_VERSION)
             .put(OBJECT_COMMITTED)
@@ -184,14 +182,19 @@ public final class SharedMetadataRecordCodec {
     }
 
     private static CommittedObjectValue decodeCommittedObject(long objectId, ByteBuffer buffer) {
-        requireRemaining(buffer, Long.BYTES + Long.BYTES + Integer.BYTES, "committed object header");
+        requireAtLeastRemaining(buffer, COMMITTED_OBJECT_HEADER_BYTES, "committed object header");
         long objectSize = buffer.getLong();
         long objectChecksum = buffer.getLong();
         int rangeCount = buffer.getInt();
         if (objectSize <= 0 || rangeCount <= 0) {
             throw corruption("committed object has invalid size or range count");
         }
-        long requiredRangeBytes = (long) rangeCount * RANGE_BYTES;
+        long requiredRangeBytes;
+        try {
+            requiredRangeBytes = Math.multiplyExact((long) rangeCount, RANGE_BYTES);
+        } catch (ArithmeticException e) {
+            throw corruption("committed object range byte count overflow", e);
+        }
         if (requiredRangeBytes != buffer.remaining()) {
             throw corruption(
                 "committed object range bytes mismatch: expected=" + requiredRangeBytes +
@@ -273,6 +276,13 @@ public final class SharedMetadataRecordCodec {
     private static void requireRemaining(ByteBuffer buffer, int expected, String description) {
         if (buffer.remaining() != expected) {
             throw corruption(description + " must contain " + expected + " remaining bytes, got " + buffer.remaining());
+        }
+    }
+
+    private static void requireAtLeastRemaining(ByteBuffer buffer, int minimum, String description) {
+        if (buffer.remaining() < minimum) {
+            throw corruption(description + " must contain at least " + minimum + " remaining bytes, got " +
+                buffer.remaining());
         }
     }
 
