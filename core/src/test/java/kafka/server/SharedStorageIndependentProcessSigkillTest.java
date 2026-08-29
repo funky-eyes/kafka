@@ -80,6 +80,7 @@ public class SharedStorageIndependentProcessSigkillTest {
     private static final int WARMUP_RECORDS = 20;
     private static final int CRASH_RECORDS = 40;
     private static final int POST_CRASH_RECORDS = 20;
+    private static final int TOTAL_RECORDS = WARMUP_RECORDS + CRASH_RECORDS + POST_CRASH_RECORDS;
     private static final long UPLOAD_INTERVAL_MS = 30_000L;
     private static final int[] BROKER_PORTS = {19092, 19192, 19292};
     private static final int[] CONTROLLER_PORTS = {19093, 19193, 19293};
@@ -162,7 +163,7 @@ public class SharedStorageIndependentProcessSigkillTest {
                 assertEquals(
                     new OffsetRange(
                         WARMUP_RECORDS + CRASH_RECORDS,
-                        WARMUP_RECORDS + CRASH_RECORDS + POST_CRASH_RECORDS
+                        TOTAL_RECORDS
                     ),
                     postCrash
                 );
@@ -174,12 +175,14 @@ public class SharedStorageIndependentProcessSigkillTest {
                         " never uploaded the pre-SIGKILL acknowledged range " + crashRange
                 );
 
-                List<String> consumed = consumeAll(
-                    bootstrapServers,
-                    WARMUP_RECORDS + CRASH_RECORDS + POST_CRASH_RECORDS
+                List<String> consumed = consumeAll(bootstrapServers, TOTAL_RECORDS);
+                assertEquals(
+                    TOTAL_RECORDS,
+                    consumed.size(),
+                    "Every acknowledged record must remain consumable after SIGKILL"
                 );
-                List<String> expected = new ArrayList<>(consumed.size());
-                for (int i = 0; i < consumed.size(); i++) {
+                List<String> expected = new ArrayList<>(TOTAL_RECORDS);
+                for (int i = 0; i < TOTAL_RECORDS; i++) {
                     expected.add(value(i));
                 }
                 assertEquals(expected, consumed, "All acknowledged records must survive SIGKILL exactly once and in order");
@@ -304,7 +307,7 @@ public class SharedStorageIndependentProcessSigkillTest {
         environment.put("KAFKA_JVM_PERFORMANCE_OPTS", "-server -XX:+UseG1GC");
         environment.put("LOG_DIR", processRuntime.resolve("../gate3-broker-" + nodeId + "-logs").normalize().toString());
         environment.putIfAbsent("AWS_ACCESS_KEY_ID", "minioadmin");
-        environment.putIfAbsent("AWS_SECRET_ACCESS_KEY", "minioadmin");
+        environment.putIfAbsent("AWS_SECRET_ACCESS_KEY", "minioadmin123");
     }
 
     private static void waitForCluster(Map<Integer, BrokerProcess> brokers, String bootstrapServers) throws Exception {
