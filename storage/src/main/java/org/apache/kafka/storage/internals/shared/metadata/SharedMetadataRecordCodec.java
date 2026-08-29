@@ -31,6 +31,7 @@ import java.util.Objects;
 public final class SharedMetadataRecordCodec {
     private static final byte OBJECT_KEY = 1;
     private static final byte BROKER_SEQUENCE_KEY = 2;
+    private static final byte OBJECT_CLEANUP_KEY = 3;
     private static final int OBJECT_KEY_BYTES = Byte.BYTES + Long.BYTES;
     private static final int BROKER_SEQUENCE_KEY_BYTES = Byte.BYTES + Integer.BYTES;
 
@@ -38,6 +39,8 @@ public final class SharedMetadataRecordCodec {
     private static final byte OBJECT_PREPARED = 1;
     private static final byte OBJECT_COMMITTED = 2;
     private static final byte BROKER_SEQUENCE_RESERVED = 3;
+    private static final byte OBJECT_CLEANUP_CLAIMED = 4;
+    private static final byte OBJECT_CLEANUP_DELETED = 5;
     private static final int VALUE_HEADER_BYTES = Short.BYTES + Byte.BYTES;
     private static final int COMMITTED_OBJECT_HEADER_BYTES = Long.BYTES + Long.BYTES + Integer.BYTES;
     private static final int RANGE_BYTES = Long.BYTES + Long.BYTES + Integer.BYTES + Integer.BYTES +
@@ -48,11 +51,23 @@ public final class SharedMetadataRecordCodec {
     }
 
     public static byte[] objectKey(long objectId) {
+        return objectScopedKey(OBJECT_KEY, objectId);
+    }
+
+    /**
+     * Uses a distinct compacted key from {@link #objectKey(long)} so a losing cleanup claim can never compact away a
+     * winning COMMIT (or vice versa). Their offsets in the single metadata partition still provide the total order.
+     */
+    public static byte[] objectCleanupKey(long objectId) {
+        return objectScopedKey(OBJECT_CLEANUP_KEY, objectId);
+    }
+
+    private static byte[] objectScopedKey(byte type, long objectId) {
         if (objectId <= 0) {
             throw new IllegalArgumentException("objectId must be positive");
         }
         return ByteBuffer.allocate(OBJECT_KEY_BYTES)
-            .put(OBJECT_KEY)
+            .put(type)
             .putLong(objectId)
             .array();
     }
@@ -72,13 +87,13 @@ public final class SharedMetadataRecordCodec {
         }
         ByteBuffer buffer = ByteBuffer.wrap(keyBytes);
         byte type = buffer.get();
-        if (type == OBJECT_KEY) {
+        if (type == OBJECT_KEY || type == OBJECT_CLEANUP_KEY) {
             requireLength(keyBytes.length, OBJECT_KEY_BYTES, "object key");
             long objectId = buffer.getLong();
             if (objectId <= 0) {
                 throw corruption("object key contains non-positive objectId " + objectId);
             }
-            return new MetadataKey(KeyType.OBJECT, objectId);
+            return new MetadataKey(type == OBJECT_KEY ? KeyType.OBJECT : KeyType.OBJECT_CLEANUP, objectId);
         }
         if (type == BROKER_SEQUENCE_KEY) {
             requireLength(keyBytes.length, BROKER_SEQUENCE_KEY_BYTES, "broker sequence key");
@@ -90,12 +105,27 @@ public final class SharedMetadataRecordCodec {
     }
 
     public static byte[] preparedObjectValue(long createdTimeMs) {
-        if (createdTimeMs < 0) {
-            throw new IllegalArgumentException("createdTimeMs must be non-negative");
-        }
+        validateCreatedTimeMs(createdTimeMs);
         return ByteBuffer.allocate(VALUE_HEADER_BYTES + Long.BYTES)
             .putShort(VALUE_VERSION)
             .put(OBJECT_PREPARED)
+            .putLong(createdTimeMs)
+            .array();
+    }
+
+    public static byte[] cleanupClaimedValue(long createdTimeMs) {
+        return cleanupValue(OBJECT_CLEANUP_CLAIMED, createdTimeMs);
+    }
+
+    public static byte[] cleanupDeletedValue(long createdTimeMs) {
+        return cleanupValue(OBJECT_CLEANUP_DELETED, createdTimeMs);
+    }
+
+    private static byte[] cleanupValue(byte type, long createdTimeMs) {
+        validateCreatedTimeMs(createdTimeMs);
+        return ByteBuffer.allocate(VALUE_HEADER_BYTES + Long.BYTES)
+            .putShort(VALUE_VERSION)
+            .put(type)
             .putLong(createdTimeMs)
             .array();
     }
@@ -158,18 +188,22 @@ public final class SharedMetadataRecordCodec {
         byte type = buffer.get();
         if (key.type() == KeyType.OBJECT) {
             if (type == OBJECT_PREPARED) {
-                requireRemaining(buffer, Long.BYTES, "prepared object value");
-                long createdTimeMs = buffer.getLong();
-                if (createdTimeMs < 0) {
-                    throw corruption("prepared object has negative createdTimeMs");
-                }
-                requireFullyConsumed(buffer, "prepared object value");
-                return new PreparedObjectValue(createdTimeMs);
+                return new PreparedObjectValue(decodeCreatedTime(buffer, "prepared object value"));
             }
             if (type == OBJECT_COMMITTED) {
                 return decodeCommittedObject(key.id(), buffer);
             }
             throw corruption("object key has incompatible value type " + type);
+        }
+        if (key.type() == KeyType.OBJECT_CLEANUP) {
+            long createdTimeMs = decodeCreatedTime(buffer, "object cleanup value");
+            if (type == OBJECT_CLEANUP_CLAIMED) {
+                return new CleanupClaimedValue(createdTimeMs);
+            }
+            if (type == OBJECT_CLEANUP_DELETED) {
+                return new CleanupDeletedValue(createdTimeMs);
+            }
+            throw corruption("object cleanup key has incompatible value type " + type);
         }
         if (type != BROKER_SEQUENCE_RESERVED) {
             throw corruption("broker sequence key has incompatible value type " + type);
@@ -179,6 +213,16 @@ public final class SharedMetadataRecordCodec {
         validateReservedExclusiveSequenceForDecode(reservedExclusiveSequence);
         requireFullyConsumed(buffer, "broker sequence value");
         return new BrokerSequenceValue(reservedExclusiveSequence);
+    }
+
+    private static long decodeCreatedTime(ByteBuffer buffer, String description) {
+        requireRemaining(buffer, Long.BYTES, description);
+        long createdTimeMs = buffer.getLong();
+        if (createdTimeMs < 0) {
+            throw corruption(description + " has negative createdTimeMs");
+        }
+        requireFullyConsumed(buffer, description);
+        return createdTimeMs;
     }
 
     private static CommittedObjectValue decodeCommittedObject(long objectId, ByteBuffer buffer) {
@@ -234,6 +278,12 @@ public final class SharedMetadataRecordCodec {
             ));
         } catch (IllegalArgumentException e) {
             throw corruption("invalid committed object metadata", e);
+        }
+    }
+
+    private static void validateCreatedTimeMs(long createdTimeMs) {
+        if (createdTimeMs < 0) {
+            throw new IllegalArgumentException("createdTimeMs must be non-negative");
         }
     }
 
@@ -302,6 +352,7 @@ public final class SharedMetadataRecordCodec {
 
     public enum KeyType {
         OBJECT,
+        OBJECT_CLEANUP,
         BROKER_SEQUENCE
     }
 
@@ -321,6 +372,12 @@ public final class SharedMetadataRecordCodec {
         public CommittedObjectValue {
             Objects.requireNonNull(metadata, "metadata");
         }
+    }
+
+    public record CleanupClaimedValue(long createdTimeMs) implements MetadataValue {
+    }
+
+    public record CleanupDeletedValue(long createdTimeMs) implements MetadataValue {
     }
 
     public record BrokerSequenceValue(long reservedExclusiveSequence) implements MetadataValue {
