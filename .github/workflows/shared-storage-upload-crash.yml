@@ -1,0 +1,171 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements. See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License. You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Shared Storage Upload Crash Points
+
+on:
+  push:
+    branches:
+      - shared-wal-s3-4.3.1
+    paths:
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/object/SharedObjectUploadHook.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/object/SharedObjectUploader.java'
+      - 'storage/shared-storage-s3/src/main/**'
+      - 'storage/shared-storage-s3/src/test/java/org/apache/kafka/storage/internals/shared/s3/S3SharedStorageUploadCrashE2ETest.java'
+      - '.github/workflows/shared-storage-upload-crash.yml'
+  pull_request:
+    paths:
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/object/SharedObjectUploadHook.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/object/SharedObjectUploader.java'
+      - 'storage/shared-storage-s3/src/main/**'
+      - 'storage/shared-storage-s3/src/test/java/org/apache/kafka/storage/internals/shared/s3/S3SharedStorageUploadCrashE2ETest.java'
+      - '.github/workflows/shared-storage-upload-crash.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shared-storage-upload-crash-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  after-put-sigkill:
+    name: AFTER_PUT leader SIGKILL and orphan cleanup
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Start MinIO
+        run: |
+          docker run --detach \
+            --name kafka-shared-minio-upload-crash \
+            --publish 9000:9000 \
+            --env MINIO_ROOT_USER=minioadmin \
+            --env MINIO_ROOT_PASSWORD=minioadmin123 \
+            minio/minio:latest \
+            server /data --address :9000
+
+      - name: Wait for MinIO readiness
+        run: |
+          for i in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs kafka-shared-minio-upload-crash
+          exit 1
+
+      - name: Ensure MinIO bucket exists
+        run: |
+          docker run --rm --network host --entrypoint /bin/sh minio/mc:latest -c '
+            mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
+            mc mb --ignore-existing local/kafka-shared-storage-upload-crash >/dev/null
+          '
+
+      - name: Setup Gradle
+        uses: ./.github/actions/setup-gradle
+        with:
+          java-version: 25
+          gradle-cache-read-only: true
+
+      - name: Stage external broker runtime
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew \
+            :core:jar \
+            :core:copyDependantLibs \
+            :tools:jar \
+            :tools:copyDependantLibs \
+            :storage:shared-storage-s3:stageProcessRuntime \
+            :storage:shared-storage-s3:compileTestJava \
+            --no-scan 2>&1 | tee shared-storage-upload-crash-build.log
+          test -d storage/shared-storage-s3/build/process-runtime
+          find storage/shared-storage-s3/build/process-runtime -maxdepth 1 -type f -printf '%f\n' | sort \
+            > shared-storage-upload-crash-runtime.txt
+          grep -q '^kafka-shared-storage-s3-' shared-storage-upload-crash-runtime.txt
+          grep -q '^s3-' shared-storage-upload-crash-runtime.txt
+
+      - name: Run AFTER_PUT external-JVM crash gate
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin123
+          AWS_REGION: us-east-1
+          SHARED_STORAGE_S3_ENDPOINT: http://127.0.0.1:9000
+          SHARED_STORAGE_S3_REGION: us-east-1
+          SHARED_STORAGE_S3_BUCKET: kafka-shared-storage-upload-crash
+        run: |
+          set -o pipefail
+          ./gradlew :storage:shared-storage-s3:test \
+            --tests 'org.apache.kafka.storage.internals.shared.s3.S3SharedStorageUploadCrashE2ETest' \
+            --no-scan 2>&1 | tee shared-storage-upload-crash-e2e.log
+
+          result_xml="$(find storage/shared-storage-s3/build/test-results build/junit-xml \
+            -type f \
+            -name 'TEST-org.apache.kafka.storage.internals.shared.s3.S3SharedStorageUploadCrashE2ETest.xml' \
+            -print -quit 2>/dev/null || true)"
+          test -n "$result_xml"
+          grep -q '<testsuite ' "$result_xml"
+          grep -q 'failures="0"' "$result_xml"
+          grep -q 'errors="0"' "$result_xml"
+          grep -q 'skipped="0"' "$result_xml"
+          grep -q 'UPLOAD_CRASH_AFTER_PUT_SIGKILL oldLeader=' "$result_xml"
+          grep -q 'UPLOAD_CRASH_AFTER_PUT_RECOVERED oldLeader=' "$result_xml"
+          grep -q 'UPLOAD_CRASH_ORPHAN_CLEANED objectId=' "$result_xml"
+
+          {
+            grep 'UPLOAD_CRASH_AFTER_PUT_SIGKILL oldLeader=' "$result_xml"
+            grep 'UPLOAD_CRASH_AFTER_PUT_RECOVERED oldLeader=' "$result_xml"
+            grep 'UPLOAD_CRASH_ORPHAN_CLEANED objectId=' "$result_xml"
+            printf 'UPLOAD_CRASH_SUCCESS commit=%s\n' "$GITHUB_SHA"
+          } > shared-storage-upload-crash-proof.txt
+          cat shared-storage-upload-crash-proof.txt
+
+      - name: Show surviving S3 objects
+        if: always()
+        run: |
+          docker run --rm --network host --entrypoint /bin/sh minio/mc:latest -c '
+            mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
+            mc ls --recursive local/kafka-shared-storage-upload-crash || true
+          ' | tee shared-storage-upload-crash-objects.log
+
+      - name: Upload crash-point diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shared-storage-upload-crash-log
+          path: |
+            shared-storage-upload-crash-build.log
+            shared-storage-upload-crash-runtime.txt
+            shared-storage-upload-crash-e2e.log
+            shared-storage-upload-crash-proof.txt
+            shared-storage-upload-crash-objects.log
+            storage/shared-storage-s3/build/upload-crash-diagnostics
+            storage/shared-storage-s3/build/reports/tests/test
+            storage/shared-storage-s3/build/test-results/test
+            build/junit-xml/storage/shared-storage-s3
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: MinIO logs
+        if: always()
+        run: docker logs kafka-shared-minio-upload-crash || true
