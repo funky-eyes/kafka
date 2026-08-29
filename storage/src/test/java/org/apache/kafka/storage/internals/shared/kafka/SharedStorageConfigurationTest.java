@@ -49,6 +49,8 @@ class SharedStorageConfigurationTest {
         assertEquals(SharedStorageConfiguration.DEFAULT_WAL_SEGMENT_BYTES, config.walSegmentBytes());
         assertEquals(SharedStorageConfiguration.DEFAULT_OBJECT_TARGET_BYTES, config.objectTargetBytes());
         assertEquals(SharedStorageConfiguration.DEFAULT_UPLOAD_INTERVAL_MS, config.uploadIntervalMs());
+        assertEquals(SharedStorageConfiguration.DEFAULT_ORPHAN_CLEANUP_INTERVAL_MS, config.orphanCleanupIntervalMs());
+        assertEquals(SharedStorageConfiguration.DEFAULT_ORPHAN_GRACE_MS, config.orphanGraceMs());
         assertEquals(expectedWalDir, config.walDir());
         assertFalse(config.walDir().startsWith(kafkaLogDir));
         assertEquals(kafkaLogDir.getParent(), config.walDir().getParent().getParent().getParent());
@@ -111,10 +113,12 @@ class SharedStorageConfigurationTest {
     }
 
     @Test
-    void parsesExplicitUploadTuning() {
+    void parsesExplicitUploadAndCleanupTuning() {
         Map<String, Object> originals = new HashMap<>();
         originals.put(SharedStorageConfiguration.OBJECT_TARGET_BYTES_CONFIG, "67108864");
         originals.put(SharedStorageConfiguration.UPLOAD_INTERVAL_MS_CONFIG, 250L);
+        originals.put(SharedStorageConfiguration.ORPHAN_CLEANUP_INTERVAL_MS_CONFIG, 5_000L);
+        originals.put(SharedStorageConfiguration.ORPHAN_GRACE_MS_CONFIG, "120000");
 
         SharedStorageConfiguration config = SharedStorageConfiguration.from(
             context(originals, TestUtils.tempDirectory())
@@ -122,6 +126,8 @@ class SharedStorageConfigurationTest {
 
         assertEquals(64L * 1024 * 1024, config.objectTargetBytes());
         assertEquals(250L, config.uploadIntervalMs());
+        assertEquals(5_000L, config.orphanCleanupIntervalMs());
+        assertEquals(120_000L, config.orphanGraceMs());
     }
 
     @Test
@@ -137,7 +143,7 @@ class SharedStorageConfigurationTest {
     }
 
     @Test
-    void rejectsNonPositiveUploadTuning() {
+    void rejectsNonPositiveUploadAndCleanupTuning() {
         File logDir = TestUtils.tempDirectory();
         Map<String, Object> targetBytes = new HashMap<>();
         targetBytes.put(SharedStorageConfiguration.OBJECT_TARGET_BYTES_CONFIG, 0L);
@@ -151,6 +157,20 @@ class SharedStorageConfigurationTest {
         assertThrows(
             IllegalArgumentException.class,
             () -> SharedStorageConfiguration.from(context(interval, logDir))
+        );
+
+        Map<String, Object> cleanupInterval = new HashMap<>();
+        cleanupInterval.put(SharedStorageConfiguration.ORPHAN_CLEANUP_INTERVAL_MS_CONFIG, 0L);
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> SharedStorageConfiguration.from(context(cleanupInterval, logDir))
+        );
+
+        Map<String, Object> grace = new HashMap<>();
+        grace.put(SharedStorageConfiguration.ORPHAN_GRACE_MS_CONFIG, -1L);
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> SharedStorageConfiguration.from(context(grace, logDir))
         );
     }
 
