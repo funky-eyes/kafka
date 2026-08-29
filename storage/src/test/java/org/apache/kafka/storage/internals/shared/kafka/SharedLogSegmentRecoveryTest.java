@@ -42,6 +42,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 
 class SharedLogSegmentRecoveryTest {
     private static final SharedPartitionId PARTITION = new SharedPartitionId(1L, 2L, 0);
+    private static final SharedPartitionId OTHER_PARTITION = new SharedPartitionId(3L, 4L, 1);
 
     @TempDir
     Path tempDir;
@@ -111,6 +112,86 @@ class SharedLogSegmentRecoveryTest {
 
             first.close();
             second.close();
+        }
+    }
+
+    @Test
+    void shouldRecoverInterleavedPartitionsWithoutCrossingLogicalSegmentBoundaries() throws Exception {
+        Path walDir = tempDir.resolve("interleaved-wal");
+        File p0LogDir = tempDir.resolve("shared-topic-0").toFile();
+        File p1LogDir = tempDir.resolve("other-topic-1").toFile();
+        Files.createDirectories(p0LogDir.toPath());
+        Files.createDirectories(p1LogDir.toPath());
+        LogConfig config = new LogConfig(new Properties());
+        MockTime time = new MockTime();
+
+        MemoryRecords p0FirstRecords = records(0L, 5, 1000L, "p0-a", "p0-b");
+        MemoryRecords p1FirstRecords = records(0L, 6, 1100L, "p1-a", "p1-b");
+        MemoryRecords p0SecondRecords = records(2L, 7, 2000L, "p0-c", "p0-d");
+        MemoryRecords p1SecondRecords = records(2L, 8, 2100L, "p1-c", "p1-d");
+        int p0FirstSize = p0FirstRecords.sizeInBytes();
+        int p0SecondSize = p0SecondRecords.sizeInBytes();
+        int p1FirstSize = p1FirstRecords.sizeInBytes();
+        int p1SecondSize = p1SecondRecords.sizeInBytes();
+
+        try (SharedStorageEngine engine = engine(walDir)) {
+            SharedLogSegment p0First = SharedLogSegment.open(
+                p0LogDir, 0L, config, time, engine, PARTITION, false, "");
+            SharedLogSegment p1 = SharedLogSegment.open(
+                p1LogDir, 0L, config, time, engine, OTHER_PARTITION, false, "");
+
+            // Physical broker WAL order is P0, P1, P0, P1 even though their logical logs are independent.
+            p0First.append(1L, p0FirstRecords);
+            p1.append(1L, p1FirstRecords);
+            p0First.onBecomeInactiveSegment();
+
+            SharedLogSegment p0Second = SharedLogSegment.open(
+                p0LogDir, 2L, config, time, engine, PARTITION, false, "");
+            p0Second.append(3L, p0SecondRecords);
+            p1.append(3L, p1SecondRecords);
+
+            p0First.close();
+            p0Second.close();
+            p1.close();
+        }
+
+        try (SharedStorageEngine recoveredEngine = engine(walDir)) {
+            SharedLogSegment p0First = SharedLogSegment.open(
+                p0LogDir, 0L, config, time, recoveredEngine, PARTITION, true, "");
+            SharedLogSegment p0Second = SharedLogSegment.open(
+                p0LogDir, 2L, config, time, recoveredEngine, PARTITION, true, "");
+            SharedLogSegment p1 = SharedLogSegment.open(
+                p1LogDir, 0L, config, time, recoveredEngine, OTHER_PARTITION, true, "");
+
+            assertEquals(p0FirstSize, p0First.size());
+            assertEquals(p0SecondSize, p0Second.size());
+            assertEquals(p1FirstSize + p1SecondSize, p1.size());
+            assertEquals(2L, p0First.readNextOffset());
+            assertEquals(4L, p0Second.readNextOffset());
+            assertEquals(4L, p1.readNextOffset());
+
+            var p0SecondOffset = p0Second.translateOffset(3L);
+            assertNotNull(p0SecondOffset);
+            assertEquals(2L, p0SecondOffset.offset);
+            assertEquals(0, p0SecondOffset.position);
+
+            var p1SecondOffset = p1.translateOffset(3L);
+            assertNotNull(p1SecondOffset);
+            assertEquals(2L, p1SecondOffset.offset);
+            assertEquals(p1FirstSize, p1SecondOffset.position);
+
+            assertNull(p0First.read(2L, Integer.MAX_VALUE, Optional.of((long) p0First.size()), false));
+            FetchDataInfo p0SecondFetch = p0Second.read(
+                2L, Integer.MAX_VALUE, Optional.of((long) p0Second.size()), false);
+            FetchDataInfo p1Fetch = p1.read(0L, Integer.MAX_VALUE, Optional.of((long) p1.size()), false);
+            assertNotNull(p0SecondFetch);
+            assertNotNull(p1Fetch);
+            assertEquals(p0SecondSize, p0SecondFetch.records.sizeInBytes());
+            assertEquals(p1FirstSize + p1SecondSize, p1Fetch.records.sizeInBytes());
+
+            p0First.close();
+            p0Second.close();
+            p1.close();
         }
     }
 
