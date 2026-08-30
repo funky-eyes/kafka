@@ -237,12 +237,12 @@ public final class SharedUploadScheduler implements AutoCloseable {
     }
 
     private void releaseUploadSlot() {
-        int remaining = uploadsInProgress.decrementAndGet();
-        if (remaining < 0) {
-            uploadsInProgress.incrementAndGet();
-            throw new IllegalStateException("Shared upload slot accounting underflow");
-        }
         synchronized (uploadDrainMonitor) {
+            int remaining = uploadsInProgress.decrementAndGet();
+            if (remaining < 0) {
+                uploadsInProgress.incrementAndGet();
+                throw new IllegalStateException("Shared upload slot accounting underflow");
+            }
             uploadDrainMonitor.notifyAll();
         }
     }
