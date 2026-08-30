@@ -22,11 +22,19 @@ on:
     paths:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/wal/**'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/wal/**'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/metadata/LocalRemoteObjectCheckpoint.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/metadata/RemoteObjectIndex.java'
+      - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/metadata/LocalRemoteObjectCheckpointTest.java'
+      - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/metadata/RemoteObjectIndexTest.java'
       - '.github/workflows/shared-storage-wal-crash.yml'
   pull_request:
     paths:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/wal/**'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/wal/**'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/metadata/LocalRemoteObjectCheckpoint.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/metadata/RemoteObjectIndex.java'
+      - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/metadata/LocalRemoteObjectCheckpointTest.java'
+      - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/metadata/RemoteObjectIndexTest.java'
       - '.github/workflows/shared-storage-wal-crash.yml'
   workflow_dispatch:
 
@@ -39,7 +47,7 @@ concurrency:
 
 jobs:
   crash-window-gate:
-    name: WAL crash-window and rotating reclaim gate
+    name: WAL crash-window, checkpoint and rotating reclaim gate
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -54,7 +62,7 @@ jobs:
           java-version: 25
           gradle-cache-read-only: true
 
-      - name: Run deterministic WAL crash-window and reclaim tests
+      - name: Run deterministic WAL crash-window, checkpoint and reclaim tests
         shell: bash
         run: |
           set -o pipefail
@@ -63,6 +71,8 @@ jobs:
             --tests 'org.apache.kafka.storage.internals.shared.wal.FileSharedWalCrashWindowTest' \
             --tests 'org.apache.kafka.storage.internals.shared.wal.RotatingFileSharedWalTest' \
             --tests 'org.apache.kafka.storage.internals.shared.wal.RemoteCoverageWalReclaimPolicyTest' \
+            --tests 'org.apache.kafka.storage.internals.shared.metadata.LocalRemoteObjectCheckpointTest' \
+            --tests 'org.apache.kafka.storage.internals.shared.metadata.RemoteObjectIndexTest' \
             2>&1 | tee shared-storage-wal-crash.log
 
       - name: Upload crash-window diagnostics
