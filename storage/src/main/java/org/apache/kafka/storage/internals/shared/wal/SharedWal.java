@@ -72,6 +72,17 @@ public interface SharedWal extends AutoCloseable {
         throw new UnsupportedOperationException("WAL implementation does not support reclamation");
     }
 
+    /**
+     * Highest monotonically increasing logical segment id that has been physically reclaimed.
+     *
+     * <p>The default {@code -1} means the implementation cannot expose a physical reclamation boundary and callers
+     * must fall back to replay-based index reconstruction. Implementations that recycle fixed physical slots should
+     * still advance a logical segment/generation id on every reuse, so this boundary remains valid for circular WALs.</p>
+     */
+    default long reclaimedThroughSegmentId() {
+        return -1L;
+    }
+
     long usedBytes();
 
     long capacityBytes();
