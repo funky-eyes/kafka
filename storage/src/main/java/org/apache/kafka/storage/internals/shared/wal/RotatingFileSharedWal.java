@@ -178,7 +178,16 @@ public final class RotatingFileSharedWal implements SharedWal {
             throw new IllegalArgumentException("desiredBytes must be positive");
         }
 
-        long activeSegmentId;
+        long activeSegmentId = beginReclaim();
+        try {
+            ReclaimPlan plan = planWithOptionalActiveSeal(policy, desiredBytes, activeSegmentId);
+            return executeReclaim(plan);
+        } finally {
+            endReclaim();
+        }
+    }
+
+    private long beginReclaim() {
         synchronized (lifecycleLock) {
             awaitReclaim();
             ensureOpen();
@@ -186,33 +195,52 @@ public final class RotatingFileSharedWal implements SharedWal {
             while (inFlightReaders > 0) {
                 waitUninterruptibly();
             }
-            activeSegmentId = delegate.activeSegmentId();
+            return delegate.activeSegmentId();
         }
+    }
 
+    private void endReclaim() {
+        synchronized (lifecycleLock) {
+            reclaiming = false;
+            lifecycleLock.notifyAll();
+        }
+    }
+
+    private ReclaimPlan planWithOptionalActiveSeal(
+        WalReclaimPolicy policy,
+        long desiredBytes,
+        long activeSegmentId
+    ) throws IOException {
+        long exclusiveSegmentId = activeSegmentId >= 0 ? activeSegmentId : Long.MAX_VALUE;
+        ReclaimPlan plan = buildReclaimPlan(policy, desiredBytes, exclusiveSegmentId);
+        if (!shouldSealActiveSegment(plan, desiredBytes, activeSegmentId)) {
+            return plan;
+        }
+        long sealedSegmentId = delegate.sealActiveSegment();
+        if (sealedSegmentId < 0) {
+            return plan;
+        }
+        return buildReclaimPlan(policy, desiredBytes, Math.addExact(sealedSegmentId, 1L));
+    }
+
+    private static boolean shouldSealActiveSegment(
+        ReclaimPlan plan,
+        long desiredBytes,
+        long activeSegmentId
+    ) {
+        return activeSegmentId >= 0 &&
+            plan.safeBoundaryBytes() < desiredBytes &&
+            !plan.blockedByUnsafeGroup();
+    }
+
+    private long executeReclaim(ReclaimPlan plan) throws IOException {
         try {
-            long exclusiveSegmentId = activeSegmentId >= 0 ? activeSegmentId : Long.MAX_VALUE;
-            ReclaimPlan plan = buildReclaimPlan(policy, desiredBytes, exclusiveSegmentId);
-            if (activeSegmentId >= 0 &&
-                plan.safeBoundaryBytes() < desiredBytes &&
-                !plan.blockedByUnsafeGroup()) {
-                long sealedSegmentId = delegate.sealActiveSegment();
-                if (sealedSegmentId >= 0) {
-                    plan = buildReclaimPlan(policy, desiredBytes, Math.addExact(sealedSegmentId, 1L));
-                }
-            }
-            try {
-                ReclaimResult result = deleteReclaimableSegments(plan);
-                applyReclaimResult(result);
-                return result.reclaimedBytes();
-            } catch (PartialReclaimException e) {
-                applyReclaimResult(e.result());
-                throw e;
-            }
-        } finally {
-            synchronized (lifecycleLock) {
-                reclaiming = false;
-                lifecycleLock.notifyAll();
-            }
+            ReclaimResult result = deleteReclaimableSegments(plan);
+            applyReclaimResult(result);
+            return result.reclaimedBytes();
+        } catch (PartialReclaimException e) {
+            applyReclaimResult(e.result());
+            throw e;
         }
     }
 
@@ -325,62 +353,19 @@ public final class RotatingFileSharedWal implements SharedWal {
         long desiredBytes,
         long exclusiveSegmentId
     ) throws IOException {
-        List<Path> segments = segmentFiles();
         List<GroupEntry> pendingGroup = new ArrayList<>();
         long safeBoundarySegmentId = -1L;
         long safeBoundaryBytes = 0L;
         long scannedSegmentBytes = 0L;
-        boolean prefixReclaimable = true;
+        boolean blockedByUnsafeGroup = false;
 
-        for (Path segment : segments) {
+        for (Path segment : segmentFiles()) {
             long segmentId = parseSegmentId(segment);
             if (segmentId >= exclusiveSegmentId) {
                 break;
             }
-            boolean scannedWholeSegment = true;
-            try (FileChannel channel = FileChannel.open(segment, StandardOpenOption.READ)) {
-                long position = 0L;
-                while (prefixReclaimable) {
-                    WalRecordCodec.ReadResult result = WalRecordCodec.read(channel, position);
-                    if (result.status() == WalRecordCodec.ReadStatus.EOF) {
-                        break;
-                    }
-                    if (result.status() != WalRecordCodec.ReadStatus.COMPLETE) {
-                        throw new WalCorruptionException(
-                            "Cannot reclaim WAL containing a partial record at segment=" + segmentId +
-                                ", position=" + position);
-                    }
-                    WalRecord record = result.record();
-                    if (record.type() == WalRecordType.GROUP_COMMIT) {
-                        if (pendingGroup.size() != record.groupRecordCount()) {
-                            throw new WalCorruptionException(
-                                "WAL group commit count mismatch during reclaim for group " + record.groupId() +
-                                    ": expected=" + record.groupRecordCount() +
-                                    ", actual=" + pendingGroup.size());
-                        }
-                        boolean reclaimGroup = true;
-                        for (GroupEntry entry : pendingGroup) {
-                            if (!policy.canReclaim(entry.record(), entry.appendResult())) {
-                                reclaimGroup = false;
-                                break;
-                            }
-                        }
-                        pendingGroup.clear();
-                        if (!reclaimGroup) {
-                            prefixReclaimable = false;
-                            scannedWholeSegment = false;
-                            break;
-                        }
-                    } else {
-                        pendingGroup.add(new GroupEntry(
-                            record,
-                            new WalAppendResult(segmentId, position, result.length())
-                        ));
-                    }
-                    position += result.length();
-                }
-            }
-            if (!scannedWholeSegment || !prefixReclaimable) {
+            if (!scanReclaimableSegment(segment, segmentId, policy, pendingGroup)) {
+                blockedByUnsafeGroup = true;
                 break;
             }
             scannedSegmentBytes = Math.addExact(scannedSegmentBytes, Files.size(segment));
@@ -392,58 +377,155 @@ public final class RotatingFileSharedWal implements SharedWal {
                 }
             }
         }
-        return new ReclaimPlan(safeBoundarySegmentId, safeBoundaryBytes, !prefixReclaimable);
+        return new ReclaimPlan(safeBoundarySegmentId, safeBoundaryBytes, blockedByUnsafeGroup);
+    }
+
+    private boolean scanReclaimableSegment(
+        Path segment,
+        long segmentId,
+        WalReclaimPolicy policy,
+        List<GroupEntry> pendingGroup
+    ) throws IOException {
+        try (FileChannel channel = FileChannel.open(segment, StandardOpenOption.READ)) {
+            long position = 0L;
+            while (true) {
+                WalRecordCodec.ReadResult result = WalRecordCodec.read(channel, position);
+                if (result.status() == WalRecordCodec.ReadStatus.EOF) {
+                    return true;
+                }
+                requireCompleteReclaimRecord(result, segmentId, position);
+                if (!acceptReclaimRecord(result.record(), result.length(), segmentId, position, policy, pendingGroup)) {
+                    return false;
+                }
+                position += result.length();
+            }
+        }
+    }
+
+    private static void requireCompleteReclaimRecord(
+        WalRecordCodec.ReadResult result,
+        long segmentId,
+        long position
+    ) throws WalCorruptionException {
+        if (result.status() != WalRecordCodec.ReadStatus.COMPLETE) {
+            throw new WalCorruptionException(
+                "Cannot reclaim WAL containing a partial record at segment=" + segmentId + ", position=" + position);
+        }
+    }
+
+    private static boolean acceptReclaimRecord(
+        WalRecord record,
+        int recordLength,
+        long segmentId,
+        long position,
+        WalReclaimPolicy policy,
+        List<GroupEntry> pendingGroup
+    ) throws WalCorruptionException {
+        if (record.type() != WalRecordType.GROUP_COMMIT) {
+            pendingGroup.add(new GroupEntry(
+                record,
+                new WalAppendResult(segmentId, position, recordLength)
+            ));
+            return true;
+        }
+        validateGroupCommit(record, pendingGroup);
+        boolean reclaimable = groupReclaimable(policy, pendingGroup);
+        pendingGroup.clear();
+        return reclaimable;
+    }
+
+    private static void validateGroupCommit(WalRecord commit, List<GroupEntry> pendingGroup)
+        throws WalCorruptionException {
+        if (pendingGroup.size() != commit.groupRecordCount()) {
+            throw new WalCorruptionException(
+                "WAL group commit count mismatch during reclaim for group " + commit.groupId() +
+                    ": expected=" + commit.groupRecordCount() + ", actual=" + pendingGroup.size());
+        }
+    }
+
+    private static boolean groupReclaimable(WalReclaimPolicy policy, List<GroupEntry> pendingGroup) {
+        for (GroupEntry entry : pendingGroup) {
+            if (!policy.canReclaim(entry.record(), entry.appendResult())) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private ReclaimResult deleteReclaimableSegments(ReclaimPlan plan) throws IOException {
         if (plan.safeBoundarySegmentId() < 0) {
             return ReclaimResult.NONE;
         }
-        long reclaimedBytes = 0L;
-        long reclaimedThroughSegmentId = -1L;
-        boolean deleted = false;
-        IOException failure = null;
+        DeletionState state = new DeletionState();
+        IOException failure = deletePlannedSegments(plan.safeBoundarySegmentId(), state);
+        failure = flushDeletedDirectory(state, failure);
+        ReclaimResult result = state.result();
+        validateDeletionResult(plan, result, failure);
+        return result;
+    }
+
+    private IOException deletePlannedSegments(long safeBoundarySegmentId, DeletionState state) throws IOException {
         for (Path segment : segmentFiles()) {
             long segmentId = parseSegmentId(segment);
-            if (segmentId > plan.safeBoundarySegmentId()) {
+            if (segmentId > safeBoundarySegmentId) {
                 break;
             }
+            IOException failure = deleteSegment(segment, segmentId, state);
+            if (failure != null) {
+                return failure;
+            }
+        }
+        return null;
+    }
+
+    private static IOException deleteSegment(Path segment, long segmentId, DeletionState state) {
+        try {
             long segmentBytes = Files.size(segment);
-            try {
-                if (Files.deleteIfExists(segment)) {
-                    reclaimedBytes = Math.addExact(reclaimedBytes, segmentBytes);
-                    reclaimedThroughSegmentId = segmentId;
-                    deleted = true;
-                }
-            } catch (IOException e) {
-                failure = e;
-                break;
+            if (Files.deleteIfExists(segment)) {
+                state.record(segmentId, segmentBytes);
             }
+            return null;
+        } catch (IOException e) {
+            return e;
         }
-        if (deleted) {
-            try {
-                Utils.flushDir(directory.toAbsolutePath().normalize());
-            } catch (IOException flushError) {
-                if (failure == null) {
-                    failure = flushError;
-                } else {
-                    failure.addSuppressed(flushError);
-                }
-            }
+    }
+
+    private IOException flushDeletedDirectory(DeletionState state, IOException failure) {
+        if (!state.deleted()) {
+            return failure;
         }
-        ReclaimResult result = new ReclaimResult(reclaimedBytes, reclaimedThroughSegmentId);
+        try {
+            Utils.flushDir(directory.toAbsolutePath().normalize());
+            return failure;
+        } catch (IOException flushError) {
+            return mergeFailures(failure, flushError);
+        }
+    }
+
+    private static IOException mergeFailures(IOException primary, IOException additional) {
+        if (primary == null) {
+            return additional;
+        }
+        primary.addSuppressed(additional);
+        return primary;
+    }
+
+    private static void validateDeletionResult(
+        ReclaimPlan plan,
+        ReclaimResult result,
+        IOException failure
+    ) throws PartialReclaimException {
         if (failure != null) {
             throw new PartialReclaimException(failure, result);
         }
-        if (reclaimedBytes != plan.safeBoundaryBytes()) {
+        if (result.reclaimedBytes() != plan.safeBoundaryBytes()) {
             throw new PartialReclaimException(
                 new IOException(
                     "WAL reclaim plan changed while deleting immutable segments: planned=" + plan.safeBoundaryBytes() +
-                        ", actual=" + reclaimedBytes),
+                        ", actual=" + result.reclaimedBytes()),
                 result
             );
         }
-        return result;
     }
 
     private static long watermarkBytes(long capacityBytes, int percent) {
@@ -493,6 +575,26 @@ public final class RotatingFileSharedWal implements SharedWal {
 
     private record ReclaimResult(long reclaimedBytes, long reclaimedThroughSegmentId) {
         private static final ReclaimResult NONE = new ReclaimResult(0L, -1L);
+    }
+
+    private static final class DeletionState {
+        private long reclaimedBytes;
+        private long reclaimedThroughSegmentId = -1L;
+        private boolean deleted;
+
+        private void record(long segmentId, long segmentBytes) {
+            reclaimedBytes = Math.addExact(reclaimedBytes, segmentBytes);
+            reclaimedThroughSegmentId = segmentId;
+            deleted = true;
+        }
+
+        private boolean deleted() {
+            return deleted;
+        }
+
+        private ReclaimResult result() {
+            return new ReclaimResult(reclaimedBytes, reclaimedThroughSegmentId);
+        }
     }
 
     private static final class PartialReclaimException extends IOException {
