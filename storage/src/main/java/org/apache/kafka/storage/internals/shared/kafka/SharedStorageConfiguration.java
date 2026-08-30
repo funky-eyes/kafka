@@ -33,7 +33,6 @@ public final class SharedStorageConfiguration {
     public static final String WAL_DIR_CONFIG = "shared.storage.wal.dir";
     public static final String WAL_CAPACITY_BYTES_CONFIG = "shared.storage.wal.capacity.bytes";
     public static final String WAL_SEGMENT_BYTES_CONFIG = "shared.storage.wal.segment.bytes";
-    public static final String WAL_READ_CACHE_BYTES_CONFIG = "shared.storage.wal.read.cache.bytes";
     public static final String OBJECT_TARGET_BYTES_CONFIG = "shared.storage.object.target.bytes";
     public static final String UPLOAD_INTERVAL_MS_CONFIG = "shared.storage.upload.interval.ms";
     public static final String ORPHAN_CLEANUP_INTERVAL_MS_CONFIG = "shared.storage.orphan.cleanup.interval.ms";
@@ -43,7 +42,6 @@ public final class SharedStorageConfiguration {
 
     public static final long DEFAULT_WAL_CAPACITY_BYTES = 2L * 1024 * 1024 * 1024;
     public static final long DEFAULT_WAL_SEGMENT_BYTES = 64L * 1024 * 1024;
-    public static final long DEFAULT_WAL_READ_CACHE_BYTES = 256L * 1024 * 1024;
     public static final long DEFAULT_OBJECT_TARGET_BYTES = 32L * 1024 * 1024;
     public static final long DEFAULT_UPLOAD_INTERVAL_MS = 100L;
     public static final long DEFAULT_ORPHAN_CLEANUP_INTERVAL_MS = 60_000L;
@@ -52,7 +50,6 @@ public final class SharedStorageConfiguration {
     private final Path walDir;
     private final long walCapacityBytes;
     private final long walSegmentBytes;
-    private final long walReadCacheBytes;
     private final long objectTargetBytes;
     private final long uploadIntervalMs;
     private final long orphanCleanupIntervalMs;
@@ -64,7 +61,6 @@ public final class SharedStorageConfiguration {
         Path walDir,
         long walCapacityBytes,
         long walSegmentBytes,
-        long walReadCacheBytes,
         long objectTargetBytes,
         long uploadIntervalMs,
         long orphanCleanupIntervalMs,
@@ -75,7 +71,6 @@ public final class SharedStorageConfiguration {
         this.walDir = walDir;
         this.walCapacityBytes = walCapacityBytes;
         this.walSegmentBytes = walSegmentBytes;
-        this.walReadCacheBytes = walReadCacheBytes;
         this.objectTargetBytes = objectTargetBytes;
         this.uploadIntervalMs = uploadIntervalMs;
         this.orphanCleanupIntervalMs = orphanCleanupIntervalMs;
@@ -106,11 +101,6 @@ public final class SharedStorageConfiguration {
             throw new IllegalArgumentException(
                 WAL_SEGMENT_BYTES_CONFIG + " must not exceed " + WAL_CAPACITY_BYTES_CONFIG);
         }
-        long walReadCacheBytes = nonNegativeLong(
-            context.originals().get(WAL_READ_CACHE_BYTES_CONFIG),
-            DEFAULT_WAL_READ_CACHE_BYTES,
-            WAL_READ_CACHE_BYTES_CONFIG
-        );
         long objectTargetBytes = positiveLong(
             context.originals().get(OBJECT_TARGET_BYTES_CONFIG),
             DEFAULT_OBJECT_TARGET_BYTES,
@@ -138,7 +128,6 @@ public final class SharedStorageConfiguration {
             walDir,
             walCapacityBytes,
             walSegmentBytes,
-            walReadCacheBytes,
             objectTargetBytes,
             uploadIntervalMs,
             orphanCleanupIntervalMs,
@@ -185,10 +174,6 @@ public final class SharedStorageConfiguration {
         return walSegmentBytes;
     }
 
-    public long walReadCacheBytes() {
-        return walReadCacheBytes;
-    }
-
     public long objectTargetBytes() {
         return objectTargetBytes;
     }
@@ -223,22 +208,14 @@ public final class SharedStorageConfiguration {
     }
 
     private static long positiveLong(Object value, long defaultValue, String name) {
-        long parsed = nonNegativeLong(value, defaultValue, name);
-        if (parsed == 0) {
-            throw new IllegalArgumentException(name + " must be positive");
-        }
-        return parsed;
-    }
-
-    private static long nonNegativeLong(Object value, long defaultValue, String name) {
         if (value == null || value.toString().isBlank()) {
             return defaultValue;
         }
         long parsed = value instanceof Number number
             ? number.longValue()
             : Long.parseLong(value.toString().trim());
-        if (parsed < 0) {
-            throw new IllegalArgumentException(name + " must not be negative");
+        if (parsed <= 0) {
+            throw new IllegalArgumentException(name + " must be positive");
         }
         return parsed;
     }
