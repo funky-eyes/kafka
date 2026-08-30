@@ -18,8 +18,11 @@ package org.apache.kafka.storage.internals.shared.s3;
 
 import org.apache.kafka.common.errors.InvalidReplicationFactorException;
 import org.apache.kafka.common.errors.TimeoutException;
+import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
 
 import org.junit.jupiter.api.Test;
+
+import java.io.IOException;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -33,5 +36,21 @@ class KafkaObjectMetadataStoreTest {
             new TimeoutException("controller metadata is still converging")));
         assertFalse(KafkaObjectMetadataStore.isTransientTopicCreationFailure(
             new IllegalStateException("permanent configuration failure")));
+    }
+
+    @Test
+    void retriesTransientRemotePlaneBootstrapFailuresThroughIOExceptionWrapping() {
+        assertTrue(S3SharedStorageExtension.isRetriableMetadataBootstrapFailure(
+            new IOException(
+                "Unable to initialize shared metadata store",
+                new UnknownTopicOrPartitionException("metadata partition not locally visible yet")
+            )
+        ));
+        assertTrue(S3SharedStorageExtension.isRetriableMetadataBootstrapFailure(
+            new IOException("wrapped", new TimeoutException("metadata still converging"))
+        ));
+        assertFalse(S3SharedStorageExtension.isRetriableMetadataBootstrapFailure(
+            new IOException("permanent", new IllegalStateException("invalid cleanup policy"))
+        ));
     }
 }
