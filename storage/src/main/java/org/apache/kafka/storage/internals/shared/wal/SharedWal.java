@@ -48,6 +48,17 @@ public interface SharedWal extends AutoCloseable {
 
     void replay(WalReplayConsumer consumer) throws IOException;
 
+    /**
+     * Reclaims a contiguous physical WAL prefix that is no longer required for recovery.
+     *
+     * <p>Implementations supporting rotation must preserve append-group atomicity and must never reclaim a record for
+     * which {@code policy} returns false. The return value is the number of physical bytes released.</p>
+     */
+    default long reclaim(WalReclaimPolicy policy) throws IOException {
+        Objects.requireNonNull(policy, "policy");
+        throw new UnsupportedOperationException("WAL implementation does not support reclamation");
+    }
+
     long usedBytes();
 
     long capacityBytes();
