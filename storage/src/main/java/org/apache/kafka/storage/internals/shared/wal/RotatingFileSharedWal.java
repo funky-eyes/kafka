@@ -36,24 +36,17 @@ import java.util.stream.Stream;
  * Rotating facade over {@link FileSharedWal}.
  *
  * <p>The underlying WAL remains the single-writer, group-commit implementation. Reclamation is online with respect to
- * appends: it snapshots the current active logical segment, briefly drains readers that may still have old segment
- * files open, and deletes only a contiguous safe prefix strictly before that active segment. The WAL writer remains
- * open and can continue group-committing into the active or newer segments while old immutable segments are reclaimed.
- * This preserves the existing crash format while removing the former close/delete/reopen stop-the-world cycle.</p>
+ * appends: it briefly drains readers that may still have old segment files open, reclaims an immutable safe prefix, and
+ * only seals the current active segment when additional safe headroom is required. The writer thread remains alive and
+ * new appends continue after the short segment-seal I/O critical section.</p>
  *
  * <p>Recently durable DATA records are retained in a bounded in-memory read cache. Producer acknowledgement still
  * depends exclusively on the underlying WAL durability barrier; the cache is populated only after that barrier and is
- * therefore a disposable performance layer. Upload packing and hot reads can reuse the owned Kafka RecordBatch bytes
- * without re-reading the physical WAL. Cache misses transparently fall back to the WAL.</p>
+ * therefore a disposable performance layer.</p>
  *
  * <p>Remote commit makes bytes reclaimable but does not immediately discard their local recovery copy. Normal
  * maintenance retains the most recent WAL until physical usage reaches the high watermark, then frees only enough of
- * the oldest safe prefix to return near the low watermark. This preserves a useful local recovery window through a
- * short object-store outage while still making the configured WAL capacity reusable indefinitely in steady state.</p>
- *
- * <p>Deletion is permitted only through a physical segment boundary that is also an append-group boundary. A group
- * spanning an immutable segment and the current active segment therefore pins the old segment until the active segment
- * rolls and the complete group can be proven safe on a later maintenance pass.</p>
+ * the oldest safe prefix to return near the low watermark.</p>
  */
 public final class RotatingFileSharedWal implements SharedWal {
     static final int DEFAULT_RECLAIM_HIGH_WATERMARK_PERCENT = 85;
@@ -92,7 +85,6 @@ public final class RotatingFileSharedWal implements SharedWal {
             ensureOpen();
             inFlightOperations++;
         }
-
         final CompletableFuture<List<WalAppendResult>> append;
         try {
             append = delegate.appendBatch(immutableRecords);
@@ -162,11 +154,6 @@ public final class RotatingFileSharedWal implements SharedWal {
         }
     }
 
-    /**
-     * Production maintenance entry point. Below the high watermark this intentionally keeps even remotely committed
-     * bytes local. Once pressure reaches the high watermark it frees only enough safe prefix to return near the low
-     * watermark; segment-boundary granularity may release slightly more.
-     */
     @Override
     public long reclaim(WalReclaimPolicy policy) throws IOException {
         Objects.requireNonNull(policy, "policy");
@@ -181,8 +168,7 @@ public final class RotatingFileSharedWal implements SharedWal {
             return 0L;
         }
         long lowWatermarkBytes = watermarkBytes(capacityBytes, DEFAULT_RECLAIM_LOW_WATERMARK_PERCENT);
-        long desiredBytes = Math.max(1L, used - lowWatermarkBytes);
-        return reclaim(policy, desiredBytes);
+        return reclaim(policy, Math.max(1L, used - lowWatermarkBytes));
     }
 
     @Override
@@ -204,7 +190,16 @@ public final class RotatingFileSharedWal implements SharedWal {
         }
 
         try {
-            ReclaimPlan plan = buildReclaimPlan(policy, desiredBytes, activeSegmentId);
+            long exclusiveSegmentId = activeSegmentId >= 0 ? activeSegmentId : Long.MAX_VALUE;
+            ReclaimPlan plan = buildReclaimPlan(policy, desiredBytes, exclusiveSegmentId);
+            if (activeSegmentId >= 0 &&
+                plan.safeBoundaryBytes() < desiredBytes &&
+                !plan.blockedByUnsafeGroup()) {
+                long sealedSegmentId = delegate.sealActiveSegment();
+                if (sealedSegmentId >= 0) {
+                    plan = buildReclaimPlan(policy, desiredBytes, Math.addExact(sealedSegmentId, 1L));
+                }
+            }
             try {
                 ReclaimResult result = deleteReclaimableSegments(plan);
                 applyReclaimResult(result);
@@ -328,7 +323,7 @@ public final class RotatingFileSharedWal implements SharedWal {
     private ReclaimPlan buildReclaimPlan(
         WalReclaimPolicy policy,
         long desiredBytes,
-        long activeSegmentId
+        long exclusiveSegmentId
     ) throws IOException {
         List<Path> segments = segmentFiles();
         List<GroupEntry> pendingGroup = new ArrayList<>();
@@ -339,7 +334,7 @@ public final class RotatingFileSharedWal implements SharedWal {
 
         for (Path segment : segments) {
             long segmentId = parseSegmentId(segment);
-            if (activeSegmentId >= 0 && segmentId >= activeSegmentId) {
+            if (segmentId >= exclusiveSegmentId) {
                 break;
             }
             boolean scannedWholeSegment = true;
@@ -397,7 +392,7 @@ public final class RotatingFileSharedWal implements SharedWal {
                 }
             }
         }
-        return new ReclaimPlan(safeBoundarySegmentId, safeBoundaryBytes);
+        return new ReclaimPlan(safeBoundarySegmentId, safeBoundaryBytes, !prefixReclaimable);
     }
 
     private ReclaimResult deleteReclaimableSegments(ReclaimPlan plan) throws IOException {
@@ -493,7 +488,7 @@ public final class RotatingFileSharedWal implements SharedWal {
     private record GroupEntry(WalRecord record, WalAppendResult appendResult) {
     }
 
-    private record ReclaimPlan(long safeBoundarySegmentId, long safeBoundaryBytes) {
+    private record ReclaimPlan(long safeBoundarySegmentId, long safeBoundaryBytes, boolean blockedByUnsafeGroup) {
     }
 
     private record ReclaimResult(long reclaimedBytes, long reclaimedThroughSegmentId) {
