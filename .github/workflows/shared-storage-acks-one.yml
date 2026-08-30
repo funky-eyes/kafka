@@ -1,20 +1,58 @@
-name: Shared Storage acks=1
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements. See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License. You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Shared Storage acks=1 Durability Matrix
 
 on:
   push:
     branches:
       - shared-wal-s3-4.3.1
+    paths:
+      - 'core/src/test/java/kafka/server/SharedStorageAcksOneIndependentProcessTest.java'
+      - 'core/src/test/java/kafka/server/SharedStorageAcksOneKRaftIntegrationTest.java'
+      - 'storage/src/main/**'
+      - 'storage/shared-storage-s3/**'
+      - '.github/workflows/shared-storage-acks-one.yml'
+  pull_request:
+    paths:
+      - 'core/src/test/java/kafka/server/SharedStorageAcksOneIndependentProcessTest.java'
+      - 'core/src/test/java/kafka/server/SharedStorageAcksOneKRaftIntegrationTest.java'
+      - 'storage/src/main/**'
+      - 'storage/shared-storage-s3/**'
+      - '.github/workflows/shared-storage-acks-one.yml'
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   group: shared-storage-acks-one-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  minio-acks-one:
-    name: MinIO acks=1 leader WAL E2E
+  acks-one-replication-matrix:
+    name: acks=1 RF${{ matrix.rf }} leader-only and replicated crash
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        rf:
+          - 1
+          - 2
+          - 3
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -46,7 +84,7 @@ jobs:
         run: |
           docker run --rm --network host --entrypoint /bin/sh minio/mc:latest -c '
             mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
-            mc mb --ignore-existing local/kafka-shared-storage-e2e >/dev/null
+            mc mb --ignore-existing local/kafka-shared-storage-acks-one >/dev/null
           '
 
       - name: Setup Gradle
@@ -55,7 +93,25 @@ jobs:
           java-version: 25
           gradle-cache-read-only: true
 
-      - name: Run acks=1 durability boundary E2E
+      - name: Stage dedicated-controller broker runtime
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew \
+            :core:jar \
+            :core:copyDependantLibs \
+            :tools:jar \
+            :tools:copyDependantLibs \
+            :storage:shared-storage-s3:stageProcessRuntime \
+            :core:compileTestJava \
+            --no-scan 2>&1 | tee shared-storage-acks-one-build.log
+          test -d storage/shared-storage-s3/build/process-runtime
+          find storage/shared-storage-s3/build/process-runtime -maxdepth 1 -type f -printf '%f\n' | sort \
+            > shared-storage-acks-one-runtime.txt
+          grep -q '^kafka-shared-storage-s3-' shared-storage-acks-one-runtime.txt
+          grep -q '^s3-' shared-storage-acks-one-runtime.txt
+
+      - name: Run RF${{ matrix.rf }} external-JVM acks=1 contract gate
         shell: bash
         env:
           AWS_ACCESS_KEY_ID: minioadmin
@@ -63,30 +119,77 @@ jobs:
           AWS_REGION: us-east-1
           SHARED_STORAGE_S3_ENDPOINT: http://127.0.0.1:9000
           SHARED_STORAGE_S3_REGION: us-east-1
-          SHARED_STORAGE_S3_BUCKET: kafka-shared-storage-e2e
+          SHARED_STORAGE_S3_BUCKET: kafka-shared-storage-acks-one
+          SHARED_STORAGE_ACKS_ONE_REPLICATION_FACTOR: ${{ matrix.rf }}
         run: |
           set -o pipefail
           ./gradlew :core:test \
-            --tests 'kafka.server.SharedStorageAcksOneKRaftIntegrationTest' \
+            --tests 'kafka.server.SharedStorageAcksOneIndependentProcessTest' \
             --no-scan 2>&1 | tee shared-storage-acks-one-e2e.log
+
+          result_xml="$(find core/build/test-results build/junit-xml \
+            -type f \
+            -name 'TEST-kafka.server.SharedStorageAcksOneIndependentProcessTest.xml' \
+            -print -quit 2>/dev/null || true)"
+          test -n "$result_xml"
+          grep -q '<testsuite ' "$result_xml"
+          grep -q 'failures="0"' "$result_xml"
+          grep -q 'errors="0"' "$result_xml"
+          grep -q 'skipped="0"' "$result_xml"
+          grep -q 'ACKS1_SCENARIO rf=${{ matrix.rf }} minIsr=${{ matrix.rf }} brokers=3 controller=dedicated' "$result_xml"
+          grep -q 'ACKS1_LEADER_ONLY_ACK rf=${{ matrix.rf }} leader=' "$result_xml"
+          grep -q 'ACKS1_SINGLE_COPY_RISK rf=${{ matrix.rf }} leader=' "$result_xml"
+          grep -q 'ACKS1_NO_AUTOMATIC_FAILOVER rf=${{ matrix.rf }} reason=' "$result_xml"
+          grep -q 'ACKS1_ORIGINAL_DISK_RECOVERED rf=${{ matrix.rf }} leader=' "$result_xml"
+          grep -q 'ACKS1_ASYNC_REPLICATION_COMPLETE rf=${{ matrix.rf }} leader=' "$result_xml"
+          grep -q 'ACKS1_MATRIX_SUCCESS rf=${{ matrix.rf }} records=2' "$result_xml"
+
+          if [ '${{ matrix.rf }}' = '1' ]; then
+            grep -q 'ACKS1_RF1_RESTART_RECOVERED leader=' "$result_xml"
+          else
+            grep -q 'ACKS1_REPLICATED_FAILOVER rf=${{ matrix.rf }} oldLeader=' "$result_xml"
+          fi
+
+          {
+            grep 'ACKS1_SCENARIO rf=${{ matrix.rf }} minIsr=' "$result_xml"
+            grep 'ACKS1_LEADER_ONLY_ACK rf=${{ matrix.rf }} leader=' "$result_xml"
+            grep 'ACKS1_SINGLE_COPY_RISK rf=${{ matrix.rf }} leader=' "$result_xml"
+            grep 'ACKS1_NO_AUTOMATIC_FAILOVER rf=${{ matrix.rf }} reason=' "$result_xml"
+            grep 'ACKS1_ORIGINAL_DISK_RECOVERED rf=${{ matrix.rf }} leader=' "$result_xml"
+            grep 'ACKS1_ASYNC_REPLICATION_COMPLETE rf=${{ matrix.rf }} leader=' "$result_xml"
+            if [ '${{ matrix.rf }}' = '1' ]; then
+              grep 'ACKS1_RF1_RESTART_RECOVERED leader=' "$result_xml"
+            else
+              grep 'ACKS1_REPLICATED_FAILOVER rf=${{ matrix.rf }} oldLeader=' "$result_xml"
+            fi
+            grep 'ACKS1_MATRIX_SUCCESS rf=${{ matrix.rf }} records=2' "$result_xml"
+            printf 'ACKS1_SUCCESS rf=%s commit=%s\n' '${{ matrix.rf }}' "$GITHUB_SHA"
+          } > shared-storage-acks-one-proof.txt
+          cat shared-storage-acks-one-proof.txt
 
       - name: Show committed S3 objects
         if: always()
         run: |
           docker run --rm --network host --entrypoint /bin/sh minio/mc:latest -c '
             mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
-            mc ls --recursive local/kafka-shared-storage-e2e || true
+            mc ls --recursive local/kafka-shared-storage-acks-one || true
           ' | tee shared-storage-acks-one-objects.log
 
-      - name: Upload diagnostics
+      - name: Upload RF${{ matrix.rf }} diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: shared-storage-acks-one-e2e-log
+          name: shared-storage-acks-one-rf${{ matrix.rf }}
           path: |
+            shared-storage-acks-one-build.log
+            shared-storage-acks-one-runtime.txt
             shared-storage-acks-one-e2e.log
+            shared-storage-acks-one-proof.txt
             shared-storage-acks-one-objects.log
+            core/build/shared-storage-acks-one-diagnostics
             core/build/reports/tests/test
+            core/build/test-results/test
+            build/junit-xml/core
           if-no-files-found: ignore
           retention-days: 7
 
