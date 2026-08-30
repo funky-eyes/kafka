@@ -169,50 +169,94 @@ public final class LocalRemoteObjectCheckpoint {
         if (!Files.exists(checkpoint)) {
             return new HashMap<>();
         }
+        long fileSize = validateCheckpointFileSize();
+        ByteBuffer bytes = readCheckpoint(fileSize);
+        validateChecksum(bytes);
+        int count = readAndValidateHeader(bytes, fileSize);
+        Map<SharedPartitionId, NavigableMap<Long, RemoteObjectIndex.RangeReference>> loaded =
+            decodeEntries(bytes, count);
+        consumeChecksum(bytes);
+        return loaded;
+    }
+
+    private long validateCheckpointFileSize() throws IOException {
         long fileSize = Files.size(checkpoint);
         if (fileSize < HEADER_BYTES + CHECKSUM_BYTES || fileSize > Integer.MAX_VALUE) {
             throw new IOException("Invalid local remote checkpoint size " + fileSize);
         }
+        return fileSize;
+    }
+
+    private ByteBuffer readCheckpoint(long fileSize) throws IOException {
         ByteBuffer bytes = ByteBuffer.allocate((int) fileSize).order(ByteOrder.BIG_ENDIAN);
         try (FileChannel channel = FileChannel.open(checkpoint, StandardOpenOption.READ)) {
             readFully(channel, bytes);
         }
         bytes.flip();
+        return bytes;
+    }
+
+    private static void validateChecksum(ByteBuffer bytes) throws IOException {
         int storedChecksum = bytes.getInt(bytes.limit() - CHECKSUM_BYTES);
         ByteBuffer checksummed = bytes.duplicate();
         checksummed.limit(bytes.limit() - CHECKSUM_BYTES);
         if ((int) crc32c(checksummed) != storedChecksum) {
             throw new IOException("Local remote checkpoint checksum mismatch");
         }
+    }
 
+    private static int readAndValidateHeader(ByteBuffer bytes, long fileSize) throws IOException {
         int magic = bytes.getInt();
         short version = bytes.getShort();
         short reserved = bytes.getShort();
         int count = bytes.getInt();
+        validateHeaderFields(magic, version, reserved, count);
+        validateExpectedSize(fileSize, count);
+        return count;
+    }
+
+    private static void validateHeaderFields(int magic, short version, short reserved, int count) throws IOException {
         if (magic != MAGIC || version != VERSION || reserved != 0 || count < 0) {
             throw new IOException("Invalid local remote checkpoint header");
         }
+    }
+
+    private static void validateExpectedSize(long fileSize, int count) throws IOException {
         long expectedSize = HEADER_BYTES + Math.multiplyExact((long) count, ENTRY_BYTES) + CHECKSUM_BYTES;
         if (expectedSize != fileSize) {
             throw new IOException(
                 "Local remote checkpoint length mismatch: expected=" + expectedSize + ", actual=" + fileSize);
         }
+    }
 
+    private static Map<SharedPartitionId, NavigableMap<Long, RemoteObjectIndex.RangeReference>> decodeEntries(
+        ByteBuffer bytes,
+        int count
+    ) throws IOException {
         Map<SharedPartitionId, NavigableMap<Long, RemoteObjectIndex.RangeReference>> loaded = new HashMap<>();
         for (int i = 0; i < count; i++) {
-            RemoteObjectIndex.RangeReference reference = decode(bytes);
-            NavigableMap<Long, RemoteObjectIndex.RangeReference> ranges = loaded.computeIfAbsent(
-                reference.range().partition(), ignored -> new TreeMap<>());
-            if (overlappingReference(ranges, reference.range().offsets()) != null) {
-                throw new IOException("Overlapping ranges in local remote checkpoint");
-            }
-            ranges.put(reference.range().offsets().startOffset(), reference);
+            addDecodedReference(loaded, decode(bytes));
         }
+        return loaded;
+    }
+
+    private static void addDecodedReference(
+        Map<SharedPartitionId, NavigableMap<Long, RemoteObjectIndex.RangeReference>> loaded,
+        RemoteObjectIndex.RangeReference reference
+    ) throws IOException {
+        NavigableMap<Long, RemoteObjectIndex.RangeReference> ranges = loaded.computeIfAbsent(
+            reference.range().partition(), ignored -> new TreeMap<>());
+        if (overlappingReference(ranges, reference.range().offsets()) != null) {
+            throw new IOException("Overlapping ranges in local remote checkpoint");
+        }
+        ranges.put(reference.range().offsets().startOffset(), reference);
+    }
+
+    private static void consumeChecksum(ByteBuffer bytes) throws IOException {
         bytes.position(bytes.position() + CHECKSUM_BYTES);
         if (bytes.hasRemaining()) {
             throw new IOException("Trailing bytes in local remote checkpoint");
         }
-        return loaded;
     }
 
     private void persist(List<RemoteObjectIndex.RangeReference> references) throws IOException {
