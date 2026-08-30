@@ -47,7 +47,7 @@ class RotatingFileSharedWalTest {
             ExecutionException full = assertThrows(ExecutionException.class, () -> append(wal, 2, 100));
             assertTrue(full.getCause() instanceof WalCapacityExceededException);
 
-            long reclaimed = wal.reclaim((record, ignored) -> record.lastOffset() == 0);
+            long reclaimed = wal.reclaim((record, ignored) -> record.lastOffset() == 0, 1L);
             assertTrue(reclaimed > 0, "a complete remotely safe prefix segment must be physically released");
             assertTrue(wal.usedBytes() < beforeReclaim);
 
@@ -69,7 +69,7 @@ class RotatingFileSharedWalTest {
             )).get(10, TimeUnit.SECONDS);
 
             long before = wal.usedBytes();
-            long reclaimed = wal.reclaim((record, ignored) -> record.lastOffset() == 0);
+            long reclaimed = wal.reclaim((record, ignored) -> record.lastOffset() == 0, 1L);
             assertEquals(0L, reclaimed,
                 "one reclaimable record must not allow deletion of a physical prefix containing half an append group");
             assertEquals(before, wal.usedBytes());
@@ -89,7 +89,7 @@ class RotatingFileSharedWalTest {
                     sawCommit.set(true);
                 }
                 return true;
-            });
+            }, 1L);
             assertTrue(reclaimed > 0);
         }
         assertFalse(sawCommit.get(), "GROUP_COMMIT is an internal framing record, not a reclaim-policy input");
@@ -103,7 +103,7 @@ class RotatingFileSharedWalTest {
             append(wal, 1, 100);
             long before = wal.usedBytes();
 
-            long reclaimed = wal.reclaim((record, ignored) -> record.firstOffset() > 0);
+            long reclaimed = wal.reclaim((record, ignored) -> record.firstOffset() > 0, 1L);
             assertEquals(0L, reclaimed, "reclamation may never jump over an unsafe oldest group");
             assertEquals(before, wal.usedBytes());
         }
@@ -115,7 +115,7 @@ class RotatingFileSharedWalTest {
         Path walDir = tempDir.resolve("rotating-all");
         try (RotatingFileSharedWal wal = new RotatingFileSharedWal(walDir, 512, 256)) {
             append(wal, 0, 50);
-            long reclaimed = wal.reclaim((record, ignored) -> true);
+            long reclaimed = wal.reclaim((record, ignored) -> true, Long.MAX_VALUE);
             assertTrue(reclaimed > 0);
             assertEquals(0L, wal.usedBytes());
             assertEquals(0L, segmentCount(walDir));
@@ -124,6 +124,52 @@ class RotatingFileSharedWalTest {
             assertTrue(wal.usedBytes() > 0);
         }
         assertEquals(List.of(1L), replayOffsets(walDir, 512, 256));
+    }
+
+    @Test
+    void shouldRetainRemoteCommittedWalBelowPressureHighWatermark() throws Exception {
+        Path walDir = tempDir.resolve("rotating-retention-window");
+        try (RotatingFileSharedWal wal = new RotatingFileSharedWal(walDir, 4096, 512)) {
+            append(wal, 0, 200);
+            append(wal, 1, 200);
+            long before = wal.usedBytes();
+            assertTrue(before < percentage(4096, RotatingFileSharedWal.DEFAULT_RECLAIM_HIGH_WATERMARK_PERCENT));
+
+            assertEquals(0L, wal.reclaim((record, ignored) -> true),
+                "remote commit alone must not eagerly discard the local recovery window");
+            assertEquals(before, wal.usedBytes());
+            assertEquals(List.of(0L, 1L), replayOffsets(walDir, 4096, 512));
+        }
+    }
+
+    @Test
+    void shouldReclaimOnlyEnoughSafePrefixToReturnToLowWatermark() throws Exception {
+        Path walDir = tempDir.resolve("rotating-pressure-window");
+        long capacity = 4096L;
+        long segmentBytes = 512L;
+        List<Long> appended = new ArrayList<>();
+        try (RotatingFileSharedWal wal = new RotatingFileSharedWal(walDir, capacity, segmentBytes)) {
+            long high = percentage(capacity, RotatingFileSharedWal.DEFAULT_RECLAIM_HIGH_WATERMARK_PERCENT);
+            for (long offset = 0; wal.usedBytes() < high; offset++) {
+                append(wal, offset, 200);
+                appended.add(offset);
+            }
+            long before = wal.usedBytes();
+            assertTrue(before >= high);
+
+            long reclaimed = wal.reclaim((record, ignored) -> true);
+            assertTrue(reclaimed > 0);
+            long low = percentage(capacity, RotatingFileSharedWal.DEFAULT_RECLAIM_LOW_WATERMARK_PERCENT);
+            assertTrue(wal.usedBytes() <= low,
+                "bounded reclamation should create the requested recovery headroom");
+            assertTrue(wal.usedBytes() > 0,
+                "pressure reclamation must retain newer WAL instead of eagerly clearing every safe segment");
+        }
+
+        List<Long> replayed = replayOffsets(walDir, capacity, segmentBytes);
+        assertFalse(replayed.isEmpty());
+        assertTrue(replayed.get(0) > appended.get(0), "oldest safe WAL prefix should have rotated away");
+        assertEquals(appended.get(appended.size() - 1), replayed.get(replayed.size() - 1));
     }
 
     private static void append(RotatingFileSharedWal wal, long offset, int payloadBytes) throws Exception {
@@ -145,5 +191,9 @@ class RotatingFileSharedWalTest {
                 .filter(path -> path.getFileName().toString().endsWith(".log"))
                 .count();
         }
+    }
+
+    private static long percentage(long value, int percent) {
+        return value * percent / 100L;
     }
 }
