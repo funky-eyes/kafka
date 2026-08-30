@@ -16,11 +16,13 @@
  */
 package org.apache.kafka.storage.internals.shared;
 
+import org.apache.kafka.storage.internals.shared.metadata.LocalRemoteObjectCheckpoint;
 import org.apache.kafka.storage.internals.shared.metadata.OffsetRange;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectRange;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 import org.apache.kafka.storage.internals.shared.wal.FileSharedWal;
+
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -97,6 +99,54 @@ class SharedStorageEngineTest {
                 engine.uploadCandidates(PARTITION, 100, 120).stream()
                     .map(SharedStorageEngine.UploadCandidate::offsets).toList());
             assertTrue(engine.readLocal(PARTITION, 110).isEmpty());
+        }
+    }
+
+    @Test
+    void committedRemoteObjectsShouldCheckpointOffCallbackAndRestoreBeforeWalReplay() throws Exception {
+        Path directory = tempDir.resolve("remote-checkpoint-engine");
+        SharedObjectMetadata first = object(10, 100, 110, 111);
+        SharedObjectMetadata second = object(11, 110, 120, 222);
+
+        LocalRemoteObjectCheckpoint checkpoint = new LocalRemoteObjectCheckpoint(directory);
+        try (SharedStorageEngine engine = new SharedStorageEngine(
+            new FileSharedWal(directory, 1024 * 1024, 4096),
+            checkpoint
+        )) {
+            engine.commitRemoteObject(first);
+            engine.commitRemoteObject(second);
+
+            assertTrue(engine.remoteIndex().coverage(PARTITION).covers(new OffsetRange(100, 120)),
+                "metadata callback must publish authoritative remote coverage immediately");
+            assertEquals(2, engine.pendingRemoteCheckpointCount(),
+                "metadata callback must queue rather than synchronously fsync the local checkpoint");
+            assertTrue(new LocalRemoteObjectCheckpoint(directory).references().isEmpty(),
+                "queued COMMITs must not be mistaken for durable local checkpoint state");
+
+            assertEquals(2, engine.checkpointCommittedRemoteObjects());
+            assertEquals(0, engine.pendingRemoteCheckpointCount());
+            assertEquals(0, engine.checkpointCommittedRemoteObjects());
+        }
+
+        LocalRemoteObjectCheckpoint reopenedCheckpoint = new LocalRemoteObjectCheckpoint(directory);
+        assertEquals(2, reopenedCheckpoint.references().size());
+        try (SharedStorageEngine restarted = new SharedStorageEngine(
+            new FileSharedWal(directory, 1024 * 1024, 4096),
+            reopenedCheckpoint
+        )) {
+            assertTrue(restarted.remoteIndex().coverage(PARTITION).covers(new OffsetRange(100, 120)),
+                "cold remote ranges must be restored before live Kafka metadata replay");
+            assertEquals(10L, restarted.remoteIndex().find(PARTITION, 105).orElseThrow().objectId());
+            assertEquals(11L, restarted.remoteIndex().find(PARTITION, 115).orElseThrow().objectId());
+        }
+    }
+
+    @Test
+    void engineWithoutLocalCheckpointShouldKeepExistingBehavior() throws Exception {
+        try (SharedStorageEngine engine = engine("no-checkpoint")) {
+            engine.commitRemoteObject(object(10, 100, 110, 111));
+            assertEquals(0, engine.checkpointCommittedRemoteObjects());
+            assertTrue(engine.remoteIndex().coverage(PARTITION).covers(new OffsetRange(100, 110)));
         }
     }
 
