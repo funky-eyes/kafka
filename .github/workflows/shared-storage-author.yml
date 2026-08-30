@@ -33,56 +33,79 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Checkout development history
+      - name: Checkout complete development history
         uses: actions/checkout@v5
         with:
-          # The branch starts exactly at Kafka 4.3.1 and the shared-storage patch stack is intentionally small.
-          # Keep enough history to cover the entire patch stack without fetching the whole Kafka repository history.
-          fetch-depth: 200
+          ref: shared-wal-s3-4.3.1
+          fetch-depth: 0
           persist-credentials: true
 
-      - name: Ensure Kafka 4.3.1 base is available
-        env:
-          BASE_SHA: 26b251a451ce941d3d7a55e6487bcb7f16b5ad48
-        run: |
-          set -euo pipefail
-          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
-            git fetch --no-tags --depth=1 origin "${BASE_SHA}"
-          fi
-
       - name: Normalize development commit identity
+        shell: bash
         env:
           BASE_SHA: 26b251a451ce941d3d7a55e6487bcb7f16b5ad48
           TARGET_NAME: Jianbin Chen
           TARGET_EMAIL: jianbin@apache.org
+          TARGET_BRANCH: shared-wal-s3-4.3.1
         run: |
           set -euo pipefail
 
-          bad_count=$(git log "${BASE_SHA}..HEAD" --format='%ae %ce' | \
-            awk -v email="${TARGET_EMAIL}" '$1 != email || $2 != email { count++ } END { print count+0 }')
-          if [ "${bad_count}" -eq 0 ]; then
+          git fetch --no-tags origin "${TARGET_BRANCH}"
+          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            git fetch --no-tags origin "${BASE_SHA}"
+          fi
+          git checkout -B "${TARGET_BRANCH}" "origin/${TARGET_BRANCH}"
+          remote_head=$(git rev-parse "origin/${TARGET_BRANCH}")
+
+          oldest_bad=""
+          while read -r commit; do
+            author_email=$(git show -s --format='%ae' "${commit}")
+            committer_email=$(git show -s --format='%ce' "${commit}")
+            if [ "${author_email}" != "${TARGET_EMAIL}" ] || \
+               [ "${committer_email}" != "${TARGET_EMAIL}" ]; then
+              oldest_bad="${commit}"
+              break
+            fi
+          done < <(git rev-list --reverse "${BASE_SHA}..HEAD")
+
+          if [ -z "${oldest_bad}" ]; then
             echo "All development commits already use ${TARGET_EMAIL}."
             exit 0
           fi
 
-          export FILTER_BRANCH_SQUELCH_WARNING=1
-          export TARGET_NAME TARGET_EMAIL BASE_SHA
-          git filter-branch --force --env-filter '
-            if git merge-base --is-ancestor "$BASE_SHA" "$GIT_COMMIT" && [ "$GIT_COMMIT" != "$BASE_SHA" ]; then
-              export GIT_AUTHOR_NAME="$TARGET_NAME"
-              export GIT_AUTHOR_EMAIL="$TARGET_EMAIL"
-              export GIT_COMMITTER_NAME="$TARGET_NAME"
-              export GIT_COMMITTER_EMAIL="$TARGET_EMAIL"
-            fi
-          ' -- "${BASE_SHA}..HEAD"
+          rebase_base=$(git rev-parse "${oldest_bad}^")
+          git config user.name "${TARGET_NAME}"
+          git config user.email "${TARGET_EMAIL}"
 
-          git push --force-with-lease origin "HEAD:${GITHUB_REF_NAME}"
-
-      - name: Verify identity
-        env:
-          BASE_SHA: 26b251a451ce941d3d7a55e6487bcb7f16b5ad48
-          TARGET_EMAIL: jianbin@apache.org
-        run: |
+          cat > /tmp/normalize-shared-storage-author.sh <<'SCRIPT'
+          #!/usr/bin/env bash
           set -euo pipefail
+          current_author=$(git show -s --format='%ae' HEAD)
+          current_committer=$(git show -s --format='%ce' HEAD)
+          if [ "${current_author}" != "${TARGET_EMAIL}" ] || \
+             [ "${current_committer}" != "${TARGET_EMAIL}" ]; then
+            GIT_COMMITTER_NAME="${TARGET_NAME}" \
+            GIT_COMMITTER_EMAIL="${TARGET_EMAIL}" \
+              git commit --amend --no-edit \
+                --author="${TARGET_NAME} <${TARGET_EMAIL}>"
+          fi
+          SCRIPT
+          chmod +x /tmp/normalize-shared-storage-author.sh
+          export TARGET_NAME TARGET_EMAIL
+
+          git rebase --rebase-merges \
+            --exec /tmp/normalize-shared-storage-author.sh \
+            "${rebase_base}"
+
+          bad_emails=$(git log "${BASE_SHA}..HEAD" --format='%ae%n%ce' | \
+            grep -vFx "${TARGET_EMAIL}" || true)
+          if [ -n "${bad_emails}" ]; then
+            echo "Unexpected development commit identities remain:"
+            printf '%s\n' "${bad_emails}"
+            exit 1
+          fi
+
           git log "${BASE_SHA}..HEAD" --format='%h %an <%ae> / %cn <%ce>'
-          test -z "$(git log "${BASE_SHA}..HEAD" --format='%ae%n%ce' | grep -vFx "${TARGET_EMAIL}" || true)"
+          git push \
+            --force-with-lease="refs/heads/${TARGET_BRANCH}:${remote_head}" \
+            origin "HEAD:${TARGET_BRANCH}"
