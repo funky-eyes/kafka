@@ -1,0 +1,163 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements. See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License. You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Shared Storage S3 Outage
+
+on:
+  push:
+    branches:
+      - shared-wal-s3-4.3.1
+    paths:
+      - 'core/src/test/java/kafka/server/SharedStorageS3OutageKRaftIntegrationTest.java'
+      - 'storage/src/main/**'
+      - 'storage/shared-storage-s3/src/main/**'
+      - '.github/workflows/shared-storage-s3-outage.yml'
+  pull_request:
+    paths:
+      - 'core/src/test/java/kafka/server/SharedStorageS3OutageKRaftIntegrationTest.java'
+      - 'storage/src/main/**'
+      - 'storage/shared-storage-s3/src/main/**'
+      - '.github/workflows/shared-storage-s3-outage.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shared-storage-s3-outage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  s3-outage-failover:
+    name: acks=all through S3 outage and leader failover
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Start MinIO
+        run: |
+          docker run --detach \
+            --name kafka-shared-minio-s3-outage \
+            --publish 9000:9000 \
+            --env MINIO_ROOT_USER=minioadmin \
+            --env MINIO_ROOT_PASSWORD=minioadmin123 \
+            minio/minio:latest \
+            server /data --address :9000
+
+      - name: Wait for MinIO readiness
+        run: |
+          for i in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs kafka-shared-minio-s3-outage
+          exit 1
+
+      - name: Ensure MinIO bucket exists
+        run: |
+          docker run --rm --network host --entrypoint /bin/sh minio/mc:latest -c '
+            mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
+            mc mb --ignore-existing local/kafka-shared-storage-s3-outage >/dev/null
+          '
+
+      - name: Setup Gradle
+        uses: ./.github/actions/setup-gradle
+        with:
+          java-version: 25
+          gradle-cache-read-only: true
+
+      - name: Run S3 outage and leader failover E2E
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin123
+          AWS_REGION: us-east-1
+          SHARED_STORAGE_S3_ENDPOINT: http://127.0.0.1:9000
+          SHARED_STORAGE_S3_REGION: us-east-1
+          SHARED_STORAGE_S3_BUCKET: kafka-shared-storage-s3-outage
+          SHARED_STORAGE_S3_CONTAINER: kafka-shared-minio-s3-outage
+        run: |
+          set -o pipefail
+          ./gradlew :core:test \
+            --tests 'kafka.server.SharedStorageS3OutageKRaftIntegrationTest' \
+            --no-scan 2>&1 | tee shared-storage-s3-outage-e2e.log
+
+          result_xml="$(find core/build/test-results build/junit-xml \
+            -type f \
+            -name 'TEST-kafka.server.SharedStorageS3OutageKRaftIntegrationTest.xml' \
+            -print -quit 2>/dev/null || true)"
+          test -n "$result_xml"
+          grep -q '<testsuite ' "$result_xml"
+          grep -q 'failures="0"' "$result_xml"
+          grep -q 'errors="0"' "$result_xml"
+          grep -q 'skipped="0"' "$result_xml"
+          grep -q 'S3_OUTAGE_STARTED oldLeader=' "$result_xml"
+          grep -q 'S3_OUTAGE_ACKED range=' "$result_xml"
+          grep -q 'S3_OUTAGE_FAILOVER oldLeader=' "$result_xml"
+          grep -q 'S3_OUTAGE_RECOVERED newLeader=' "$result_xml"
+
+          {
+            grep 'S3_OUTAGE_STARTED oldLeader=' "$result_xml"
+            grep 'S3_OUTAGE_ACKED range=' "$result_xml"
+            grep 'S3_OUTAGE_FAILOVER oldLeader=' "$result_xml"
+            grep 'S3_OUTAGE_RECOVERED newLeader=' "$result_xml"
+            printf 'S3_OUTAGE_SUCCESS commit=%s\n' "$GITHUB_SHA"
+          } > shared-storage-s3-outage-proof.txt
+          cat shared-storage-s3-outage-proof.txt
+
+      - name: Ensure MinIO is running for diagnostics
+        if: always()
+        run: |
+          docker start kafka-shared-minio-s3-outage >/dev/null 2>&1 || true
+          for i in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 0
+
+      - name: Show committed S3 objects
+        if: always()
+        run: |
+          docker run --rm --network host --entrypoint /bin/sh minio/mc:latest -c '
+            mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
+            mc ls --recursive local/kafka-shared-storage-s3-outage || true
+          ' | tee shared-storage-s3-outage-objects.log
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shared-storage-s3-outage-log
+          path: |
+            shared-storage-s3-outage-e2e.log
+            shared-storage-s3-outage-proof.txt
+            shared-storage-s3-outage-objects.log
+            core/build/reports/tests/test
+            core/build/test-results/test
+            build/junit-xml/core
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: MinIO logs
+        if: always()
+        run: docker logs kafka-shared-minio-s3-outage || true
