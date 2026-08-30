@@ -174,7 +174,10 @@ public final class SharedUploadScheduler implements AutoCloseable {
         if (!uploadInProgress.compareAndSet(false, true)) {
             return CompletableFuture.completedFuture(Optional.empty());
         }
+        return selectForUpload(applyTriggerGate);
+    }
 
+    private CompletableFuture<Optional<SharedObjectMetadata>> selectForUpload(boolean applyTriggerGate) {
         final CandidateSelection selection;
         try {
             selection = selectCandidateBatch();
@@ -186,7 +189,13 @@ public final class SharedUploadScheduler implements AutoCloseable {
             uploadInProgress.set(false);
             return CompletableFuture.completedFuture(Optional.empty());
         }
+        return evaluateTrigger(selection, applyTriggerGate);
+    }
 
+    private CompletableFuture<Optional<SharedObjectMetadata>> evaluateTrigger(
+        CandidateSelection selection,
+        boolean applyTriggerGate
+    ) {
         final long nowMs;
         try {
             nowMs = currentTimeMsSupplier.getAsLong();
@@ -197,7 +206,13 @@ public final class SharedUploadScheduler implements AutoCloseable {
             uploadInProgress.set(false);
             return CompletableFuture.completedFuture(Optional.empty());
         }
+        return startUpload(selection, nowMs);
+    }
 
+    private CompletableFuture<Optional<SharedObjectMetadata>> startUpload(
+        CandidateSelection selection,
+        long nowMs
+    ) {
         final CompletableFuture<Optional<SharedObjectMetadata>> result;
         try {
             long objectId = objectIdSupplier.getAsLong();
@@ -210,16 +225,18 @@ public final class SharedUploadScheduler implements AutoCloseable {
         } catch (RuntimeException e) {
             return synchronousFailure(e);
         }
-        return result.whenComplete((ignored, error) -> {
-            if (error == null) {
-                lastUploadFailure.set(null);
-                pendingHead.set(null);
-            } else {
-                lastUploadFailure.set(error);
-                LOG.warn("Shared object upload failed", error);
-            }
-            uploadInProgress.set(false);
-        });
+        return result.whenComplete(this::completeUpload);
+    }
+
+    private void completeUpload(Optional<SharedObjectMetadata> ignored, Throwable error) {
+        if (error == null) {
+            lastUploadFailure.set(null);
+            pendingHead.set(null);
+        } else {
+            lastUploadFailure.set(error);
+            LOG.warn("Shared object upload failed", error);
+        }
+        uploadInProgress.set(false);
     }
 
     private boolean shouldUpload(CandidateSelection selection, long nowMs) {
@@ -337,10 +354,7 @@ public final class SharedUploadScheduler implements AutoCloseable {
             .comparingLong((SharedStorageEngine.UploadCandidate candidate) -> candidate.location().segmentId())
             .thenComparingLong(candidate -> candidate.location().position()));
 
-        long totalEligibleBytes = 0L;
-        for (SharedStorageEngine.UploadCandidate candidate : committed) {
-            totalEligibleBytes = Math.addExact(totalEligibleBytes, candidate.location().payloadLength());
-        }
+        long totalEligibleBytes = totalEligibleBytes(committed);
         logSelectionSummary(new SelectionSummary(
             snapshot.size(),
             leaderPartitions,
@@ -350,8 +364,22 @@ public final class SharedUploadScheduler implements AutoCloseable {
         ));
 
         if (committed.isEmpty()) {
-            return new CandidateSelection(List.of(), 0L, 0L);
+            return new CandidateSelection(List.of(), 0L);
         }
+        return new CandidateSelection(selectTargetBounded(committed), totalEligibleBytes);
+    }
+
+    private static long totalEligibleBytes(List<SharedStorageEngine.UploadCandidate> candidates) {
+        long total = 0L;
+        for (SharedStorageEngine.UploadCandidate candidate : candidates) {
+            total = Math.addExact(total, candidate.location().payloadLength());
+        }
+        return total;
+    }
+
+    private List<SharedStorageEngine.UploadCandidate> selectTargetBounded(
+        List<SharedStorageEngine.UploadCandidate> committed
+    ) {
         List<SharedStorageEngine.UploadCandidate> selected = new ArrayList<>();
         long selectedBytes = 0L;
         for (SharedStorageEngine.UploadCandidate candidate : committed) {
@@ -365,7 +393,7 @@ public final class SharedUploadScheduler implements AutoCloseable {
                 break;
             }
         }
-        return new CandidateSelection(List.copyOf(selected), selectedBytes, totalEligibleBytes);
+        return List.copyOf(selected);
     }
 
     private void logSelectionSummary(SelectionSummary summary) {
@@ -407,7 +435,6 @@ public final class SharedUploadScheduler implements AutoCloseable {
 
     private record CandidateSelection(
         List<SharedStorageEngine.UploadCandidate> candidates,
-        long selectedBytes,
         long totalEligibleBytes
     ) {
     }
