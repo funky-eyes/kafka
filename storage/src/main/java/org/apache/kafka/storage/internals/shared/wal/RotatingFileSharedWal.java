@@ -40,12 +40,18 @@ import java.util.stream.Stream;
  * of segment files whose complete append groups are approved by the supplied {@link WalReclaimPolicy}, fsyncs the WAL
  * directory, and reopens the writer. This deliberately favors safety over reclamation aggressiveness.</p>
  *
+ * <p>Remote commit makes bytes reclaimable but does not immediately discard their local recovery copy. Normal
+ * maintenance retains the most recent WAL until physical usage reaches the high watermark, then frees only enough of
+ * the oldest safe prefix to return near the low watermark. This preserves a useful local recovery window through a
+ * short object-store outage while still making the configured WAL capacity reusable indefinitely in steady state.</p>
+ *
  * <p>Deletion is permitted only through a physical segment boundary that is also an append-group boundary. A group
  * spanning two files therefore pins both files until its commit marker is safely covered. Bounded reclamation stops at
- * the first such boundary providing the requested headroom, retaining newer remotely committed WAL as a local recovery
- * window instead of eagerly discarding it.</p>
+ * the first such boundary providing the requested headroom.</p>
  */
 public final class RotatingFileSharedWal implements SharedWal {
+    static final int DEFAULT_RECLAIM_HIGH_WATERMARK_PERCENT = 85;
+    static final int DEFAULT_RECLAIM_LOW_WATERMARK_PERCENT = 70;
     private static final Pattern SEGMENT_FILE_PATTERN = Pattern.compile("wal-(\\d{20})\\.log");
 
     private final Object lifecycleLock = new Object();
@@ -114,6 +120,29 @@ public final class RotatingFileSharedWal implements SharedWal {
         } finally {
             endOperation();
         }
+    }
+
+    /**
+     * Production maintenance entry point. Below the high watermark this intentionally keeps even remotely committed
+     * bytes local. Once pressure reaches the high watermark it frees only enough safe prefix to return near the low
+     * watermark; segment-boundary granularity may release slightly more.
+     */
+    @Override
+    public long reclaim(WalReclaimPolicy policy) throws IOException {
+        Objects.requireNonNull(policy, "policy");
+        long used;
+        synchronized (lifecycleLock) {
+            awaitReclaim();
+            ensureOpen();
+            used = delegate.usedBytes();
+        }
+        long highWatermarkBytes = watermarkBytes(capacityBytes, DEFAULT_RECLAIM_HIGH_WATERMARK_PERCENT);
+        if (used < highWatermarkBytes) {
+            return 0L;
+        }
+        long lowWatermarkBytes = watermarkBytes(capacityBytes, DEFAULT_RECLAIM_LOW_WATERMARK_PERCENT);
+        long desiredBytes = Math.max(1L, used - lowWatermarkBytes);
+        return reclaim(policy, desiredBytes);
     }
 
     @Override
@@ -334,6 +363,15 @@ public final class RotatingFileSharedWal implements SharedWal {
             Utils.flushDir(directory.toAbsolutePath().normalize());
         }
         return reclaimedBytes;
+    }
+
+    private static long watermarkBytes(long capacityBytes, int percent) {
+        long quotient = capacityBytes / 100L;
+        long remainder = capacityBytes % 100L;
+        return Math.addExact(
+            Math.multiplyExact(quotient, percent),
+            Math.multiplyExact(remainder, percent) / 100L
+        );
     }
 
     private List<Path> segmentFiles() throws IOException {
