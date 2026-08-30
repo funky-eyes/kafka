@@ -50,16 +50,36 @@ public final class RemoteObjectIndex {
      */
     public synchronized void add(SharedObjectMetadata object) {
         Objects.requireNonNull(object, "object");
+        List<RangeReference> references = object.ranges().stream()
+            .map(range -> new RangeReference(object.objectId(), range))
+            .toList();
+        addReferences(references);
+    }
+
+    /**
+     * Restores ranges that were durably checkpointed locally after an authoritative metadata COMMIT.
+     *
+     * <p>This is intentionally the same conflict-checked publication path as live metadata. A stale or corrupt local
+     * checkpoint therefore cannot silently override a different logical Kafka range when the authoritative metadata
+     * image is replayed later during broker startup.</p>
+     */
+    public synchronized void restore(List<RangeReference> references) {
+        Objects.requireNonNull(references, "references");
+        addReferences(List.copyOf(references));
+    }
+
+    private void addReferences(List<RangeReference> references) {
         Map<SharedPartitionId, NavigableMap<Long, RangeReference>> stagedByPartition = new HashMap<>();
         List<RangeReference> newRanges = new ArrayList<>();
 
-        for (SharedObjectRange range : object.ranges()) {
+        for (RangeReference incoming : references) {
+            Objects.requireNonNull(incoming, "range reference");
+            SharedObjectRange range = incoming.range();
             SharedPartitionId partition = range.partition();
             NavigableMap<Long, RangeReference> staged = stagedByPartition.computeIfAbsent(
                 partition,
                 this::copyExistingRanges
             );
-            RangeReference incoming = new RangeReference(object.objectId(), range);
             RangeReference overlapping = overlappingReference(staged, range.offsets());
             if (overlapping != null) {
                 if (sameLogicalRange(overlapping.range(), range)) {
@@ -71,14 +91,15 @@ public final class RemoteObjectIndex {
             newRanges.add(incoming);
         }
 
-        // No validation below this point can fail for ordinary metadata. Publish only after the whole object validates.
+        // No validation below this point can fail for ordinary metadata. Publish only after the whole batch validates.
         for (RangeReference reference : newRanges) {
             SharedObjectRange range = reference.range();
             byPartition
                 .computeIfAbsent(range.partition(), ignored -> new ConcurrentSkipListMap<>())
                 .put(range.offsets().startOffset(), reference);
         }
-        for (SharedObjectRange range : object.ranges()) {
+        for (RangeReference reference : references) {
+            SharedObjectRange range = reference.range();
             coverage(range.partition()).add(range.offsets());
         }
     }
@@ -146,5 +167,11 @@ public final class RemoteObjectIndex {
     }
 
     public record RangeReference(long objectId, SharedObjectRange range) {
+        public RangeReference {
+            if (objectId <= 0) {
+                throw new IllegalArgumentException("objectId must be positive");
+            }
+            Objects.requireNonNull(range, "range");
+        }
     }
 }

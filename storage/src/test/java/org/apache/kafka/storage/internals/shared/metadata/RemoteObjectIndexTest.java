@@ -53,6 +53,27 @@ class RemoteObjectIndexTest {
     }
 
     @Test
+    void shouldRestoreDurableLocalReferencesBeforeAuthoritativeReplay() {
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        SharedObjectRange first = range(PARTITION, 0, 100, 777);
+        SharedObjectRange second = range(OTHER_PARTITION, 100, 200, 888);
+
+        index.restore(List.of(
+            new RemoteObjectIndex.RangeReference(10, first),
+            new RemoteObjectIndex.RangeReference(11, second)
+        ));
+
+        assertTrue(index.coverage(PARTITION).covers(new OffsetRange(0, 100)));
+        assertTrue(index.coverage(OTHER_PARTITION).covers(new OffsetRange(100, 200)));
+        assertEquals(10, index.find(PARTITION, 50).orElseThrow().objectId());
+        assertEquals(11, index.find(OTHER_PARTITION, 150).orElseThrow().objectId());
+
+        // Later Kafka metadata replay of the same authoritative logical range is idempotent.
+        index.add(object(99, 0, 100, 777));
+        assertEquals(10, index.find(PARTITION, 50).orElseThrow().objectId());
+    }
+
+    @Test
     void shouldRejectConflictingDuplicateContent() {
         RemoteObjectIndex index = new RemoteObjectIndex();
         index.add(object(10, 0, 100, 777));
