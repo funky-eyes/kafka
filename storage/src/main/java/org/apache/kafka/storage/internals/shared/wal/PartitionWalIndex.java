@@ -92,6 +92,11 @@ public final class PartitionWalIndex {
         }
     }
 
+    /** Clears every physical WAL location before replaying the surviving post-reclaim segments. */
+    public void clear() {
+        locations.clear();
+    }
+
     public int partitionCount() {
         return locations.size();
     }
