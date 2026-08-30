@@ -23,6 +23,7 @@ import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectReader;
 import org.apache.kafka.storage.internals.shared.wal.PartitionWalIndex;
+import org.apache.kafka.storage.internals.shared.wal.RemoteCoverageWalReclaimPolicy;
 import org.apache.kafka.storage.internals.shared.wal.SharedWal;
 import org.apache.kafka.storage.internals.shared.wal.WalAppendResult;
 import org.apache.kafka.storage.internals.shared.wal.WalLocation;
@@ -54,19 +55,13 @@ public final class SharedStorageEngine implements AutoCloseable {
     private final LocalRemoteObjectCheckpoint remoteCheckpoint;
     private final ConcurrentLinkedQueue<SharedObjectMetadata> pendingRemoteCheckpoints = new ConcurrentLinkedQueue<>();
     private final Object checkpointMaintenanceLock = new Object();
+    private final Object walMaintenanceLock = new Object();
     private volatile SharedObjectReader remoteReader;
 
     public SharedStorageEngine(SharedWal wal) throws IOException {
         this(wal, null);
     }
 
-    /**
-     * Creates an engine with an optional crash-safe local remote-range checkpoint.
-     *
-     * <p>The checkpoint is restored before WAL replay. A broker whose old local WAL segments have already been
-     * reclaimed can therefore reconstruct remote coverage before Kafka starts loading partition logs. The compacted
-     * Kafka metadata topic will replay the same logical ranges later and remains the cluster-wide source of truth.</p>
-     */
     public SharedStorageEngine(SharedWal wal, LocalRemoteObjectCheckpoint remoteCheckpoint) throws IOException {
         this.wal = Objects.requireNonNull(wal, "wal");
         this.remoteCheckpoint = remoteCheckpoint;
@@ -76,7 +71,6 @@ public final class SharedStorageEngine implements AutoCloseable {
         wal.replay(walIndex::apply);
     }
 
-    /** Installs the object reader used only after a batch is no longer available from the local WAL. */
     public synchronized void installRemoteReader(SharedObjectReader reader) {
         Objects.requireNonNull(reader, "reader");
         if (remoteReader != null && remoteReader != reader) {
@@ -85,7 +79,6 @@ public final class SharedStorageEngine implements AutoCloseable {
         remoteReader = reader;
     }
 
-    /** Defensive-copy append for generic callers. */
     public CompletableFuture<WalLocation> appendData(
         SharedPartitionId partition,
         int leaderEpoch,
@@ -96,10 +89,6 @@ public final class SharedStorageEngine implements AutoCloseable {
         return appendRecord(partition, leaderEpoch, firstOffset, lastOffset, kafkaRecordBatch, false);
     }
 
-    /**
-     * Zero-additional-copy append for adapters that already own an immutable Kafka RecordBatch buffer.
-     * The caller transfers ownership and must never mutate the bytes after this call.
-     */
     public CompletableFuture<WalLocation> appendOwnedData(
         SharedPartitionId partition,
         int leaderEpoch,
@@ -110,13 +99,6 @@ public final class SharedStorageEngine implements AutoCloseable {
         return appendRecord(partition, leaderEpoch, firstOffset, lastOffset, ownedKafkaRecordBatch, true);
     }
 
-    /**
-     * Durably appends all Kafka RecordBatches from one logical Kafka append as one crash-atomic WAL group.
-     *
-     * <p>This is the preferred Kafka-adapter API. The WAL performs one admission decision for the entire group and
-     * replay exposes none of the batches unless the group's commit marker is durable. Buffers are owned by the caller
-     * before this call and ownership is transferred to the WAL.</p>
-     */
     public CompletableFuture<List<WalLocation>> appendOwnedBatchGroup(
         SharedPartitionId partition,
         List<OwnedDataBatch> batches
@@ -215,19 +197,15 @@ public final class SharedStorageEngine implements AutoCloseable {
     }
 
     public Optional<WalRecord> readLocal(SharedPartitionId partition, long offset) throws IOException {
-        Optional<WalLocation> location = walIndex.find(walKey(partition), offset);
-        if (location.isEmpty()) {
-            return Optional.empty();
+        synchronized (walMaintenanceLock) {
+            Optional<WalLocation> location = walIndex.find(walKey(partition), offset);
+            if (location.isEmpty()) {
+                return Optional.empty();
+            }
+            return Optional.of(wal.read(location.get()));
         }
-        return Optional.of(wal.read(location.get()));
     }
 
-    /**
-     * Reads one complete Kafka RecordBatch, preferring the local WAL and falling back to immutable object storage.
-     *
-     * <p>The remote path is reached only when the local WAL index has no live entry for the requested offset. Remote
-     * reads are checksum-validated by {@link SharedObjectReader}.</p>
-     */
     public Optional<ByteBuffer> readBatchBytes(SharedPartitionId partition, long offset) throws IOException {
         Optional<WalRecord> local = readLocal(partition, offset);
         if (local.isPresent()) {
@@ -240,10 +218,6 @@ public final class SharedStorageEngine implements AutoCloseable {
         return awaitRemote(reader.read(partition, offset));
     }
 
-    /**
-     * Returns the logical Kafka batches known from either surviving local WAL or authoritative remote coverage.
-     * Local WAL metadata wins when both tiers contain the same logical range.
-     */
     public List<StoredBatchMetadata> storedBatches(
         SharedPartitionId partition,
         long startOffset,
@@ -279,9 +253,6 @@ public final class SharedStorageEngine implements AutoCloseable {
         return List.copyOf(merged.values());
     }
 
-    /**
-     * Reads complete logical batches from local WAL and/or S3 without splitting a RecordBatch.
-     */
     public BatchReadResult readBatches(
         SharedPartitionId partition,
         long startOffset,
@@ -329,11 +300,6 @@ public final class SharedStorageEngine implements AutoCloseable {
         return new BatchReadResult(firstBatchOffset, List.copyOf(selected), selectedBytes, false);
     }
 
-    /**
-     * Returns ordered live WAL locations intersecting {@code [startOffset, endOffsetExclusive)}.
-     * This metadata-only view is used by the Kafka compatibility adapter to rebuild logical segment state without
-     * loading the whole WAL payload into memory.
-     */
     public List<WalLocation> localLocations(
         SharedPartitionId partition,
         long startOffset,
@@ -348,29 +314,28 @@ public final class SharedStorageEngine implements AutoCloseable {
             return List.of();
         }
 
-        List<WalLocation> result = new ArrayList<>();
-        for (WalLocation location : walIndex.ranges(walKey(partition))) {
-            if (location.lastOffset() < startOffset) {
-                continue;
+        synchronized (walMaintenanceLock) {
+            List<WalLocation> result = new ArrayList<>();
+            for (WalLocation location : walIndex.ranges(walKey(partition))) {
+                if (location.lastOffset() < startOffset) {
+                    continue;
+                }
+                if (location.firstOffset() >= endOffsetExclusive) {
+                    break;
+                }
+                result.add(location);
             }
-            if (location.firstOffset() >= endOffsetExclusive) {
-                break;
-            }
-            result.add(location);
+            return List.copyOf(result);
         }
-        return List.copyOf(result);
     }
 
-    /** Reads the exact WAL locations returned by {@link #localLocations(SharedPartitionId, long, long)}. */
     public List<WalRecord> readLocalLocations(List<WalLocation> locations) throws IOException {
         Objects.requireNonNull(locations, "locations");
-        return wal.readBatch(List.copyOf(locations));
+        synchronized (walMaintenanceLock) {
+            return wal.readBatch(List.copyOf(locations));
+        }
     }
 
-    /**
-     * Reads complete Kafka RecordBatches from the local WAL starting at the batch containing {@code startOffset}.
-     * No batch is split. If {@code minOneBatch} is true, the first batch may exceed {@code maxBytes}.
-     */
     public LocalReadResult readLocalBatches(
         SharedPartitionId partition,
         long startOffset,
@@ -378,17 +343,19 @@ public final class SharedStorageEngine implements AutoCloseable {
         boolean minOneBatch
     ) throws IOException {
         validateLocalRead(partition, startOffset, maxBytes);
-        ReadSelection selection = selectLocalBatches(partition, startOffset, maxBytes, minOneBatch);
-        if (selection.locations().isEmpty()) {
-            return new LocalReadResult(selection.firstBatchOffset(), List.of(), 0, selection.firstBatchIncomplete());
+        synchronized (walMaintenanceLock) {
+            ReadSelection selection = selectLocalBatches(partition, startOffset, maxBytes, minOneBatch);
+            if (selection.locations().isEmpty()) {
+                return new LocalReadResult(selection.firstBatchOffset(), List.of(), 0, selection.firstBatchIncomplete());
+            }
+            List<WalRecord> records = wal.readBatch(selection.locations());
+            return new LocalReadResult(
+                selection.firstBatchOffset(),
+                records,
+                selection.sizeInBytes(),
+                selection.firstBatchIncomplete()
+            );
         }
-        List<WalRecord> records = wal.readBatch(selection.locations());
-        return new LocalReadResult(
-            selection.firstBatchOffset(),
-            records,
-            selection.sizeInBytes(),
-            selection.firstBatchIncomplete()
-        );
     }
 
     private static void validateLocalRead(SharedPartitionId partition, long startOffset, int maxBytes) {
@@ -454,14 +421,12 @@ public final class SharedStorageEngine implements AutoCloseable {
 
     public List<WalRecord> readUploadCandidates(List<UploadCandidate> candidates) throws IOException {
         Objects.requireNonNull(candidates, "candidates");
-        List<WalLocation> locations = candidates.stream().map(UploadCandidate::location).toList();
-        return wal.readBatch(locations);
+        synchronized (walMaintenanceLock) {
+            List<WalLocation> locations = candidates.stream().map(UploadCandidate::location).toList();
+            return wal.readBatch(locations);
+        }
     }
 
-    /**
-     * Returns complete WAL batches that are both Kafka-committed and not remotely covered.
-     * highWatermark is Kafka's exclusive commit boundary: every returned batch has lastOffset < highWatermark.
-     */
     public List<UploadCandidate> uploadCandidates(
         SharedPartitionId partition,
         long logStartOffset,
@@ -476,26 +441,22 @@ public final class SharedStorageEngine implements AutoCloseable {
             return List.of();
         }
 
-        List<UploadCandidate> result = new ArrayList<>();
-        for (WalLocation location : walIndex.ranges(walKey(partition))) {
-            if (location.lastOffset() < logStartOffset || location.lastOffset() >= highWatermark) {
-                continue;
+        synchronized (walMaintenanceLock) {
+            List<UploadCandidate> result = new ArrayList<>();
+            for (WalLocation location : walIndex.ranges(walKey(partition))) {
+                if (location.lastOffset() < logStartOffset || location.lastOffset() >= highWatermark) {
+                    continue;
+                }
+                OffsetRange logicalRange =
+                    new OffsetRange(location.firstOffset(), Math.addExact(location.lastOffset(), 1));
+                if (!remoteIndex.coverage(partition).covers(logicalRange)) {
+                    result.add(new UploadCandidate(partition, logicalRange, location));
+                }
             }
-            OffsetRange logicalRange = new OffsetRange(location.firstOffset(), Math.addExact(location.lastOffset(), 1));
-            if (!remoteIndex.coverage(partition).covers(logicalRange)) {
-                result.add(new UploadCandidate(partition, logicalRange, location));
-            }
+            return List.copyOf(result);
         }
-        return List.copyOf(result);
     }
 
-    /**
-     * Publishes authoritative remote coverage without performing local disk I/O on the metadata-consumer thread.
-     *
-     * <p>When a local checkpoint is configured, the committed object is queued for the maintenance thread. Physical
-     * WAL reclamation must never use the queued state; it may only use ranges that have crossed
-     * {@link #checkpointCommittedRemoteObjects()} successfully.</p>
-     */
     public void commitRemoteObject(SharedObjectMetadata object) {
         SharedObjectMetadata committed = Objects.requireNonNull(object, "object");
         remoteIndex.add(committed);
@@ -504,15 +465,6 @@ public final class SharedStorageEngine implements AutoCloseable {
         }
     }
 
-    /**
-     * Persists all currently queued authoritative remote COMMITs in one crash-safe local checkpoint rewrite.
-     *
-     * <p>On failure the drained objects are re-enqueued before the exception is propagated. Duplicate retries are safe
-     * because the checkpoint deduplicates identical logical ranges. This method is intended for one maintenance thread;
-     * the explicit lock also makes accidental concurrent calls safe.</p>
-     *
-     * @return number of remote object COMMITs crossed by this checkpoint durability barrier
-     */
     public int checkpointCommittedRemoteObjects() throws IOException {
         if (remoteCheckpoint == null) {
             return 0;
@@ -536,6 +488,29 @@ public final class SharedStorageEngine implements AutoCloseable {
         }
     }
 
+    /**
+     * Durably checkpoints current remote COMMITs and then releases only the physical WAL prefix covered by that exact
+     * durable checkpoint snapshot. The in-memory WAL index is rebuilt from surviving segments before readers proceed.
+     */
+    public long reclaimCheckpointedWal() throws IOException {
+        if (remoteCheckpoint == null) {
+            return 0L;
+        }
+        synchronized (checkpointMaintenanceLock) {
+            checkpointCommittedRemoteObjects();
+            RemoteObjectIndex checkpointed = new RemoteObjectIndex();
+            checkpointed.restore(remoteCheckpoint.references());
+            synchronized (walMaintenanceLock) {
+                long reclaimed = wal.reclaim(new RemoteCoverageWalReclaimPolicy(checkpointed));
+                if (reclaimed > 0) {
+                    walIndex.clear();
+                    wal.replay(walIndex::apply);
+                }
+                return reclaimed;
+            }
+        }
+    }
+
     int pendingRemoteCheckpointCount() {
         return pendingRemoteCheckpoints.size();
     }
@@ -545,7 +520,9 @@ public final class SharedStorageEngine implements AutoCloseable {
     }
 
     public long walUsedBytes() {
-        return wal.usedBytes();
+        synchronized (walMaintenanceLock) {
+            return wal.usedBytes();
+        }
     }
 
     public long walCapacityBytes() {
@@ -554,7 +531,9 @@ public final class SharedStorageEngine implements AutoCloseable {
 
     @Override
     public void close() throws IOException {
-        wal.close();
+        synchronized (walMaintenanceLock) {
+            wal.close();
+        }
     }
 
     private static Optional<ByteBuffer> awaitRemote(CompletableFuture<Optional<ByteBuffer>> future) throws IOException {
