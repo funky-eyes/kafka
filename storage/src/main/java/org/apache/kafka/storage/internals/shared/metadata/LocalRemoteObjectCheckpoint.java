@@ -121,9 +121,34 @@ public final class LocalRemoteObjectCheckpoint {
     }
 
     /** Atomically merges one authoritative committed object into the local durable snapshot. */
-    public synchronized void add(SharedObjectMetadata object) throws IOException {
-        Objects.requireNonNull(object, "object");
+    public void add(SharedObjectMetadata object) throws IOException {
+        addAll(List.of(Objects.requireNonNull(object, "object")));
+    }
+
+    /**
+     * Atomically merges many authoritative committed objects and crosses one checkpoint durability barrier.
+     *
+     * <p>This is used after metadata replay so thousands of COMMIT records do not translate into thousands of complete
+     * checkpoint rewrites. Either the whole staged snapshot becomes durable and visible or the previous snapshot stays
+     * authoritative for local WAL-reclaim purposes.</p>
+     */
+    public synchronized void addAll(List<SharedObjectMetadata> objects) throws IOException {
+        Objects.requireNonNull(objects, "objects");
+        if (objects.isEmpty()) {
+            return;
+        }
         Map<SharedPartitionId, NavigableMap<Long, RemoteObjectIndex.RangeReference>> staged = mutableCopy(byPartition);
+        for (SharedObjectMetadata object : objects) {
+            mergeObject(staged, Objects.requireNonNull(object, "object"));
+        }
+        persist(flatten(staged));
+        byPartition = immutable(staged);
+    }
+
+    private static void mergeObject(
+        Map<SharedPartitionId, NavigableMap<Long, RemoteObjectIndex.RangeReference>> staged,
+        SharedObjectMetadata object
+    ) throws IOException {
         for (SharedObjectRange range : object.ranges()) {
             RemoteObjectIndex.RangeReference incoming = new RemoteObjectIndex.RangeReference(object.objectId(), range);
             NavigableMap<Long, RemoteObjectIndex.RangeReference> ranges = staged.computeIfAbsent(
@@ -138,8 +163,6 @@ public final class LocalRemoteObjectCheckpoint {
             }
             ranges.put(range.offsets().startOffset(), incoming);
         }
-        persist(flatten(staged));
-        byPartition = immutable(staged);
     }
 
     private Map<SharedPartitionId, NavigableMap<Long, RemoteObjectIndex.RangeReference>> load() throws IOException {
