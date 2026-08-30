@@ -21,6 +21,7 @@ import org.apache.kafka.storage.internals.shared.metadata.OffsetRange;
 import org.apache.kafka.storage.internals.shared.metadata.RemoteObjectIndex;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
+import org.apache.kafka.storage.internals.shared.object.SharedObjectReader;
 import org.apache.kafka.storage.internals.shared.wal.PartitionWalIndex;
 import org.apache.kafka.storage.internals.shared.wal.SharedWal;
 import org.apache.kafka.storage.internals.shared.wal.WalAppendResult;
@@ -34,8 +35,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.TreeMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ExecutionException;
 
 /**
  * Kafka-independent core of the shared storage data plane.
@@ -51,6 +54,7 @@ public final class SharedStorageEngine implements AutoCloseable {
     private final LocalRemoteObjectCheckpoint remoteCheckpoint;
     private final ConcurrentLinkedQueue<SharedObjectMetadata> pendingRemoteCheckpoints = new ConcurrentLinkedQueue<>();
     private final Object checkpointMaintenanceLock = new Object();
+    private volatile SharedObjectReader remoteReader;
 
     public SharedStorageEngine(SharedWal wal) throws IOException {
         this(wal, null);
@@ -70,6 +74,15 @@ public final class SharedStorageEngine implements AutoCloseable {
             remoteIndex.restore(remoteCheckpoint.references());
         }
         wal.replay(walIndex::apply);
+    }
+
+    /** Installs the object reader used only after a batch is no longer available from the local WAL. */
+    public synchronized void installRemoteReader(SharedObjectReader reader) {
+        Objects.requireNonNull(reader, "reader");
+        if (remoteReader != null && remoteReader != reader) {
+            throw new IllegalStateException("Shared remote reader is already installed");
+        }
+        remoteReader = reader;
     }
 
     /** Defensive-copy append for generic callers. */
@@ -210,6 +223,113 @@ public final class SharedStorageEngine implements AutoCloseable {
     }
 
     /**
+     * Reads one complete Kafka RecordBatch, preferring the local WAL and falling back to immutable object storage.
+     *
+     * <p>The remote path is reached only when the local WAL index has no live entry for the requested offset. Remote
+     * reads are checksum-validated by {@link SharedObjectReader}.</p>
+     */
+    public Optional<ByteBuffer> readBatchBytes(SharedPartitionId partition, long offset) throws IOException {
+        Optional<WalRecord> local = readLocal(partition, offset);
+        if (local.isPresent()) {
+            return Optional.of(local.get().payload().asReadOnlyBuffer());
+        }
+        SharedObjectReader reader = remoteReader;
+        if (reader == null) {
+            return Optional.empty();
+        }
+        return awaitRemote(reader.read(partition, offset));
+    }
+
+    /**
+     * Returns the logical Kafka batches known from either surviving local WAL or authoritative remote coverage.
+     * Local WAL metadata wins when both tiers contain the same logical range.
+     */
+    public List<StoredBatchMetadata> storedBatches(
+        SharedPartitionId partition,
+        long startOffset,
+        long endOffsetExclusive
+    ) {
+        Objects.requireNonNull(partition, "partition");
+        if (startOffset < 0 || endOffsetExclusive < startOffset) {
+            throw new IllegalArgumentException("invalid stored batch range");
+        }
+        TreeMap<Long, StoredBatchMetadata> merged = new TreeMap<>();
+        for (RemoteObjectIndex.RangeReference reference : remoteIndex.ranges(partition)) {
+            OffsetRange offsets = reference.range().offsets();
+            if (offsets.endOffset() <= startOffset || offsets.startOffset() >= endOffsetExclusive) {
+                continue;
+            }
+            merged.put(offsets.startOffset(), new StoredBatchMetadata(
+                offsets.startOffset(),
+                offsets.endOffset() - 1,
+                reference.range().leaderEpoch(),
+                reference.range().objectLength(),
+                false
+            ));
+        }
+        for (WalLocation location : localLocations(partition, startOffset, endOffsetExclusive)) {
+            merged.put(location.firstOffset(), new StoredBatchMetadata(
+                location.firstOffset(),
+                location.lastOffset(),
+                location.leaderEpoch(),
+                location.payloadLength(),
+                true
+            ));
+        }
+        return List.copyOf(merged.values());
+    }
+
+    /**
+     * Reads complete logical batches from local WAL and/or S3 without splitting a RecordBatch.
+     */
+    public BatchReadResult readBatches(
+        SharedPartitionId partition,
+        long startOffset,
+        int maxBytes,
+        boolean minOneBatch
+    ) throws IOException {
+        validateLocalRead(partition, startOffset, maxBytes);
+        List<StoredBatchMetadata> known = storedBatches(partition, startOffset, Long.MAX_VALUE);
+        if (known.isEmpty()) {
+            return new BatchReadResult(startOffset, List.of(), 0, false);
+        }
+
+        List<ByteBuffer> selected = new ArrayList<>();
+        int selectedBytes = 0;
+        long firstBatchOffset = startOffset;
+        for (StoredBatchMetadata metadata : known) {
+            if (metadata.lastOffset() < startOffset) {
+                continue;
+            }
+            boolean first = selected.isEmpty();
+            if (first) {
+                firstBatchOffset = metadata.firstOffset();
+            }
+            if (!canSelectPayload(metadata.payloadLength(), selectedBytes, first, maxBytes, minOneBatch)) {
+                if (first) {
+                    return new BatchReadResult(firstBatchOffset, List.of(), 0, !minOneBatch);
+                }
+                break;
+            }
+            ByteBuffer bytes = readBatchBytes(partition, metadata.firstOffset())
+                .orElseThrow(() -> new IOException(
+                    "Shared batch payload is unavailable from both WAL and remote storage at offset " +
+                        metadata.firstOffset()));
+            if (bytes.remaining() != metadata.payloadLength()) {
+                throw new IOException(
+                    "Shared batch payload length mismatch at offset " + metadata.firstOffset() +
+                        ": expected=" + metadata.payloadLength() + ", actual=" + bytes.remaining());
+            }
+            selected.add(bytes.asReadOnlyBuffer());
+            selectedBytes = Math.addExact(selectedBytes, bytes.remaining());
+            if (selectedBytes >= maxBytes && !(selected.size() == 1 && minOneBatch)) {
+                break;
+            }
+        }
+        return new BatchReadResult(firstBatchOffset, List.copyOf(selected), selectedBytes, false);
+    }
+
+    /**
      * Returns ordered live WAL locations intersecting {@code [startOffset, endOffsetExclusive)}.
      * This metadata-only view is used by the Kafka compatibility adapter to rebuild logical segment state without
      * loading the whole WAL payload into memory.
@@ -316,10 +436,20 @@ public final class SharedStorageEngine implements AutoCloseable {
         int maxBytes,
         boolean minOneBatch
     ) {
+        return canSelectPayload(location.payloadLength(), selectedBytes, first, maxBytes, minOneBatch);
+    }
+
+    private static boolean canSelectPayload(
+        int payloadLength,
+        int selectedBytes,
+        boolean first,
+        int maxBytes,
+        boolean minOneBatch
+    ) {
         if (first) {
-            return minOneBatch || (maxBytes > 0 && location.payloadLength() <= maxBytes);
+            return minOneBatch || (maxBytes > 0 && payloadLength <= maxBytes);
         }
-        return (long) selectedBytes + location.payloadLength() <= maxBytes;
+        return (long) selectedBytes + payloadLength <= maxBytes;
     }
 
     public List<WalRecord> readUploadCandidates(List<UploadCandidate> candidates) throws IOException {
@@ -427,6 +557,30 @@ public final class SharedStorageEngine implements AutoCloseable {
         wal.close();
     }
 
+    private static Optional<ByteBuffer> awaitRemote(CompletableFuture<Optional<ByteBuffer>> future) throws IOException {
+        try {
+            return future.get();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted while reading shared object storage", e);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            while (cause instanceof java.util.concurrent.CompletionException && cause.getCause() != null) {
+                cause = cause.getCause();
+            }
+            if (cause instanceof IOException ioException) {
+                throw ioException;
+            }
+            if (cause instanceof RuntimeException runtimeException) {
+                throw runtimeException;
+            }
+            if (cause instanceof Error error) {
+                throw error;
+            }
+            throw new IOException("Shared object read failed", cause);
+        }
+    }
+
     private static WalPartitionKey walKey(SharedPartitionId partition) {
         return new WalPartitionKey(partition.topicIdHigh(), partition.topicIdLow(), partition.partition());
     }
@@ -457,6 +611,31 @@ public final class SharedStorageEngine implements AutoCloseable {
     ) {
         public LocalReadResult {
             records = List.copyOf(records);
+        }
+    }
+
+    public record StoredBatchMetadata(
+        long firstOffset,
+        long lastOffset,
+        int leaderEpoch,
+        int payloadLength,
+        boolean local
+    ) {
+        public StoredBatchMetadata {
+            if (firstOffset < 0 || lastOffset < firstOffset || payloadLength <= 0) {
+                throw new IllegalArgumentException("invalid stored batch metadata");
+            }
+        }
+    }
+
+    public record BatchReadResult(
+        long firstBatchOffset,
+        List<ByteBuffer> batches,
+        int sizeInBytes,
+        boolean firstBatchIncomplete
+    ) {
+        public BatchReadResult {
+            batches = batches.stream().map(ByteBuffer::asReadOnlyBuffer).toList();
         }
     }
 
