@@ -28,7 +28,12 @@ public record S3ObjectStoreConfig(
     String region,
     Optional<URI> endpoint,
     boolean pathStyleAccess,
-    int ioThreads
+    int ioThreads,
+    long connectionTimeoutMs,
+    long socketTimeoutMs,
+    long apiCallAttemptTimeoutMs,
+    long apiCallTimeoutMs,
+    int maxAttempts
 ) {
     public static final String BUCKET_CONFIG = "shared.storage.s3.bucket";
     public static final String KEY_PREFIX_CONFIG = "shared.storage.s3.key.prefix";
@@ -36,10 +41,44 @@ public record S3ObjectStoreConfig(
     public static final String ENDPOINT_CONFIG = "shared.storage.s3.endpoint";
     public static final String PATH_STYLE_ACCESS_CONFIG = "shared.storage.s3.path.style";
     public static final String IO_THREADS_CONFIG = "shared.storage.s3.io.threads";
+    public static final String CONNECTION_TIMEOUT_MS_CONFIG = "shared.storage.s3.connection.timeout.ms";
+    public static final String SOCKET_TIMEOUT_MS_CONFIG = "shared.storage.s3.socket.timeout.ms";
+    public static final String API_CALL_ATTEMPT_TIMEOUT_MS_CONFIG =
+        "shared.storage.s3.api.call.attempt.timeout.ms";
+    public static final String API_CALL_TIMEOUT_MS_CONFIG = "shared.storage.s3.api.call.timeout.ms";
+    public static final String MAX_ATTEMPTS_CONFIG = "shared.storage.s3.max.attempts";
 
     public static final String DEFAULT_KEY_PREFIX = "objects";
     public static final String DEFAULT_REGION = "us-east-1";
     public static final int DEFAULT_IO_THREADS = 8;
+    public static final long DEFAULT_CONNECTION_TIMEOUT_MS = 5_000L;
+    public static final long DEFAULT_SOCKET_TIMEOUT_MS = 30_000L;
+    public static final long DEFAULT_API_CALL_ATTEMPT_TIMEOUT_MS = 60_000L;
+    public static final long DEFAULT_API_CALL_TIMEOUT_MS = 180_000L;
+    public static final int DEFAULT_MAX_ATTEMPTS = 3;
+
+    public S3ObjectStoreConfig(
+        String bucket,
+        String keyPrefix,
+        String region,
+        Optional<URI> endpoint,
+        boolean pathStyleAccess,
+        int ioThreads
+    ) {
+        this(
+            bucket,
+            keyPrefix,
+            region,
+            endpoint,
+            pathStyleAccess,
+            ioThreads,
+            DEFAULT_CONNECTION_TIMEOUT_MS,
+            DEFAULT_SOCKET_TIMEOUT_MS,
+            DEFAULT_API_CALL_ATTEMPT_TIMEOUT_MS,
+            DEFAULT_API_CALL_TIMEOUT_MS,
+            DEFAULT_MAX_ATTEMPTS
+        );
+    }
 
     public S3ObjectStoreConfig {
         bucket = requireNonBlank(bucket, "bucket");
@@ -49,6 +88,17 @@ public record S3ObjectStoreConfig(
         endpoint.ifPresent(S3ObjectStoreConfig::validateEndpoint);
         if (ioThreads <= 0) {
             throw new IllegalArgumentException("ioThreads must be positive");
+        }
+        requirePositive(connectionTimeoutMs, CONNECTION_TIMEOUT_MS_CONFIG);
+        requirePositive(socketTimeoutMs, SOCKET_TIMEOUT_MS_CONFIG);
+        requirePositive(apiCallAttemptTimeoutMs, API_CALL_ATTEMPT_TIMEOUT_MS_CONFIG);
+        requirePositive(apiCallTimeoutMs, API_CALL_TIMEOUT_MS_CONFIG);
+        if (apiCallAttemptTimeoutMs > apiCallTimeoutMs) {
+            throw new IllegalArgumentException(
+                API_CALL_ATTEMPT_TIMEOUT_MS_CONFIG + " must not exceed " + API_CALL_TIMEOUT_MS_CONFIG);
+        }
+        if (maxAttempts <= 0) {
+            throw new IllegalArgumentException(MAX_ATTEMPTS_CONFIG + " must be positive");
         }
     }
 
@@ -60,7 +110,44 @@ public record S3ObjectStoreConfig(
         Optional<URI> endpoint = optionalUri(originals.get(ENDPOINT_CONFIG));
         boolean pathStyleAccess = booleanValue(originals.get(PATH_STYLE_ACCESS_CONFIG), false);
         int ioThreads = positiveInt(originals.get(IO_THREADS_CONFIG), DEFAULT_IO_THREADS, IO_THREADS_CONFIG);
-        return new S3ObjectStoreConfig(bucket, keyPrefix, region, endpoint, pathStyleAccess, ioThreads);
+        long connectionTimeoutMs = positiveLong(
+            originals.get(CONNECTION_TIMEOUT_MS_CONFIG),
+            DEFAULT_CONNECTION_TIMEOUT_MS,
+            CONNECTION_TIMEOUT_MS_CONFIG
+        );
+        long socketTimeoutMs = positiveLong(
+            originals.get(SOCKET_TIMEOUT_MS_CONFIG),
+            DEFAULT_SOCKET_TIMEOUT_MS,
+            SOCKET_TIMEOUT_MS_CONFIG
+        );
+        long apiCallAttemptTimeoutMs = positiveLong(
+            originals.get(API_CALL_ATTEMPT_TIMEOUT_MS_CONFIG),
+            DEFAULT_API_CALL_ATTEMPT_TIMEOUT_MS,
+            API_CALL_ATTEMPT_TIMEOUT_MS_CONFIG
+        );
+        long apiCallTimeoutMs = positiveLong(
+            originals.get(API_CALL_TIMEOUT_MS_CONFIG),
+            DEFAULT_API_CALL_TIMEOUT_MS,
+            API_CALL_TIMEOUT_MS_CONFIG
+        );
+        int maxAttempts = positiveInt(
+            originals.get(MAX_ATTEMPTS_CONFIG),
+            DEFAULT_MAX_ATTEMPTS,
+            MAX_ATTEMPTS_CONFIG
+        );
+        return new S3ObjectStoreConfig(
+            bucket,
+            keyPrefix,
+            region,
+            endpoint,
+            pathStyleAccess,
+            ioThreads,
+            connectionTimeoutMs,
+            socketTimeoutMs,
+            apiCallAttemptTimeoutMs,
+            apiCallTimeoutMs,
+            maxAttempts
+        );
     }
 
     public String objectKey(long objectId) {
@@ -127,6 +214,23 @@ public record S3ObjectStoreConfig(
             throw new IllegalArgumentException(name + " must be positive");
         }
         return parsed;
+    }
+
+    private static long positiveLong(Object value, long defaultValue, String name) {
+        if (value == null || value.toString().isBlank()) {
+            return defaultValue;
+        }
+        long parsed = value instanceof Number number
+            ? number.longValue()
+            : Long.parseLong(value.toString().trim());
+        requirePositive(parsed, name);
+        return parsed;
+    }
+
+    private static void requirePositive(long value, String name) {
+        if (value <= 0) {
+            throw new IllegalArgumentException(name + " must be positive");
+        }
     }
 
     private static String normalizePrefix(String prefix) {
