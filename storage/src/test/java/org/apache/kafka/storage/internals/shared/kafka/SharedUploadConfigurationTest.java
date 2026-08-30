@@ -32,7 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class SharedUploadConfigurationTest {
     @Test
-    void defaultsUploadLingerAndWalPressure() {
+    void defaultsUploadTuning() {
         SharedStorageConfiguration config = SharedStorageConfiguration.from(context(Map.of()));
 
         assertEquals(SharedStorageConfiguration.DEFAULT_UPLOAD_MAX_LINGER_MS, config.uploadMaxLingerMs());
@@ -40,18 +40,21 @@ class SharedUploadConfigurationTest {
             SharedStorageConfiguration.DEFAULT_UPLOAD_WAL_PRESSURE_PERCENT,
             config.uploadWalPressurePercent()
         );
+        assertEquals(SharedStorageConfiguration.DEFAULT_UPLOAD_MAX_INFLIGHT, config.uploadMaxInflight());
     }
 
     @Test
-    void parsesExplicitUploadLingerAndWalPressure() {
+    void parsesExplicitUploadTuning() {
         Map<String, Object> originals = new HashMap<>();
         originals.put(SharedStorageConfiguration.UPLOAD_MAX_LINGER_MS_CONFIG, "2500");
         originals.put(SharedStorageConfiguration.UPLOAD_WAL_PRESSURE_PERCENT_CONFIG, 82);
+        originals.put(SharedStorageConfiguration.UPLOAD_MAX_INFLIGHT_CONFIG, "6");
 
         SharedStorageConfiguration config = SharedStorageConfiguration.from(context(originals));
 
         assertEquals(2_500L, config.uploadMaxLingerMs());
         assertEquals(82, config.uploadWalPressurePercent());
+        assertEquals(6, config.uploadMaxInflight());
     }
 
     @Test
@@ -77,6 +80,14 @@ class SharedUploadConfigurationTest {
         assertThrows(IllegalArgumentException.class, () -> SharedStorageConfiguration.from(context(Map.of(
             SharedStorageConfiguration.UPLOAD_WAL_PRESSURE_PERCENT_CONFIG,
             101
+        ))));
+        assertThrows(IllegalArgumentException.class, () -> SharedStorageConfiguration.from(context(Map.of(
+            SharedStorageConfiguration.UPLOAD_MAX_INFLIGHT_CONFIG,
+            0
+        ))));
+        assertThrows(IllegalArgumentException.class, () -> SharedStorageConfiguration.from(context(Map.of(
+            SharedStorageConfiguration.UPLOAD_MAX_INFLIGHT_CONFIG,
+            -1
         ))));
     }
 
