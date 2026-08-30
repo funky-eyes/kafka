@@ -31,11 +31,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.LongSupplier;
 
@@ -49,8 +52,9 @@ import java.util.function.LongSupplier;
  *
  * <p>The periodic interval is only an evaluation cadence. Scheduled uploads are started when the eligible committed
  * bytes reach the target object size, when the oldest current candidate reaches the configured maximum linger, or when
- * broker-wide WAL usage crosses the configured pressure threshold. This avoids producing tiny objects every scheduler
- * tick while still bounding low-throughput publication latency and draining the WAL before capacity becomes critical.</p>
+ * broker-wide WAL usage crosses the configured pressure threshold. Multiple immutable objects may be in flight, but a
+ * physical WAL record is reserved by at most one upload until that upload completes. This lets the object-store I/O
+ * pool execute PUTs concurrently without allowing two concurrent selections to publish the same WAL range.</p>
  *
  * <p>The same maintenance thread persists remote COMMIT references into the broker-local crash-safe checkpoint and
  * then reclaims only the rotating WAL prefix covered by that durable checkpoint. Metadata-consumer callbacks only
@@ -59,8 +63,10 @@ import java.util.function.LongSupplier;
  */
 public final class SharedUploadScheduler implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(SharedUploadScheduler.class);
+    private static final long CLOSE_DRAIN_TIMEOUT_SECONDS = 30L;
     static final long DEFAULT_MAX_LINGER_MS = 1_000L;
     static final int DEFAULT_WAL_PRESSURE_PERCENT = 70;
+    static final int DEFAULT_MAX_INFLIGHT = 1;
 
     private final SharedStorageEngine engine;
     private final SharedCommitProgress commitProgress;
@@ -70,12 +76,15 @@ public final class SharedUploadScheduler implements AutoCloseable {
     private final long targetObjectBytes;
     private final long maxLingerMs;
     private final int walPressurePercent;
-    private final AtomicBoolean uploadInProgress = new AtomicBoolean();
+    private final int maxInflight;
+    private final AtomicInteger uploadsInProgress = new AtomicInteger();
+    private final Set<CandidateKey> reservedCandidates = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean closed = new AtomicBoolean();
     private final AtomicReference<Throwable> lastUploadFailure = new AtomicReference<>();
     private final AtomicReference<Throwable> lastMaintenanceFailure = new AtomicReference<>();
     private final AtomicReference<SelectionSummary> lastSelectionSummary = new AtomicReference<>();
     private final AtomicReference<PendingHead> pendingHead = new AtomicReference<>();
+    private final Object uploadDrainMonitor = new Object();
 
     private ScheduledExecutorService executor;
 
@@ -95,7 +104,8 @@ public final class SharedUploadScheduler implements AutoCloseable {
             currentTimeMsSupplier,
             targetObjectBytes,
             DEFAULT_MAX_LINGER_MS,
-            DEFAULT_WAL_PRESSURE_PERCENT
+            DEFAULT_WAL_PRESSURE_PERCENT,
+            DEFAULT_MAX_INFLIGHT
         );
     }
 
@@ -108,6 +118,30 @@ public final class SharedUploadScheduler implements AutoCloseable {
         long targetObjectBytes,
         long maxLingerMs,
         int walPressurePercent
+    ) {
+        this(
+            engine,
+            commitProgress,
+            uploader,
+            objectIdSupplier,
+            currentTimeMsSupplier,
+            targetObjectBytes,
+            maxLingerMs,
+            walPressurePercent,
+            DEFAULT_MAX_INFLIGHT
+        );
+    }
+
+    public SharedUploadScheduler(
+        SharedStorageEngine engine,
+        SharedCommitProgress commitProgress,
+        SharedObjectUploader uploader,
+        LongSupplier objectIdSupplier,
+        LongSupplier currentTimeMsSupplier,
+        long targetObjectBytes,
+        long maxLingerMs,
+        int walPressurePercent,
+        int maxInflight
     ) {
         this.engine = Objects.requireNonNull(engine, "engine");
         this.commitProgress = Objects.requireNonNull(commitProgress, "commitProgress");
@@ -123,9 +157,13 @@ public final class SharedUploadScheduler implements AutoCloseable {
         if (walPressurePercent <= 0 || walPressurePercent > 100) {
             throw new IllegalArgumentException("walPressurePercent must be in [1, 100]");
         }
+        if (maxInflight <= 0) {
+            throw new IllegalArgumentException("maxInflight must be positive");
+        }
         this.targetObjectBytes = targetObjectBytes;
         this.maxLingerMs = maxLingerMs;
         this.walPressurePercent = walPressurePercent;
+        this.maxInflight = maxInflight;
     }
 
     public synchronized void start(long intervalMs) {
@@ -145,19 +183,20 @@ public final class SharedUploadScheduler implements AutoCloseable {
         });
         LOG.info(
             "Started shared upload scheduler with intervalMs={}, targetObjectBytes={}, maxLingerMs={}, " +
-                "walPressurePercent={}",
+                "walPressurePercent={}, maxInflight={}",
             intervalMs,
             targetObjectBytes,
             maxLingerMs,
-            walPressurePercent
+            walPressurePercent,
+            maxInflight
         );
         executor.scheduleWithFixedDelay(this::runScheduledUpload, intervalMs, intervalMs, TimeUnit.MILLISECONDS);
     }
 
     /**
-     * Forces at most one asynchronous object upload and returns empty when there is no committed leader work or another
-     * upload is already active. This is primarily useful for deterministic maintenance/tests; the periodic scheduler
-     * uses the size/linger/WAL-pressure gate instead. This method never blocks on object-store or metadata-store I/O.
+     * Forces at most one new asynchronous object upload and returns empty when there is no committed leader work or all
+     * upload slots are occupied. This is primarily useful for deterministic maintenance/tests; the periodic scheduler
+     * may fill multiple available slots per evaluation. This method never blocks on object-store or metadata-store I/O.
      */
     public CompletableFuture<Optional<SharedObjectMetadata>> tryUploadOnce() {
         return tryUpload(false);
@@ -171,10 +210,33 @@ public final class SharedUploadScheduler implements AutoCloseable {
         if (closed.get()) {
             return CompletableFuture.failedFuture(new IllegalStateException("Shared upload scheduler is closed"));
         }
-        if (!uploadInProgress.compareAndSet(false, true)) {
+        if (!tryAcquireUploadSlot()) {
             return CompletableFuture.completedFuture(Optional.empty());
         }
         return selectForUpload(applyTriggerGate);
+    }
+
+    private boolean tryAcquireUploadSlot() {
+        while (true) {
+            int current = uploadsInProgress.get();
+            if (current >= maxInflight) {
+                return false;
+            }
+            if (uploadsInProgress.compareAndSet(current, current + 1)) {
+                return true;
+            }
+        }
+    }
+
+    private void releaseUploadSlot() {
+        int remaining = uploadsInProgress.decrementAndGet();
+        if (remaining < 0) {
+            uploadsInProgress.incrementAndGet();
+            throw new IllegalStateException("Shared upload slot accounting underflow");
+        }
+        synchronized (uploadDrainMonitor) {
+            uploadDrainMonitor.notifyAll();
+        }
     }
 
     private CompletableFuture<Optional<SharedObjectMetadata>> selectForUpload(boolean applyTriggerGate) {
@@ -186,7 +248,7 @@ public final class SharedUploadScheduler implements AutoCloseable {
         }
         if (selection.candidates().isEmpty()) {
             pendingHead.set(null);
-            uploadInProgress.set(false);
+            releaseUploadSlot();
             return CompletableFuture.completedFuture(Optional.empty());
         }
         return evaluateTrigger(selection, applyTriggerGate);
@@ -203,7 +265,11 @@ public final class SharedUploadScheduler implements AutoCloseable {
             return synchronousFailure(e);
         }
         if (applyTriggerGate && !shouldUpload(selection, nowMs)) {
-            uploadInProgress.set(false);
+            releaseUploadSlot();
+            return CompletableFuture.completedFuture(Optional.empty());
+        }
+        if (!reserve(selection.candidates())) {
+            releaseUploadSlot();
             return CompletableFuture.completedFuture(Optional.empty());
         }
         return startUpload(selection, nowMs);
@@ -223,12 +289,14 @@ public final class SharedUploadScheduler implements AutoCloseable {
                 .upload(objectId, nowMs, selection.candidates())
                 .thenApply(Optional::of);
         } catch (RuntimeException e) {
+            releaseReservation(selection.candidates());
             return synchronousFailure(e);
         }
-        return result.whenComplete(this::completeUpload);
+        return result.whenComplete((ignored, error) -> completeUpload(selection.candidates(), error));
     }
 
-    private void completeUpload(Optional<SharedObjectMetadata> ignored, Throwable error) {
+    private void completeUpload(List<SharedStorageEngine.UploadCandidate> candidates, Throwable error) {
+        releaseReservation(candidates);
         if (error == null) {
             lastUploadFailure.set(null);
             pendingHead.set(null);
@@ -236,7 +304,26 @@ public final class SharedUploadScheduler implements AutoCloseable {
             lastUploadFailure.set(error);
             LOG.warn("Shared object upload failed", error);
         }
-        uploadInProgress.set(false);
+        releaseUploadSlot();
+    }
+
+    private boolean reserve(List<SharedStorageEngine.UploadCandidate> candidates) {
+        List<CandidateKey> acquired = new ArrayList<>(candidates.size());
+        for (SharedStorageEngine.UploadCandidate candidate : candidates) {
+            CandidateKey key = CandidateKey.from(candidate);
+            if (!reservedCandidates.add(key)) {
+                acquired.forEach(reservedCandidates::remove);
+                return false;
+            }
+            acquired.add(key);
+        }
+        return true;
+    }
+
+    private void releaseReservation(List<SharedStorageEngine.UploadCandidate> candidates) {
+        for (SharedStorageEngine.UploadCandidate candidate : candidates) {
+            reservedCandidates.remove(CandidateKey.from(candidate));
+        }
     }
 
     private boolean shouldUpload(CandidateSelection selection, long nowMs) {
@@ -276,7 +363,7 @@ public final class SharedUploadScheduler implements AutoCloseable {
 
     private CompletableFuture<Optional<SharedObjectMetadata>> synchronousFailure(RuntimeException error) {
         lastUploadFailure.set(error);
-        uploadInProgress.set(false);
+        releaseUploadSlot();
         LOG.warn("Shared upload scheduling failed before the asynchronous object PUT started", error);
         return CompletableFuture.failedFuture(error);
     }
@@ -353,20 +440,25 @@ public final class SharedUploadScheduler implements AutoCloseable {
         committed.sort(Comparator
             .comparingLong((SharedStorageEngine.UploadCandidate candidate) -> candidate.location().segmentId())
             .thenComparingLong(candidate -> candidate.location().position()));
+        List<SharedStorageEngine.UploadCandidate> available = committed.stream()
+            .filter(candidate -> !reservedCandidates.contains(CandidateKey.from(candidate)))
+            .toList();
 
-        long totalEligibleBytes = totalEligibleBytes(committed);
+        long totalEligibleBytes = totalEligibleBytes(available);
         logSelectionSummary(new SelectionSummary(
             snapshot.size(),
             leaderPartitions,
             openCommitWindows,
-            committed.size(),
-            totalEligibleBytes
+            available.size(),
+            totalEligibleBytes,
+            reservedCandidates.size(),
+            uploadsInProgress.get()
         ));
 
-        if (committed.isEmpty()) {
+        if (available.isEmpty()) {
             return new CandidateSelection(List.of(), 0L);
         }
-        return new CandidateSelection(selectTargetBounded(committed), totalEligibleBytes);
+        return new CandidateSelection(selectTargetBounded(available), totalEligibleBytes);
     }
 
     private static long totalEligibleBytes(List<SharedStorageEngine.UploadCandidate> candidates) {
@@ -401,12 +493,14 @@ public final class SharedUploadScheduler implements AutoCloseable {
         if (!summary.equals(previous)) {
             LOG.info(
                 "Shared upload gate state changed: trackedPartitions={}, leaders={}, openCommitWindows={}, " +
-                    "candidates={}, eligibleBytes={}",
+                    "candidates={}, eligibleBytes={}, reservedCandidates={}, uploadsInProgress={}",
                 summary.trackedPartitions(),
                 summary.leaderPartitions(),
                 summary.openCommitWindows(),
                 summary.candidateCount(),
-                summary.eligibleBytes()
+                summary.eligibleBytes(),
+                summary.reservedCandidateCount(),
+                summary.uploadsInProgress()
             );
         }
     }
@@ -414,11 +508,13 @@ public final class SharedUploadScheduler implements AutoCloseable {
     private void runScheduledUpload() {
         checkpointRemoteCommitsOnce();
         reclaimCheckpointedWalOnce();
-        tryScheduledUploadOnce().whenComplete((ignored, error) -> {
-            if (error != null) {
-                lastUploadFailure.set(error);
-            }
-        });
+        for (int index = 0; index < maxInflight; index++) {
+            tryScheduledUploadOnce().whenComplete((ignored, error) -> {
+                if (error != null) {
+                    lastUploadFailure.set(error);
+                }
+            });
+        }
     }
 
     @Override
@@ -431,12 +527,53 @@ public final class SharedUploadScheduler implements AutoCloseable {
             executor.shutdownNow();
             executor = null;
         }
+        awaitUploadDrain();
+    }
+
+    private void awaitUploadDrain() {
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(CLOSE_DRAIN_TIMEOUT_SECONDS);
+        boolean interrupted = false;
+        synchronized (uploadDrainMonitor) {
+            while (uploadsInProgress.get() > 0) {
+                long remainingNanos = deadlineNanos - System.nanoTime();
+                if (remainingNanos <= 0) {
+                    LOG.warn(
+                        "Timed out draining {} shared object upload(s) during scheduler close",
+                        uploadsInProgress.get()
+                    );
+                    break;
+                }
+                try {
+                    TimeUnit.NANOSECONDS.timedWait(uploadDrainMonitor, remainingNanos);
+                } catch (InterruptedException e) {
+                    interrupted = true;
+                    break;
+                }
+            }
+        }
+        if (interrupted) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     private record CandidateSelection(
         List<SharedStorageEngine.UploadCandidate> candidates,
         long totalEligibleBytes
     ) {
+    }
+
+    private record CandidateKey(
+        SharedPartitionId partition,
+        long segmentId,
+        long position
+    ) {
+        private static CandidateKey from(SharedStorageEngine.UploadCandidate candidate) {
+            return new CandidateKey(
+                candidate.partition(),
+                candidate.location().segmentId(),
+                candidate.location().position()
+            );
+        }
     }
 
     private record PendingHead(
@@ -466,7 +603,9 @@ public final class SharedUploadScheduler implements AutoCloseable {
         int leaderPartitions,
         int openCommitWindows,
         int candidateCount,
-        long eligibleBytes
+        long eligibleBytes,
+        int reservedCandidateCount,
+        int uploadsInProgress
     ) {
     }
 }
