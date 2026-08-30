@@ -35,16 +35,21 @@ import org.apache.kafka.storage.internals.shared.object.ActiveObjectUploads;
 import org.apache.kafka.storage.internals.shared.object.OrphanCleanupScheduler;
 import org.apache.kafka.storage.internals.shared.object.OrphanObjectCleaner;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectPacker;
+import org.apache.kafka.storage.internals.shared.object.SharedObjectReader;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectUploadHook;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectUploader;
 import org.apache.kafka.storage.internals.shared.wal.FileSharedWal;
 import org.apache.kafka.storage.internals.shared.wal.SharedWal;
 
+import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Properties;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
@@ -55,17 +60,19 @@ import java.util.function.LongSupplier;
 /**
  * Production shared-storage extension using a broker-wide replicated WAL, Kafka-backed authoritative metadata and S3.
  *
- * <p>{@link #start(StorageExtensionContext)} performs only local WAL and remote-checkpoint recovery and installs the
- * shared log factory, so Kafka can load partitions before network listeners are available.
- * {@link #onBrokerReady(StorageExtensionBrokerContext)} then replays the classic metadata topic, fences the
- * broker-scoped object-ID allocator, restores authoritative remote coverage and finally starts asynchronous S3 upload
- * and orphan cleanup. Kafka's broker-startup deadline gates the returned future.</p>
+ * <p>{@link #start(StorageExtensionContext)} restores the local remote-range checkpoint and WAL, opens the S3 reader
+ * needed by Kafka LogLoader when old WAL bytes were already reclaimed, and installs the shared log factory.
+ * {@link #onBrokerReady(StorageExtensionBrokerContext)} then replays the classic metadata topic, fences the broker
+ * object-ID allocator and starts asynchronous S3 upload and orphan cleanup. Producer acknowledgement never waits on
+ * S3; the early S3 client is a cold-read dependency only for data whose WAL recovery copy was already reclaimed.</p>
  */
 public final class S3SharedStorageExtension implements KafkaStorageExtension {
     private static final int DEFAULT_OBJECT_ID_BLOCK_SIZE = 4_096;
     private static final long BOOTSTRAP_EXECUTOR_STOP_TIMEOUT_SECONDS = 5L;
     private static final long METADATA_BOOTSTRAP_RETRY_BACKOFF_MS = 250L;
     private static final long METADATA_BOOTSTRAP_RETRY_TIMEOUT_MS = 30_000L;
+    private static final String META_PROPERTIES_FILE = "meta.properties";
+    private static final String CLUSTER_ID_PROPERTY = "cluster.id";
 
     private SharedStorageConfiguration storageConfiguration;
     private SharedStorageEngine storage;
@@ -93,10 +100,14 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             configuration.walCapacityBytes(),
             configuration.walSegmentBytes()
         );
+        S3ObjectStore newObjectStore = null;
         try {
             LocalRemoteObjectCheckpoint remoteCheckpoint =
                 new LocalRemoteObjectCheckpoint(configuration.walDir());
             SharedStorageEngine newStorage = new SharedStorageEngine(wal, remoteCheckpoint);
+            newObjectStore = new S3ObjectStore(objectStoreConfiguration(context));
+            newStorage.installRemoteReader(new SharedObjectReader(newObjectStore, newStorage.remoteIndex()));
+
             SharedCommitProgress newCommitProgress = new SharedCommitProgress();
             UnifiedLogFactory newFactory = new RoutingUnifiedLogFactory(
                 configuration,
@@ -116,7 +127,10 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             unifiedLogFactory = newFactory;
             partitionRoleListener = newPartitionRoleListener;
             bootstrapExecutor = newBootstrapExecutor;
+            objectStore = newObjectStore;
+            newObjectStore = null;
         } catch (Throwable t) {
+            closeIgnoringFailure(newObjectStore);
             try {
                 wal.close();
             } catch (Throwable closeError) {
@@ -145,7 +159,8 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
     @Override
     public synchronized CompletableFuture<Void> onBrokerReady(StorageExtensionBrokerContext context) {
         Objects.requireNonNull(context, "context");
-        if (storage == null || bootstrapExecutor == null || storageConfiguration == null || commitProgress == null) {
+        if (storage == null || bootstrapExecutor == null || storageConfiguration == null ||
+            commitProgress == null || objectStore == null) {
             return CompletableFuture.failedFuture(
                 new IllegalStateException("S3 shared storage extension has not been started"));
         }
@@ -159,10 +174,11 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         SharedStorageConfiguration configuration = storageConfiguration;
         SharedStorageEngine engine = storage;
         SharedCommitProgress progress = commitProgress;
+        S3ObjectStore objects = objectStore;
         ExecutorService executor = bootstrapExecutor;
         brokerReadyFuture = CompletableFuture.runAsync(() -> {
             try {
-                initializeRemotePlane(context, configuration, engine, progress);
+                initializeRemotePlane(context, configuration, engine, progress, objects);
             } catch (IOException e) {
                 throw new CompletionException(e);
             }
@@ -174,10 +190,10 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         StorageExtensionBrokerContext context,
         SharedStorageConfiguration configuration,
         SharedStorageEngine engine,
-        SharedCommitProgress progress
+        SharedCommitProgress progress,
+        S3ObjectStore sharedObjectStore
     ) throws IOException {
         KafkaObjectMetadataStore newMetadataStore = null;
-        S3ObjectStore newObjectStore = null;
         SharedUploadScheduler newUploadScheduler = null;
         OrphanCleanupScheduler newOrphanCleanupScheduler = null;
         boolean installed = false;
@@ -186,9 +202,6 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
                 SharedMetadataClientConfiguration.from(context);
             // Initial replay and live commits from every broker update this engine's remote coverage.
             newMetadataStore = openMetadataStoreWithRetry(metadataConfiguration, engine);
-
-            S3ObjectStoreConfig objectStoreConfig = objectStoreConfiguration(context);
-            newObjectStore = new S3ObjectStore(objectStoreConfig);
 
             KafkaObjectMetadataStore.SequenceBlock initialBlock =
                 newMetadataStore.reserveSequenceBlock(DEFAULT_OBJECT_ID_BLOCK_SIZE);
@@ -202,7 +215,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             SharedObjectUploadHook uploadHook =
                 FileSharedObjectUploadBarrier.from(context.originals(), context.brokerId());
             SharedObjectUploader uploader = new SharedObjectUploader(
-                newObjectStore,
+                sharedObjectStore,
                 newMetadataStore,
                 new SharedObjectPacker(),
                 engine,
@@ -218,17 +231,16 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
                 configuration.objectTargetBytes()
             );
             newOrphanCleanupScheduler = new OrphanCleanupScheduler(
-                new OrphanObjectCleaner(newObjectStore, newMetadataStore, activeUploads),
+                new OrphanObjectCleaner(sharedObjectStore, newMetadataStore, activeUploads),
                 context.time()::milliseconds,
                 configuration.orphanGraceMs()
             );
 
             synchronized (this) {
-                if (closed || storage != engine) {
+                if (closed || storage != engine || objectStore != sharedObjectStore) {
                     throw new IOException("S3 shared storage extension closed or restarted during remote bootstrap");
                 }
                 metadataStore = newMetadataStore;
-                objectStore = newObjectStore;
                 uploadScheduler = newUploadScheduler;
                 orphanCleanupScheduler = newOrphanCleanupScheduler;
                 newUploadScheduler.start(configuration.uploadIntervalMs());
@@ -239,7 +251,6 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             if (!installed) {
                 closeIgnoringFailure(newOrphanCleanupScheduler);
                 closeIgnoringFailure(newUploadScheduler);
-                closeIgnoringFailure(newObjectStore);
                 closeIgnoringFailure(newMetadataStore);
             }
         }
@@ -294,17 +305,53 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         return false;
     }
 
+    private static S3ObjectStoreConfig objectStoreConfiguration(StorageExtensionContext context) throws IOException {
+        return objectStoreConfiguration(context.originals(), clusterIdFromLogDirs(context.liveLogDirs()));
+    }
+
     private static S3ObjectStoreConfig objectStoreConfiguration(StorageExtensionBrokerContext context) {
-        Map<String, Object> originals = new LinkedHashMap<>();
-        context.originals().forEach(originals::put);
-        Object configuredPrefix = originals.get(S3ObjectStoreConfig.KEY_PREFIX_CONFIG);
+        return objectStoreConfiguration(context.originals(), context.clusterId());
+    }
+
+    private static S3ObjectStoreConfig objectStoreConfiguration(Map<String, ?> originals, String clusterId) {
+        Map<String, Object> effective = new LinkedHashMap<>();
+        originals.forEach(effective::put);
+        Object configuredPrefix = effective.get(S3ObjectStoreConfig.KEY_PREFIX_CONFIG);
         if (configuredPrefix == null || configuredPrefix.toString().isBlank()) {
-            originals.put(
+            effective.put(
                 S3ObjectStoreConfig.KEY_PREFIX_CONFIG,
-                "clusters/" + context.clusterId() + "/objects"
+                "clusters/" + clusterId + "/objects"
             );
         }
-        return S3ObjectStoreConfig.from(originals);
+        return S3ObjectStoreConfig.from(effective);
+    }
+
+    private static String clusterIdFromLogDirs(java.util.List<File> liveLogDirs) throws IOException {
+        String clusterId = null;
+        for (File logDir : liveLogDirs) {
+            Path metaProperties = logDir.toPath().resolve(META_PROPERTIES_FILE);
+            if (!Files.isRegularFile(metaProperties)) {
+                continue;
+            }
+            Properties properties = new Properties();
+            try (var reader = Files.newBufferedReader(metaProperties)) {
+                properties.load(reader);
+            }
+            String candidate = properties.getProperty(CLUSTER_ID_PROPERTY);
+            if (candidate == null || candidate.isBlank()) {
+                throw new IOException("Missing cluster.id in " + metaProperties);
+            }
+            candidate = candidate.trim();
+            if (clusterId != null && !clusterId.equals(candidate)) {
+                throw new IOException(
+                    "Inconsistent cluster.id across live log directories: " + clusterId + " vs " + candidate);
+            }
+            clusterId = candidate;
+        }
+        if (clusterId == null) {
+            throw new IOException("Unable to recover cluster.id from live log directory meta.properties");
+        }
+        return clusterId;
     }
 
     @Override
