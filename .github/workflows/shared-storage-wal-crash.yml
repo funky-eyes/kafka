@@ -62,6 +62,7 @@ jobs:
             --tests 'org.apache.kafka.storage.internals.shared.wal.FileSharedWalTest' \
             --tests 'org.apache.kafka.storage.internals.shared.wal.FileSharedWalCrashWindowTest' \
             --tests 'org.apache.kafka.storage.internals.shared.wal.RotatingFileSharedWalTest' \
+            --tests 'org.apache.kafka.storage.internals.shared.wal.RemoteCoverageWalReclaimPolicyTest' \
             2>&1 | tee shared-storage-wal-crash.log
 
       - name: Upload crash-window diagnostics
