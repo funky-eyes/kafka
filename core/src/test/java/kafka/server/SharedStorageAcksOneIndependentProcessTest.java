@@ -181,10 +181,9 @@ public class SharedStorageAcksOneIndependentProcessTest {
                     brokers,
                     replicationFactor,
                     firstLeader,
+                    followers,
                     1
                 );
-                restartBrokers(repositoryRoot, processRuntime, brokers, followers);
-                waitForTopicState(admin, replicationFactor, replicationFactor, -1);
 
                 proveReplicatedAckBehavior(
                     repositoryRoot,
@@ -255,17 +254,20 @@ public class SharedStorageAcksOneIndependentProcessTest {
         Map<Integer, BrokerProcess> brokers,
         short replicationFactor,
         int leaderId,
+        List<Integer> followers,
         int expectedRecords
     ) throws Exception {
         restartBroker(repositoryRoot, processRuntime, brokers, leaderId);
-        waitForTopicState(admin, replicationFactor, (short) 1, leaderId);
+        restartBrokers(repositoryRoot, processRuntime, brokers, followers);
+        waitForTopicState(admin, replicationFactor, replicationFactor, leaderId);
         assertExpectedValues(
             consumeAll(bootstrapServers, expectedRecords),
             expectedRecords,
-            "Original leader WAL must recover the leader-only acks=1 record"
+            "Original leader WAL must recover and replicate the leader-only acks=1 record"
         );
         System.out.println("ACKS1_ORIGINAL_DISK_RECOVERED rf=" + replicationFactor +
-            " leader=" + leaderId + " records=" + expectedRecords);
+            " leader=" + leaderId + " records=" + expectedRecords +
+            " recoveredWithFullMetadataQuorum=true");
     }
 
     private static void proveReplicatedAckBehavior(
