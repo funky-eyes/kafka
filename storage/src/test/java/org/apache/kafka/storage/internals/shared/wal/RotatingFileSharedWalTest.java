@@ -129,17 +129,18 @@ class RotatingFileSharedWalTest {
     @Test
     void shouldRetainRemoteCommittedWalBelowPressureHighWatermark() throws Exception {
         Path walDir = tempDir.resolve("rotating-retention-window");
+        long before;
         try (RotatingFileSharedWal wal = new RotatingFileSharedWal(walDir, 4096, 512)) {
             append(wal, 0, 200);
             append(wal, 1, 200);
-            long before = wal.usedBytes();
+            before = wal.usedBytes();
             assertTrue(before < percentage(4096, RotatingFileSharedWal.DEFAULT_RECLAIM_HIGH_WATERMARK_PERCENT));
 
             assertEquals(0L, wal.reclaim((record, ignored) -> true),
                 "remote commit alone must not eagerly discard the local recovery window");
             assertEquals(before, wal.usedBytes());
-            assertEquals(List.of(0L, 1L), replayOffsets(walDir, 4096, 512));
         }
+        assertEquals(List.of(0L, 1L), replayOffsets(walDir, 4096, 512));
     }
 
     @Test
