@@ -92,6 +92,31 @@ public final class PartitionWalIndex {
         }
     }
 
+    /**
+     * Removes locations whose immutable logical WAL segment has already been physically reclaimed.
+     *
+     * <p>The compare-and-remove form is important because appends may update the same logical offset concurrently
+     * after a Kafka truncate/reappend. A newly installed location is never removed merely because an older snapshot
+     * observed that offset on a reclaimed segment.</p>
+     */
+    public void removeSegmentsThrough(long segmentId) {
+        if (segmentId < 0) {
+            return;
+        }
+        for (Map.Entry<WalPartitionKey, ConcurrentNavigableMap<Long, WalLocation>> partition : locations.entrySet()) {
+            ConcurrentNavigableMap<Long, WalLocation> partitionLocations = partition.getValue();
+            for (Map.Entry<Long, WalLocation> entry : partitionLocations.entrySet()) {
+                WalLocation location = entry.getValue();
+                if (location.segmentId() <= segmentId) {
+                    partitionLocations.remove(entry.getKey(), location);
+                }
+            }
+            if (partitionLocations.isEmpty()) {
+                locations.remove(partition.getKey(), partitionLocations);
+            }
+        }
+    }
+
     /** Clears every physical WAL location before replaying the surviving post-reclaim segments. */
     public void clear() {
         locations.clear();
