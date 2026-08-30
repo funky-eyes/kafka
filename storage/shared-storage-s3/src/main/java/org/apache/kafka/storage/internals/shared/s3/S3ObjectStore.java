@@ -23,6 +23,7 @@ import software.amazon.awssdk.core.ResponseBytes;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.retries.DefaultRetryStrategy;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.S3ClientBuilder;
 import software.amazon.awssdk.services.s3.S3Configuration;
@@ -32,6 +33,7 @@ import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 
 import java.nio.ByteBuffer;
+import java.time.Duration;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
@@ -49,6 +51,9 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  * <p>This client belongs exclusively to asynchronous object publication and cold reads. Producer acknowledgement
  * durability is owned by the local and replicated WAL path; an S3 request must never be placed on that ACK path.</p>
+ *
+ * <p>HTTP connect/read waits, each individual attempt, the whole API call and maximum attempts are all explicit. This
+ * prevents environment or SDK defaults from turning an object-store outage into an unbounded upload-worker stall.</p>
  */
 public final class S3ObjectStore implements ObjectStore {
     private static final long CLOSE_TIMEOUT_SECONDS = 30L;
@@ -146,12 +151,21 @@ public final class S3ObjectStore implements ObjectStore {
         return CompletableFuture.supplyAsync(operation, ioExecutor);
     }
 
-    private static S3Client buildClient(S3ObjectStoreConfig config) {
+    static S3Client buildClient(S3ObjectStoreConfig config) {
         Objects.requireNonNull(config, "config");
+        var retryStrategy = DefaultRetryStrategy.standardStrategyBuilder()
+            .maxAttempts(config.maxAttempts())
+            .build();
         S3ClientBuilder builder = S3Client.builder()
             .region(Region.of(config.region()))
             .credentialsProvider(DefaultCredentialsProvider.builder().build())
-            .httpClientBuilder(UrlConnectionHttpClient.builder())
+            .httpClientBuilder(UrlConnectionHttpClient.builder()
+                .connectionTimeout(Duration.ofMillis(config.connectionTimeoutMs()))
+                .socketTimeout(Duration.ofMillis(config.socketTimeoutMs())))
+            .overrideConfiguration(override -> override
+                .apiCallAttemptTimeout(Duration.ofMillis(config.apiCallAttemptTimeoutMs()))
+                .apiCallTimeout(Duration.ofMillis(config.apiCallTimeoutMs()))
+                .retryStrategy(retryStrategy))
             .serviceConfiguration(S3Configuration.builder()
                 .pathStyleAccessEnabled(config.pathStyleAccess())
                 .build());
