@@ -39,7 +39,7 @@ concurrency:
 
 jobs:
   crash-window-gate:
-    name: WAL crash-window recovery gate
+    name: WAL crash-window and rotating reclaim gate
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -54,13 +54,14 @@ jobs:
           java-version: 25
           gradle-cache-read-only: true
 
-      - name: Run deterministic WAL crash-window tests
+      - name: Run deterministic WAL crash-window and reclaim tests
         shell: bash
         run: |
           set -o pipefail
           ./gradlew :storage:test --no-scan \
             --tests 'org.apache.kafka.storage.internals.shared.wal.FileSharedWalTest' \
             --tests 'org.apache.kafka.storage.internals.shared.wal.FileSharedWalCrashWindowTest' \
+            --tests 'org.apache.kafka.storage.internals.shared.wal.RotatingFileSharedWalTest' \
             2>&1 | tee shared-storage-wal-crash.log
 
       - name: Upload crash-window diagnostics
