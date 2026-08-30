@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+// Keep the external-process durability gates tied to the packaged S3 runtime.
 ext.awsSdkVersion = "2.54.3"
 
 base {
