@@ -46,10 +46,10 @@ import java.util.function.LongSupplier;
  * HW, merges them by physical WAL order and delegates the durable object/metadata protocol to
  * {@link SharedObjectUploader}.</p>
  *
- * <p>The same maintenance thread also persists remote COMMIT references into the broker-local crash-safe checkpoint.
- * Metadata-consumer callbacks only enqueue that work and never perform filesystem I/O. Checkpoint failure does not
- * stop additional remote uploads, but it remains observable through {@link #lastFailure()} and prevents later WAL
- * reclamation from treating the uncheckpointed ranges as locally recoverable.</p>
+ * <p>The same maintenance thread persists remote COMMIT references into the broker-local crash-safe checkpoint and
+ * then reclaims only the rotating WAL prefix covered by that durable checkpoint. Metadata-consumer callbacks only
+ * enqueue checkpoint work and never perform filesystem I/O. Maintenance failure remains observable through
+ * {@link #lastFailure()} and fails closed for reclamation without blocking future asynchronous uploads.</p>
  */
 public final class SharedUploadScheduler implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(SharedUploadScheduler.class);
@@ -189,6 +189,24 @@ public final class SharedUploadScheduler implements AutoCloseable {
         }
     }
 
+    long reclaimCheckpointedWalOnce() {
+        if (lastMaintenanceFailure.get() != null) {
+            return 0L;
+        }
+        try {
+            long reclaimedBytes = engine.reclaimCheckpointedWal();
+            lastMaintenanceFailure.set(null);
+            if (reclaimedBytes > 0) {
+                LOG.debug("Reclaimed {} bytes from checkpointed rotating shared WAL", reclaimedBytes);
+            }
+            return reclaimedBytes;
+        } catch (IOException | RuntimeException e) {
+            lastMaintenanceFailure.set(e);
+            LOG.warn("Unable to reclaim checkpointed rotating shared WAL", e);
+            return 0L;
+        }
+    }
+
     List<SharedStorageEngine.UploadCandidate> selectCandidates() {
         Map<org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId,
             SharedCommitProgress.PartitionProgress> snapshot = commitProgress.snapshot();
@@ -257,6 +275,7 @@ public final class SharedUploadScheduler implements AutoCloseable {
 
     private void runScheduledUpload() {
         checkpointRemoteCommitsOnce();
+        reclaimCheckpointedWalOnce();
         tryUploadOnce().whenComplete((ignored, error) -> {
             if (error != null) {
                 lastUploadFailure.set(error);
