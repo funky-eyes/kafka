@@ -586,13 +586,15 @@ public class SharedStorageIndependentProcessSigkillTest {
         properties.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
         properties.put(ProducerConfig.ACKS_CONFIG, "all");
         properties.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, idempotent);
-        properties.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, 30_000);
         properties.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
         properties.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
-        if (!idempotent) {
+        if (idempotent) {
+            properties.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, 120_000);
+        } else {
             properties.put(ProducerConfig.RETRIES_CONFIG, 0);
             properties.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, 5_000);
             properties.put(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, 3_000);
+            properties.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, 10_000);
         }
         return new KafkaProducer<>(properties);
     }
