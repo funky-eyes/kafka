@@ -46,6 +46,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class SharedStorageReclaimTest {
     private static final SharedPartitionId PARTITION = new SharedPartitionId(11, 22, 0);
     private static final long OBJECT_ID = 101;
+    private static final long WAL_CAPACITY_BYTES = 255;
+    private static final long WAL_SEGMENT_BYTES = 255;
 
     @TempDir
     Path tempDir;
@@ -62,7 +64,7 @@ class SharedStorageReclaimTest {
 
         LocalRemoteObjectCheckpoint checkpoint = new LocalRemoteObjectCheckpoint(walDir);
         try (SharedStorageEngine engine = new SharedStorageEngine(
-            new RotatingFileSharedWal(walDir, 1024, 256),
+            new RotatingFileSharedWal(walDir, WAL_CAPACITY_BYTES, WAL_SEGMENT_BYTES),
             checkpoint
         )) {
             engine.installRemoteReader(new SharedObjectReader(objectStore, engine.remoteIndex()));
@@ -73,7 +75,8 @@ class SharedStorageReclaimTest {
             assertEquals(1, engine.pendingRemoteCheckpointCount());
             long reclaimed = engine.reclaimCheckpointedWal();
 
-            assertTrue(reclaimed > 0, "checkpointed remote coverage must release the complete local WAL prefix");
+            assertTrue(reclaimed > 0,
+                "checkpointed remote coverage must release the complete local WAL prefix under capacity pressure");
             assertEquals(0, engine.pendingRemoteCheckpointCount());
             assertFalse(engine.readLocal(PARTITION, 0).isPresent(), "reclaimed payload must no longer be local");
             assertArrayEquals(payload, bytes(engine.readBatchBytes(PARTITION, 0).orElseThrow()));
@@ -81,7 +84,7 @@ class SharedStorageReclaimTest {
 
         LocalRemoteObjectCheckpoint reopenedCheckpoint = new LocalRemoteObjectCheckpoint(walDir);
         try (SharedStorageEngine restarted = new SharedStorageEngine(
-            new RotatingFileSharedWal(walDir, 1024, 256),
+            new RotatingFileSharedWal(walDir, WAL_CAPACITY_BYTES, WAL_SEGMENT_BYTES),
             reopenedCheckpoint
         )) {
             restarted.installRemoteReader(new SharedObjectReader(objectStore, restarted.remoteIndex()));
