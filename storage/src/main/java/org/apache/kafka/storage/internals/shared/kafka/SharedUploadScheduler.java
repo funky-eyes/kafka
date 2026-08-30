@@ -211,21 +211,29 @@ public final class SharedUploadScheduler implements AutoCloseable {
             return CompletableFuture.failedFuture(new IllegalStateException("Shared upload scheduler is closed"));
         }
         if (!tryAcquireUploadSlot()) {
+            if (closed.get()) {
+                return CompletableFuture.failedFuture(new IllegalStateException("Shared upload scheduler is closed"));
+            }
             return CompletableFuture.completedFuture(Optional.empty());
         }
         return selectForUpload(applyTriggerGate);
     }
 
     private boolean tryAcquireUploadSlot() {
-        while (true) {
+        while (!closed.get()) {
             int current = uploadsInProgress.get();
             if (current >= maxInflight) {
                 return false;
             }
             if (uploadsInProgress.compareAndSet(current, current + 1)) {
+                if (closed.get()) {
+                    releaseUploadSlot();
+                    return false;
+                }
                 return true;
             }
         }
+        return false;
     }
 
     private void releaseUploadSlot() {
