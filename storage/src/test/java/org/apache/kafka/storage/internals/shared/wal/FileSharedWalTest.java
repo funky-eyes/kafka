@@ -16,6 +16,8 @@
  */
 package org.apache.kafka.storage.internals.shared.wal;
 
+import org.apache.kafka.common.errors.KafkaStorageException;
+
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -148,7 +150,40 @@ class FileSharedWalTest {
                 wal.append(WalRecord.data(1, 1, 0, 0, 1, 1, new byte[100]))
                     .get(10, TimeUnit.SECONDS));
             assertTrue(error.getCause() instanceof WalCapacityExceededException);
+            assertTrue(error.getCause() instanceof KafkaStorageException);
         }
+    }
+
+    @Test
+    void shouldRemainHealthyAfterRejectingAnOversizedCapacityAdmission() throws Exception {
+        Path walDir = tempDir.resolve("wal-capacity-recovery");
+        long usedAfterFirstAppend;
+        try (FileSharedWal wal = new FileSharedWal(walDir, 512, 512)) {
+            wal.append(WalRecord.data(2, 2, 0, 0, 0, 0, new byte[100]))
+                .get(10, TimeUnit.SECONDS);
+            usedAfterFirstAppend = wal.usedBytes();
+
+            ExecutionException rejected = assertThrows(ExecutionException.class, () ->
+                wal.append(WalRecord.data(2, 2, 0, 0, 1, 1, new byte[240]))
+                    .get(10, TimeUnit.SECONDS));
+            assertTrue(rejected.getCause() instanceof WalCapacityExceededException);
+            assertEquals(usedAfterFirstAppend, wal.usedBytes(),
+                "a rejected logical append group must not consume or overwrite WAL bytes");
+
+            wal.append(WalRecord.data(2, 2, 0, 0, 2, 2, new byte[]{7}))
+                .get(10, TimeUnit.SECONDS);
+            assertTrue(wal.usedBytes() > usedAfterFirstAppend,
+                "capacity rejection must not poison the single WAL writer");
+        }
+
+        List<WalRecord> replayed = new ArrayList<>();
+        try (FileSharedWal wal = new FileSharedWal(walDir, 512, 512)) {
+            wal.replay((record, ignored) -> replayed.add(record));
+        }
+        assertEquals(2, replayed.size());
+        assertEquals(0, replayed.get(0).firstOffset());
+        assertEquals(2, replayed.get(1).firstOffset());
+        assertArrayEquals(new byte[]{7}, bytes(replayed.get(1).payload()));
     }
 
     private static byte[] bytes(ByteBuffer buffer) {
