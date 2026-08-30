@@ -52,19 +52,64 @@ class S3ObjectStoreTest {
         assertEquals("objects", config.keyPrefix());
         assertEquals(S3ObjectStoreConfig.DEFAULT_REGION, config.region());
         assertEquals(S3ObjectStoreConfig.DEFAULT_IO_THREADS, config.ioThreads());
+        assertEquals(S3ObjectStoreConfig.DEFAULT_CONNECTION_TIMEOUT_MS, config.connectionTimeoutMs());
+        assertEquals(S3ObjectStoreConfig.DEFAULT_SOCKET_TIMEOUT_MS, config.socketTimeoutMs());
+        assertEquals(S3ObjectStoreConfig.DEFAULT_API_CALL_ATTEMPT_TIMEOUT_MS, config.apiCallAttemptTimeoutMs());
+        assertEquals(S3ObjectStoreConfig.DEFAULT_API_CALL_TIMEOUT_MS, config.apiCallTimeoutMs());
+        assertEquals(S3ObjectStoreConfig.DEFAULT_MAX_ATTEMPTS, config.maxAttempts());
         assertFalse(config.pathStyleAccess());
         assertTrue(config.endpoint().isEmpty());
         assertEquals("objects/42", config.objectKey(42L));
     }
 
     @Test
-    void rejectsMissingBucketAndInvalidEndpoint() {
+    void parsesExplicitBoundedRequestPolicy() {
+        S3ObjectStoreConfig config = S3ObjectStoreConfig.from(Map.of(
+            S3ObjectStoreConfig.BUCKET_CONFIG, "shared-data",
+            S3ObjectStoreConfig.CONNECTION_TIMEOUT_MS_CONFIG, 1_000L,
+            S3ObjectStoreConfig.SOCKET_TIMEOUT_MS_CONFIG, "2000",
+            S3ObjectStoreConfig.API_CALL_ATTEMPT_TIMEOUT_MS_CONFIG, 3_000L,
+            S3ObjectStoreConfig.API_CALL_TIMEOUT_MS_CONFIG, "7000",
+            S3ObjectStoreConfig.MAX_ATTEMPTS_CONFIG, 2
+        ));
+
+        assertEquals(1_000L, config.connectionTimeoutMs());
+        assertEquals(2_000L, config.socketTimeoutMs());
+        assertEquals(3_000L, config.apiCallAttemptTimeoutMs());
+        assertEquals(7_000L, config.apiCallTimeoutMs());
+        assertEquals(2, config.maxAttempts());
+    }
+
+    @Test
+    void rejectsMissingBucketInvalidEndpointAndUnboundedRequestPolicy() {
         assertThrows(IllegalArgumentException.class, () -> S3ObjectStoreConfig.from(Map.of()));
         assertThrows(
             IllegalArgumentException.class,
             () -> S3ObjectStoreConfig.from(Map.of(
                 S3ObjectStoreConfig.BUCKET_CONFIG, "shared-data",
                 S3ObjectStoreConfig.ENDPOINT_CONFIG, "ftp://127.0.0.1:9000"
+            ))
+        );
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> S3ObjectStoreConfig.from(Map.of(
+                S3ObjectStoreConfig.BUCKET_CONFIG, "shared-data",
+                S3ObjectStoreConfig.API_CALL_TIMEOUT_MS_CONFIG, 0
+            ))
+        );
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> S3ObjectStoreConfig.from(Map.of(
+                S3ObjectStoreConfig.BUCKET_CONFIG, "shared-data",
+                S3ObjectStoreConfig.API_CALL_ATTEMPT_TIMEOUT_MS_CONFIG, 10_000,
+                S3ObjectStoreConfig.API_CALL_TIMEOUT_MS_CONFIG, 5_000
+            ))
+        );
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> S3ObjectStoreConfig.from(Map.of(
+                S3ObjectStoreConfig.BUCKET_CONFIG, "shared-data",
+                S3ObjectStoreConfig.MAX_ATTEMPTS_CONFIG, 0
             ))
         );
     }
@@ -83,6 +128,11 @@ class S3ObjectStoreTest {
         originals.put(S3ObjectStoreConfig.PATH_STYLE_ACCESS_CONFIG, true);
         originals.put(S3ObjectStoreConfig.KEY_PREFIX_CONFIG, "integration/objects");
         originals.put(S3ObjectStoreConfig.IO_THREADS_CONFIG, 2);
+        originals.put(S3ObjectStoreConfig.API_CALL_TIMEOUT_MS_CONFIG, 10_000L);
+        originals.put(S3ObjectStoreConfig.API_CALL_ATTEMPT_TIMEOUT_MS_CONFIG, 5_000L);
+        originals.put(S3ObjectStoreConfig.SOCKET_TIMEOUT_MS_CONFIG, 5_000L);
+        originals.put(S3ObjectStoreConfig.CONNECTION_TIMEOUT_MS_CONFIG, 2_000L);
+        originals.put(S3ObjectStoreConfig.MAX_ATTEMPTS_CONFIG, 2);
         S3ObjectStoreConfig config = S3ObjectStoreConfig.from(originals);
 
         ensureBucket(config);
