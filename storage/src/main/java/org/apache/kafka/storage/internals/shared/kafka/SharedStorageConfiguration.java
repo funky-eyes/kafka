@@ -37,6 +37,7 @@ public final class SharedStorageConfiguration {
     public static final String UPLOAD_INTERVAL_MS_CONFIG = "shared.storage.upload.interval.ms";
     public static final String UPLOAD_MAX_LINGER_MS_CONFIG = "shared.storage.upload.max.linger.ms";
     public static final String UPLOAD_WAL_PRESSURE_PERCENT_CONFIG = "shared.storage.upload.wal.pressure.percent";
+    public static final String UPLOAD_MAX_INFLIGHT_CONFIG = "shared.storage.upload.max.inflight";
     public static final String ORPHAN_CLEANUP_INTERVAL_MS_CONFIG = "shared.storage.orphan.cleanup.interval.ms";
     public static final String ORPHAN_GRACE_MS_CONFIG = "shared.storage.orphan.grace.ms";
     public static final String TOPICS_CONFIG = "shared.storage.topics";
@@ -48,6 +49,7 @@ public final class SharedStorageConfiguration {
     public static final long DEFAULT_UPLOAD_INTERVAL_MS = 100L;
     public static final long DEFAULT_UPLOAD_MAX_LINGER_MS = 1_000L;
     public static final int DEFAULT_UPLOAD_WAL_PRESSURE_PERCENT = 70;
+    public static final int DEFAULT_UPLOAD_MAX_INFLIGHT = 4;
     public static final long DEFAULT_ORPHAN_CLEANUP_INTERVAL_MS = 60_000L;
     public static final long DEFAULT_ORPHAN_GRACE_MS = 10L * 60 * 1_000;
 
@@ -58,6 +60,7 @@ public final class SharedStorageConfiguration {
     private final long uploadIntervalMs;
     private final long uploadMaxLingerMs;
     private final int uploadWalPressurePercent;
+    private final int uploadMaxInflight;
     private final long orphanCleanupIntervalMs;
     private final long orphanGraceMs;
     private final Set<String> topics;
@@ -71,6 +74,7 @@ public final class SharedStorageConfiguration {
         long uploadIntervalMs,
         long uploadMaxLingerMs,
         int uploadWalPressurePercent,
+        int uploadMaxInflight,
         long orphanCleanupIntervalMs,
         long orphanGraceMs,
         Set<String> topics,
@@ -83,6 +87,7 @@ public final class SharedStorageConfiguration {
         this.uploadIntervalMs = uploadIntervalMs;
         this.uploadMaxLingerMs = uploadMaxLingerMs;
         this.uploadWalPressurePercent = uploadWalPressurePercent;
+        this.uploadMaxInflight = uploadMaxInflight;
         this.orphanCleanupIntervalMs = orphanCleanupIntervalMs;
         this.orphanGraceMs = orphanGraceMs;
         this.topics = topics;
@@ -131,6 +136,11 @@ public final class SharedStorageConfiguration {
             DEFAULT_UPLOAD_WAL_PRESSURE_PERCENT,
             UPLOAD_WAL_PRESSURE_PERCENT_CONFIG
         );
+        int uploadMaxInflight = positiveInt(
+            context.originals().get(UPLOAD_MAX_INFLIGHT_CONFIG),
+            DEFAULT_UPLOAD_MAX_INFLIGHT,
+            UPLOAD_MAX_INFLIGHT_CONFIG
+        );
         long orphanCleanupIntervalMs = positiveLong(
             context.originals().get(ORPHAN_CLEANUP_INTERVAL_MS_CONFIG),
             DEFAULT_ORPHAN_CLEANUP_INTERVAL_MS,
@@ -152,6 +162,7 @@ public final class SharedStorageConfiguration {
             uploadIntervalMs,
             uploadMaxLingerMs,
             uploadWalPressurePercent,
+            uploadMaxInflight,
             orphanCleanupIntervalMs,
             orphanGraceMs,
             topics,
@@ -212,6 +223,10 @@ public final class SharedStorageConfiguration {
         return uploadWalPressurePercent;
     }
 
+    public int uploadMaxInflight() {
+        return uploadMaxInflight;
+    }
+
     public long orphanCleanupIntervalMs() {
         return orphanCleanupIntervalMs;
     }
@@ -243,6 +258,14 @@ public final class SharedStorageConfiguration {
             throw new IllegalArgumentException(name + " must be positive");
         }
         return parsed;
+    }
+
+    private static int positiveInt(Object value, int defaultValue, String name) {
+        long parsed = longValue(value, defaultValue);
+        if (parsed <= 0 || parsed > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException(name + " must be in [1, " + Integer.MAX_VALUE + "]");
+        }
+        return Math.toIntExact(parsed);
     }
 
     private static long nonNegativeLong(Object value, long defaultValue, String name) {
