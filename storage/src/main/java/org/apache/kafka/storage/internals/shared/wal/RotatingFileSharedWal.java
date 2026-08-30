@@ -205,19 +205,29 @@ public final class RotatingFileSharedWal implements SharedWal {
 
         try {
             ReclaimPlan plan = buildReclaimPlan(policy, desiredBytes, activeSegmentId);
-            ReclaimResult result = deleteReclaimableSegments(plan);
-            if (result.reclaimedBytes() > 0) {
-                delegate.releaseReclaimedBytes(result.reclaimedBytes());
-                reclaimedThroughSegmentId = Math.max(reclaimedThroughSegmentId, result.reclaimedThroughSegmentId());
-                readCache.clear();
+            try {
+                ReclaimResult result = deleteReclaimableSegments(plan);
+                applyReclaimResult(result);
+                return result.reclaimedBytes();
+            } catch (PartialReclaimException e) {
+                applyReclaimResult(e.result());
+                throw e;
             }
-            return result.reclaimedBytes();
         } finally {
             synchronized (lifecycleLock) {
                 reclaiming = false;
                 lifecycleLock.notifyAll();
             }
         }
+    }
+
+    private void applyReclaimResult(ReclaimResult result) {
+        if (result.reclaimedBytes() <= 0) {
+            return;
+        }
+        delegate.releaseReclaimedBytes(result.reclaimedBytes());
+        reclaimedThroughSegmentId = Math.max(reclaimedThroughSegmentId, result.reclaimedThroughSegmentId());
+        readCache.clear();
     }
 
     @Override
@@ -426,15 +436,19 @@ public final class RotatingFileSharedWal implements SharedWal {
                 }
             }
         }
+        ReclaimResult result = new ReclaimResult(reclaimedBytes, reclaimedThroughSegmentId);
         if (failure != null) {
-            throw new PartialReclaimException(failure, reclaimedBytes, reclaimedThroughSegmentId);
+            throw new PartialReclaimException(failure, result);
         }
         if (reclaimedBytes != plan.safeBoundaryBytes()) {
-            throw new IOException(
-                "WAL reclaim plan changed while deleting immutable segments: planned=" + plan.safeBoundaryBytes() +
-                    ", actual=" + reclaimedBytes);
+            throw new PartialReclaimException(
+                new IOException(
+                    "WAL reclaim plan changed while deleting immutable segments: planned=" + plan.safeBoundaryBytes() +
+                        ", actual=" + reclaimedBytes),
+                result
+            );
         }
-        return new ReclaimResult(reclaimedBytes, reclaimedThroughSegmentId);
+        return result;
     }
 
     private static long watermarkBytes(long capacityBytes, int percent) {
@@ -487,12 +501,19 @@ public final class RotatingFileSharedWal implements SharedWal {
     }
 
     private static final class PartialReclaimException extends IOException {
-        private PartialReclaimException(IOException cause, long reclaimedBytes, long reclaimedThroughSegmentId) {
+        private final ReclaimResult result;
+
+        private PartialReclaimException(IOException cause, ReclaimResult result) {
             super(
-                "WAL reclaim partially deleted immutable segments: reclaimedBytes=" + reclaimedBytes +
-                    ", reclaimedThroughSegmentId=" + reclaimedThroughSegmentId,
+                "WAL reclaim partially deleted immutable segments: reclaimedBytes=" + result.reclaimedBytes() +
+                    ", reclaimedThroughSegmentId=" + result.reclaimedThroughSegmentId(),
                 cause
             );
+            this.result = result;
+        }
+
+        private ReclaimResult result() {
+            return result;
         }
     }
 }
