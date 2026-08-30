@@ -39,6 +39,7 @@ concurrency:
   group: shared-storage-sigkill-${{ github.ref }}
   cancel-in-progress: true
 
+# Each RF case is a separate external-process fault domain and produces independent evidence.
 jobs:
   acks-all-replication-matrix:
     name: acks=all RF${{ matrix.rf }} leader SIGKILL
