@@ -42,10 +42,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  after-put-sigkill:
-    name: AFTER_PUT leader SIGKILL and orphan cleanup
+  upload-crash-boundary:
+    name: ${{ matrix.phase }} leader SIGKILL boundary
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        phase:
+          - AFTER_PREPARE
+          - AFTER_PUT
+          - AFTER_COMMIT
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -104,7 +111,7 @@ jobs:
           grep -q '^kafka-shared-storage-s3-' shared-storage-upload-crash-runtime.txt
           grep -q '^s3-' shared-storage-upload-crash-runtime.txt
 
-      - name: Run AFTER_PUT external-JVM crash gate
+      - name: Run ${{ matrix.phase }} external-JVM crash gate
         shell: bash
         env:
           AWS_ACCESS_KEY_ID: minioadmin
@@ -113,6 +120,7 @@ jobs:
           SHARED_STORAGE_S3_ENDPOINT: http://127.0.0.1:9000
           SHARED_STORAGE_S3_REGION: us-east-1
           SHARED_STORAGE_S3_BUCKET: kafka-shared-storage-upload-crash
+          SHARED_STORAGE_UPLOAD_CRASH_PHASE: ${{ matrix.phase }}
         run: |
           set -o pipefail
           ./gradlew :storage:shared-storage-s3:test \
@@ -128,15 +136,26 @@ jobs:
           grep -q 'failures="0"' "$result_xml"
           grep -q 'errors="0"' "$result_xml"
           grep -q 'skipped="0"' "$result_xml"
-          grep -q 'UPLOAD_CRASH_AFTER_PUT_SIGKILL oldLeader=' "$result_xml"
-          grep -q 'UPLOAD_CRASH_AFTER_PUT_RECOVERED oldLeader=' "$result_xml"
-          grep -q 'UPLOAD_CRASH_ORPHAN_CLEANED objectId=' "$result_xml"
+          grep -q 'UPLOAD_CRASH_PHASE phase=${{ matrix.phase }}' "$result_xml"
+          grep -q 'UPLOAD_CRASH_${{ matrix.phase }}_SIGKILL oldLeader=' "$result_xml"
+          grep -q 'UPLOAD_CRASH_${{ matrix.phase }}_RECOVERED oldLeader=' "$result_xml"
+
+          if [ '${{ matrix.phase }}' = 'AFTER_COMMIT' ]; then
+            grep -q 'UPLOAD_CRASH_COMMITTED_OBJECT_RETAINED phase=AFTER_COMMIT objectId=' "$result_xml"
+          else
+            grep -q 'UPLOAD_CRASH_ORPHAN_CLEANED phase=${{ matrix.phase }} objectId=' "$result_xml"
+          fi
 
           {
-            grep 'UPLOAD_CRASH_AFTER_PUT_SIGKILL oldLeader=' "$result_xml"
-            grep 'UPLOAD_CRASH_AFTER_PUT_RECOVERED oldLeader=' "$result_xml"
-            grep 'UPLOAD_CRASH_ORPHAN_CLEANED objectId=' "$result_xml"
-            printf 'UPLOAD_CRASH_SUCCESS commit=%s\n' "$GITHUB_SHA"
+            grep 'UPLOAD_CRASH_PHASE phase=${{ matrix.phase }}' "$result_xml"
+            grep 'UPLOAD_CRASH_${{ matrix.phase }}_SIGKILL oldLeader=' "$result_xml"
+            grep 'UPLOAD_CRASH_${{ matrix.phase }}_RECOVERED oldLeader=' "$result_xml"
+            if [ '${{ matrix.phase }}' = 'AFTER_COMMIT' ]; then
+              grep 'UPLOAD_CRASH_COMMITTED_OBJECT_RETAINED phase=AFTER_COMMIT objectId=' "$result_xml"
+            else
+              grep 'UPLOAD_CRASH_ORPHAN_CLEANED phase=${{ matrix.phase }} objectId=' "$result_xml"
+            fi
+            printf 'UPLOAD_CRASH_SUCCESS phase=%s commit=%s\n' '${{ matrix.phase }}' "$GITHUB_SHA"
           } > shared-storage-upload-crash-proof.txt
           cat shared-storage-upload-crash-proof.txt
 
@@ -152,7 +171,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: shared-storage-upload-crash-log
+          name: shared-storage-upload-crash-${{ matrix.phase }}
           path: |
             shared-storage-upload-crash-build.log
             shared-storage-upload-crash-runtime.txt
