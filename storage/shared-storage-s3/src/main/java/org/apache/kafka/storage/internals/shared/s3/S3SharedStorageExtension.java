@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.storage.internals.shared.s3;
 
+import org.apache.kafka.common.errors.RetriableException;
 import org.apache.kafka.storage.internals.log.KafkaStorageExtension;
 import org.apache.kafka.storage.internals.log.StorageExtensionBrokerContext;
 import org.apache.kafka.storage.internals.log.StorageExtensionContext;
@@ -61,6 +62,8 @@ import java.util.function.LongSupplier;
 public final class S3SharedStorageExtension implements KafkaStorageExtension {
     private static final int DEFAULT_OBJECT_ID_BLOCK_SIZE = 4_096;
     private static final long BOOTSTRAP_EXECUTOR_STOP_TIMEOUT_SECONDS = 5L;
+    private static final long METADATA_BOOTSTRAP_RETRY_BACKOFF_MS = 250L;
+    private static final long METADATA_BOOTSTRAP_RETRY_TIMEOUT_MS = 30_000L;
 
     private SharedStorageConfiguration storageConfiguration;
     private SharedStorageEngine storage;
@@ -178,10 +181,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             SharedMetadataClientConfiguration metadataConfiguration =
                 SharedMetadataClientConfiguration.from(context);
             // Initial replay and live commits from every broker update this engine's remote coverage.
-            newMetadataStore = KafkaObjectMetadataStore.open(
-                metadataConfiguration,
-                engine::commitRemoteObject
-            );
+            newMetadataStore = openMetadataStoreWithRetry(metadataConfiguration, engine);
 
             S3ObjectStoreConfig objectStoreConfig = objectStoreConfiguration(context);
             newObjectStore = new S3ObjectStore(objectStoreConfig);
@@ -239,6 +239,55 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
                 closeIgnoringFailure(newMetadataStore);
             }
         }
+    }
+
+    private KafkaObjectMetadataStore openMetadataStoreWithRetry(
+        SharedMetadataClientConfiguration metadataConfiguration,
+        SharedStorageEngine engine
+    ) throws IOException {
+        long deadlineNanos = System.nanoTime() +
+            TimeUnit.MILLISECONDS.toNanos(METADATA_BOOTSTRAP_RETRY_TIMEOUT_MS);
+        Throwable lastFailure = null;
+        while (System.nanoTime() < deadlineNanos) {
+            try {
+                return KafkaObjectMetadataStore.open(metadataConfiguration, engine::commitRemoteObject);
+            } catch (IOException | RuntimeException e) {
+                if (!isRetriableMetadataBootstrapFailure(e)) {
+                    if (e instanceof IOException ioException) {
+                        throw ioException;
+                    }
+                    throw e;
+                }
+                lastFailure = e;
+            }
+
+            try {
+                Thread.sleep(METADATA_BOOTSTRAP_RETRY_BACKOFF_MS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("Interrupted while waiting for shared metadata bootstrap", e);
+            }
+        }
+        throw new IOException(
+            "Timed out waiting for shared metadata topic to become locally readable",
+            lastFailure
+        );
+    }
+
+    static boolean isRetriableMetadataBootstrapFailure(Throwable failure) {
+        Objects.requireNonNull(failure, "failure");
+        Throwable current = failure;
+        while (current != null) {
+            if (current instanceof RetriableException) {
+                return true;
+            }
+            Throwable cause = current.getCause();
+            if (cause == current) {
+                break;
+            }
+            current = cause;
+        }
+        return false;
     }
 
     private static S3ObjectStoreConfig objectStoreConfiguration(StorageExtensionBrokerContext context) {
