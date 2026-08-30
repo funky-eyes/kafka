@@ -30,12 +30,11 @@ import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.config.TopicConfig;
 import org.apache.kafka.common.errors.KafkaStorageException;
-import org.apache.kafka.common.errors.NotEnoughReplicasAfterAppendException;
-import org.apache.kafka.common.errors.NotEnoughReplicasException;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.apache.kafka.common.test.KafkaClusterTestKit;
+import org.apache.kafka.common.test.TestKitNode;
 import org.apache.kafka.common.test.TestKitNodes;
 import org.apache.kafka.storage.internals.shared.metadata.OffsetRange;
 import org.apache.kafka.storage.internals.shared.metadata.PartitionRemoteCoverage;
@@ -54,6 +53,8 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -63,6 +64,7 @@ import java.util.Properties;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -132,6 +134,11 @@ public class SharedStorageWalCapacityPressureKRaftIntegrationTest {
             .setConfigProp("shared.storage.s3.key.prefix", keyPrefix)
             .setConfigProp("shared.storage.s3.path.style", true)
             .setConfigProp("shared.storage.s3.io.threads", 2)
+            .setConfigProp("shared.storage.s3.connection.timeout.ms", 500L)
+            .setConfigProp("shared.storage.s3.socket.timeout.ms", 1_000L)
+            .setConfigProp("shared.storage.s3.api.call.attempt.timeout.ms", 1_500L)
+            .setConfigProp("shared.storage.s3.api.call.timeout.ms", 3_000L)
+            .setConfigProp("shared.storage.s3.max.attempts", 1)
             .build()) {
 
             try {
@@ -156,8 +163,11 @@ public class SharedStorageWalCapacityPressureKRaftIntegrationTest {
                     assertTrue(fill.acknowledgedValues().size() > 0,
                         "The WAL must admit records before reaching its capacity boundary");
                     assertNotNull(fill.rejection(), "The bounded fill must reach WAL capacity");
-                    assertTrue(isExpectedBackpressure(fill.rejection()),
-                        "Expected storage or quorum backpressure, but received " + failureDescription(fill.rejection()));
+                    assertTrue(
+                        hasCause(fill.rejection(), KafkaStorageException.class),
+                        "Expected KafkaStorageException admission backpressure, but received " +
+                            failureDescription(fill.rejection())
+                    );
                     assertEquals(0L, fill.acknowledgedRange().startOffset());
                     assertEquals(fill.acknowledgedValues().size(), fill.acknowledgedRange().endOffset());
                     System.out.println("WAL_CAPACITY_BACKPRESSURE acknowledged=" +
@@ -175,9 +185,13 @@ public class SharedStorageWalCapacityPressureKRaftIntegrationTest {
                         "Only successfully acknowledged shared records may remain visible"
                     );
 
-                    assertBrokerAndClassicTopicHealthy(admin, bootstrapServers);
-                    System.out.println("WAL_CAPACITY_BROKER_ONLINE brokers=3 classicRecords=" +
-                        CLASSIC_PROBE_RECORDS);
+                    Map<Integer, Long> walBytes = assertBrokerAndClassicTopicHealthy(
+                        cluster,
+                        admin,
+                        bootstrapServers
+                    );
+                    System.out.println("WAL_CAPACITY_BROKER_ONLINE brokers=3 isr=3 classicRecords=" +
+                        CLASSIC_PROBE_RECORDS + " walBytes=" + walBytes);
 
                     startContainer(minioContainer);
                     minioStopped = false;
@@ -193,6 +207,7 @@ public class SharedStorageWalCapacityPressureKRaftIntegrationTest {
                         consumeAssigned(bootstrapServers, SHARED_TOPIC, fill.acknowledgedValues().size(), 60),
                         "Every acknowledged shared record must survive capacity backpressure and S3 recovery"
                     );
+                    assertEquals(3, waitForTopicReady(admin, SHARED_TOPIC).partitions().get(0).isr().size());
                     System.out.println("WAL_CAPACITY_REMOTE_RECOVERED range=" + fill.acknowledgedRange() +
                         " records=" + fill.acknowledgedValues().size() + " overwriteAllowed=false");
                 }
@@ -251,16 +266,24 @@ public class SharedStorageWalCapacityPressureKRaftIntegrationTest {
         );
     }
 
-    private static void assertBrokerAndClassicTopicHealthy(
+    private static Map<Integer, Long> assertBrokerAndClassicTopicHealthy(
+        KafkaClusterTestKit cluster,
         Admin admin,
         String bootstrapServers
     ) throws Exception {
         assertEquals(3, admin.describeCluster().nodes().get(30, TimeUnit.SECONDS).size(),
             "WAL capacity pressure must not terminate or unregister brokers");
-        TopicDescription shared = admin.describeTopics(List.of(SHARED_TOPIC)).allTopicNames()
-            .get(30, TimeUnit.SECONDS).get(SHARED_TOPIC);
-        assertTrue(shared.partitions().get(0).leader().id() >= 0,
-            "The shared partition must retain a leader after admission backpressure");
+        TopicDescription shared = waitForTopicReady(admin, SHARED_TOPIC);
+        assertEquals(3, shared.partitions().get(0).isr().size(),
+            "WAL capacity rejection must not remove healthy replicas from ISR");
+
+        Map<Integer, Long> walBytes = walBytesByBroker(cluster);
+        for (Map.Entry<Integer, Long> entry : walBytes.entrySet()) {
+            assertTrue(
+                entry.getValue() <= WAL_CAPACITY_BYTES,
+                "Broker " + entry.getKey() + " exceeded WAL capacity: " + entry.getValue()
+            );
+        }
 
         List<String> expected = new ArrayList<>(CLASSIC_PROBE_RECORDS);
         try (KafkaProducer<String, String> producer = producer(bootstrapServers)) {
@@ -276,6 +299,46 @@ public class SharedStorageWalCapacityPressureKRaftIntegrationTest {
             consumeAssigned(bootstrapServers, CLASSIC_TOPIC, CLASSIC_PROBE_RECORDS, 30),
             "A classic topic on the same brokers must remain writable after shared WAL rejection"
         );
+        return walBytes;
+    }
+
+    private static Map<Integer, Long> walBytesByBroker(KafkaClusterTestKit cluster) {
+        Map<Integer, Long> result = new LinkedHashMap<>();
+        for (Map.Entry<Integer, TestKitNode> broker : cluster.nodes().brokerNodes().entrySet()) {
+            result.put(broker.getKey(), walBytes(walDir(broker.getValue(), broker.getKey())));
+        }
+        return Map.copyOf(result);
+    }
+
+    private static Path walDir(TestKitNode broker, int brokerId) {
+        Path dataDir = Path.of(broker.logDataDirectories().iterator().next())
+            .toAbsolutePath()
+            .normalize();
+        return dataDir
+            .resolveSibling(dataDir.getFileName() + ".shared-storage")
+            .resolve("broker-" + brokerId)
+            .resolve("wal");
+    }
+
+    private static long walBytes(Path walDir) {
+        if (!Files.isDirectory(walDir)) {
+            return 0L;
+        }
+        try (Stream<Path> files = Files.list(walDir)) {
+            return files
+                .filter(path -> path.getFileName().toString().startsWith("wal-"))
+                .filter(path -> path.getFileName().toString().endsWith(".log"))
+                .mapToLong(path -> {
+                    try {
+                        return Files.size(path);
+                    } catch (Exception ignored) {
+                        return 0L;
+                    }
+                })
+                .sum();
+        } catch (Exception ignored) {
+            return 0L;
+        }
     }
 
     private static KafkaProducer<String, String> producer(String bootstrapServers) {
@@ -393,12 +456,6 @@ public class SharedStorageWalCapacityPressureKRaftIntegrationTest {
             }
         }
         return List.copyOf(latestCommitted.values());
-    }
-
-    private static boolean isExpectedBackpressure(Throwable error) {
-        return hasCause(error, KafkaStorageException.class) ||
-            hasCause(error, NotEnoughReplicasException.class) ||
-            hasCause(error, NotEnoughReplicasAfterAppendException.class);
     }
 
     private static boolean hasCause(Throwable error, Class<? extends Throwable> type) {
