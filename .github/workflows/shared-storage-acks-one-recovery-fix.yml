@@ -26,8 +26,7 @@ permissions:
   contents: write
 
 jobs:
-  patch-and-remove-self:
-    if: github.actor != 'github-actions[bot]'
+  apply-fix:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -37,112 +36,20 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Apply recovery topology fix and remove one-shot workflow
+      - name: Patch source and remove temporary files
         shell: bash
         run: |
           set -euo pipefail
           branch="${GITHUB_REF_NAME}"
           git fetch origin "$branch"
           git reset --hard "origin/$branch"
-
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path('core/src/test/java/kafka/server/SharedStorageAcksOneIndependentProcessTest.java')
-          text = path.read_text(encoding='utf-8')
-
-          old_call = '''                recoverOriginalLeader(
-                    repositoryRoot,
-                    processRuntime,
-                    bootstrapServers,
-                    admin,
-                    brokers,
-                    replicationFactor,
-                    firstLeader,
-                    1
-                );
-                restartBrokers(repositoryRoot, processRuntime, brokers, followers);
-                waitForTopicState(admin, replicationFactor, replicationFactor, -1);
-          '''
-          new_call = '''                recoverOriginalLeader(
-                    repositoryRoot,
-                    processRuntime,
-                    bootstrapServers,
-                    admin,
-                    brokers,
-                    replicationFactor,
-                    firstLeader,
-                    followers,
-                    1
-                );
-          '''
-          if text.count(old_call) != 1:
-              raise SystemExit(f'expected one recovery call block, found {text.count(old_call)}')
-          text = text.replace(old_call, new_call)
-
-          old_method = '''    private static void recoverOriginalLeader(
-        Path repositoryRoot,
-        Path processRuntime,
-        String bootstrapServers,
-        Admin admin,
-        Map<Integer, BrokerProcess> brokers,
-        short replicationFactor,
-        int leaderId,
-        int expectedRecords
-    ) throws Exception {
-        restartBroker(repositoryRoot, processRuntime, brokers, leaderId);
-        waitForTopicState(admin, replicationFactor, (short) 1, leaderId);
-        assertExpectedValues(
-            consumeAll(bootstrapServers, expectedRecords),
-            expectedRecords,
-            "Original leader WAL must recover the leader-only acks=1 record"
-        );
-        System.out.println("ACKS1_ORIGINAL_DISK_RECOVERED rf=" + replicationFactor +
-            " leader=" + leaderId + " records=" + expectedRecords);
-    }
-          '''
-          new_method = '''    private static void recoverOriginalLeader(
-        Path repositoryRoot,
-        Path processRuntime,
-        String bootstrapServers,
-        Admin admin,
-        Map<Integer, BrokerProcess> brokers,
-        short replicationFactor,
-        int leaderId,
-        List<Integer> followers,
-        int expectedRecords
-    ) throws Exception {
-        restartBroker(repositoryRoot, processRuntime, brokers, leaderId);
-        restartBrokers(repositoryRoot, processRuntime, brokers, followers);
-        waitForTopicState(admin, replicationFactor, replicationFactor, leaderId);
-        assertExpectedValues(
-            consumeAll(bootstrapServers, expectedRecords),
-            expectedRecords,
-            "Original leader WAL must recover and replicate the leader-only acks=1 record"
-        );
-        System.out.println("ACKS1_ORIGINAL_DISK_RECOVERED rf=" + replicationFactor +
-            " leader=" + leaderId + " records=" + expectedRecords +
-            " recoveredWithFullMetadataQuorum=true");
-    }
-          '''
-          if text.count(old_method) != 1:
-              raise SystemExit(f'expected one recovery method block, found {text.count(old_method)}')
-          path.write_text(text.replace(old_method, new_method), encoding='utf-8')
-          PY
-
+          python3 .github/scripts/fix-acks-one-recovery.py
+          rm .github/scripts/fix-acks-one-recovery.py
           rm .github/workflows/shared-storage-acks-one-recovery-fix.yml
           git config user.name 'Jianbin Chen'
           git config user.email 'jianbin@apache.org'
-          git add core/src/test/java/kafka/server/SharedStorageAcksOneIndependentProcessTest.java \
-            .github/workflows/shared-storage-acks-one-recovery-fix.yml
+          git add -A
           git commit -m 'KAFKA-Shared: recover acks=1 data with metadata quorum'
-
-          for attempt in 1 2 3; do
-            git fetch origin "$branch"
-            if git rebase "origin/$branch" && git push origin "HEAD:$branch"; then
-              exit 0
-            fi
-            git rebase --abort || true
-            sleep $((attempt * 2))
-          done
-          exit 1
+          git fetch origin "$branch"
+          git rebase "origin/$branch"
+          git push origin "HEAD:$branch"
