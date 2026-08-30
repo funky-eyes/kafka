@@ -230,7 +230,8 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
                 context.time()::milliseconds,
                 configuration.objectTargetBytes(),
                 configuration.uploadMaxLingerMs(),
-                configuration.uploadWalPressurePercent()
+                configuration.uploadWalPressurePercent(),
+                configuration.uploadMaxInflight()
             );
             newOrphanCleanupScheduler = new OrphanCleanupScheduler(
                 new OrphanObjectCleaner(sharedObjectStore, newMetadataStore, activeUploads),
