@@ -490,7 +490,9 @@ public final class SharedStorageEngine implements AutoCloseable {
 
     /**
      * Durably checkpoints current remote COMMITs and then releases only the physical WAL prefix covered by that exact
-     * durable checkpoint snapshot. The in-memory WAL index is rebuilt from surviving segments before readers proceed.
+     * durable checkpoint snapshot. WALs exposing a monotonic reclaimed-segment boundary allow the in-memory index to
+     * prune only those physical locations while concurrent appends remain intact; legacy implementations fall back to
+     * full replay-based reconstruction.
      */
     public long reclaimCheckpointedWal() throws IOException {
         if (remoteCheckpoint == null) {
@@ -503,8 +505,13 @@ public final class SharedStorageEngine implements AutoCloseable {
             synchronized (walMaintenanceLock) {
                 long reclaimed = wal.reclaim(new RemoteCoverageWalReclaimPolicy(checkpointed));
                 if (reclaimed > 0) {
-                    walIndex.clear();
-                    wal.replay(walIndex::apply);
+                    long reclaimedThroughSegmentId = wal.reclaimedThroughSegmentId();
+                    if (reclaimedThroughSegmentId >= 0) {
+                        walIndex.removeSegmentsThrough(reclaimedThroughSegmentId);
+                    } else {
+                        walIndex.clear();
+                        wal.replay(walIndex::apply);
+                    }
                 }
                 return reclaimed;
             }
