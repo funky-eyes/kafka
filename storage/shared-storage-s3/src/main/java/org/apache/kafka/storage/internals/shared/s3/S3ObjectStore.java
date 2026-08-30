@@ -46,6 +46,9 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <p>The AWS SDK synchronous client intentionally uses JDK URLConnection rather than its Netty client so loading this
  * plugin cannot introduce a second Netty stack into Kafka. ObjectStore's asynchronous contract is provided by a small,
  * bounded-size worker pool owned by this instance. Callers must not mutate a PUT buffer until its future completes.</p>
+ *
+ * <p>This client belongs exclusively to asynchronous object publication and cold reads. Producer acknowledgement
+ * durability is owned by the local and replicated WAL path; an S3 request must never be placed on that ACK path.</p>
  */
 public final class S3ObjectStore implements ObjectStore {
     private static final long CLOSE_TIMEOUT_SECONDS = 30L;
