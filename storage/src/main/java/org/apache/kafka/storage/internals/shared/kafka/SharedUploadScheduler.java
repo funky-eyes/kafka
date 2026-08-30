@@ -355,8 +355,12 @@ public final class SharedUploadScheduler implements AutoCloseable {
         List<SharedStorageEngine.UploadCandidate> selected = new ArrayList<>();
         long selectedBytes = 0L;
         for (SharedStorageEngine.UploadCandidate candidate : committed) {
+            int payloadBytes = candidate.location().payloadLength();
+            if (!selected.isEmpty() && selectedBytes + payloadBytes > targetObjectBytes) {
+                break;
+            }
             selected.add(candidate);
-            selectedBytes = Math.addExact(selectedBytes, candidate.location().payloadLength());
+            selectedBytes = Math.addExact(selectedBytes, payloadBytes);
             if (selectedBytes >= targetObjectBytes) {
                 break;
             }
