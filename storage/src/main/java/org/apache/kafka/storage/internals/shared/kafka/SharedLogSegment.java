@@ -42,8 +42,6 @@ import org.apache.kafka.storage.internals.log.TimestampOffset;
 import org.apache.kafka.storage.internals.log.TransactionIndex;
 import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
-import org.apache.kafka.storage.internals.shared.wal.WalLocation;
-import org.apache.kafka.storage.internals.shared.wal.WalRecord;
 
 import java.io.File;
 import java.io.IOException;
@@ -66,16 +64,13 @@ import java.util.stream.Stream;
  * Kafka 4.3.x compatibility segment backed by SharedStorageEngine rather than a per-partition .log payload file.
  *
  * <p>The inherited FileRecords is intentionally a zero-byte placeholder. Kafka offset/time/transaction index files
- * remain available as lightweight compatibility metadata, while all Kafka RecordBatch payload bytes live only in the
- * broker-wide shared WAL and, after asynchronous upload, shared object storage.</p>
+ * remain available as lightweight compatibility metadata, while Kafka RecordBatch payload bytes live in the
+ * broker-wide replicated WAL and, once remotely committed, shared object storage.</p>
  *
- * <p>Kafka's relativePositionInSegment is represented by a virtual byte position: the cumulative serialized Kafka
- * RecordBatch bytes in this logical segment. It is stable for Kafka metadata purposes and deliberately unrelated to
- * the physical position of a batch in the broker-wide WAL.</p>
+ * <p>Reads and unclean-restart recovery are tier-agnostic: the engine prefers a surviving local WAL batch and falls
+ * back to the checksummed immutable remote batch after that WAL prefix has been safely reclaimed.</p>
  */
 public final class SharedLogSegment extends LogSegment {
-    private static final int RECOVERY_READ_BATCH_SIZE = 256;
-
     private final SharedStorageEngine storage;
     private final SharedPartitionId partition;
     private final int indexIntervalBytes;
@@ -133,7 +128,6 @@ public final class SharedLogSegment extends LogSegment {
     ) throws IOException {
         Files.createDirectories(dir.toPath());
         int maxIndexSize = config.maxIndexSize;
-        // Payload must never be preallocated here. This file is a compatibility placeholder only.
         FileRecords placeholder = FileRecords.open(
             LogFileUtils.logFile(dir, baseOffset, fileSuffix),
             fileAlreadyExists,
@@ -286,7 +280,7 @@ public final class SharedLogSegment extends LogSegment {
             return new FetchDataInfo(offsetMetadata, MemoryRecords.EMPTY, true, Optional.empty());
         }
 
-        SharedStorageEngine.LocalReadResult readResult = storage.readLocalBatches(
+        SharedStorageEngine.BatchReadResult readResult = storage.readBatches(
             partition,
             start.firstOffset,
             window.get().maxBytes(),
@@ -325,14 +319,14 @@ public final class SharedLogSegment extends LogSegment {
 
     private static FetchDataInfo materializeFetch(
         LogOffsetMetadata offsetMetadata,
-        SharedStorageEngine.LocalReadResult readResult
+        SharedStorageEngine.BatchReadResult readResult
     ) {
-        if (readResult.records().isEmpty()) {
+        if (readResult.batches().isEmpty()) {
             return new FetchDataInfo(offsetMetadata, MemoryRecords.EMPTY, readResult.firstBatchIncomplete(), Optional.empty());
         }
         ByteBuffer data = ByteBuffer.allocate(readResult.sizeInBytes());
-        for (WalRecord record : readResult.records()) {
-            data.put(record.payload());
+        for (ByteBuffer batch : readResult.batches()) {
+            data.put(batch.duplicate());
         }
         data.flip();
         return new FetchDataInfo(offsetMetadata, MemoryRecords.readableRecords(data));
@@ -393,11 +387,15 @@ public final class SharedLogSegment extends LogSegment {
         timeIndex().reset();
         txnIndex().reset();
         int lastIndexPosition = 0;
-        for (WalBatch recovered : readWalBatches(baseOffset(), nextLogicalSegmentBaseOffset(log().file().getParentFile()))) {
+        for (StoredBatch recovered : readStoredBatches(
+            baseOffset(),
+            nextLogicalSegmentBaseOffset(log().file().getParentFile())
+        )) {
             RecordBatch batch = recovered.batch();
-            BatchMetadata metadata = batches.get(recovered.location().firstOffset());
+            BatchMetadata metadata = batches.get(recovered.metadata().firstOffset());
             if (metadata == null) {
-                throw new IOException("Missing recovered shared batch metadata at offset " + recovered.location().firstOffset());
+                throw new IOException(
+                    "Missing recovered shared batch metadata at offset " + recovered.metadata().firstOffset());
             }
             if (metadata.virtualPosition - lastIndexPosition > indexIntervalBytes) {
                 offsetIndex().append(metadata.lastOffset, metadata.virtualPosition);
@@ -454,10 +452,11 @@ public final class SharedLogSegment extends LogSegment {
             if (metadata.lastOffset < startingOffset || metadata.maxTimestamp < timestampMs) {
                 continue;
             }
-            WalRecord walRecord = storage.readLocal(partition, metadata.firstOffset)
+            ByteBuffer bytes = storage.readBatchBytes(partition, metadata.firstOffset)
                 .orElseThrow(() -> new IOException(
-                    "Shared WAL batch missing for timestamp lookup at offset " + metadata.firstOffset));
-            MemoryRecords records = MemoryRecords.readableRecords(walRecord.payload());
+                    "Shared batch missing from WAL and object storage for timestamp lookup at offset " +
+                        metadata.firstOffset));
+            MemoryRecords records = MemoryRecords.readableRecords(bytes);
             for (RecordBatch batch : records.batches()) {
                 if (batch.timestampType() == TimestampType.LOG_APPEND_TIME && batch.maxTimestamp() >= timestampMs) {
                     for (Record record : batch) {
@@ -493,24 +492,24 @@ public final class SharedLogSegment extends LogSegment {
     private void restoreLogicalMetadata(File dir) throws IOException {
         long endOffsetExclusive = nextLogicalSegmentBaseOffset(dir);
         int position = 0;
-        for (WalBatch recovered : readWalBatches(baseOffset(), endOffsetExclusive)) {
-            WalLocation location = recovered.location();
-            if (location.firstOffset() < baseOffset() || location.lastOffset() >= endOffsetExclusive) {
+        for (StoredBatch recovered : readStoredBatches(baseOffset(), endOffsetExclusive)) {
+            SharedStorageEngine.StoredBatchMetadata stored = recovered.metadata();
+            if (stored.firstOffset() < baseOffset() || stored.lastOffset() >= endOffsetExclusive) {
                 throw new IOException(
-                    "WAL batch crosses shared logical segment boundary: base=" + baseOffset() +
-                        ", end=" + endOffsetExclusive + ", location=" + location);
+                    "Stored batch crosses shared logical segment boundary: base=" + baseOffset() +
+                        ", end=" + endOffsetExclusive + ", batch=" + stored);
             }
             RecordBatch batch = recovered.batch();
             BatchMetadata metadata = new BatchMetadata(
-                location.firstOffset(),
-                location.lastOffset(),
+                stored.firstOffset(),
+                stored.lastOffset(),
                 position,
-                location.payloadLength(),
+                stored.payloadLength(),
                 batch.maxTimestamp(),
-                location.leaderEpoch()
+                stored.leaderEpoch()
             );
-            batches.put(location.firstOffset(), metadata);
-            position = Math.addExact(position, location.payloadLength());
+            batches.put(stored.firstOffset(), metadata);
+            position = Math.addExact(position, stored.payloadLength());
         }
         logicalSize = position;
         bytesSinceLastIndexEntry = 0;
@@ -521,47 +520,48 @@ public final class SharedLogSegment extends LogSegment {
         }
     }
 
-    private List<WalBatch> readWalBatches(long startOffset, long endOffsetExclusive) throws IOException {
-        List<WalLocation> locations = storage.localLocations(partition, startOffset, endOffsetExclusive);
-        if (locations.isEmpty()) {
+    private List<StoredBatch> readStoredBatches(long startOffset, long endOffsetExclusive) throws IOException {
+        List<SharedStorageEngine.StoredBatchMetadata> stored =
+            storage.storedBatches(partition, startOffset, endOffsetExclusive);
+        if (stored.isEmpty()) {
             return List.of();
         }
-        List<WalBatch> result = new ArrayList<>(locations.size());
-        for (int start = 0; start < locations.size(); start += RECOVERY_READ_BATCH_SIZE) {
-            int end = Math.min(start + RECOVERY_READ_BATCH_SIZE, locations.size());
-            List<WalLocation> chunk = locations.subList(start, end);
-            List<WalRecord> records = storage.readLocalLocations(chunk);
-            if (records.size() != chunk.size()) {
-                throw new IOException("Shared WAL recovery read count mismatch");
-            }
-            for (int i = 0; i < chunk.size(); i++) {
-                result.add(decodeWalBatch(chunk.get(i), records.get(i)));
-            }
+        List<StoredBatch> result = new ArrayList<>(stored.size());
+        for (SharedStorageEngine.StoredBatchMetadata metadata : stored) {
+            ByteBuffer bytes = storage.readBatchBytes(partition, metadata.firstOffset())
+                .orElseThrow(() -> new IOException(
+                    "Shared batch payload is unavailable from both WAL and object storage at offset " +
+                        metadata.firstOffset()));
+            result.add(decodeStoredBatch(metadata, bytes));
         }
         return List.copyOf(result);
     }
 
-    private static WalBatch decodeWalBatch(WalLocation location, WalRecord record) throws IOException {
-        if (record.payload().remaining() != location.payloadLength()) {
-            throw new IOException("Shared WAL payload length mismatch at " + location);
+    private static StoredBatch decodeStoredBatch(
+        SharedStorageEngine.StoredBatchMetadata metadata,
+        ByteBuffer payload
+    ) throws IOException {
+        if (payload.remaining() != metadata.payloadLength()) {
+            throw new IOException(
+                "Shared batch payload length mismatch: metadata=" + metadata + ", actual=" + payload.remaining());
         }
-        MemoryRecords records = MemoryRecords.readableRecords(record.payload());
+        MemoryRecords records = MemoryRecords.readableRecords(payload);
         Iterator<? extends RecordBatch> iterator = records.batches().iterator();
         if (!iterator.hasNext()) {
-            throw new IOException("Shared WAL DATA entry contains no Kafka RecordBatch at " + location);
+            throw new IOException("Shared DATA entry contains no Kafka RecordBatch at " + metadata);
         }
         RecordBatch batch = iterator.next();
         if (iterator.hasNext()) {
-            throw new IOException("Shared WAL DATA entry contains multiple Kafka RecordBatches at " + location);
+            throw new IOException("Shared DATA entry contains multiple Kafka RecordBatches at " + metadata);
         }
         batch.ensureValid();
-        if (batch.sizeInBytes() != location.payloadLength() ||
-            batch.baseOffset() != location.firstOffset() ||
-            batch.lastOffset() != location.lastOffset() ||
-            batch.partitionLeaderEpoch() != location.leaderEpoch()) {
-            throw new IOException("Shared WAL Kafka RecordBatch metadata mismatch at " + location);
+        if (batch.sizeInBytes() != metadata.payloadLength() ||
+            batch.baseOffset() != metadata.firstOffset() ||
+            batch.lastOffset() != metadata.lastOffset() ||
+            batch.partitionLeaderEpoch() != metadata.leaderEpoch()) {
+            throw new IOException("Shared Kafka RecordBatch metadata mismatch at " + metadata);
         }
-        return new WalBatch(location, batch);
+        return new StoredBatch(metadata, batch);
     }
 
     private long nextLogicalSegmentBaseOffset(File dir) throws IOException {
@@ -668,7 +668,7 @@ public final class SharedLogSegment extends LogSegment {
     private record ReadWindow(int maxBytes, boolean firstEntryIncomplete) {
     }
 
-    private record WalBatch(WalLocation location, RecordBatch batch) {
+    private record StoredBatch(SharedStorageEngine.StoredBatchMetadata metadata, RecordBatch batch) {
     }
 
     private record BatchMetadata(
