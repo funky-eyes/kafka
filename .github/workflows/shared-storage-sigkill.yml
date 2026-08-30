@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-name: Shared Storage SIGKILL
+name: Shared Storage acks=all Durability Matrix
 
 on:
   push:
@@ -40,10 +40,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  independent-process-sigkill:
-    name: 3 JVM acks=all leader SIGKILL
+  acks-all-replication-matrix:
+    name: acks=all RF${{ matrix.rf }} leader SIGKILL
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        rf:
+          - 1
+          - 2
+          - 3
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -96,14 +103,13 @@ jobs:
             :storage:shared-storage-s3:stageProcessRuntime \
             :core:compileTestJava \
             --no-scan 2>&1 | tee shared-storage-sigkill-build.log
-          test -f core/build/libs/kafka_2.13-*.jar || true
           test -d storage/shared-storage-s3/build/process-runtime
           find storage/shared-storage-s3/build/process-runtime -maxdepth 1 -type f -printf '%f\n' | sort \
             > shared-storage-sigkill-runtime.txt
           grep -q '^kafka-shared-storage-s3-' shared-storage-sigkill-runtime.txt
           grep -q '^s3-' shared-storage-sigkill-runtime.txt
 
-      - name: Run independent JVM SIGKILL gate
+      - name: Run RF${{ matrix.rf }} independent JVM SIGKILL gate
         shell: bash
         env:
           AWS_ACCESS_KEY_ID: minioadmin
@@ -112,6 +118,7 @@ jobs:
           SHARED_STORAGE_S3_ENDPOINT: http://127.0.0.1:9000
           SHARED_STORAGE_S3_REGION: us-east-1
           SHARED_STORAGE_S3_BUCKET: kafka-shared-storage-sigkill
+          SHARED_STORAGE_REPLICATION_FACTOR: ${{ matrix.rf }}
         run: |
           set -o pipefail
           ./gradlew :core:test \
@@ -127,13 +134,47 @@ jobs:
           grep -q 'failures="0"' "$result_xml"
           grep -q 'errors="0"' "$result_xml"
           grep -q 'skipped="0"' "$result_xml"
-          grep -q 'GATE3_SIGKILL brokerId=' "$result_xml"
-          grep -q 'GATE3_RECOVERED oldLeader=' "$result_xml"
+          grep -q 'MATRIX_SCENARIO rf=${{ matrix.rf }} acks=all minIsr=' "$result_xml"
+          grep -q 'MATRIX_SIGKILL rf=${{ matrix.rf }} brokerId=' "$result_xml"
+          grep -q 'MATRIX_RECOVERED rf=${{ matrix.rf }} mode=' "$result_xml"
+
+          case '${{ matrix.rf }}' in
+            1)
+              grep -q 'MATRIX_RESTART_REQUIRED rf=1 leader=' "$result_xml"
+              grep -q 'MATRIX_RECOVERED rf=1 mode=original-node-restart' "$result_xml"
+              ;;
+            2)
+              grep -q 'MATRIX_FAILOVER_READABLE rf=2 oldLeader=' "$result_xml"
+              grep -q 'MATRIX_WRITE_REJECTED_MIN_ISR rf=2 leader=' "$result_xml"
+              grep -q 'MATRIX_WRITE_RESUMED rf=2 leader=' "$result_xml"
+              grep -q 'MATRIX_RECOVERED rf=2 mode=automatic-failover' "$result_xml"
+              ;;
+            3)
+              grep -q 'MATRIX_FAILOVER_READABLE rf=3 oldLeader=' "$result_xml"
+              grep -q 'MATRIX_FAILOVER_WRITABLE rf=3 newLeader=' "$result_xml"
+              grep -q 'MATRIX_RECOVERED rf=3 mode=automatic-failover' "$result_xml"
+              ;;
+          esac
 
           {
-            grep 'GATE3_SIGKILL brokerId=' "$result_xml"
-            grep 'GATE3_RECOVERED oldLeader=' "$result_xml"
-            printf 'GATE3_SUCCESS commit=%s\n' "$GITHUB_SHA"
+            grep 'MATRIX_SCENARIO rf=${{ matrix.rf }} acks=all minIsr=' "$result_xml"
+            grep 'MATRIX_SIGKILL rf=${{ matrix.rf }} brokerId=' "$result_xml"
+            grep 'MATRIX_RECOVERED rf=${{ matrix.rf }} mode=' "$result_xml"
+            case '${{ matrix.rf }}' in
+              1)
+                grep 'MATRIX_RESTART_REQUIRED rf=1 leader=' "$result_xml"
+                ;;
+              2)
+                grep 'MATRIX_FAILOVER_READABLE rf=2 oldLeader=' "$result_xml"
+                grep 'MATRIX_WRITE_REJECTED_MIN_ISR rf=2 leader=' "$result_xml"
+                grep 'MATRIX_WRITE_RESUMED rf=2 leader=' "$result_xml"
+                ;;
+              3)
+                grep 'MATRIX_FAILOVER_READABLE rf=3 oldLeader=' "$result_xml"
+                grep 'MATRIX_FAILOVER_WRITABLE rf=3 newLeader=' "$result_xml"
+                ;;
+            esac
+            printf 'MATRIX_SUCCESS rf=%s commit=%s\n' '${{ matrix.rf }}' "$GITHUB_SHA"
           } > shared-storage-sigkill-proof.txt
           cat shared-storage-sigkill-proof.txt
 
@@ -145,17 +186,18 @@ jobs:
             mc ls --recursive local/kafka-shared-storage-sigkill || true
           ' | tee shared-storage-sigkill-objects.log
 
-      - name: Upload SIGKILL diagnostics
+      - name: Upload RF${{ matrix.rf }} SIGKILL diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: shared-storage-independent-sigkill-log
+          name: shared-storage-acks-all-rf${{ matrix.rf }}-sigkill
           path: |
             shared-storage-sigkill-build.log
             shared-storage-sigkill-runtime.txt
             shared-storage-sigkill-e2e.log
             shared-storage-sigkill-proof.txt
             shared-storage-sigkill-objects.log
+            core/build/shared-storage-sigkill-diagnostics
             core/build/reports/tests/test
             core/build/test-results/test
             build/junit-xml/core
