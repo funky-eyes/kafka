@@ -228,7 +228,9 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
                 uploader,
                 objectIds,
                 context.time()::milliseconds,
-                configuration.objectTargetBytes()
+                configuration.objectTargetBytes(),
+                configuration.uploadMaxLingerMs(),
+                configuration.uploadWalPressurePercent()
             );
             newOrphanCleanupScheduler = new OrphanCleanupScheduler(
                 new OrphanObjectCleaner(sharedObjectStore, newMetadataStore, activeUploads),
@@ -307,10 +309,6 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
 
     private static S3ObjectStoreConfig objectStoreConfiguration(StorageExtensionContext context) throws IOException {
         return objectStoreConfiguration(context.originals(), clusterIdFromLogDirs(context.liveLogDirs()));
-    }
-
-    private static S3ObjectStoreConfig objectStoreConfiguration(StorageExtensionBrokerContext context) {
-        return objectStoreConfiguration(context.originals(), context.clusterId());
     }
 
     private static S3ObjectStoreConfig objectStoreConfiguration(Map<String, ?> originals, String clusterId) {
