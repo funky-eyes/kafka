@@ -23,6 +23,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -49,6 +52,7 @@ class RotatingFileSharedWalTest {
 
             long reclaimed = wal.reclaim((record, ignored) -> record.lastOffset() == 0, 1L);
             assertTrue(reclaimed > 0, "a complete remotely safe prefix segment must be physically released");
+            assertEquals(0L, wal.reclaimedThroughSegmentId());
             assertTrue(wal.usedBytes() < beforeReclaim);
 
             append(wal, 2, 100);
@@ -57,6 +61,38 @@ class RotatingFileSharedWalTest {
 
         List<Long> replayed = replayOffsets(walDir, 512, 256);
         assertEquals(List.of(1L, 2L), replayed);
+    }
+
+    @Test
+    void shouldAllowAppendWhileSafePrefixReclaimIsInProgress() throws Exception {
+        Path walDir = tempDir.resolve("rotating-online-reclaim");
+        try (RotatingFileSharedWal wal = new RotatingFileSharedWal(walDir, 2048, 256)) {
+            append(wal, 0, 100);
+            append(wal, 1, 100);
+
+            CountDownLatch policyEntered = new CountDownLatch(1);
+            CountDownLatch releasePolicy = new CountDownLatch(1);
+            CompletableFuture<Long> reclaim = CompletableFuture.supplyAsync(() -> {
+                try {
+                    return wal.reclaim((record, ignored) -> {
+                        policyEntered.countDown();
+                        await(releasePolicy);
+                        return record.lastOffset() == 0;
+                    }, 1L);
+                } catch (Exception e) {
+                    throw new CompletionException(e);
+                }
+            });
+
+            assertTrue(policyEntered.await(10, TimeUnit.SECONDS), "reclaim must start scanning the immutable prefix");
+            wal.append(WalRecord.data(1, 2, 0, 1, 2, 2, new byte[100])).get(10, TimeUnit.SECONDS);
+            assertFalse(reclaim.isDone(), "blocked reclaim policy should still be waiting while append completes");
+
+            releasePolicy.countDown();
+            assertTrue(reclaim.get(10, TimeUnit.SECONDS) > 0);
+        }
+
+        assertEquals(List.of(1L, 2L), replayOffsets(walDir, 2048, 256));
     }
 
     @Test
@@ -84,6 +120,7 @@ class RotatingFileSharedWalTest {
         AtomicBoolean sawCommit = new AtomicBoolean();
         try (RotatingFileSharedWal wal = new RotatingFileSharedWal(walDir, 1024, 256)) {
             append(wal, 0, 50);
+            append(wal, 1, 50);
             long reclaimed = wal.reclaim((record, ignored) -> {
                 if (record.type() == WalRecordType.GROUP_COMMIT) {
                     sawCommit.set(true);
@@ -111,19 +148,20 @@ class RotatingFileSharedWalTest {
     }
 
     @Test
-    void shouldLeaveDirectoryAndReopenedWalConsistentAfterDeletingAllSafeSegments() throws Exception {
-        Path walDir = tempDir.resolve("rotating-all");
-        try (RotatingFileSharedWal wal = new RotatingFileSharedWal(walDir, 512, 256)) {
+    void shouldKeepActiveSegmentWhileDeletingAllOlderSafeSegments() throws Exception {
+        Path walDir = tempDir.resolve("rotating-active");
+        try (RotatingFileSharedWal wal = new RotatingFileSharedWal(walDir, 1024, 256)) {
             append(wal, 0, 50);
+            append(wal, 1, 50);
             long reclaimed = wal.reclaim((record, ignored) -> true, Long.MAX_VALUE);
             assertTrue(reclaimed > 0);
-            assertEquals(0L, wal.usedBytes());
-            assertEquals(0L, segmentCount(walDir));
+            assertTrue(wal.usedBytes() > 0, "the live active segment must remain accounted and open");
+            assertEquals(1L, segmentCount(walDir), "online reclaim must retain the current active segment");
 
-            append(wal, 1, 50);
+            append(wal, 2, 50);
             assertTrue(wal.usedBytes() > 0);
         }
-        assertEquals(List.of(1L), replayOffsets(walDir, 512, 256));
+        assertEquals(List.of(1L, 2L), replayOffsets(walDir, 1024, 256));
     }
 
     @Test
@@ -176,6 +214,21 @@ class RotatingFileSharedWalTest {
     private static void append(RotatingFileSharedWal wal, long offset, int payloadBytes) throws Exception {
         wal.append(WalRecord.data(1, 2, 0, 1, offset, offset, new byte[payloadBytes]))
             .get(10, TimeUnit.SECONDS);
+    }
+
+    private static void await(CountDownLatch latch) {
+        boolean interrupted = false;
+        while (true) {
+            try {
+                latch.await();
+                break;
+            } catch (InterruptedException e) {
+                interrupted = true;
+            }
+        }
+        if (interrupted) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     private static List<Long> replayOffsets(Path walDir, long capacity, long segmentBytes) throws Exception {
