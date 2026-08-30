@@ -38,7 +38,7 @@ import org.apache.kafka.storage.internals.shared.object.SharedObjectPacker;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectReader;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectUploadHook;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectUploader;
-import org.apache.kafka.storage.internals.shared.wal.FileSharedWal;
+import org.apache.kafka.storage.internals.shared.wal.RotatingFileSharedWal;
 import org.apache.kafka.storage.internals.shared.wal.SharedWal;
 
 import java.io.File;
@@ -95,7 +95,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         }
 
         SharedStorageConfiguration configuration = SharedStorageConfiguration.from(context);
-        SharedWal wal = new FileSharedWal(
+        SharedWal wal = new RotatingFileSharedWal(
             configuration.walDir(),
             configuration.walCapacityBytes(),
             configuration.walSegmentBytes()
