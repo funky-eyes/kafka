@@ -40,6 +40,11 @@ import java.util.stream.Stream;
  * of segment files whose complete append groups are approved by the supplied {@link WalReclaimPolicy}, fsyncs the WAL
  * directory, and reopens the writer. This deliberately favors safety over reclamation aggressiveness.</p>
  *
+ * <p>Recently durable DATA records are retained in a bounded in-memory read cache. Producer acknowledgement still
+ * depends exclusively on the underlying WAL durability barrier; the cache is populated only after that barrier and is
+ * therefore a disposable performance layer. Upload packing and hot reads can reuse the owned Kafka RecordBatch bytes
+ * without re-reading the physical WAL. Cache misses transparently fall back to the WAL.</p>
+ *
  * <p>Remote commit makes bytes reclaimable but does not immediately discard their local recovery copy. Normal
  * maintenance retains the most recent WAL until physical usage reaches the high watermark, then frees only enough of
  * the oldest safe prefix to return near the low watermark. This preserves a useful local recovery window through a
@@ -52,12 +57,14 @@ import java.util.stream.Stream;
 public final class RotatingFileSharedWal implements SharedWal {
     static final int DEFAULT_RECLAIM_HIGH_WATERMARK_PERCENT = 85;
     static final int DEFAULT_RECLAIM_LOW_WATERMARK_PERCENT = 70;
+    static final long DEFAULT_READ_CACHE_BYTES = 256L * 1024 * 1024;
     private static final Pattern SEGMENT_FILE_PATTERN = Pattern.compile("wal-(\\d{20})\\.log");
 
     private final Object lifecycleLock = new Object();
     private final Path directory;
     private final long capacityBytes;
     private final long segmentBytes;
+    private final WalReadCache readCache;
 
     private FileSharedWal delegate;
     private int inFlightOperations;
@@ -65,15 +72,21 @@ public final class RotatingFileSharedWal implements SharedWal {
     private boolean closed;
 
     public RotatingFileSharedWal(Path directory, long capacityBytes, long segmentBytes) throws IOException {
+        this(directory, capacityBytes, segmentBytes, DEFAULT_READ_CACHE_BYTES);
+    }
+
+    RotatingFileSharedWal(Path directory, long capacityBytes, long segmentBytes, long readCacheBytes) throws IOException {
         this.directory = Objects.requireNonNull(directory, "directory");
         this.capacityBytes = capacityBytes;
         this.segmentBytes = segmentBytes;
+        this.readCache = new WalReadCache(readCacheBytes);
         this.delegate = new FileSharedWal(directory, capacityBytes, segmentBytes);
     }
 
     @Override
     public CompletableFuture<List<WalAppendResult>> appendBatch(List<WalRecord> records) {
         Objects.requireNonNull(records, "records");
+        List<WalRecord> immutableRecords = List.copyOf(records);
         final FileSharedWal current;
         synchronized (lifecycleLock) {
             awaitReclaim();
@@ -84,19 +97,25 @@ public final class RotatingFileSharedWal implements SharedWal {
 
         final CompletableFuture<List<WalAppendResult>> append;
         try {
-            append = current.appendBatch(records);
+            append = current.appendBatch(immutableRecords);
         } catch (Throwable t) {
             endOperation();
             throw t;
         }
-        return append.whenComplete((ignored, error) -> endOperation());
+        return append.thenApply(results -> {
+            List<WalAppendResult> immutableResults = List.copyOf(results);
+            readCache.putAll(immutableRecords, immutableResults);
+            return immutableResults;
+        }).whenComplete((ignored, error) -> endOperation());
     }
 
     @Override
     public WalRecord read(WalLocation location) throws IOException {
+        Objects.requireNonNull(location, "location");
         FileSharedWal current = beginOperation();
         try {
-            return current.read(location);
+            WalRecord cached = readCache.get(location);
+            return cached != null ? cached : current.read(location);
         } finally {
             endOperation();
         }
@@ -104,9 +123,32 @@ public final class RotatingFileSharedWal implements SharedWal {
 
     @Override
     public List<WalRecord> readBatch(List<WalLocation> locations) throws IOException {
+        Objects.requireNonNull(locations, "locations");
+        if (locations.isEmpty()) {
+            return List.of();
+        }
         FileSharedWal current = beginOperation();
         try {
-            return current.readBatch(locations);
+            WalRecord[] records = new WalRecord[locations.size()];
+            List<WalLocation> misses = new ArrayList<>();
+            List<Integer> missIndexes = new ArrayList<>();
+            for (int i = 0; i < locations.size(); i++) {
+                WalLocation location = Objects.requireNonNull(locations.get(i), "location");
+                WalRecord cached = readCache.get(location);
+                if (cached == null) {
+                    misses.add(location);
+                    missIndexes.add(i);
+                } else {
+                    records[i] = cached;
+                }
+            }
+            if (!misses.isEmpty()) {
+                List<WalRecord> loaded = current.readBatch(misses);
+                for (int i = 0; i < loaded.size(); i++) {
+                    records[missIndexes.get(i)] = loaded.get(i);
+                }
+            }
+            return List.of(records);
         } finally {
             endOperation();
         }
@@ -171,6 +213,7 @@ public final class RotatingFileSharedWal implements SharedWal {
         } catch (IOException e) {
             failure = e;
         } finally {
+            readCache.clear();
             try {
                 FileSharedWal reopened = new FileSharedWal(directory, capacityBytes, segmentBytes);
                 synchronized (lifecycleLock) {
@@ -221,7 +264,16 @@ public final class RotatingFileSharedWal implements SharedWal {
             }
             current = delegate;
         }
+        readCache.clear();
         current.close();
+    }
+
+    int cachedEntryCount() {
+        return readCache.entryCount();
+    }
+
+    long cachedBytes() {
+        return readCache.usedBytes();
     }
 
     private FileSharedWal beginOperation() {
