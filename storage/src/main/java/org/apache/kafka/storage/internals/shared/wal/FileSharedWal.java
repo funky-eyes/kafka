@@ -62,14 +62,14 @@ public final class FileSharedWal implements SharedWal {
     private final AtomicBoolean running = new AtomicBoolean(true);
     private final AtomicBoolean closed = new AtomicBoolean(false);
     private final AtomicLong nextGroupId;
+    private final AtomicLong usedBytes;
     private final Object lifecycleLock = new Object();
     private final Thread writerThread;
 
     private volatile boolean accepting = true;
-    private volatile long usedBytes;
     private volatile Throwable failure;
+    private volatile SegmentWriter activeSegment;
     private long nextSegmentId;
-    private SegmentWriter activeSegment;
 
     public FileSharedWal(Path directory, long capacityBytes, long segmentBytes) throws IOException {
         this.directory = Objects.requireNonNull(directory, "directory");
@@ -87,7 +87,7 @@ public final class FileSharedWal implements SharedWal {
 
         Files.createDirectories(directory);
         RecoveryState recovery = recoverSegments();
-        this.usedBytes = recovery.usedBytes;
+        this.usedBytes = new AtomicLong(recovery.usedBytes);
         this.nextSegmentId = recovery.nextSegmentId;
         this.nextGroupId = new AtomicLong(recovery.nextGroupId);
         this.activeSegment = openActiveSegment(recovery.lastSegmentId);
@@ -150,12 +150,33 @@ public final class FileSharedWal implements SharedWal {
 
     @Override
     public long usedBytes() {
-        return usedBytes;
+        return usedBytes.get();
     }
 
     @Override
     public long capacityBytes() {
         return capacityBytes;
+    }
+
+    long activeSegmentId() {
+        SegmentWriter current = activeSegment;
+        return current == null ? -1L : current.id;
+    }
+
+    void releaseReclaimedBytes(long reclaimedBytes) {
+        if (reclaimedBytes < 0) {
+            throw new IllegalArgumentException("reclaimedBytes must not be negative");
+        }
+        if (reclaimedBytes == 0) {
+            return;
+        }
+        long remaining = usedBytes.addAndGet(-reclaimedBytes);
+        if (remaining < 0) {
+            usedBytes.addAndGet(reclaimedBytes);
+            throw new IllegalStateException(
+                "Reclaimed WAL bytes exceed accounted usage: reclaimed=" + reclaimedBytes +
+                    ", usedBefore=" + (remaining + reclaimedBytes));
+        }
     }
 
     @Override
@@ -328,10 +349,11 @@ public final class FileSharedWal implements SharedWal {
         List<PendingAppend> admitted = new ArrayList<>(groups.size());
         long plannedBytes = 0;
         int firstRejected = -1;
+        long currentUsedBytes = usedBytes.get();
         for (int i = 0; i < groups.size(); i++) {
             PendingAppend group = groups.get(i);
             long groupBytes = group.totalBytes();
-            if (usedBytes + plannedBytes + groupBytes > capacityBytes) {
+            if (currentUsedBytes + plannedBytes + groupBytes > capacityBytes) {
                 firstRejected = i;
                 break;
             }
@@ -341,7 +363,7 @@ public final class FileSharedWal implements SharedWal {
 
         if (firstRejected >= 0) {
             WalCapacityExceededException error = new WalCapacityExceededException(
-                "WAL capacity exceeded: used=" + usedBytes + ", admitted=" + plannedBytes +
+                "WAL capacity exceeded: used=" + currentUsedBytes + ", admitted=" + plannedBytes +
                     ", capacity=" + capacityBytes);
             for (int i = firstRejected; i < groups.size(); i++) {
                 groups.get(i).future.completeExceptionally(error);
@@ -361,7 +383,7 @@ public final class FileSharedWal implements SharedWal {
                 long position = activeSegment.position;
                 writeEncoded(activeSegment.channel, encoded, position);
                 activeSegment.position += length;
-                usedBytes += length;
+                usedBytes.addAndGet(length);
                 if (i < group.userRecordCount) {
                     userResults.add(new WalAppendResult(activeSegment.id, position, length));
                 }
