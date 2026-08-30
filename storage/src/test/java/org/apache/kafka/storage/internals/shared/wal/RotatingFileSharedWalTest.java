@@ -59,8 +59,7 @@ class RotatingFileSharedWalTest {
             assertTrue(wal.usedBytes() <= wal.capacityBytes());
         }
 
-        List<Long> replayed = replayOffsets(walDir, 512, 256);
-        assertEquals(List.of(1L, 2L), replayed);
+        assertEquals(List.of(1L, 2L), replayOffsets(walDir, 512, 256));
     }
 
     @Test
@@ -148,20 +147,19 @@ class RotatingFileSharedWalTest {
     }
 
     @Test
-    void shouldKeepActiveSegmentWhileDeletingAllOlderSafeSegments() throws Exception {
-        Path walDir = tempDir.resolve("rotating-active");
-        try (RotatingFileSharedWal wal = new RotatingFileSharedWal(walDir, 1024, 256)) {
+    void shouldSealActiveSegmentWhenAdditionalSafeHeadroomIsRequired() throws Exception {
+        Path walDir = tempDir.resolve("rotating-seal-active");
+        try (RotatingFileSharedWal wal = new RotatingFileSharedWal(walDir, 512, 256)) {
             append(wal, 0, 50);
-            append(wal, 1, 50);
             long reclaimed = wal.reclaim((record, ignored) -> true, Long.MAX_VALUE);
             assertTrue(reclaimed > 0);
-            assertTrue(wal.usedBytes() > 0, "the live active segment must remain accounted and open");
-            assertEquals(1L, segmentCount(walDir), "online reclaim must retain the current active segment");
+            assertEquals(0L, wal.usedBytes(), "a remote-safe single active segment must be reclaimable");
+            assertEquals(0L, segmentCount(walDir));
 
-            append(wal, 2, 50);
-            assertTrue(wal.usedBytes() > 0);
+            append(wal, 1, 50);
+            assertTrue(wal.usedBytes() > 0, "writer must continue without closing and reopening the WAL");
         }
-        assertEquals(List.of(1L, 2L), replayOffsets(walDir, 1024, 256));
+        assertEquals(List.of(1L), replayOffsets(walDir, 512, 256));
     }
 
     @Test
