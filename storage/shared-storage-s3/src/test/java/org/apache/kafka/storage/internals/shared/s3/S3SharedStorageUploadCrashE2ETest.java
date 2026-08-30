@@ -124,21 +124,10 @@ class S3SharedStorageUploadCrashE2ETest {
         System.out.println("UPLOAD_CRASH_PHASE phase=" + crashPhase);
         try (S3ObjectStore verifier = new S3ObjectStore(verifierConfig)) {
             try {
-                for (int nodeId = 1; nodeId <= 3; nodeId++) {
-                    Path config = writeBrokerConfig(
-                        nodeId,
-                        clusterId,
-                        s3Endpoint,
-                        bucket,
-                        region,
-                        keyPrefix,
-                        barrierDir,
-                        crashPhase
-                    );
-                    formatStorage(repositoryRoot, processRuntime, clusterId, config, nodeId);
-                    brokers.put(nodeId, startBroker(repositoryRoot, processRuntime, nodeId, config));
-                }
-
+                startBrokers(
+                    repositoryRoot, processRuntime, clusterId, s3Endpoint, bucket,
+                    region, keyPrefix, barrierDir, crashPhase, brokers
+                );
                 waitForCluster(brokers, bootstrapServers);
                 try (Admin admin = admin(bootstrapServers);
                      KafkaProducer<String, String> producer = producer(bootstrapServers)) {
@@ -269,6 +258,34 @@ class S3SharedStorageUploadCrashE2ETest {
                 stopProcesses(brokers);
                 copyDiagnostics(repositoryRoot);
             }
+        }
+    }
+
+    private void startBrokers(
+        Path repositoryRoot,
+        Path processRuntime,
+        String clusterId,
+        String s3Endpoint,
+        String bucket,
+        String region,
+        String keyPrefix,
+        Path barrierDir,
+        SharedObjectUploadHook.Phase crashPhase,
+        Map<Integer, BrokerProcess> brokers
+    ) throws Exception {
+        for (int nodeId = 1; nodeId <= 3; nodeId++) {
+            Path config = writeBrokerConfig(
+                nodeId,
+                clusterId,
+                s3Endpoint,
+                bucket,
+                region,
+                keyPrefix,
+                barrierDir,
+                crashPhase
+            );
+            formatStorage(repositoryRoot, processRuntime, clusterId, config, nodeId);
+            brokers.put(nodeId, startBroker(repositoryRoot, processRuntime, nodeId, config));
         }
     }
 
