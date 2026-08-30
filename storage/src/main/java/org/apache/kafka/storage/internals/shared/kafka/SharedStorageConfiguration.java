@@ -35,6 +35,8 @@ public final class SharedStorageConfiguration {
     public static final String WAL_SEGMENT_BYTES_CONFIG = "shared.storage.wal.segment.bytes";
     public static final String OBJECT_TARGET_BYTES_CONFIG = "shared.storage.object.target.bytes";
     public static final String UPLOAD_INTERVAL_MS_CONFIG = "shared.storage.upload.interval.ms";
+    public static final String UPLOAD_MAX_LINGER_MS_CONFIG = "shared.storage.upload.max.linger.ms";
+    public static final String UPLOAD_WAL_PRESSURE_PERCENT_CONFIG = "shared.storage.upload.wal.pressure.percent";
     public static final String ORPHAN_CLEANUP_INTERVAL_MS_CONFIG = "shared.storage.orphan.cleanup.interval.ms";
     public static final String ORPHAN_GRACE_MS_CONFIG = "shared.storage.orphan.grace.ms";
     public static final String TOPICS_CONFIG = "shared.storage.topics";
@@ -44,6 +46,8 @@ public final class SharedStorageConfiguration {
     public static final long DEFAULT_WAL_SEGMENT_BYTES = 64L * 1024 * 1024;
     public static final long DEFAULT_OBJECT_TARGET_BYTES = 32L * 1024 * 1024;
     public static final long DEFAULT_UPLOAD_INTERVAL_MS = 100L;
+    public static final long DEFAULT_UPLOAD_MAX_LINGER_MS = 1_000L;
+    public static final int DEFAULT_UPLOAD_WAL_PRESSURE_PERCENT = 70;
     public static final long DEFAULT_ORPHAN_CLEANUP_INTERVAL_MS = 60_000L;
     public static final long DEFAULT_ORPHAN_GRACE_MS = 10L * 60 * 1_000;
 
@@ -52,6 +56,8 @@ public final class SharedStorageConfiguration {
     private final long walSegmentBytes;
     private final long objectTargetBytes;
     private final long uploadIntervalMs;
+    private final long uploadMaxLingerMs;
+    private final int uploadWalPressurePercent;
     private final long orphanCleanupIntervalMs;
     private final long orphanGraceMs;
     private final Set<String> topics;
@@ -63,6 +69,8 @@ public final class SharedStorageConfiguration {
         long walSegmentBytes,
         long objectTargetBytes,
         long uploadIntervalMs,
+        long uploadMaxLingerMs,
+        int uploadWalPressurePercent,
         long orphanCleanupIntervalMs,
         long orphanGraceMs,
         Set<String> topics,
@@ -73,6 +81,8 @@ public final class SharedStorageConfiguration {
         this.walSegmentBytes = walSegmentBytes;
         this.objectTargetBytes = objectTargetBytes;
         this.uploadIntervalMs = uploadIntervalMs;
+        this.uploadMaxLingerMs = uploadMaxLingerMs;
+        this.uploadWalPressurePercent = uploadWalPressurePercent;
         this.orphanCleanupIntervalMs = orphanCleanupIntervalMs;
         this.orphanGraceMs = orphanGraceMs;
         this.topics = topics;
@@ -111,6 +121,16 @@ public final class SharedStorageConfiguration {
             DEFAULT_UPLOAD_INTERVAL_MS,
             UPLOAD_INTERVAL_MS_CONFIG
         );
+        long uploadMaxLingerMs = nonNegativeLong(
+            context.originals().get(UPLOAD_MAX_LINGER_MS_CONFIG),
+            DEFAULT_UPLOAD_MAX_LINGER_MS,
+            UPLOAD_MAX_LINGER_MS_CONFIG
+        );
+        int uploadWalPressurePercent = percentage(
+            context.originals().get(UPLOAD_WAL_PRESSURE_PERCENT_CONFIG),
+            DEFAULT_UPLOAD_WAL_PRESSURE_PERCENT,
+            UPLOAD_WAL_PRESSURE_PERCENT_CONFIG
+        );
         long orphanCleanupIntervalMs = positiveLong(
             context.originals().get(ORPHAN_CLEANUP_INTERVAL_MS_CONFIG),
             DEFAULT_ORPHAN_CLEANUP_INTERVAL_MS,
@@ -130,6 +150,8 @@ public final class SharedStorageConfiguration {
             walSegmentBytes,
             objectTargetBytes,
             uploadIntervalMs,
+            uploadMaxLingerMs,
+            uploadWalPressurePercent,
             orphanCleanupIntervalMs,
             orphanGraceMs,
             topics,
@@ -182,6 +204,14 @@ public final class SharedStorageConfiguration {
         return uploadIntervalMs;
     }
 
+    public long uploadMaxLingerMs() {
+        return uploadMaxLingerMs;
+    }
+
+    public int uploadWalPressurePercent() {
+        return uploadWalPressurePercent;
+    }
+
     public long orphanCleanupIntervalMs() {
         return orphanCleanupIntervalMs;
     }
@@ -208,16 +238,36 @@ public final class SharedStorageConfiguration {
     }
 
     private static long positiveLong(Object value, long defaultValue, String name) {
-        if (value == null || value.toString().isBlank()) {
-            return defaultValue;
-        }
-        long parsed = value instanceof Number number
-            ? number.longValue()
-            : Long.parseLong(value.toString().trim());
+        long parsed = longValue(value, defaultValue);
         if (parsed <= 0) {
             throw new IllegalArgumentException(name + " must be positive");
         }
         return parsed;
+    }
+
+    private static long nonNegativeLong(Object value, long defaultValue, String name) {
+        long parsed = longValue(value, defaultValue);
+        if (parsed < 0) {
+            throw new IllegalArgumentException(name + " must not be negative");
+        }
+        return parsed;
+    }
+
+    private static int percentage(Object value, int defaultValue, String name) {
+        long parsed = longValue(value, defaultValue);
+        if (parsed <= 0 || parsed > 100) {
+            throw new IllegalArgumentException(name + " must be in [1, 100]");
+        }
+        return Math.toIntExact(parsed);
+    }
+
+    private static long longValue(Object value, long defaultValue) {
+        if (value == null || value.toString().isBlank()) {
+            return defaultValue;
+        }
+        return value instanceof Number number
+            ? number.longValue()
+            : Long.parseLong(value.toString().trim());
     }
 
     private static Set<String> parseTopics(Object value) {
