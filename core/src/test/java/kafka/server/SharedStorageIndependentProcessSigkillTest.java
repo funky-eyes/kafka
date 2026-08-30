@@ -29,6 +29,8 @@ import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.config.TopicConfig;
+import org.apache.kafka.common.errors.NotEnoughReplicasAfterAppendException;
+import org.apache.kafka.common.errors.NotEnoughReplicasException;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
@@ -48,6 +50,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -65,22 +68,25 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
- * Gate 3: proves failover with three real Kafka JVMs and an OS-level SIGKILL of the current partition leader.
+ * Proves the production {@code acks=all} durability and availability boundary with three real Kafka JVMs.
  *
- * <p>This test deliberately does not use {@code KafkaClusterTestKit} and never calls {@code BrokerServer.shutdown()} for
- * the crash transition. {@code kafka-server-start.sh} execs the Java process, so the {@link Process#pid()} tracked here
- * is the actual broker JVM PID. The leader is terminated with {@code /bin/kill -9}; only surviving independent JVMs may
- * elect the replacement leader and upload the acknowledged WAL tail.</p>
+ * <p>The configured topic replication factor is supplied through {@code SHARED_STORAGE_REPLICATION_FACTOR}. The
+ * current leader is terminated with an OS-level {@code SIGKILL} while an acknowledged range is still WAL-only. RF=3
+ * must remain writable with {@code min.insync.replicas=2}; RF=2 must preserve acknowledged data but reject new strict
+ * quorum writes until the failed replica returns; RF=1 must require the original node and disk to restart.</p>
  */
 @Tag("integration")
-@Timeout(value = 6, unit = TimeUnit.MINUTES)
+@Timeout(value = 8, unit = TimeUnit.MINUTES)
 public class SharedStorageIndependentProcessSigkillTest {
+    private static final String REPLICATION_FACTOR_ENV = "SHARED_STORAGE_REPLICATION_FACTOR";
     private static final String TOPIC = "shared-wal-sigkill";
+    private static final String WRITE_PROBE_TOPIC = "shared-wal-write-probe";
     private static final String METADATA_TOPIC = "__shared_storage_metadata";
     private static final int WARMUP_RECORDS = 20;
     private static final int CRASH_RECORDS = 40;
     private static final int POST_CRASH_RECORDS = 20;
-    private static final int TOTAL_RECORDS = WARMUP_RECORDS + CRASH_RECORDS + POST_CRASH_RECORDS;
+    private static final int PRE_RECOVERY_RECORDS = WARMUP_RECORDS + CRASH_RECORDS;
+    private static final int TOTAL_RECORDS = PRE_RECOVERY_RECORDS + POST_CRASH_RECORDS;
     private static final long UPLOAD_INTERVAL_MS = 30_000L;
     private static final int[] BROKER_PORTS = {19092, 19192, 19292};
     private static final int[] CONTROLLER_PORTS = {19093, 19193, 19293};
@@ -89,7 +95,8 @@ public class SharedStorageIndependentProcessSigkillTest {
     Path tempDir;
 
     @Test
-    public void acksAllWalTailSurvivesRealLeaderSigkill() throws Exception {
+    public void acksAllWalTailObeysReplicationFactorAvailabilityContract() throws Exception {
+        Scenario scenario = scenario();
         String s3Endpoint = System.getenv("SHARED_STORAGE_S3_ENDPOINT");
         assumeTrue(s3Endpoint != null && !s3Endpoint.isBlank(), "S3/MinIO integration endpoint is not configured");
         Path repositoryRoot = repositoryRoot();
@@ -102,43 +109,55 @@ public class SharedStorageIndependentProcessSigkillTest {
         String bootstrapServers = bootstrapServers();
         Map<Integer, BrokerProcess> brokers = new LinkedHashMap<>();
 
+        System.out.println("MATRIX_SCENARIO rf=" + scenario.replicationFactor() +
+            " acks=all minIsr=" + scenario.minIsr());
         try {
-            for (int nodeId = 1; nodeId <= 3; nodeId++) {
-                Path config = writeBrokerConfig(
-                    repositoryRoot,
-                    nodeId,
-                    clusterId,
-                    s3Endpoint,
-                    bucket,
-                    region
-                );
-                formatStorage(repositoryRoot, processRuntime, clusterId, config, nodeId);
-                brokers.put(nodeId, startBroker(repositoryRoot, processRuntime, nodeId, config));
-            }
-
+            startInitialBrokers(
+                repositoryRoot,
+                processRuntime,
+                clusterId,
+                s3Endpoint,
+                bucket,
+                region,
+                brokers
+            );
             waitForCluster(brokers, bootstrapServers);
-            try (Admin admin = admin(bootstrapServers);
-                 KafkaProducer<String, String> producer = producer(bootstrapServers)) {
-                admin.createTopics(List.of(new NewTopic(TOPIC, 1, (short) 3)
-                    .configs(Map.of(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2"))))
-                    .all().get(30, TimeUnit.SECONDS);
+            try (Admin admin = admin(bootstrapServers)) {
+                admin.createTopics(List.of(new NewTopic(TOPIC, 1, scenario.replicationFactor())
+                    .configs(Map.of(
+                        TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG,
+                        Short.toString(scenario.minIsr())
+                    )))).all().get(30, TimeUnit.SECONDS);
 
-                TopicDescription topic = waitForTopicReady(admin);
+                TopicDescription topic = waitForTopicState(
+                    admin,
+                    TOPIC,
+                    scenario.replicationFactor(),
+                    scenario.replicationFactor(),
+                    -1
+                );
                 SharedPartitionId partition = sharedPartitionId(topic.topicId(), 0);
                 int oldLeader = topic.partitions().get(0).leader().id();
+                List<Integer> replicaIds = topic.partitions().get(0).replicas().stream()
+                    .map(node -> node.id())
+                    .toList();
 
-                OffsetRange warmup = produceRange(producer, 0, WARMUP_RECORDS);
-                waitForReplicatedWal(brokers);
+                if (scenario.replicationFactor() == 2) {
+                    createWriteProbeTopic(admin, oldLeader, replicaIds, scenario.minIsr());
+                }
+
+                OffsetRange warmup = produceRange(bootstrapServers, 0, WARMUP_RECORDS);
+                waitForReplicatedWal(brokers, replicaIds);
                 TestUtils.waitForCondition(
                     () -> brokerCoverage(bootstrapServers, partition, oldLeader).covers(warmup),
                     90_000L,
                     () -> "Old leader " + oldLeader + " never remotely committed warmup range " + warmup
                 );
 
-                OffsetRange crashRange = produceRange(producer, WARMUP_RECORDS, CRASH_RECORDS);
-                PartitionRemoteCoverage beforeKill = allCoverage(bootstrapServers, partition);
+                OffsetRange crashRange = produceRange(bootstrapServers, WARMUP_RECORDS, CRASH_RECORDS);
+                assertEquals(new OffsetRange(WARMUP_RECORDS, PRE_RECOVERY_RECORDS), crashRange);
                 assertFalse(
-                    beforeKill.covers(crashRange),
+                    allCoverage(bootstrapServers, partition).covers(crashRange),
                     "Crash tranche unexpectedly reached remote storage before SIGKILL"
                 );
 
@@ -148,54 +167,178 @@ public class SharedStorageIndependentProcessSigkillTest {
                 sigkill(victimPid);
                 assertTrue(victim.process().waitFor(30, TimeUnit.SECONDS), "SIGKILLed broker JVM did not exit");
                 assertFalse(victim.process().isAlive());
-                System.out.println("GATE3_SIGKILL brokerId=" + oldLeader + " pid=" + victimPid +
-                    " exitCode=" + victim.process().exitValue());
+                System.out.println("MATRIX_SIGKILL rf=" + scenario.replicationFactor() +
+                    " brokerId=" + oldLeader + " pid=" + victimPid);
 
-                int newLeader = waitForNewLeader(admin, oldLeader);
-                assertNotEquals(oldLeader, newLeader);
-                assertTrue(brokers.get(newLeader).process().isAlive(), "Replacement leader is not an independent live JVM");
-
-                OffsetRange postCrash = produceRange(
-                    producer,
-                    WARMUP_RECORDS + CRASH_RECORDS,
-                    POST_CRASH_RECORDS
-                );
-                assertEquals(
-                    new OffsetRange(
-                        WARMUP_RECORDS + CRASH_RECORDS,
-                        TOTAL_RECORDS
-                    ),
-                    postCrash
-                );
-
-                TestUtils.waitForCondition(
-                    () -> brokerCoverage(bootstrapServers, partition, newLeader).covers(crashRange),
-                    90_000L,
-                    () -> "Replacement leader " + newLeader +
-                        " never uploaded the pre-SIGKILL acknowledged range " + crashRange
-                );
-
-                List<String> consumed = consumeAll(bootstrapServers, TOTAL_RECORDS);
-                assertEquals(
-                    TOTAL_RECORDS,
-                    consumed.size(),
-                    "Every acknowledged record must remain consumable after SIGKILL"
-                );
-                List<String> expected = new ArrayList<>(TOTAL_RECORDS);
-                for (int i = 0; i < TOTAL_RECORDS; i++) {
-                    expected.add(value(i));
+                if (scenario.replicationFactor() == 1) {
+                    runSingleReplicaRecovery(
+                        repositoryRoot,
+                        processRuntime,
+                        bootstrapServers,
+                        admin,
+                        brokers,
+                        partition,
+                        crashRange,
+                        oldLeader,
+                        scenario
+                    );
+                } else {
+                    runReplicatedFailover(
+                        repositoryRoot,
+                        processRuntime,
+                        bootstrapServers,
+                        admin,
+                        brokers,
+                        partition,
+                        crashRange,
+                        oldLeader,
+                        scenario
+                    );
                 }
-                assertEquals(expected, consumed, "All acknowledged records must survive SIGKILL exactly once and in order");
-                System.out.println("GATE3_RECOVERED oldLeader=" + oldLeader + " newLeader=" + newLeader +
-                    " crashRange=" + crashRange + " records=" + consumed.size());
             }
         } finally {
             stopProcesses(brokers);
+            copyDiagnostics(repositoryRoot);
         }
     }
 
-    private Path writeBrokerConfig(
+    private void runReplicatedFailover(
         Path repositoryRoot,
+        Path processRuntime,
+        String bootstrapServers,
+        Admin admin,
+        Map<Integer, BrokerProcess> brokers,
+        SharedPartitionId partition,
+        OffsetRange crashRange,
+        int oldLeader,
+        Scenario scenario
+    ) throws Exception {
+        int newLeader = waitForNewLeader(admin, TOPIC, oldLeader);
+        assertNotEquals(oldLeader, newLeader);
+        assertTrue(brokers.get(newLeader).process().isAlive(), "Replacement leader is not an independent live JVM");
+
+        TestUtils.waitForCondition(
+            () -> brokerCoverage(bootstrapServers, partition, newLeader).covers(crashRange),
+            90_000L,
+            () -> "Replacement leader " + newLeader +
+                " never uploaded the pre-SIGKILL acknowledged range " + crashRange
+        );
+        assertExpectedValues(
+            consumeAll(bootstrapServers, PRE_RECOVERY_RECORDS),
+            PRE_RECOVERY_RECORDS,
+            "Acknowledged data must be readable from the replacement leader"
+        );
+        System.out.println("MATRIX_FAILOVER_READABLE rf=" + scenario.replicationFactor() +
+            " oldLeader=" + oldLeader + " newLeader=" + newLeader + " records=" + PRE_RECOVERY_RECORDS);
+
+        if (scenario.replicationFactor() == 3) {
+            OffsetRange postCrash = produceRange(
+                bootstrapServers,
+                PRE_RECOVERY_RECORDS,
+                POST_CRASH_RECORDS
+            );
+            assertEquals(new OffsetRange(PRE_RECOVERY_RECORDS, TOTAL_RECORDS), postCrash);
+            System.out.println("MATRIX_FAILOVER_WRITABLE rf=3 newLeader=" + newLeader +
+                " postRange=" + postCrash);
+            restartBroker(repositoryRoot, processRuntime, brokers, oldLeader);
+            waitForTopicState(admin, TOPIC, (short) 3, (short) 3, newLeader);
+        } else {
+            waitForTopicState(admin, WRITE_PROBE_TOPIC, (short) 2, (short) 1, newLeader);
+            assertAcksAllRejectedByMinIsr(bootstrapServers);
+            System.out.println("MATRIX_WRITE_REJECTED_MIN_ISR rf=2 leader=" + newLeader + " minIsr=2");
+            restartBroker(repositoryRoot, processRuntime, brokers, oldLeader);
+            waitForTopicState(admin, TOPIC, (short) 2, (short) 2, newLeader);
+            OffsetRange postCrash = produceRange(
+                bootstrapServers,
+                PRE_RECOVERY_RECORDS,
+                POST_CRASH_RECORDS
+            );
+            assertEquals(new OffsetRange(PRE_RECOVERY_RECORDS, TOTAL_RECORDS), postCrash);
+            System.out.println("MATRIX_WRITE_RESUMED rf=2 leader=" + newLeader + " postRange=" + postCrash);
+        }
+
+        waitForFullRemoteCoverage(bootstrapServers, partition);
+        assertExpectedValues(
+            consumeAll(bootstrapServers, TOTAL_RECORDS),
+            TOTAL_RECORDS,
+            "All acknowledged records must survive replicated failover exactly once and in order"
+        );
+        System.out.println("MATRIX_RECOVERED rf=" + scenario.replicationFactor() +
+            " mode=automatic-failover oldLeader=" + oldLeader + " activeLeader=" + newLeader +
+            " records=" + TOTAL_RECORDS);
+    }
+
+    private void runSingleReplicaRecovery(
+        Path repositoryRoot,
+        Path processRuntime,
+        String bootstrapServers,
+        Admin admin,
+        Map<Integer, BrokerProcess> brokers,
+        SharedPartitionId partition,
+        OffsetRange crashRange,
+        int oldLeader,
+        Scenario scenario
+    ) throws Exception {
+        assertProduceUnavailable(bootstrapServers, TOPIC);
+        System.out.println("MATRIX_RESTART_REQUIRED rf=1 leader=" + oldLeader +
+            " reason=no-replica-for-election");
+
+        restartBroker(repositoryRoot, processRuntime, brokers, oldLeader);
+        waitForTopicState(admin, TOPIC, scenario.replicationFactor(), scenario.replicationFactor(), oldLeader);
+        TestUtils.waitForCondition(
+            () -> brokerCoverage(bootstrapServers, partition, oldLeader).covers(crashRange),
+            90_000L,
+            () -> "Restarted RF=1 leader never uploaded recovered WAL range " + crashRange
+        );
+
+        OffsetRange postCrash = produceRange(
+            bootstrapServers,
+            PRE_RECOVERY_RECORDS,
+            POST_CRASH_RECORDS
+        );
+        assertEquals(new OffsetRange(PRE_RECOVERY_RECORDS, TOTAL_RECORDS), postCrash);
+        waitForFullRemoteCoverage(bootstrapServers, partition);
+        assertExpectedValues(
+            consumeAll(bootstrapServers, TOTAL_RECORDS),
+            TOTAL_RECORDS,
+            "RF=1 must recover acknowledged records from the original disk after process restart"
+        );
+        System.out.println("MATRIX_RECOVERED rf=1 mode=original-node-restart leader=" + oldLeader +
+            " records=" + TOTAL_RECORDS);
+    }
+
+    private void startInitialBrokers(
+        Path repositoryRoot,
+        Path processRuntime,
+        String clusterId,
+        String s3Endpoint,
+        String bucket,
+        String region,
+        Map<Integer, BrokerProcess> brokers
+    ) throws Exception {
+        for (int nodeId = 1; nodeId <= 3; nodeId++) {
+            Path config = writeBrokerConfig(nodeId, clusterId, s3Endpoint, bucket, region);
+            formatStorage(repositoryRoot, processRuntime, clusterId, config, nodeId);
+            brokers.put(nodeId, startBroker(repositoryRoot, processRuntime, nodeId, config));
+        }
+    }
+
+    private static void createWriteProbeTopic(
+        Admin admin,
+        int oldLeader,
+        List<Integer> replicaIds,
+        short minIsr
+    ) throws Exception {
+        List<Integer> orderedReplicas = new ArrayList<>(replicaIds.size());
+        orderedReplicas.add(oldLeader);
+        replicaIds.stream().filter(id -> id != oldLeader).forEach(orderedReplicas::add);
+        NewTopic probe = new NewTopic(WRITE_PROBE_TOPIC, Map.of(0, orderedReplicas))
+            .configs(Map.of(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, Short.toString(minIsr)));
+        admin.createTopics(List.of(probe)).all().get(30, TimeUnit.SECONDS);
+        waitForTopicState(admin, WRITE_PROBE_TOPIC, (short) 2, (short) 2, oldLeader);
+    }
+
+    private Path writeBrokerConfig(
         int nodeId,
         String clusterId,
         String s3Endpoint,
@@ -229,6 +372,7 @@ public class SharedStorageIndependentProcessSigkillTest {
             "transaction.state.log.min.isr=2",
             "group.initial.rebalance.delay.ms=0",
             "auto.create.topics.enable=false",
+            "unclean.leader.election.enable=false",
             "storage.extension.class=org.apache.kafka.storage.internals.shared.s3.S3SharedStorageExtension",
             "shared.storage.topics=" + TOPIC,
             "shared.storage.wal.dir=" + walDir.toAbsolutePath(),
@@ -283,7 +427,8 @@ public class SharedStorageIndependentProcessSigkillTest {
         int nodeId,
         Path config
     ) throws IOException {
-        Path log = tempDir.resolve("node-" + nodeId).resolve("broker.log");
+        Path log = tempDir.resolve("node-" + nodeId)
+            .resolve("broker-" + System.nanoTime() + ".log");
         ProcessBuilder builder = new ProcessBuilder(
             repositoryRoot.resolve("bin/kafka-server-start.sh").toString(),
             config.toString()
@@ -291,8 +436,28 @@ public class SharedStorageIndependentProcessSigkillTest {
         configureEnvironment(builder, processRuntime, nodeId);
         builder.redirectErrorStream(true).redirectOutput(log.toFile());
         Process process = builder.start();
-        System.out.println("GATE3_STARTED brokerId=" + nodeId + " pid=" + process.pid());
-        return new BrokerProcess(nodeId, process, log, tempDir.resolve("node-" + nodeId).resolve("wal"));
+        System.out.println("MATRIX_BROKER_STARTED brokerId=" + nodeId + " pid=" + process.pid());
+        return new BrokerProcess(
+            nodeId,
+            process,
+            log,
+            tempDir.resolve("node-" + nodeId).resolve("wal"),
+            config
+        );
+    }
+
+    private void restartBroker(
+        Path repositoryRoot,
+        Path processRuntime,
+        Map<Integer, BrokerProcess> brokers,
+        int brokerId
+    ) throws IOException {
+        BrokerProcess stopped = brokers.get(brokerId);
+        assertFalse(stopped.process().isAlive(), "Broker " + brokerId + " must be stopped before restart");
+        brokers.put(
+            brokerId,
+            startBroker(repositoryRoot, processRuntime, brokerId, stopped.configFile())
+        );
     }
 
     private static void configureEnvironment(ProcessBuilder builder, Path processRuntime, int nodeId) {
@@ -305,7 +470,10 @@ public class SharedStorageIndependentProcessSigkillTest {
         );
         environment.put("KAFKA_HEAP_OPTS", "-Xms256m -Xmx256m");
         environment.put("KAFKA_JVM_PERFORMANCE_OPTS", "-server -XX:+UseG1GC");
-        environment.put("LOG_DIR", processRuntime.resolve("../gate3-broker-" + nodeId + "-logs").normalize().toString());
+        environment.put(
+            "LOG_DIR",
+            processRuntime.resolve("../matrix-broker-" + nodeId + "-logs").normalize().toString()
+        );
         environment.putIfAbsent("AWS_ACCESS_KEY_ID", "minioadmin");
         environment.putIfAbsent("AWS_SECRET_ACCESS_KEY", "minioadmin123");
     }
@@ -328,17 +496,26 @@ public class SharedStorageIndependentProcessSigkillTest {
         }
     }
 
-    private static TopicDescription waitForTopicReady(Admin admin) throws Exception {
+    private static TopicDescription waitForTopicState(
+        Admin admin,
+        String topicName,
+        short expectedReplicas,
+        short expectedIsr,
+        int expectedLeader
+    ) throws Exception {
         TopicDescription[] ready = new TopicDescription[1];
         TestUtils.waitForCondition(() -> {
             try {
-                TopicDescription topic = describeTopic(admin);
+                TopicDescription topic = describeTopic(admin, topicName);
                 if (topic == null || topic.partitions().size() != 1) {
                     return false;
                 }
                 var partition = topic.partitions().get(0);
                 if (partition.leader() == null || partition.leader().id() < 0 ||
-                    partition.replicas().size() != 3 || partition.isr().size() != 3) {
+                    partition.replicas().size() != expectedReplicas || partition.isr().size() != expectedIsr) {
+                    return false;
+                }
+                if (expectedLeader >= 0 && partition.leader().id() != expectedLeader) {
                     return false;
                 }
                 ready[0] = topic;
@@ -346,15 +523,16 @@ public class SharedStorageIndependentProcessSigkillTest {
             } catch (Exception ignored) {
                 return false;
             }
-        }, 60_000L, () -> "SIGKILL topic never reached leader + RF3/ISR3 readiness");
+        }, 90_000L, () -> "Topic " + topicName + " did not converge to RF=" + expectedReplicas +
+            ", ISR=" + expectedIsr + ", expectedLeader=" + expectedLeader);
         return ready[0];
     }
 
-    private static int waitForNewLeader(Admin admin, int oldLeader) throws Exception {
+    private static int waitForNewLeader(Admin admin, String topicName, int oldLeader) throws Exception {
         int[] result = {-1};
         TestUtils.waitForCondition(() -> {
             try {
-                TopicDescription topic = describeTopic(admin);
+                TopicDescription topic = describeTopic(admin, topicName);
                 if (topic == null || topic.partitions().isEmpty() || topic.partitions().get(0).leader() == null) {
                     return false;
                 }
@@ -367,43 +545,96 @@ public class SharedStorageIndependentProcessSigkillTest {
             } catch (Exception ignored) {
                 return false;
             }
-        }, 60_000L, () -> "No new leader was elected after SIGKILL of broker " + oldLeader);
+        }, 60_000L, () -> "No new leader was elected for " + topicName +
+            " after SIGKILL of broker " + oldLeader);
         return result[0];
     }
 
-    private static TopicDescription describeTopic(Admin admin) throws Exception {
-        return admin.describeTopics(List.of(TOPIC)).allTopicNames().get(10, TimeUnit.SECONDS).get(TOPIC);
+    private static TopicDescription describeTopic(Admin admin, String topicName) throws Exception {
+        return admin.describeTopics(List.of(topicName)).allTopicNames()
+            .get(10, TimeUnit.SECONDS).get(topicName);
     }
 
     private static OffsetRange produceRange(
-        KafkaProducer<String, String> producer,
+        String bootstrapServers,
         int start,
         int count
     ) throws Exception {
-        long first = -1L;
-        long last = -1L;
-        for (int i = 0; i < count; i++) {
-            int value = start + i;
-            RecordMetadata metadata = producer.send(
-                new ProducerRecord<>(TOPIC, 0, Integer.toString(value), value(value))
-            ).get(30, TimeUnit.SECONDS);
-            if (first < 0) {
-                first = metadata.offset();
+        try (KafkaProducer<String, String> producer = producer(bootstrapServers, true)) {
+            long first = -1L;
+            long last = -1L;
+            for (int i = 0; i < count; i++) {
+                int sequence = start + i;
+                RecordMetadata metadata = producer.send(
+                    new ProducerRecord<>(TOPIC, 0, Integer.toString(sequence), value(sequence))
+                ).get(30, TimeUnit.SECONDS);
+                if (first < 0) {
+                    first = metadata.offset();
+                }
+                last = metadata.offset();
             }
-            last = metadata.offset();
+            producer.flush();
+            return new OffsetRange(first, Math.addExact(last, 1L));
         }
-        producer.flush();
-        return new OffsetRange(first, Math.addExact(last, 1L));
     }
 
-    private static KafkaProducer<String, String> producer(String bootstrapServers) {
+    private static KafkaProducer<String, String> producer(
+        String bootstrapServers,
+        boolean idempotent
+    ) {
         Properties properties = new Properties();
         properties.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
         properties.put(ProducerConfig.ACKS_CONFIG, "all");
-        properties.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
+        properties.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, idempotent);
+        properties.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, 30_000);
         properties.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
         properties.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
+        if (!idempotent) {
+            properties.put(ProducerConfig.RETRIES_CONFIG, 0);
+            properties.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, 5_000);
+            properties.put(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, 3_000);
+        }
         return new KafkaProducer<>(properties);
+    }
+
+    private static void assertAcksAllRejectedByMinIsr(String bootstrapServers) throws Exception {
+        Throwable failure = null;
+        try (KafkaProducer<String, String> producer = producer(bootstrapServers, false)) {
+            producer.send(new ProducerRecord<>(WRITE_PROBE_TOPIC, 0, "probe", "probe"))
+                .get(15, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            failure = e;
+        }
+        assertTrue(failure != null, "RF=2/minISR=2 must reject acks=all while only one replica is in ISR");
+        assertTrue(
+            hasCause(failure, NotEnoughReplicasException.class) ||
+                hasCause(failure, NotEnoughReplicasAfterAppendException.class),
+            () -> "Expected a minISR rejection but received: " + failure
+        );
+    }
+
+    private static void assertProduceUnavailable(String bootstrapServers, String topicName) {
+        boolean completed = false;
+        try (KafkaProducer<String, String> producer = producer(bootstrapServers, false)) {
+            producer.send(new ProducerRecord<>(topicName, 0, "unavailable", "unavailable"))
+                .get(10, TimeUnit.SECONDS);
+            completed = true;
+        } catch (Exception expected) {
+            System.out.println("MATRIX_EXPECTED_UNAVAILABLE topic=" + topicName +
+                " error=" + expected.getClass().getSimpleName());
+        }
+        assertFalse(completed, "A partition without a live replica must not accept acks=all writes");
+    }
+
+    private static boolean hasCause(Throwable error, Class<? extends Throwable> expectedType) {
+        Throwable current = error;
+        while (current != null) {
+            if (expectedType.isInstance(current)) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 
     private static Admin admin(String bootstrapServers) {
@@ -415,7 +646,7 @@ public class SharedStorageIndependentProcessSigkillTest {
     private static List<String> consumeAll(String bootstrapServers, int expectedCount) {
         Properties properties = new Properties();
         properties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
-        properties.put(ConsumerConfig.GROUP_ID_CONFIG, "gate3-" + UUID.randomUUID());
+        properties.put(ConsumerConfig.GROUP_ID_CONFIG, "matrix-" + UUID.randomUUID());
         properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
         properties.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
         properties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
@@ -431,12 +662,26 @@ public class SharedStorageIndependentProcessSigkillTest {
         return values;
     }
 
-    private static void waitForReplicatedWal(Map<Integer, BrokerProcess> brokers) throws Exception {
-        for (BrokerProcess broker : brokers.values()) {
+    private static void assertExpectedValues(List<String> actual, int expectedCount, String message) {
+        assertEquals(expectedCount, actual.size(), message);
+        List<String> expected = new ArrayList<>(expectedCount);
+        for (int i = 0; i < expectedCount; i++) {
+            expected.add(value(i));
+        }
+        assertEquals(expected, actual, message);
+    }
+
+    private static void waitForReplicatedWal(
+        Map<Integer, BrokerProcess> brokers,
+        List<Integer> replicaIds
+    ) throws Exception {
+        for (int replicaId : replicaIds) {
+            BrokerProcess broker = brokers.get(replicaId);
             TestUtils.waitForCondition(
                 () -> walBytes(broker.walDir()) > 0L,
                 30_000L,
-                () -> "Broker " + broker.nodeId() + " never received shared WAL data in " + broker.walDir()
+                () -> "Replica broker " + replicaId +
+                    " never received shared WAL data in " + broker.walDir()
             );
         }
     }
@@ -460,6 +705,18 @@ public class SharedStorageIndependentProcessSigkillTest {
         } catch (IOException ignored) {
             return 0L;
         }
+    }
+
+    private static void waitForFullRemoteCoverage(
+        String bootstrapServers,
+        SharedPartitionId partition
+    ) throws Exception {
+        OffsetRange fullRange = new OffsetRange(0, TOTAL_RECORDS);
+        TestUtils.waitForCondition(
+            () -> allCoverage(bootstrapServers, partition).covers(fullRange),
+            90_000L,
+            () -> "Remote coverage never reached the full acknowledged range " + fullRange
+        );
     }
 
     private static PartitionRemoteCoverage allCoverage(String bootstrapServers, SharedPartitionId partition) {
@@ -494,7 +751,7 @@ public class SharedStorageIndependentProcessSigkillTest {
     private static List<SharedObjectMetadata> committedObjects(String bootstrapServers) {
         Properties properties = new Properties();
         properties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
-        properties.put(ConsumerConfig.CLIENT_ID_CONFIG, "gate3-metadata-" + UUID.randomUUID());
+        properties.put(ConsumerConfig.CLIENT_ID_CONFIG, "matrix-metadata-" + UUID.randomUUID());
         properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
         properties.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
         properties.put(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_committed");
@@ -536,6 +793,21 @@ public class SharedStorageIndependentProcessSigkillTest {
         return new SharedPartitionId(topicId.getMostSignificantBits(), topicId.getLeastSignificantBits(), partition);
     }
 
+    private static Scenario scenario() {
+        String configured = environment(REPLICATION_FACTOR_ENV, "3");
+        final short replicationFactor;
+        try {
+            replicationFactor = Short.parseShort(configured);
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(REPLICATION_FACTOR_ENV + " must be an integer", e);
+        }
+        if (replicationFactor < 1 || replicationFactor > 3) {
+            throw new IllegalArgumentException(REPLICATION_FACTOR_ENV + " must be between 1 and 3");
+        }
+        short minIsr = replicationFactor == 3 ? (short) 2 : replicationFactor;
+        return new Scenario(replicationFactor, minIsr);
+    }
+
     private static void sigkill(long pid) throws Exception {
         Process kill = new ProcessBuilder("/bin/kill", "-9", Long.toString(pid)).start();
         assertTrue(kill.waitFor(10, TimeUnit.SECONDS), "kill -9 command timed out for pid " + pid);
@@ -560,14 +832,29 @@ public class SharedStorageIndependentProcessSigkillTest {
         }
     }
 
+    private void copyDiagnostics(Path repositoryRoot) {
+        Path destination = repositoryRoot.resolve("core/build/shared-storage-sigkill-diagnostics");
+        try (Stream<Path> paths = Files.walk(tempDir)) {
+            for (Path source : paths.filter(Files::isRegularFile).toList()) {
+                String name = source.getFileName().toString();
+                if (!(name.endsWith(".log") || name.endsWith(".properties"))) {
+                    continue;
+                }
+                Path target = destination.resolve(tempDir.relativize(source).toString());
+                Files.createDirectories(target.getParent());
+                Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } catch (IOException e) {
+            System.out.println("Unable to copy durability-matrix diagnostics: " + e);
+        }
+    }
+
     private static Path repositoryRoot() {
         Path current = Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize();
-        if (Files.isDirectory(current.resolve("bin")) && Files.isDirectory(current.resolve("core"))) {
-            return current;
-        }
-        Path parent = current.getParent();
-        if (parent != null && Files.isDirectory(parent.resolve("bin")) && Files.isDirectory(parent.resolve("core"))) {
-            return parent;
+        for (Path candidate = current; candidate != null; candidate = candidate.getParent()) {
+            if (Files.isDirectory(candidate.resolve("bin")) && Files.isDirectory(candidate.resolve("core"))) {
+                return candidate;
+            }
         }
         throw new IllegalStateException("Unable to locate Kafka repository root from " + current);
     }
@@ -593,13 +880,22 @@ public class SharedStorageIndependentProcessSigkillTest {
                 return "<missing " + log + ">";
             }
             List<String> lines = Files.readAllLines(log);
-            int start = Math.max(0, lines.size() - 80);
+            int start = Math.max(0, lines.size() - 100);
             return String.join("\n", lines.subList(start, lines.size()));
         } catch (IOException e) {
             return "<unable to read " + log + ": " + e + ">";
         }
     }
 
-    private record BrokerProcess(int nodeId, Process process, Path logFile, Path walDir) {
+    private record Scenario(short replicationFactor, short minIsr) {
+    }
+
+    private record BrokerProcess(
+        int nodeId,
+        Process process,
+        Path logFile,
+        Path walDir,
+        Path configFile
+    ) {
     }
 }
