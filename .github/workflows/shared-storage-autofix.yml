@@ -46,10 +46,8 @@ jobs:
 
           path = Path('core/src/test/java/kafka/server/SharedStorageIndependentProcessSigkillTest.java')
           text = path.read_text(encoding='utf-8')
-          old = '''            () -> "Expected a minISR rejection but received: " + failure
-'''
-          new = '''            "Expected a minISR rejection but received: " + failure
-'''
+          old = '            () -> "Expected a minISR rejection but received: " + failure\n'
+          new = '            "Expected a minISR rejection but received: " + failure\n'
           if text.count(old) != 1:
               raise SystemExit(f'expected exactly one compile-fix target, found {text.count(old)}')
           path.write_text(text.replace(old, new), encoding='utf-8')
