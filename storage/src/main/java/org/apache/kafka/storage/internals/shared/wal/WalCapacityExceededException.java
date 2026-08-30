@@ -16,9 +16,18 @@
  */
 package org.apache.kafka.storage.internals.shared.wal;
 
-import java.io.IOException;
+import org.apache.kafka.common.errors.KafkaStorageException;
 
-public final class WalCapacityExceededException extends IOException {
+/**
+ * Retriable admission failure raised before a logical append group modifies the shared WAL.
+ *
+ * <p>This is deliberately not an {@link java.io.IOException}. Kafka treats an IOException from a log append as a
+ * physical log-directory failure and takes the directory offline. Capacity pressure is different: the disk and WAL
+ * are healthy, but accepting another append would overwrite or exceed the configured durability window. Propagating a
+ * Kafka storage error rejects the produce request while keeping the broker and log directory online so asynchronous
+ * remote upload or operator action can relieve the pressure.</p>
+ */
+public final class WalCapacityExceededException extends KafkaStorageException {
     public WalCapacityExceededException(String message) {
         super(message);
     }
