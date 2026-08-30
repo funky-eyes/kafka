@@ -609,7 +609,7 @@ public class SharedStorageIndependentProcessSigkillTest {
         assertTrue(
             hasCause(failure, NotEnoughReplicasException.class) ||
                 hasCause(failure, NotEnoughReplicasAfterAppendException.class),
-            () -> "Expected a minISR rejection but received: " + failure
+            "Expected a minISR rejection but received: " + failure
         );
     }
 
