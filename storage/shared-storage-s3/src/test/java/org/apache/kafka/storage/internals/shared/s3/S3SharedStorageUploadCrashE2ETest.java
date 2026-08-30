@@ -39,6 +39,7 @@ import org.apache.kafka.storage.internals.shared.metadata.PartitionRemoteCoverag
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
+import org.apache.kafka.storage.internals.shared.object.SharedObjectUploadHook;
 
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
@@ -72,11 +73,14 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
-/** Proves the PREPARE -> PUT -> COMMIT crash window with three external Kafka JVMs and real S3 I/O. */
+/**
+ * Proves every PREPARE -> PUT -> COMMIT process-crash boundary with three external Kafka JVMs and real S3 I/O.
+ */
 @Tag("integration")
 @Timeout(value = 7, unit = TimeUnit.MINUTES)
 class S3SharedStorageUploadCrashE2ETest {
-    private static final String TOPIC = "shared-upload-after-put-crash";
+    private static final String CRASH_PHASE_ENV = "SHARED_STORAGE_UPLOAD_CRASH_PHASE";
+    private static final String TOPIC = "shared-upload-crash";
     private static final String METADATA_TOPIC = "__shared_storage_metadata";
     private static final int WARMUP_RECORDS = 20;
     private static final int CRASH_RECORDS = 40;
@@ -92,7 +96,8 @@ class S3SharedStorageUploadCrashE2ETest {
     Path tempDir;
 
     @Test
-    void afterPutLeaderSigkillRecoversAndCleansPhysicalOrphan() throws Exception {
+    void leaderSigkillAtConfiguredUploadPhaseRecoversSafely() throws Exception {
+        SharedObjectUploadHook.Phase crashPhase = crashPhase();
         String s3Endpoint = System.getenv("SHARED_STORAGE_S3_ENDPOINT");
         assumeTrue(s3Endpoint != null && !s3Endpoint.isBlank(), "S3/MinIO integration endpoint is not configured");
         Path repositoryRoot = repositoryRoot();
@@ -116,6 +121,7 @@ class S3SharedStorageUploadCrashE2ETest {
             1
         );
 
+        System.out.println("UPLOAD_CRASH_PHASE phase=" + crashPhase);
         try (S3ObjectStore verifier = new S3ObjectStore(verifierConfig)) {
             try {
                 for (int nodeId = 1; nodeId <= 3; nodeId++) {
@@ -126,7 +132,8 @@ class S3SharedStorageUploadCrashE2ETest {
                         bucket,
                         region,
                         keyPrefix,
-                        barrierDir
+                        barrierDir,
+                        crashPhase
                     );
                     formatStorage(repositoryRoot, processRuntime, clusterId, config, nodeId);
                     brokers.put(nodeId, startBroker(repositoryRoot, processRuntime, nodeId, config));
@@ -152,43 +159,30 @@ class S3SharedStorageUploadCrashE2ETest {
                     );
 
                     Path armFile = barrierDir.resolve("broker-" + oldLeader + ".arm");
-                    Path reachedFile = barrierDir.resolve("broker-" + oldLeader + ".AFTER_PUT.reached");
+                    Path reachedFile = barrierDir.resolve(
+                        "broker-" + oldLeader + "." + crashPhase + ".reached"
+                    );
                     Files.writeString(armFile, "armed\n");
                     OffsetRange crashRange = produceRange(producer, WARMUP_RECORDS, CRASH_RECORDS);
                     waitForCondition(
                         () -> Files.isRegularFile(reachedFile),
                         60_000L,
-                        () -> "Leader " + oldLeader + " never reached the AFTER_PUT crash barrier"
+                        () -> "Leader " + oldLeader + " never reached the " + crashPhase + " crash barrier"
                     );
 
                     BarrierEvidence evidence = readBarrierEvidence(reachedFile);
-                    long orphanObjectId = evidence.objectId();
-                    assertEquals(oldLeader, BrokerObjectId.brokerId(orphanObjectId));
-                    assertTrue(
-                        objectExists(verifier, orphanObjectId),
-                        "AFTER_PUT marker must imply a physical S3 object"
-                    );
+                    long crashObjectId = evidence.objectId();
+                    assertEquals(crashPhase, evidence.phase(), "Crash marker phase must match the configured phase");
+                    assertEquals(oldLeader, BrokerObjectId.brokerId(crashObjectId));
+                    boolean initiallyPhysical = objectExists(verifier, crashObjectId);
                     MetadataSnapshot beforeKill = metadataSnapshot(bootstrapServers);
-                    assertTrue(
-                        beforeKill.preparedObjects().containsKey(orphanObjectId),
-                        "The paused physical object must have PREPARED metadata"
-                    );
-                    assertEquals(
-                        evidence.createdTimeMs(),
-                        beforeKill.preparedObjects().get(orphanObjectId).longValue(),
-                        "The paused physical object must retain its PREPARED generation"
-                    );
-                    assertFalse(
-                        beforeKill.committedObjects().containsKey(orphanObjectId),
-                        "The paused physical object must not have COMMITTED metadata"
-                    );
-                    assertFalse(
-                        beforeKill.cleanupStates().containsKey(orphanObjectId),
-                        "Cleanup must not race ahead of the intentional SIGKILL boundary"
-                    );
-                    assertFalse(
-                        coverage(beforeKill, partition, null).covers(crashRange),
-                        "The paused AFTER_PUT object must not advance authoritative remote coverage"
+                    assertPreKillState(
+                        crashPhase,
+                        evidence,
+                        initiallyPhysical,
+                        beforeKill,
+                        partition,
+                        crashRange
                     );
 
                     BrokerProcess victim = brokers.get(oldLeader);
@@ -197,8 +191,8 @@ class S3SharedStorageUploadCrashE2ETest {
                     sigkill(victimPid);
                     assertTrue(victim.process().waitFor(30, TimeUnit.SECONDS), "SIGKILLed broker JVM did not exit");
                     assertFalse(victim.process().isAlive());
-                    System.out.println("UPLOAD_CRASH_AFTER_PUT_SIGKILL oldLeader=" + oldLeader +
-                        " pid=" + victimPid + " orphanObjectId=" + orphanObjectId);
+                    System.out.println("UPLOAD_CRASH_" + crashPhase + "_SIGKILL oldLeader=" + oldLeader +
+                        " pid=" + victimPid + " objectId=" + crashObjectId);
 
                     int newLeader = waitForNewLeader(admin, oldLeader);
                     assertNotEquals(oldLeader, newLeader);
@@ -217,11 +211,20 @@ class S3SharedStorageUploadCrashE2ETest {
                         postCrash
                     );
 
+                    waitForCrashRangeRecovery(
+                        crashPhase,
+                        bootstrapServers,
+                        partition,
+                        crashRange,
+                        crashObjectId,
+                        newLeader
+                    );
+                    OffsetRange fullRange = new OffsetRange(0, TOTAL_RECORDS);
                     waitForCondition(
-                        () -> brokerCoverage(bootstrapServers, partition, newLeader).covers(crashRange),
+                        () -> coverage(metadataSnapshot(bootstrapServers), partition, null).covers(fullRange),
                         90_000L,
-                        () -> "Replacement leader " + newLeader +
-                            " never committed the pre-SIGKILL acknowledged range " + crashRange
+                        () -> "Remote coverage never reached the full acknowledged range " + fullRange +
+                            " after " + crashPhase + " SIGKILL"
                     );
 
                     List<String> consumed = consumeAll(bootstrapServers, TOTAL_RECORDS);
@@ -232,27 +235,176 @@ class S3SharedStorageUploadCrashE2ETest {
                     }
                     assertEquals(expected, consumed, "All acknowledged records must survive exactly once and in order");
 
-                    waitForCondition(
-                        () -> cleanupClaimed(bootstrapServers, orphanObjectId) &&
-                            objectMissing(verifier, orphanObjectId),
-                        90_000L,
-                        () -> "Physical orphan " + orphanObjectId + " was not claimed and deleted"
-                    );
-                    assertFalse(
-                        metadataSnapshot(bootstrapServers).committedObjects().containsKey(orphanObjectId),
-                        "Cleanup-fenced orphan must never be resurrected as COMMITTED"
-                    );
-                    System.out.println("UPLOAD_CRASH_AFTER_PUT_RECOVERED oldLeader=" + oldLeader +
+                    if (crashPhase == SharedObjectUploadHook.Phase.AFTER_COMMIT) {
+                        assertCommittedObjectSurvivesCleanupWindow(
+                            bootstrapServers,
+                            verifier,
+                            partition,
+                            crashRange,
+                            crashObjectId,
+                            keyPrefix
+                        );
+                    } else {
+                        waitForCondition(
+                            () -> cleanupClaimed(bootstrapServers, crashObjectId) &&
+                                objectMissing(verifier, crashObjectId),
+                            90_000L,
+                            () -> "Non-authoritative object " + crashObjectId +
+                                " from " + crashPhase + " was not cleanup-fenced and deleted"
+                        );
+                        assertFalse(
+                            metadataSnapshot(bootstrapServers).committedObjects().containsKey(crashObjectId),
+                            "Cleanup-fenced object must never be resurrected as COMMITTED"
+                        );
+                        System.out.println("UPLOAD_CRASH_ORPHAN_CLEANED phase=" + crashPhase +
+                            " objectId=" + crashObjectId + " initiallyPhysical=" + initiallyPhysical +
+                            " key=" + keyPrefix + "/" + crashObjectId);
+                    }
+
+                    System.out.println("UPLOAD_CRASH_" + crashPhase + "_RECOVERED oldLeader=" + oldLeader +
                         " newLeader=" + newLeader + " crashRange=" + crashRange +
                         " records=" + consumed.size());
-                    System.out.println("UPLOAD_CRASH_ORPHAN_CLEANED objectId=" + orphanObjectId +
-                        " key=" + keyPrefix + "/" + orphanObjectId);
                 }
             } finally {
                 stopProcesses(brokers);
                 copyDiagnostics(repositoryRoot);
             }
         }
+    }
+
+    private static void assertPreKillState(
+        SharedObjectUploadHook.Phase crashPhase,
+        BarrierEvidence evidence,
+        boolean physicalObjectExists,
+        MetadataSnapshot snapshot,
+        SharedPartitionId partition,
+        OffsetRange crashRange
+    ) {
+        long objectId = evidence.objectId();
+        assertFalse(
+            snapshot.cleanupStates().containsKey(objectId),
+            "Cleanup must not race ahead of the intentional SIGKILL boundary"
+        );
+
+        switch (crashPhase) {
+            case AFTER_PREPARE -> {
+                assertFalse(
+                    physicalObjectExists,
+                    "AFTER_PREPARE marker must precede creation of the physical S3 object"
+                );
+                assertPrepared(snapshot, evidence);
+                assertFalse(
+                    snapshot.committedObjects().containsKey(objectId),
+                    "AFTER_PREPARE object must not have COMMITTED metadata"
+                );
+                assertFalse(
+                    coverage(snapshot, partition, null).covers(crashRange),
+                    "AFTER_PREPARE object must not advance authoritative remote coverage"
+                );
+            }
+            case AFTER_PUT -> {
+                assertTrue(
+                    physicalObjectExists,
+                    "AFTER_PUT marker must imply a physical S3 object"
+                );
+                assertPrepared(snapshot, evidence);
+                assertFalse(
+                    snapshot.committedObjects().containsKey(objectId),
+                    "AFTER_PUT object must not have COMMITTED metadata"
+                );
+                assertFalse(
+                    coverage(snapshot, partition, null).covers(crashRange),
+                    "AFTER_PUT object must not advance authoritative remote coverage"
+                );
+            }
+            case AFTER_COMMIT -> {
+                assertTrue(
+                    physicalObjectExists,
+                    "AFTER_COMMIT marker must retain the physical S3 object"
+                );
+                assertFalse(
+                    snapshot.preparedObjects().containsKey(objectId),
+                    "AFTER_COMMIT object must no longer be PREPARED"
+                );
+                SharedObjectMetadata committed = snapshot.committedObjects().get(objectId);
+                assertTrue(committed != null, "AFTER_COMMIT object must be authoritative in metadata");
+                assertEquals(evidence.objectSize(), committed.objectSize());
+                assertTrue(
+                    coverage(snapshot, partition, null).covers(crashRange),
+                    "AFTER_COMMIT object must advance authoritative remote coverage before SIGKILL"
+                );
+            }
+        }
+    }
+
+    private static void assertPrepared(MetadataSnapshot snapshot, BarrierEvidence evidence) {
+        Long preparedTime = snapshot.preparedObjects().get(evidence.objectId());
+        assertTrue(preparedTime != null, "Paused non-authoritative object must have PREPARED metadata");
+        assertEquals(
+            evidence.createdTimeMs(),
+            preparedTime.longValue(),
+            "Paused object must retain its PREPARED generation"
+        );
+    }
+
+    private static void waitForCrashRangeRecovery(
+        SharedObjectUploadHook.Phase crashPhase,
+        String bootstrapServers,
+        SharedPartitionId partition,
+        OffsetRange crashRange,
+        long crashObjectId,
+        int newLeader
+    ) throws Exception {
+        if (crashPhase == SharedObjectUploadHook.Phase.AFTER_COMMIT) {
+            waitForCondition(
+                () -> {
+                    MetadataSnapshot snapshot = metadataSnapshot(bootstrapServers);
+                    return snapshot.committedObjects().containsKey(crashObjectId) &&
+                        coverage(snapshot, partition, null).covers(crashRange);
+                },
+                90_000L,
+                () -> "Committed object " + crashObjectId +
+                    " did not remain authoritative after its leader was SIGKILLed"
+            );
+        } else {
+            waitForCondition(
+                () -> brokerCoverage(bootstrapServers, partition, newLeader).covers(crashRange),
+                90_000L,
+                () -> "Replacement leader " + newLeader +
+                    " never committed the pre-SIGKILL acknowledged range " + crashRange +
+                    " after " + crashPhase
+            );
+        }
+    }
+
+    private static void assertCommittedObjectSurvivesCleanupWindow(
+        String bootstrapServers,
+        S3ObjectStore verifier,
+        SharedPartitionId partition,
+        OffsetRange crashRange,
+        long objectId,
+        String keyPrefix
+    ) throws Exception {
+        Thread.sleep(ORPHAN_GRACE_MS + (4L * ORPHAN_CLEANUP_INTERVAL_MS) + 2_000L);
+        MetadataSnapshot afterCleanupWindow = metadataSnapshot(bootstrapServers);
+        assertTrue(
+            afterCleanupWindow.committedObjects().containsKey(objectId),
+            "Committed object must remain authoritative after the orphan-cleanup grace window"
+        );
+        assertFalse(
+            afterCleanupWindow.cleanupStates().containsKey(objectId),
+            "Orphan cleaner must never claim a COMMITTED object"
+        );
+        assertTrue(
+            objectExists(verifier, objectId),
+            "Orphan cleaner must never delete a COMMITTED physical object"
+        );
+        assertTrue(
+            coverage(afterCleanupWindow, partition, null).covers(crashRange),
+            "Committed coverage must survive the cleanup window"
+        );
+        System.out.println("UPLOAD_CRASH_COMMITTED_OBJECT_RETAINED phase=AFTER_COMMIT objectId=" + objectId +
+            " key=" + keyPrefix + "/" + objectId);
     }
 
     private Path writeBrokerConfig(
@@ -262,7 +414,8 @@ class S3SharedStorageUploadCrashE2ETest {
         String bucket,
         String region,
         String keyPrefix,
-        Path barrierDir
+        Path barrierDir,
+        SharedObjectUploadHook.Phase crashPhase
     ) throws IOException {
         Path nodeDir = tempDir.resolve("node-" + nodeId);
         Path dataDir = nodeDir.resolve("data");
@@ -309,7 +462,7 @@ class S3SharedStorageUploadCrashE2ETest {
             "shared.storage.s3.key.prefix=" + keyPrefix,
             "shared.storage.s3.path.style=true",
             "shared.storage.s3.io.threads=2",
-            FileSharedObjectUploadBarrier.PAUSE_AFTER_CONFIG + "=AFTER_PUT",
+            FileSharedObjectUploadBarrier.PAUSE_AFTER_CONFIG + "=" + crashPhase,
             FileSharedObjectUploadBarrier.BARRIER_DIR_CONFIG + "=" + barrierDir.toAbsolutePath(),
             ""
         );
@@ -613,6 +766,7 @@ class S3SharedStorageUploadCrashE2ETest {
             properties.load(reader);
         }
         return new BarrierEvidence(
+            SharedObjectUploadHook.Phase.valueOf(properties.getProperty("phase")),
             Long.parseLong(properties.getProperty("objectId")),
             Long.parseLong(properties.getProperty("createdTimeMs")),
             Long.parseLong(properties.getProperty("objectSize"))
@@ -652,6 +806,19 @@ class S3SharedStorageUploadCrashE2ETest {
 
     private static SharedPartitionId sharedPartitionId(Uuid topicId, int partition) {
         return new SharedPartitionId(topicId.getMostSignificantBits(), topicId.getLeastSignificantBits(), partition);
+    }
+
+    private static SharedObjectUploadHook.Phase crashPhase() {
+        String configured = environment(CRASH_PHASE_ENV, SharedObjectUploadHook.Phase.AFTER_PUT.name());
+        try {
+            return SharedObjectUploadHook.Phase.valueOf(configured.trim());
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException(
+                "Unsupported " + CRASH_PHASE_ENV + " value '" + configured + "'. Expected one of " +
+                    List.of(SharedObjectUploadHook.Phase.values()),
+                e
+            );
+        }
     }
 
     private static void sigkill(long pid) throws Exception {
@@ -766,9 +933,14 @@ class S3SharedStorageUploadCrashE2ETest {
         boolean getAsBoolean() throws Exception;
     }
 
-    private record BarrierEvidence(long objectId, long createdTimeMs, long objectSize) {
+    private record BarrierEvidence(
+        SharedObjectUploadHook.Phase phase,
+        long objectId,
+        long createdTimeMs,
+        long objectSize
+    ) {
         private BarrierEvidence {
-            if (objectId <= 0 || createdTimeMs < 0 || objectSize <= 0) {
+            if (phase == null || objectId <= 0 || createdTimeMs < 0 || objectSize <= 0) {
                 throw new IllegalArgumentException("Invalid upload barrier evidence");
             }
         }
