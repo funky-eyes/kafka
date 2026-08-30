@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.storage.internals.shared;
 
+import org.apache.kafka.storage.internals.shared.metadata.LocalRemoteObjectCheckpoint;
 import org.apache.kafka.storage.internals.shared.metadata.OffsetRange;
 import org.apache.kafka.storage.internals.shared.metadata.RemoteObjectIndex;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
@@ -34,6 +35,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
  * Kafka-independent core of the shared storage data plane.
@@ -46,9 +48,27 @@ public final class SharedStorageEngine implements AutoCloseable {
     private final SharedWal wal;
     private final PartitionWalIndex walIndex = new PartitionWalIndex();
     private final RemoteObjectIndex remoteIndex = new RemoteObjectIndex();
+    private final LocalRemoteObjectCheckpoint remoteCheckpoint;
+    private final ConcurrentLinkedQueue<SharedObjectMetadata> pendingRemoteCheckpoints = new ConcurrentLinkedQueue<>();
+    private final Object checkpointMaintenanceLock = new Object();
 
     public SharedStorageEngine(SharedWal wal) throws IOException {
+        this(wal, null);
+    }
+
+    /**
+     * Creates an engine with an optional crash-safe local remote-range checkpoint.
+     *
+     * <p>The checkpoint is restored before WAL replay. A broker whose old local WAL segments have already been
+     * reclaimed can therefore reconstruct remote coverage before Kafka starts loading partition logs. The compacted
+     * Kafka metadata topic will replay the same logical ranges later and remains the cluster-wide source of truth.</p>
+     */
+    public SharedStorageEngine(SharedWal wal, LocalRemoteObjectCheckpoint remoteCheckpoint) throws IOException {
         this.wal = Objects.requireNonNull(wal, "wal");
+        this.remoteCheckpoint = remoteCheckpoint;
+        if (remoteCheckpoint != null) {
+            remoteIndex.restore(remoteCheckpoint.references());
+        }
         wal.replay(walIndex::apply);
     }
 
@@ -339,8 +359,55 @@ public final class SharedStorageEngine implements AutoCloseable {
         return List.copyOf(result);
     }
 
+    /**
+     * Publishes authoritative remote coverage without performing local disk I/O on the metadata-consumer thread.
+     *
+     * <p>When a local checkpoint is configured, the committed object is queued for the maintenance thread. Physical
+     * WAL reclamation must never use the queued state; it may only use ranges that have crossed
+     * {@link #checkpointCommittedRemoteObjects()} successfully.</p>
+     */
     public void commitRemoteObject(SharedObjectMetadata object) {
-        remoteIndex.add(Objects.requireNonNull(object, "object"));
+        SharedObjectMetadata committed = Objects.requireNonNull(object, "object");
+        remoteIndex.add(committed);
+        if (remoteCheckpoint != null) {
+            pendingRemoteCheckpoints.add(committed);
+        }
+    }
+
+    /**
+     * Persists all currently queued authoritative remote COMMITs in one crash-safe local checkpoint rewrite.
+     *
+     * <p>On failure the drained objects are re-enqueued before the exception is propagated. Duplicate retries are safe
+     * because the checkpoint deduplicates identical logical ranges. This method is intended for one maintenance thread;
+     * the explicit lock also makes accidental concurrent calls safe.</p>
+     *
+     * @return number of remote object COMMITs crossed by this checkpoint durability barrier
+     */
+    public int checkpointCommittedRemoteObjects() throws IOException {
+        if (remoteCheckpoint == null) {
+            return 0;
+        }
+        synchronized (checkpointMaintenanceLock) {
+            List<SharedObjectMetadata> drained = new ArrayList<>();
+            SharedObjectMetadata object;
+            while ((object = pendingRemoteCheckpoints.poll()) != null) {
+                drained.add(object);
+            }
+            if (drained.isEmpty()) {
+                return 0;
+            }
+            try {
+                remoteCheckpoint.addAll(drained);
+                return drained.size();
+            } catch (IOException e) {
+                drained.forEach(pendingRemoteCheckpoints::add);
+                throw e;
+            }
+        }
+    }
+
+    int pendingRemoteCheckpointCount() {
+        return pendingRemoteCheckpoints.size();
     }
 
     public RemoteObjectIndex remoteIndex() {
