@@ -23,6 +23,7 @@ import org.apache.kafka.storage.internals.shared.object.SharedObjectUploader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -44,6 +45,11 @@ import java.util.function.LongSupplier;
  * those commit windows on its own thread, accepts current local leaders only, filters candidates strictly below Kafka
  * HW, merges them by physical WAL order and delegates the durable object/metadata protocol to
  * {@link SharedObjectUploader}.</p>
+ *
+ * <p>The same maintenance thread also persists remote COMMIT references into the broker-local crash-safe checkpoint.
+ * Metadata-consumer callbacks only enqueue that work and never perform filesystem I/O. Checkpoint failure does not
+ * stop additional remote uploads, but it remains observable through {@link #lastFailure()} and prevents later WAL
+ * reclamation from treating the uncheckpointed ranges as locally recoverable.</p>
  */
 public final class SharedUploadScheduler implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(SharedUploadScheduler.class);
@@ -56,7 +62,8 @@ public final class SharedUploadScheduler implements AutoCloseable {
     private final long targetObjectBytes;
     private final AtomicBoolean uploadInProgress = new AtomicBoolean();
     private final AtomicBoolean closed = new AtomicBoolean();
-    private final AtomicReference<Throwable> lastFailure = new AtomicReference<>();
+    private final AtomicReference<Throwable> lastUploadFailure = new AtomicReference<>();
+    private final AtomicReference<Throwable> lastMaintenanceFailure = new AtomicReference<>();
     private final AtomicReference<SelectionSummary> lastSelectionSummary = new AtomicReference<>();
 
     private ScheduledExecutorService executor;
@@ -141,9 +148,9 @@ public final class SharedUploadScheduler implements AutoCloseable {
         }
         return result.whenComplete((ignored, error) -> {
             if (error == null) {
-                lastFailure.set(null);
+                lastUploadFailure.set(null);
             } else {
-                lastFailure.set(error);
+                lastUploadFailure.set(error);
                 LOG.warn("Shared object upload failed", error);
             }
             uploadInProgress.set(false);
@@ -151,14 +158,35 @@ public final class SharedUploadScheduler implements AutoCloseable {
     }
 
     private CompletableFuture<Optional<SharedObjectMetadata>> synchronousFailure(RuntimeException error) {
-        lastFailure.set(error);
+        lastUploadFailure.set(error);
         uploadInProgress.set(false);
         LOG.warn("Shared upload scheduling failed before the asynchronous object PUT started", error);
         return CompletableFuture.failedFuture(error);
     }
 
     public Optional<Throwable> lastFailure() {
-        return Optional.ofNullable(lastFailure.get());
+        Throwable maintenance = lastMaintenanceFailure.get();
+        return Optional.ofNullable(maintenance != null ? maintenance : lastUploadFailure.get());
+    }
+
+    /**
+     * Persists queued authoritative remote COMMITs on the maintenance thread.
+     *
+     * @return number of object COMMITs crossed by the local checkpoint durability barrier, or zero after a failure
+     */
+    int checkpointRemoteCommitsOnce() {
+        try {
+            int checkpointed = engine.checkpointCommittedRemoteObjects();
+            lastMaintenanceFailure.set(null);
+            if (checkpointed > 0) {
+                LOG.debug("Checkpointed {} committed shared objects for local WAL recovery", checkpointed);
+            }
+            return checkpointed;
+        } catch (IOException e) {
+            lastMaintenanceFailure.set(e);
+            LOG.warn("Unable to persist committed shared-object ranges for local WAL recovery", e);
+            return 0;
+        }
     }
 
     List<SharedStorageEngine.UploadCandidate> selectCandidates() {
@@ -228,9 +256,10 @@ public final class SharedUploadScheduler implements AutoCloseable {
     }
 
     private void runScheduledUpload() {
+        checkpointRemoteCommitsOnce();
         tryUploadOnce().whenComplete((ignored, error) -> {
             if (error != null) {
-                lastFailure.set(error);
+                lastUploadFailure.set(error);
             }
         });
     }
