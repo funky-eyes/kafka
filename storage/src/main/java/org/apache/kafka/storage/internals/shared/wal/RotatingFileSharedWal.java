@@ -37,13 +37,13 @@ import java.util.stream.Stream;
  *
  * <p>The underlying WAL remains the single-writer, group-commit implementation. Reclamation temporarily blocks new
  * operations, waits for already admitted async appends to finish, closes the writer, deletes only a contiguous prefix
- * of sealed segment files whose complete append groups are approved by the supplied {@link WalReclaimPolicy}, fsyncs
- * the WAL directory, and reopens the writer. This deliberately favors safety over reclamation aggressiveness.</p>
+ * of segment files whose complete append groups are approved by the supplied {@link WalReclaimPolicy}, fsyncs the WAL
+ * directory, and reopens the writer. This deliberately favors safety over reclamation aggressiveness.</p>
  *
- * <p>The initial implementation only deletes through a physical segment boundary that is also an append-group
- * boundary. A group spanning two files therefore pins both files until a later safe boundary exists. This constraint
- * keeps crash recovery compatible with {@link FileSharedWal} without introducing a reclaim checkpoint in the first
- * step; a later checkpoint can safely relax the constraint.</p>
+ * <p>Deletion is permitted only through a physical segment boundary that is also an append-group boundary. A group
+ * spanning two files therefore pins both files until its commit marker is safely covered. Bounded reclamation stops at
+ * the first such boundary providing the requested headroom, retaining newer remotely committed WAL as a local recovery
+ * window instead of eagerly discarding it.</p>
  */
 public final class RotatingFileSharedWal implements SharedWal {
     private static final Pattern SEGMENT_FILE_PATTERN = Pattern.compile("wal-(\\d{20})\\.log");
@@ -117,8 +117,11 @@ public final class RotatingFileSharedWal implements SharedWal {
     }
 
     @Override
-    public long reclaim(WalReclaimPolicy policy) throws IOException {
+    public long reclaim(WalReclaimPolicy policy, long desiredBytes) throws IOException {
         Objects.requireNonNull(policy, "policy");
+        if (desiredBytes <= 0) {
+            throw new IllegalArgumentException("desiredBytes must be positive");
+        }
         FileSharedWal oldDelegate;
         synchronized (lifecycleLock) {
             awaitReclaim();
@@ -134,7 +137,7 @@ public final class RotatingFileSharedWal implements SharedWal {
         long reclaimedBytes = 0L;
         try {
             oldDelegate.close();
-            ReclaimPlan plan = buildReclaimPlan(policy);
+            ReclaimPlan plan = buildReclaimPlan(policy, desiredBytes);
             reclaimedBytes = deleteReclaimableSegments(plan);
         } catch (IOException e) {
             failure = e;
@@ -240,14 +243,17 @@ public final class RotatingFileSharedWal implements SharedWal {
         }
     }
 
-    private ReclaimPlan buildReclaimPlan(WalReclaimPolicy policy) throws IOException {
+    private ReclaimPlan buildReclaimPlan(WalReclaimPolicy policy, long desiredBytes) throws IOException {
         List<Path> segments = segmentFiles();
         List<GroupEntry> pendingGroup = new ArrayList<>();
         long safeBoundarySegmentId = -1L;
+        long safeBoundaryBytes = 0L;
+        long scannedSegmentBytes = 0L;
         boolean prefixReclaimable = true;
 
         for (Path segment : segments) {
             long segmentId = parseSegmentId(segment);
+            boolean scannedWholeSegment = true;
             try (FileChannel channel = FileChannel.open(segment, StandardOpenOption.READ)) {
                 long position = 0L;
                 while (prefixReclaimable) {
@@ -278,6 +284,7 @@ public final class RotatingFileSharedWal implements SharedWal {
                         pendingGroup.clear();
                         if (!reclaimGroup) {
                             prefixReclaimable = false;
+                            scannedWholeSegment = false;
                             break;
                         }
                     } else {
@@ -289,14 +296,19 @@ public final class RotatingFileSharedWal implements SharedWal {
                     position += result.length();
                 }
             }
-            if (!prefixReclaimable) {
+            if (!scannedWholeSegment || !prefixReclaimable) {
                 break;
             }
+            scannedSegmentBytes = Math.addExact(scannedSegmentBytes, Files.size(segment));
             if (pendingGroup.isEmpty()) {
                 safeBoundarySegmentId = segmentId;
+                safeBoundaryBytes = scannedSegmentBytes;
+                if (safeBoundaryBytes >= desiredBytes) {
+                    break;
+                }
             }
         }
-        return new ReclaimPlan(safeBoundarySegmentId);
+        return new ReclaimPlan(safeBoundarySegmentId, safeBoundaryBytes);
     }
 
     private long deleteReclaimableSegments(ReclaimPlan plan) throws IOException {
@@ -312,6 +324,11 @@ public final class RotatingFileSharedWal implements SharedWal {
             }
             reclaimedBytes = Math.addExact(reclaimedBytes, Files.size(segment));
             deleted |= Files.deleteIfExists(segment);
+        }
+        if (reclaimedBytes != plan.safeBoundaryBytes()) {
+            throw new IOException(
+                "WAL reclaim plan changed while writer was stopped: planned=" + plan.safeBoundaryBytes() +
+                    ", actual=" + reclaimedBytes);
         }
         if (deleted) {
             Utils.flushDir(directory.toAbsolutePath().normalize());
@@ -352,6 +369,6 @@ public final class RotatingFileSharedWal implements SharedWal {
     private record GroupEntry(WalRecord record, WalAppendResult appendResult) {
     }
 
-    private record ReclaimPlan(long safeBoundarySegmentId) {
+    private record ReclaimPlan(long safeBoundarySegmentId, long safeBoundaryBytes) {
     }
 }
