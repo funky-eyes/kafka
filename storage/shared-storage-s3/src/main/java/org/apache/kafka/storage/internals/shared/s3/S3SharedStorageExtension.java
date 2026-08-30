@@ -30,6 +30,7 @@ import org.apache.kafka.storage.internals.shared.kafka.SharedStorageConfiguratio
 import org.apache.kafka.storage.internals.shared.kafka.SharedUnifiedLogFactory;
 import org.apache.kafka.storage.internals.shared.kafka.SharedUploadScheduler;
 import org.apache.kafka.storage.internals.shared.metadata.BrokerObjectId;
+import org.apache.kafka.storage.internals.shared.metadata.LocalRemoteObjectCheckpoint;
 import org.apache.kafka.storage.internals.shared.object.ActiveObjectUploads;
 import org.apache.kafka.storage.internals.shared.object.OrphanCleanupScheduler;
 import org.apache.kafka.storage.internals.shared.object.OrphanObjectCleaner;
@@ -54,10 +55,11 @@ import java.util.function.LongSupplier;
 /**
  * Production shared-storage extension using a broker-wide replicated WAL, Kafka-backed authoritative metadata and S3.
  *
- * <p>{@link #start(StorageExtensionContext)} performs only local WAL recovery and installs the shared log factory, so
- * Kafka can load partitions before network listeners are available. {@link #onBrokerReady(StorageExtensionBrokerContext)}
- * then replays the classic metadata topic, fences the broker-scoped object-ID allocator, restores remote coverage and
- * finally starts asynchronous S3 upload and orphan cleanup. Kafka's broker-startup deadline gates the returned future.</p>
+ * <p>{@link #start(StorageExtensionContext)} performs only local WAL and remote-checkpoint recovery and installs the
+ * shared log factory, so Kafka can load partitions before network listeners are available.
+ * {@link #onBrokerReady(StorageExtensionBrokerContext)} then replays the classic metadata topic, fences the
+ * broker-scoped object-ID allocator, restores authoritative remote coverage and finally starts asynchronous S3 upload
+ * and orphan cleanup. Kafka's broker-startup deadline gates the returned future.</p>
  */
 public final class S3SharedStorageExtension implements KafkaStorageExtension {
     private static final int DEFAULT_OBJECT_ID_BLOCK_SIZE = 4_096;
@@ -92,7 +94,9 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             configuration.walSegmentBytes()
         );
         try {
-            SharedStorageEngine newStorage = new SharedStorageEngine(wal);
+            LocalRemoteObjectCheckpoint remoteCheckpoint =
+                new LocalRemoteObjectCheckpoint(configuration.walDir());
+            SharedStorageEngine newStorage = new SharedStorageEngine(wal, remoteCheckpoint);
             SharedCommitProgress newCommitProgress = new SharedCommitProgress();
             UnifiedLogFactory newFactory = new RoutingUnifiedLogFactory(
                 configuration,
