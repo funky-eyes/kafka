@@ -16,5 +16,61 @@
  */
 package org.apache.kafka.storage.internals.shared.wal;
 
-public record WalAppendResult(long segmentId, long position, int length) {
+/**
+ * Stable logical address returned after a WAL record crosses the durability barrier.
+ *
+ * <p>The canonical contract is a monotonically increasing logical offset plus encoded length. Physical extent ids,
+ * file positions, ring slots and generations are backend implementation details. The deprecated physical accessors are
+ * a migration bridge for callers that have not yet moved to {@link #offset()} and will be removed once the storage
+ * engine boundary is fully converted.</p>
+ */
+public record WalAppendResult(long offset, int length) {
+    private static final int PHYSICAL_POSITION_BITS = 32;
+    private static final long PHYSICAL_POSITION_MASK = (1L << PHYSICAL_POSITION_BITS) - 1L;
+    private static final long MAX_PHYSICAL_EXTENT_ID = Integer.MAX_VALUE;
+
+    public WalAppendResult {
+        if (offset < 0 || length < WalRecordCodec.HEADER_BYTES) {
+            throw new IllegalArgumentException("invalid logical WAL append result");
+        }
+    }
+
+    /** Internal adapter used by the current rotating-file backend. */
+    WalAppendResult(long extentId, long position, int length) {
+        this(encodePhysical(extentId, position), length);
+    }
+
+    /** @deprecated use {@link #offset()}; physical layout must not escape the WAL backend. */
+    @Deprecated(forRemoval = true)
+    public long segmentId() {
+        return extentId(offset);
+    }
+
+    /** @deprecated use {@link #offset()}; physical layout must not escape the WAL backend. */
+    @Deprecated(forRemoval = true)
+    public long position() {
+        return extentPosition(offset);
+    }
+
+    static long encodePhysical(long extentId, long position) {
+        if (extentId < 0 || extentId > MAX_PHYSICAL_EXTENT_ID) {
+            throw new IllegalArgumentException("invalid WAL extent id: " + extentId);
+        }
+        if (position < 0 || position > PHYSICAL_POSITION_MASK) {
+            throw new IllegalArgumentException("invalid WAL extent position: " + position);
+        }
+        return (extentId << PHYSICAL_POSITION_BITS) | position;
+    }
+
+    static long extentId(long offset) {
+        return offset >>> PHYSICAL_POSITION_BITS;
+    }
+
+    static long extentPosition(long offset) {
+        return offset & PHYSICAL_POSITION_MASK;
+    }
+
+    static long firstOffsetAfterExtent(long extentId) {
+        return encodePhysical(Math.addExact(extentId, 1L), 0L);
+    }
 }

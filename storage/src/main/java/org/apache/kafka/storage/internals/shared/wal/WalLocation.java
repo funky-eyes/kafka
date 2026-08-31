@@ -16,9 +16,15 @@
  */
 package org.apache.kafka.storage.internals.shared.wal;
 
+/**
+ * Logical WAL address plus Kafka batch metadata used by the in-memory partition index.
+ *
+ * <p>The canonical identity is {@code walOffset}; no caller needs a physical file/position pair. Deprecated physical
+ * accessors remain only as a short-lived migration bridge for the existing file backend and will be deleted after all
+ * upper-layer callers move to the logical address.</p>
+ */
 public record WalLocation(
-    long segmentId,
-    long position,
+    long walOffset,
     int length,
     int payloadLength,
     int leaderEpoch,
@@ -26,35 +32,51 @@ public record WalLocation(
     long lastOffset
 ) {
     public WalLocation {
-        if (segmentId < 0 || position < 0 || length < WalRecordCodec.HEADER_BYTES) {
-            throw new IllegalArgumentException("invalid physical WAL location");
+        if (walOffset < 0 || length < WalRecordCodec.HEADER_BYTES) {
+            throw new IllegalArgumentException("invalid logical WAL location");
         }
         if (payloadLength < 0 || payloadLength != length - WalRecordCodec.HEADER_BYTES) {
             throw new IllegalArgumentException("invalid WAL payload length");
         }
         if (firstOffset < 0 || lastOffset < firstOffset) {
-            throw new IllegalArgumentException("invalid logical WAL range");
+            throw new IllegalArgumentException("invalid logical Kafka range");
         }
     }
 
-    /** Compatibility constructor for indexed DATA records. */
+    public WalLocation(long walOffset, int length, int leaderEpoch, long firstOffset, long lastOffset) {
+        this(walOffset, length, length - WalRecordCodec.HEADER_BYTES, leaderEpoch, firstOffset, lastOffset);
+    }
+
+    /** @deprecated migration bridge; physical layout must not escape the WAL backend. */
+    @Deprecated(forRemoval = true)
     public WalLocation(
-        long segmentId,
+        long extentId,
         long position,
         int length,
+        int payloadLength,
         int leaderEpoch,
         long firstOffset,
         long lastOffset
     ) {
-        this(
-            segmentId,
-            position,
-            length,
-            length - WalRecordCodec.HEADER_BYTES,
-            leaderEpoch,
-            firstOffset,
-            lastOffset
-        );
+        this(WalAppendResult.encodePhysical(extentId, position), length, payloadLength, leaderEpoch, firstOffset, lastOffset);
+    }
+
+    /** @deprecated migration bridge; physical layout must not escape the WAL backend. */
+    @Deprecated(forRemoval = true)
+    public WalLocation(long extentId, long position, int length, int leaderEpoch, long firstOffset, long lastOffset) {
+        this(WalAppendResult.encodePhysical(extentId, position), length, leaderEpoch, firstOffset, lastOffset);
+    }
+
+    /** @deprecated use {@link #walOffset()}. */
+    @Deprecated(forRemoval = true)
+    public long segmentId() {
+        return WalAppendResult.extentId(walOffset);
+    }
+
+    /** @deprecated use {@link #walOffset()}. */
+    @Deprecated(forRemoval = true)
+    public long position() {
+        return WalAppendResult.extentPosition(walOffset);
     }
 
     public boolean contains(long offset) {

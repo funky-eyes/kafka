@@ -49,20 +49,19 @@ public interface SharedWal extends AutoCloseable {
     void replay(WalReplayConsumer consumer) throws IOException;
 
     /**
-     * Reclaims the complete safe physical prefix currently allowed by {@code policy}.
+     * Reclaims the complete safe local WAL prefix currently allowed by {@code policy}.
      */
     default long reclaim(WalReclaimPolicy policy) throws IOException {
         return reclaim(policy, Long.MAX_VALUE);
     }
 
     /**
-     * Reclaims a contiguous physical WAL prefix that is no longer required for recovery.
+     * Reclaims a contiguous local WAL prefix that is no longer required for recovery.
      *
-     * <p>Implementations supporting rotation must preserve append-group atomicity and must never reclaim a record for
-     * which {@code policy} returns false. Reclamation stops at the first safe physical segment boundary after at least
-     * {@code desiredBytes} have been selected. The released byte count may therefore exceed {@code desiredBytes} by a
-     * segment, while an unsafe append group may cause fewer bytes to be released. This lets a rotating WAL create only
-     * the headroom it currently needs instead of eagerly discarding every remotely committed local recovery copy.</p>
+     * <p>The public contract is expressed only in logical WAL order. An implementation may reclaim file extents,
+     * circular slots, or other internal allocation units, but must preserve append-group atomicity and must never
+     * reclaim a record for which {@code policy} returns false. The released byte count may exceed
+     * {@code desiredBytes} because backend allocation units can be coarser than a logical record.</p>
      */
     default long reclaim(WalReclaimPolicy policy, long desiredBytes) throws IOException {
         Objects.requireNonNull(policy, "policy");
@@ -73,12 +72,22 @@ public interface SharedWal extends AutoCloseable {
     }
 
     /**
-     * Highest monotonically increasing logical segment id that has been physically reclaimed.
+     * Exclusive logical WAL offset below which records are no longer locally readable.
      *
-     * <p>The default {@code -1} means the implementation cannot expose a physical reclamation boundary and callers
-     * must fall back to replay-based index reconstruction. Implementations that recycle fixed physical slots should
-     * still advance a logical segment/generation id on every reuse, so this boundary remains valid for circular WALs.</p>
+     * <p>The default {@code -1} means the implementation cannot expose a stable logical reclamation watermark and
+     * callers must fall back to replay-based index reconstruction.</p>
      */
+    default long reclaimedBeforeOffset() {
+        long reclaimedExtent = reclaimedThroughSegmentId();
+        return reclaimedExtent < 0 ? -1L : WalAppendResult.firstOffsetAfterExtent(reclaimedExtent);
+    }
+
+    /**
+     * Temporary migration bridge for the current rotating-file backend.
+     *
+     * @deprecated physical allocation identity is backend-private; use {@link #reclaimedBeforeOffset()}.
+     */
+    @Deprecated(forRemoval = true)
     default long reclaimedThroughSegmentId() {
         return -1L;
     }
