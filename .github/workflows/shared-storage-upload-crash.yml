@@ -22,6 +22,7 @@ on:
     paths:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/object/SharedObjectUploadHook.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/object/SharedObjectUploader.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/wal/**'
       - 'storage/shared-storage-s3/src/main/**'
       - 'storage/shared-storage-s3/src/test/java/org/apache/kafka/storage/internals/shared/s3/S3SharedStorageUploadCrashE2ETest.java'
       - '.github/workflows/shared-storage-upload-crash.yml'
@@ -29,6 +30,7 @@ on:
     paths:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/object/SharedObjectUploadHook.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/object/SharedObjectUploader.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/wal/**'
       - 'storage/shared-storage-s3/src/main/**'
       - 'storage/shared-storage-s3/src/test/java/org/apache/kafka/storage/internals/shared/s3/S3SharedStorageUploadCrashE2ETest.java'
       - '.github/workflows/shared-storage-upload-crash.yml'
