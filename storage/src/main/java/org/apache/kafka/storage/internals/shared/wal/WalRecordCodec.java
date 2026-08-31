@@ -20,7 +20,6 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-import java.nio.channels.FileChannel;
 import java.util.zip.CRC32C;
 
 final class WalRecordCodec {
@@ -76,8 +75,8 @@ final class WalRecordCodec {
         return new EncodedRecord(header, payload, totalLength);
     }
 
-    static ReadResult read(FileChannel channel, long position) throws IOException {
-        long remaining = channel.size() - position;
+    static ReadResult read(WalIoBackend.Handle handle, long position) throws IOException {
+        long remaining = handle.size() - position;
         if (remaining == 0) {
             return ReadResult.eof(position);
         }
@@ -85,21 +84,21 @@ final class WalRecordCodec {
             return ReadResult.partial(position);
         }
 
-        Prefix prefix = readPrefix(channel, position);
+        Prefix prefix = readPrefix(handle, position);
         validatePrefix(prefix, position);
         if (remaining < prefix.totalLength()) {
             return ReadResult.partial(position);
         }
 
         WalRecordType type = recordType(prefix.typeId(), position);
-        ByteBuffer body = readAndValidateBody(channel, position, prefix);
+        ByteBuffer body = readAndValidateBody(handle, position, prefix);
         WalRecord record = decodeRecord(type, body, position);
         return ReadResult.complete(position, prefix.totalLength(), record);
     }
 
-    private static Prefix readPrefix(FileChannel channel, long position) throws IOException {
+    private static Prefix readPrefix(WalIoBackend.Handle handle, long position) throws IOException {
         ByteBuffer buffer = ByteBuffer.allocate(PREFIX_BYTES).order(ByteOrder.BIG_ENDIAN);
-        readFully(channel, buffer, position);
+        readFully(handle, buffer, position);
         buffer.flip();
         return new Prefix(
             buffer.getInt(),
@@ -139,13 +138,13 @@ final class WalRecordCodec {
     }
 
     private static ByteBuffer readAndValidateBody(
-        FileChannel channel,
+        WalIoBackend.Handle handle,
         long position,
         Prefix prefix
     ) throws IOException {
         int bodyLength = prefix.totalLength() - PREFIX_BYTES;
         ByteBuffer body = ByteBuffer.allocate(bodyLength).order(ByteOrder.BIG_ENDIAN);
-        readFully(channel, body, position + PREFIX_BYTES);
+        readFully(handle, body, position + PREFIX_BYTES);
         body.flip();
 
         CRC32C crc = new CRC32C();
@@ -238,10 +237,10 @@ final class WalRecordCodec {
         }
     }
 
-    private static void readFully(FileChannel channel, ByteBuffer buffer, long position) throws IOException {
+    private static void readFully(WalIoBackend.Handle handle, ByteBuffer buffer, long position) throws IOException {
         long currentPosition = position;
         while (buffer.hasRemaining()) {
-            int read = channel.read(buffer, currentPosition);
+            int read = handle.read(buffer, currentPosition);
             if (read < 0) {
                 throw new EOFException("Unexpected EOF while reading WAL at position " + currentPosition);
             }

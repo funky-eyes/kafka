@@ -20,10 +20,8 @@ import org.apache.kafka.common.utils.Utils;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
@@ -47,9 +45,9 @@ import java.util.stream.Stream;
  * Replay exposes the group only when its commit marker is present and valid. This makes a multi-RecordBatch Kafka
  * append crash-atomic even when the group crosses physical WAL segments.</p>
  *
- * <p>Append futures complete only after the full drained writer batch is persisted with
- * {@link FileChannel#force(boolean)}. When a new segment is created, its parent directory is also flushed before
- * futures complete.</p>
+ * <p>Append futures complete only after the full drained writer batch crosses the physical durability barrier exposed
+ * by {@link WalIoBackend.Handle#force()}. Physical I/O is delegated to {@link WalIoBackend}; Kafka offset, append-group,
+ * capacity, recovery and reclaim semantics remain in this state machine.</p>
  */
 public final class FileSharedWal implements SharedWal {
     private static final Pattern SEGMENT_FILE_PATTERN = Pattern.compile("wal-(\\d{20})\\.log");
@@ -58,6 +56,7 @@ public final class FileSharedWal implements SharedWal {
     private final Path directory;
     private final long capacityBytes;
     private final long segmentBytes;
+    private final WalIoBackend ioBackend;
     private final LinkedBlockingQueue<PendingAppend> pendingAppends = new LinkedBlockingQueue<>();
     private final AtomicBoolean running = new AtomicBoolean(true);
     private final AtomicBoolean closed = new AtomicBoolean(false);
@@ -73,7 +72,12 @@ public final class FileSharedWal implements SharedWal {
     private long nextSegmentId;
 
     public FileSharedWal(Path directory, long capacityBytes, long segmentBytes) throws IOException {
+        this(directory, capacityBytes, segmentBytes, new FileChannelWalIoBackend());
+    }
+
+    FileSharedWal(Path directory, long capacityBytes, long segmentBytes, WalIoBackend ioBackend) throws IOException {
         this.directory = Objects.requireNonNull(directory, "directory");
+        this.ioBackend = Objects.requireNonNull(ioBackend, "ioBackend");
         if (capacityBytes <= 0) {
             throw new IllegalArgumentException("capacityBytes must be positive");
         }
@@ -170,8 +174,7 @@ public final class FileSharedWal implements SharedWal {
             if (current == null) {
                 return -1L;
             }
-            forceSegment(current);
-            current.close();
+            current.seal();
             activeSegment = null;
             return current.id;
         }
@@ -196,8 +199,8 @@ public final class FileSharedWal implements SharedWal {
     @Override
     public WalRecord read(WalLocation location) throws IOException {
         Objects.requireNonNull(location, "location");
-        try (FileChannel channel = FileChannel.open(segmentPath(location.segmentId()), StandardOpenOption.READ)) {
-            return readAt(channel, location);
+        try (WalIoBackend.Handle handle = ioBackend.openRead(segmentPath(location.segmentId()))) {
+            return readAt(handle, location);
         }
     }
 
@@ -217,9 +220,9 @@ public final class FileSharedWal implements SharedWal {
 
         WalRecord[] result = new WalRecord[locations.size()];
         for (Map.Entry<Long, List<IndexedLocation>> entry : bySegment.entrySet()) {
-            try (FileChannel channel = FileChannel.open(segmentPath(entry.getKey()), StandardOpenOption.READ)) {
+            try (WalIoBackend.Handle handle = ioBackend.openRead(segmentPath(entry.getKey()))) {
                 for (IndexedLocation indexed : entry.getValue()) {
-                    result[indexed.index] = readAt(channel, indexed.location);
+                    result[indexed.index] = readAt(handle, indexed.location);
                 }
             }
         }
@@ -232,10 +235,10 @@ public final class FileSharedWal implements SharedWal {
         List<ReplayEntry> pendingGroup = new ArrayList<>();
         for (Path segment : segmentFiles()) {
             long segmentId = parseSegmentId(segment);
-            try (FileChannel channel = FileChannel.open(segment, StandardOpenOption.READ)) {
+            try (WalIoBackend.Handle handle = ioBackend.openRead(segment)) {
                 long position = 0;
                 while (true) {
-                    WalRecordCodec.ReadResult result = WalRecordCodec.read(channel, position);
+                    WalRecordCodec.ReadResult result = WalRecordCodec.read(handle, position);
                     if (result.status() == WalRecordCodec.ReadStatus.EOF ||
                         result.status() == WalRecordCodec.ReadStatus.PARTIAL) {
                         break;
@@ -301,6 +304,15 @@ public final class FileSharedWal implements SharedWal {
                     } finally {
                         activeSegment = null;
                     }
+                }
+            }
+            try {
+                ioBackend.close();
+            } catch (IOException e) {
+                if (closeError == null) {
+                    closeError = e;
+                } else {
+                    closeError.addSuppressed(e);
                 }
             }
         }
@@ -397,7 +409,7 @@ public final class FileSharedWal implements SharedWal {
                     int length = encoded.totalLength();
                     ensureWritableSegment(length);
                     long position = activeSegment.position;
-                    writeEncoded(activeSegment.channel, encoded, position);
+                    writeEncoded(activeSegment.handle, encoded, position);
                     activeSegment.position += length;
                     usedBytes.addAndGet(length);
                     if (i < group.userRecordCount) {
@@ -420,18 +432,13 @@ public final class FileSharedWal implements SharedWal {
             return;
         }
         if (activeSegment.position > 0 && activeSegment.position + recordLength > segmentBytes) {
-            forceSegment(activeSegment);
-            activeSegment.close();
+            activeSegment.seal();
             activeSegment = createSegment(nextSegmentId++);
         }
     }
 
     private void forceSegment(SegmentWriter segment) throws IOException {
-        segment.channel.force(false);
-        if (segment.directoryEntryDirty) {
-            Utils.flushDir(directory.toAbsolutePath().normalize());
-            segment.directoryEntryDirty = false;
-        }
+        segment.handle.force();
     }
 
     private RecoveryState recoverSegments() throws IOException {
@@ -463,10 +470,10 @@ public final class FileSharedWal implements SharedWal {
     }
 
     private boolean scanSegment(Path segment, int segmentIndex, RecoveryAccumulator accumulator) throws IOException {
-        try (FileChannel channel = FileChannel.open(segment, StandardOpenOption.READ)) {
+        try (WalIoBackend.Handle handle = ioBackend.openRead(segment)) {
             long position = 0;
             while (true) {
-                WalRecordCodec.ReadResult result = WalRecordCodec.read(channel, position);
+                WalRecordCodec.ReadResult result = WalRecordCodec.read(handle, position);
                 if (result.status() == WalRecordCodec.ReadStatus.EOF) {
                     return false;
                 }
@@ -484,7 +491,7 @@ public final class FileSharedWal implements SharedWal {
         long totalBytes = 0;
         long lastSegmentId = -1;
         for (Path segment : segments) {
-            totalBytes = Math.addExact(totalBytes, Files.size(segment));
+            totalBytes = Math.addExact(totalBytes, ioBackend.size(segment));
             lastSegmentId = Math.max(lastSegmentId, parseSegmentId(segment));
         }
         return new SegmentSummary(totalBytes, lastSegmentId);
@@ -499,9 +506,9 @@ public final class FileSharedWal implements SharedWal {
 
     private void truncateIncompleteTail(List<Path> segments, GroupStart start) throws IOException {
         Path first = segments.get(start.segmentIndex);
-        try (FileChannel channel = FileChannel.open(first, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
-            channel.truncate(start.position);
-            channel.force(false);
+        try (WalIoBackend.Handle handle = ioBackend.reopen(first)) {
+            handle.truncate(start.position);
+            handle.force();
         }
         boolean deleted = false;
         for (int i = start.segmentIndex + 1; i < segments.size(); i++) {
@@ -517,27 +524,19 @@ public final class FileSharedWal implements SharedWal {
             return null;
         }
         Path path = segmentPath(lastSegmentId);
-        long size = Files.size(path);
+        long size = ioBackend.size(path);
         if (size >= segmentBytes) {
             return null;
         }
-        FileChannel channel = FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE);
-        return new SegmentWriter(lastSegmentId, channel, size, false);
+        return new SegmentWriter(lastSegmentId, ioBackend.reopen(path), size);
     }
 
     private SegmentWriter createSegment(long segmentId) throws IOException {
-        Path path = segmentPath(segmentId);
-        FileChannel channel = FileChannel.open(
-            path,
-            StandardOpenOption.CREATE_NEW,
-            StandardOpenOption.READ,
-            StandardOpenOption.WRITE
-        );
-        return new SegmentWriter(segmentId, channel, 0, true);
+        return new SegmentWriter(segmentId, ioBackend.create(segmentPath(segmentId)), 0);
     }
 
-    private WalRecord readAt(FileChannel channel, WalLocation location) throws IOException {
-        WalRecordCodec.ReadResult result = WalRecordCodec.read(channel, location.position());
+    private WalRecord readAt(WalIoBackend.Handle handle, WalLocation location) throws IOException {
+        WalRecordCodec.ReadResult result = WalRecordCodec.read(handle, location.position());
         if (result.status() != WalRecordCodec.ReadStatus.COMPLETE) {
             throw new WalCorruptionException("WAL location does not point to a complete record: " + location);
         }
@@ -582,12 +581,16 @@ public final class FileSharedWal implements SharedWal {
         return Long.parseLong(matcher.group(1));
     }
 
-    private static void writeEncoded(FileChannel channel, WalRecordCodec.EncodedRecord encoded, long position) throws IOException {
+    private static void writeEncoded(
+        WalIoBackend.Handle handle,
+        WalRecordCodec.EncodedRecord encoded,
+        long position
+    ) throws IOException {
         long currentPosition = position;
-        currentPosition += writeFully(channel, encoded.header(), currentPosition);
+        currentPosition += writeFully(handle, encoded.header(), currentPosition);
         ByteBuffer payload = encoded.payload();
         if (payload.hasRemaining()) {
-            currentPosition += writeFully(channel, payload, currentPosition);
+            currentPosition += writeFully(handle, payload, currentPosition);
         }
         if (currentPosition - position != encoded.totalLength()) {
             throw new IOException("WAL write length mismatch: expected=" + encoded.totalLength() +
@@ -595,11 +598,11 @@ public final class FileSharedWal implements SharedWal {
         }
     }
 
-    private static int writeFully(FileChannel channel, ByteBuffer buffer, long position) throws IOException {
+    private static int writeFully(WalIoBackend.Handle handle, ByteBuffer buffer, long position) throws IOException {
         long currentPosition = position;
         int totalWritten = 0;
         while (buffer.hasRemaining()) {
-            int written = channel.write(buffer, currentPosition);
+            int written = handle.write(buffer, currentPosition);
             if (written <= 0) {
                 throw new IOException("Unable to make progress writing WAL at position " + currentPosition);
             }
@@ -723,20 +726,22 @@ public final class FileSharedWal implements SharedWal {
 
     private static final class SegmentWriter implements AutoCloseable {
         private final long id;
-        private final FileChannel channel;
+        private final WalIoBackend.Handle handle;
         private long position;
-        private boolean directoryEntryDirty;
 
-        private SegmentWriter(long id, FileChannel channel, long position, boolean directoryEntryDirty) {
+        private SegmentWriter(long id, WalIoBackend.Handle handle, long position) {
             this.id = id;
-            this.channel = channel;
+            this.handle = handle;
             this.position = position;
-            this.directoryEntryDirty = directoryEntryDirty;
+        }
+
+        private void seal() throws IOException {
+            handle.seal();
         }
 
         @Override
         public void close() throws IOException {
-            channel.close();
+            handle.close();
         }
     }
 }
