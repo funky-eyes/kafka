@@ -115,8 +115,8 @@ public final class PartitionWalIndex {
         }
     }
 
-    /** Temporary migration bridge; use {@link #removeBefore(long)} with a logical WAL reclamation watermark. */
-    public void removeSegmentsThrough(long segmentId) {
+    /** Backend-only bridge while the rotating-file WAL still reports an extent watermark. */
+    void removeSegmentsThrough(long segmentId) {
         if (segmentId < 0) {
             return;
         }

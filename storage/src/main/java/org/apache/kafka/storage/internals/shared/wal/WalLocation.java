@@ -19,9 +19,8 @@ package org.apache.kafka.storage.internals.shared.wal;
 /**
  * Logical WAL address plus Kafka batch metadata used by the in-memory partition index.
  *
- * <p>The canonical identity is {@code walOffset}; no caller needs a physical file/position pair. Physical accessors
- * remain only as a short-lived migration bridge for the existing file backend and will be deleted after all upper-layer
- * callers move to the logical address.</p>
+ * <p>The public identity is {@code walOffset}; no caller outside the WAL backend needs a physical file/position pair.
+ * Package-private physical adapters remain only while the current file backend is being replaced.</p>
  */
 public record WalLocation(
     long walOffset,
@@ -47,8 +46,8 @@ public record WalLocation(
         this(walOffset, length, length - WalRecordCodec.HEADER_BYTES, leaderEpoch, firstOffset, lastOffset);
     }
 
-    /** Temporary migration bridge; physical layout must not escape the WAL backend. */
-    public WalLocation(
+    /** Backend-only adapter for the current rotating-file implementation. */
+    WalLocation(
         long extentId,
         long position,
         int length,
@@ -60,18 +59,18 @@ public record WalLocation(
         this(WalAppendResult.encodePhysical(extentId, position), length, payloadLength, leaderEpoch, firstOffset, lastOffset);
     }
 
-    /** Temporary migration bridge; physical layout must not escape the WAL backend. */
-    public WalLocation(long extentId, long position, int length, int leaderEpoch, long firstOffset, long lastOffset) {
+    /** Backend-only adapter for the current rotating-file implementation. */
+    WalLocation(long extentId, long position, int length, int leaderEpoch, long firstOffset, long lastOffset) {
         this(WalAppendResult.encodePhysical(extentId, position), length, leaderEpoch, firstOffset, lastOffset);
     }
 
-    /** Temporary migration bridge; use {@link #walOffset()}. */
-    public long segmentId() {
+    /** Backend-only bridge; physical layout must not escape this package. */
+    long segmentId() {
         return WalAppendResult.extentId(walOffset);
     }
 
-    /** Temporary migration bridge; use {@link #walOffset()}. */
-    public long position() {
+    /** Backend-only bridge; physical layout must not escape this package. */
+    long position() {
         return WalAppendResult.extentPosition(walOffset);
     }
 
