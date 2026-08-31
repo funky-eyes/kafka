@@ -25,8 +25,8 @@ import java.util.concurrent.ConcurrentNavigableMap;
 import java.util.concurrent.ConcurrentSkipListMap;
 
 /**
- * In-memory logical index from partition offsets to physical broker-wide WAL locations.
- * TRUNCATE records invalidate old physical entries without truncating the shared WAL file itself.
+ * In-memory logical index from Kafka partition offsets to broker-wide logical WAL addresses.
+ * TRUNCATE records invalidate old entries without exposing or depending on the WAL backend's physical allocation.
  */
 public final class PartitionWalIndex {
     private final ConcurrentHashMap<WalPartitionKey, ConcurrentNavigableMap<Long, WalLocation>> locations =
@@ -39,8 +39,7 @@ public final class PartitionWalIndex {
             return;
         }
         WalLocation location = new WalLocation(
-            appendResult.segmentId(),
-            appendResult.position(),
+            appendResult.offset(),
             appendResult.length(),
             record.leaderEpoch(),
             record.firstOffset(),
@@ -93,21 +92,20 @@ public final class PartitionWalIndex {
     }
 
     /**
-     * Removes locations whose immutable logical WAL segment has already been physically reclaimed.
+     * Removes entries whose logical WAL address is below the backend's exclusive reclamation watermark.
      *
-     * <p>The compare-and-remove form is important because appends may update the same logical offset concurrently
-     * after a Kafka truncate/reappend. A newly installed location is never removed merely because an older snapshot
-     * observed that offset on a reclaimed segment.</p>
+     * <p>The compare-and-remove form protects a concurrently re-appended Kafka range: a newer location installed for
+     * the same logical Kafka offset is retained unless its own WAL address is also below the watermark.</p>
      */
-    public void removeSegmentsThrough(long segmentId) {
-        if (segmentId < 0) {
+    public void removeBefore(long walOffsetExclusive) {
+        if (walOffsetExclusive < 0) {
             return;
         }
         for (Map.Entry<WalPartitionKey, ConcurrentNavigableMap<Long, WalLocation>> partition : locations.entrySet()) {
             ConcurrentNavigableMap<Long, WalLocation> partitionLocations = partition.getValue();
             for (Map.Entry<Long, WalLocation> entry : partitionLocations.entrySet()) {
                 WalLocation location = entry.getValue();
-                if (location.segmentId() <= segmentId) {
+                if (location.walOffset() < walOffsetExclusive) {
                     partitionLocations.remove(entry.getKey(), location);
                 }
             }
@@ -117,7 +115,16 @@ public final class PartitionWalIndex {
         }
     }
 
-    /** Clears every physical WAL location before replaying the surviving post-reclaim segments. */
+    /** @deprecated use {@link #removeBefore(long)} with a logical WAL reclamation watermark. */
+    @Deprecated(forRemoval = true)
+    public void removeSegmentsThrough(long segmentId) {
+        if (segmentId < 0) {
+            return;
+        }
+        removeBefore(WalAppendResult.firstOffsetAfterExtent(segmentId));
+    }
+
+    /** Clears every indexed WAL address before replaying the surviving logical recovery window. */
     public void clear() {
         locations.clear();
     }

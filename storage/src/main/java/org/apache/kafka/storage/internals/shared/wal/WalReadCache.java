@@ -24,14 +24,12 @@ import java.util.Map;
 /**
  * Bounded FIFO cache for DATA records that have already crossed the WAL durability barrier.
  *
- * <p>The cache retains the immutable payload owned by {@link WalRecord}; it never participates in acknowledgement
- * durability and is always safe to discard. A cache miss falls back to the physical WAL. Entries are keyed by physical
- * WAL position and additionally validated against logical metadata so a reclaimed/reused physical position can never
- * return stale bytes.</p>
+ * <p>The cache is keyed by the stable logical WAL address, never by a physical file position or ring slot. Logical
+ * Kafka metadata is still validated on lookup so a corrupt/stale index entry cannot expose the wrong RecordBatch.</p>
  */
 final class WalReadCache {
     private final long capacityBytes;
-    private final LinkedHashMap<CacheKey, CacheEntry> entries = new LinkedHashMap<>();
+    private final LinkedHashMap<Long, CacheEntry> entries = new LinkedHashMap<>();
     private long usedBytes;
 
     WalReadCache(long capacityBytes) {
@@ -59,13 +57,13 @@ final class WalReadCache {
             return;
         }
 
-        CacheKey key = new CacheKey(result.segmentId(), result.position());
+        long key = result.offset();
         CacheEntry replaced = entries.remove(key);
         if (replaced != null) {
             usedBytes -= replaced.payloadBytes();
         }
         while (!entries.isEmpty() && usedBytes + payloadBytes > capacityBytes) {
-            Iterator<Map.Entry<CacheKey, CacheEntry>> iterator = entries.entrySet().iterator();
+            Iterator<Map.Entry<Long, CacheEntry>> iterator = entries.entrySet().iterator();
             CacheEntry eldest = iterator.next().getValue();
             usedBytes -= eldest.payloadBytes();
             iterator.remove();
@@ -75,7 +73,7 @@ final class WalReadCache {
     }
 
     synchronized WalRecord get(WalLocation location) {
-        CacheEntry entry = entries.get(new CacheKey(location.segmentId(), location.position()));
+        CacheEntry entry = entries.get(location.walOffset());
         if (entry == null || !entry.matches(location)) {
             return null;
         }
@@ -97,9 +95,6 @@ final class WalReadCache {
     synchronized void clear() {
         entries.clear();
         usedBytes = 0L;
-    }
-
-    private record CacheKey(long segmentId, long position) {
     }
 
     private record CacheEntry(WalRecord record, int encodedLength, int payloadBytes) {
