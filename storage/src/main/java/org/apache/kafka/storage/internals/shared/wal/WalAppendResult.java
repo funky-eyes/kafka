@@ -20,9 +20,9 @@ package org.apache.kafka.storage.internals.shared.wal;
  * Stable logical address returned after a WAL record crosses the durability barrier.
  *
  * <p>The canonical contract is a monotonically increasing logical offset plus encoded length. Physical extent ids,
- * file positions, ring slots and generations are backend implementation details. The deprecated physical accessors are
- * a migration bridge for callers that have not yet moved to {@link #offset()} and will be removed once the storage
- * engine boundary is fully converted.</p>
+ * file positions, ring slots and generations are backend implementation details. The physical accessors below are a
+ * temporary migration bridge for callers that have not yet moved to {@link #offset()} and will be removed once the
+ * storage engine boundary is fully converted.</p>
  */
 public record WalAppendResult(long offset, int length) {
     private static final int PHYSICAL_POSITION_BITS = 32;
@@ -40,14 +40,12 @@ public record WalAppendResult(long offset, int length) {
         this(encodePhysical(extentId, position), length);
     }
 
-    /** @deprecated use {@link #offset()}; physical layout must not escape the WAL backend. */
-    @Deprecated(forRemoval = true)
+    /** Temporary migration bridge; use {@link #offset()}. */
     public long segmentId() {
         return extentId(offset);
     }
 
-    /** @deprecated use {@link #offset()}; physical layout must not escape the WAL backend. */
-    @Deprecated(forRemoval = true)
+    /** Temporary migration bridge; use {@link #offset()}. */
     public long position() {
         return extentPosition(offset);
     }

@@ -115,8 +115,7 @@ public final class PartitionWalIndex {
         }
     }
 
-    /** @deprecated use {@link #removeBefore(long)} with a logical WAL reclamation watermark. */
-    @Deprecated(forRemoval = true)
+    /** Temporary migration bridge; use {@link #removeBefore(long)} with a logical WAL reclamation watermark. */
     public void removeSegmentsThrough(long segmentId) {
         if (segmentId < 0) {
             return;

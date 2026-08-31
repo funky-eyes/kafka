@@ -82,12 +82,7 @@ public interface SharedWal extends AutoCloseable {
         return reclaimedExtent < 0 ? -1L : WalAppendResult.firstOffsetAfterExtent(reclaimedExtent);
     }
 
-    /**
-     * Temporary migration bridge for the current rotating-file backend.
-     *
-     * @deprecated physical allocation identity is backend-private; use {@link #reclaimedBeforeOffset()}.
-     */
-    @Deprecated(forRemoval = true)
+    /** Temporary migration bridge for the current rotating-file backend. */
     default long reclaimedThroughSegmentId() {
         return -1L;
     }
