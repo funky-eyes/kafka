@@ -19,10 +19,8 @@ package org.apache.kafka.storage.internals.shared.wal;
 import org.apache.kafka.common.utils.Utils;
 
 import java.io.IOException;
-import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -58,6 +56,7 @@ public final class RotatingFileSharedWal implements SharedWal {
     private final Path directory;
     private final long capacityBytes;
     private final WalReadCache readCache;
+    private final WalIoBackend ioBackend;
     private final FileSharedWal delegate;
 
     private int inFlightOperations;
@@ -67,14 +66,25 @@ public final class RotatingFileSharedWal implements SharedWal {
     private volatile long reclaimedThroughSegmentId = -1L;
 
     public RotatingFileSharedWal(Path directory, long capacityBytes, long segmentBytes) throws IOException {
-        this(directory, capacityBytes, segmentBytes, DEFAULT_READ_CACHE_BYTES);
+        this(directory, capacityBytes, segmentBytes, DEFAULT_READ_CACHE_BYTES, new FileChannelWalIoBackend());
     }
 
     RotatingFileSharedWal(Path directory, long capacityBytes, long segmentBytes, long readCacheBytes) throws IOException {
+        this(directory, capacityBytes, segmentBytes, readCacheBytes, new FileChannelWalIoBackend());
+    }
+
+    RotatingFileSharedWal(
+        Path directory,
+        long capacityBytes,
+        long segmentBytes,
+        long readCacheBytes,
+        WalIoBackend ioBackend
+    ) throws IOException {
         this.directory = Objects.requireNonNull(directory, "directory");
         this.capacityBytes = capacityBytes;
         this.readCache = new WalReadCache(readCacheBytes);
-        this.delegate = new FileSharedWal(directory, capacityBytes, segmentBytes);
+        this.ioBackend = Objects.requireNonNull(ioBackend, "ioBackend");
+        this.delegate = new FileSharedWal(directory, capacityBytes, segmentBytes, ioBackend);
     }
 
     @Override
@@ -368,7 +378,7 @@ public final class RotatingFileSharedWal implements SharedWal {
                 blockedByUnsafeGroup = true;
                 break;
             }
-            scannedSegmentBytes = Math.addExact(scannedSegmentBytes, Files.size(segment));
+            scannedSegmentBytes = Math.addExact(scannedSegmentBytes, ioBackend.size(segment));
             if (pendingGroup.isEmpty()) {
                 safeBoundarySegmentId = segmentId;
                 safeBoundaryBytes = scannedSegmentBytes;
@@ -386,10 +396,10 @@ public final class RotatingFileSharedWal implements SharedWal {
         WalReclaimPolicy policy,
         List<GroupEntry> pendingGroup
     ) throws IOException {
-        try (FileChannel channel = FileChannel.open(segment, StandardOpenOption.READ)) {
+        try (WalIoBackend.Handle handle = ioBackend.openRead(segment)) {
             long position = 0L;
             while (true) {
-                WalRecordCodec.ReadResult result = WalRecordCodec.read(channel, position);
+                WalRecordCodec.ReadResult result = WalRecordCodec.read(handle, position);
                 if (result.status() == WalRecordCodec.ReadStatus.EOF) {
                     return true;
                 }
