@@ -274,51 +274,72 @@ public final class FileSharedWal implements SharedWal {
         if (!closed.compareAndSet(false, true)) {
             return;
         }
+        stopWriter();
+        IOException closeError = awaitWriterStop();
+        closeError = closeIoResources(closeError);
+        if (closeError != null) {
+            throw closeError;
+        }
+    }
+
+    private void stopWriter() {
         synchronized (lifecycleLock) {
             accepting = false;
             if (running.getAndSet(false)) {
                 pendingAppends.offer(PendingAppend.poison());
             }
         }
+    }
 
-        IOException closeError = null;
+    private IOException awaitWriterStop() {
         try {
             writerThread.join(TimeUnit.SECONDS.toMillis(30));
             if (writerThread.isAlive()) {
-                closeError = new IOException("Timed out waiting for WAL writer to stop");
+                return new IOException("Timed out waiting for WAL writer to stop");
             }
+            return null;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            closeError = new IOException("Interrupted while closing WAL", e);
-        } finally {
-            synchronized (writerIoLock) {
-                if (activeSegment != null) {
-                    try {
-                        activeSegment.close();
-                    } catch (IOException e) {
-                        if (closeError == null) {
-                            closeError = e;
-                        } else {
-                            closeError.addSuppressed(e);
-                        }
-                    } finally {
-                        activeSegment = null;
-                    }
-                }
-            }
-            try {
-                ioBackend.close();
-            } catch (IOException e) {
-                if (closeError == null) {
-                    closeError = e;
-                } else {
-                    closeError.addSuppressed(e);
-                }
-            }
+            return new IOException("Interrupted while closing WAL", e);
         }
-        if (closeError != null) {
-            throw closeError;
+    }
+
+    private IOException closeIoResources(IOException closeError) {
+        synchronized (writerIoLock) {
+            closeError = closeActiveSegment(closeError);
         }
+        return closeBackend(closeError);
+    }
+
+    private IOException closeActiveSegment(IOException closeError) {
+        SegmentWriter segment = activeSegment;
+        activeSegment = null;
+        if (segment == null) {
+            return closeError;
+        }
+        try {
+            segment.close();
+            return closeError;
+        } catch (IOException e) {
+            return mergeCloseError(closeError, e);
+        }
+    }
+
+    private IOException closeBackend(IOException closeError) {
+        try {
+            ioBackend.close();
+            return closeError;
+        } catch (IOException e) {
+            return mergeCloseError(closeError, e);
+        }
+    }
+
+    private static IOException mergeCloseError(IOException closeError, IOException additional) {
+        if (closeError == null) {
+            return additional;
+        }
+        closeError.addSuppressed(additional);
+        return closeError;
     }
 
     private void writerLoop() {
