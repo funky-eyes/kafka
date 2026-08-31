@@ -44,9 +44,9 @@ import java.util.concurrent.ExecutionException;
 /**
  * Kafka-independent core of the shared storage data plane.
  *
- * <p>Kafka owns leader election, ISR and HW. This class owns durable physical WAL state and immutable remote
- * coverage. Callers may only request upload candidates below Kafka's current HW; the engine never invents a
- * commit boundary of its own.</p>
+ * <p>Kafka owns leader election, ISR and HW. This class owns durable local WAL state and immutable remote coverage.
+ * Callers may only request upload candidates below Kafka's current HW; the engine never invents a commit boundary of
+ * its own. WAL addresses consumed here are logical and independent from the backend's physical allocation layout.</p>
  */
 public final class SharedStorageEngine implements AutoCloseable {
     private final SharedWal wal;
@@ -137,8 +137,7 @@ public final class SharedStorageEngine implements AutoCloseable {
             WalAppendResult result = results.get(i);
             walIndex.apply(record, result);
             locations.add(new WalLocation(
-                result.segmentId(),
-                result.position(),
+                result.offset(),
                 result.length(),
                 record.payload().remaining(),
                 record.leaderEpoch(),
@@ -169,8 +168,7 @@ public final class SharedStorageEngine implements AutoCloseable {
         return wal.append(record).thenApply(result -> {
             walIndex.apply(record, result);
             return new WalLocation(
-                result.segmentId(),
-                result.position(),
+                result.offset(),
                 result.length(),
                 record.payload().remaining(),
                 leaderEpoch,
@@ -489,10 +487,10 @@ public final class SharedStorageEngine implements AutoCloseable {
     }
 
     /**
-     * Durably checkpoints current remote COMMITs and then releases only the physical WAL prefix covered by that exact
-     * durable checkpoint snapshot. WALs exposing a monotonic reclaimed-segment boundary allow the in-memory index to
-     * prune only those physical locations while concurrent appends remain intact; legacy implementations fall back to
-     * full replay-based reconstruction.
+     * Durably checkpoints current remote COMMITs and then releases only the logical WAL prefix covered by that exact
+     * durable checkpoint snapshot. WALs exposing an exclusive logical reclamation watermark allow the in-memory index
+     * to prune only reclaimed addresses while concurrent appends remain intact; implementations without such a
+     * watermark fall back to full replay-based reconstruction.
      */
     public long reclaimCheckpointedWal() throws IOException {
         if (remoteCheckpoint == null) {
@@ -505,9 +503,9 @@ public final class SharedStorageEngine implements AutoCloseable {
             synchronized (walMaintenanceLock) {
                 long reclaimed = wal.reclaim(new RemoteCoverageWalReclaimPolicy(checkpointed));
                 if (reclaimed > 0) {
-                    long reclaimedThroughSegmentId = wal.reclaimedThroughSegmentId();
-                    if (reclaimedThroughSegmentId >= 0) {
-                        walIndex.removeSegmentsThrough(reclaimedThroughSegmentId);
+                    long reclaimedBeforeOffset = wal.reclaimedBeforeOffset();
+                    if (reclaimedBeforeOffset >= 0) {
+                        walIndex.removeBefore(reclaimedBeforeOffset);
                     } else {
                         walIndex.clear();
                         wal.replay(walIndex::apply);

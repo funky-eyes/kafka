@@ -47,13 +47,13 @@ import java.util.function.LongSupplier;
  *
  * <p>Kafka callbacks never call this class. They only update {@link SharedCommitProgress}. This scheduler snapshots
  * those commit windows on its own thread, accepts current local leaders only, filters candidates strictly below Kafka
- * HW, merges them by physical WAL order and delegates the durable object/metadata protocol to
+ * HW, merges them by logical WAL order and delegates the durable object/metadata protocol to
  * {@link SharedObjectUploader}.</p>
  *
  * <p>The periodic interval is only an evaluation cadence. Scheduled uploads are started when the eligible committed
  * bytes reach the target object size, when the oldest current candidate reaches the configured maximum linger, or when
  * broker-wide WAL usage crosses the configured pressure threshold. Multiple immutable objects may be in flight, but a
- * physical WAL record is reserved by at most one upload until that upload completes. This lets the object-store I/O
+ * logical WAL record is reserved by at most one upload until that upload completes. This lets the object-store I/O
  * pool execute PUTs concurrently without allowing two concurrent selections to publish the same WAL range.</p>
  *
  * <p>The same maintenance thread persists remote COMMIT references into the broker-local crash-safe checkpoint and
@@ -445,9 +445,9 @@ public final class SharedUploadScheduler implements AutoCloseable {
             ));
         }
 
-        committed.sort(Comparator
-            .comparingLong((SharedStorageEngine.UploadCandidate candidate) -> candidate.location().segmentId())
-            .thenComparingLong(candidate -> candidate.location().position()));
+        committed.sort(Comparator.comparingLong(
+            (SharedStorageEngine.UploadCandidate candidate) -> candidate.location().walOffset()
+        ));
         List<SharedStorageEngine.UploadCandidate> available = committed.stream()
             .filter(candidate -> !reservedCandidates.contains(CandidateKey.from(candidate)))
             .toList();
@@ -572,37 +572,32 @@ public final class SharedUploadScheduler implements AutoCloseable {
 
     private record CandidateKey(
         SharedPartitionId partition,
-        long segmentId,
-        long position
+        long walOffset
     ) {
         private static CandidateKey from(SharedStorageEngine.UploadCandidate candidate) {
             return new CandidateKey(
                 candidate.partition(),
-                candidate.location().segmentId(),
-                candidate.location().position()
+                candidate.location().walOffset()
             );
         }
     }
 
     private record PendingHead(
         SharedPartitionId partition,
-        long segmentId,
-        long position,
+        long walOffset,
         long firstObservedMs
     ) {
         private static PendingHead from(SharedStorageEngine.UploadCandidate candidate, long firstObservedMs) {
             return new PendingHead(
                 candidate.partition(),
-                candidate.location().segmentId(),
-                candidate.location().position(),
+                candidate.location().walOffset(),
                 firstObservedMs
             );
         }
 
         private boolean matches(SharedStorageEngine.UploadCandidate candidate) {
             return partition.equals(candidate.partition()) &&
-                segmentId == candidate.location().segmentId() &&
-                position == candidate.location().position();
+                walOffset == candidate.location().walOffset();
         }
     }
 
