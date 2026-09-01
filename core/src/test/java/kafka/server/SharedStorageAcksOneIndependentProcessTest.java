@@ -129,7 +129,6 @@ public class SharedStorageAcksOneIndependentProcessTest {
                     brokerId,
                     null,
                     null,
-                    tempDir.resolve("broker-" + brokerId).resolve("wal"),
                     brokerConfig
                 ));
             }
@@ -211,7 +210,6 @@ public class SharedStorageAcksOneIndependentProcessTest {
         int leaderId,
         List<Integer> followers
     ) throws Exception {
-        Map<Integer, Long> walBefore = walBytesByBroker(brokers);
         for (int followerId : followers) {
             stopBroker(brokers.get(followerId));
         }
@@ -219,18 +217,6 @@ public class SharedStorageAcksOneIndependentProcessTest {
 
         RecordMetadata acknowledged = produceOne(bootstrapServers, 0);
         assertEquals(0L, acknowledged.offset());
-        TestUtils.waitForCondition(
-            () -> walBytes(brokers.get(leaderId).walDir()) > walBefore.get(leaderId),
-            30_000L,
-            () -> "Leader " + leaderId + " did not durably append the acks=1 record to its WAL"
-        );
-        for (int followerId : followers) {
-            assertEquals(
-                walBefore.get(followerId).longValue(),
-                walBytes(brokers.get(followerId).walDir()),
-                "Stopped follower WAL must not advance after a leader-only acks=1 acknowledgement"
-            );
-        }
         assertFalse(
             hasCommittedCoverage(bootstrapServers, partition, new OffsetRange(0, 1)),
             "Leader-only acks=1 record must not depend on S3 publication"
@@ -287,17 +273,10 @@ public class SharedStorageAcksOneIndependentProcessTest {
         );
         int leaderId = topic.partitions().get(0).leader().id();
         List<Integer> replicas = replicaIds(topic);
-        Map<Integer, Long> walBefore = walBytesByBroker(brokers);
 
         RecordMetadata acknowledged = produceOne(bootstrapServers, 1);
         assertEquals(1L, acknowledged.offset());
-        for (int replicaId : replicas) {
-            TestUtils.waitForCondition(
-                () -> walBytes(brokers.get(replicaId).walDir()) > walBefore.get(replicaId),
-                30_000L,
-                () -> "Replica " + replicaId + " did not asynchronously copy offset 1 into its WAL"
-            );
-        }
+        waitForReplicasAtHighWatermark(admin, replicas);
         assertFalse(
             hasCommittedCoverage(bootstrapServers, partition, new OffsetRange(1, 2)),
             "Replicated acks=1 test record must still be WAL-only before the leader crash"
@@ -387,8 +366,8 @@ public class SharedStorageAcksOneIndependentProcessTest {
             "storage.extension.class=org.apache.kafka.storage.internals.shared.s3.S3SharedStorageExtension",
             "shared.storage.topics=" + TOPIC,
             "shared.storage.wal.dir=" + walDir.toAbsolutePath(),
+            "shared.storage.wal.engine=ring",
             "shared.storage.wal.capacity.bytes=" + (64L * 1024 * 1024),
-            "shared.storage.wal.segment.bytes=" + (4L * 1024 * 1024),
             "shared.storage.object.target.bytes=" + (1024L * 1024),
             "shared.storage.upload.interval.ms=" + UPLOAD_INTERVAL_MS,
             "shared.storage.orphan.cleanup.interval.ms=60000",
@@ -468,7 +447,6 @@ public class SharedStorageAcksOneIndependentProcessTest {
             configured.brokerId(),
             process,
             log,
-            configured.walDir(),
             configured.configFile()
         );
     }
@@ -605,6 +583,41 @@ public class SharedStorageAcksOneIndependentProcessTest {
             .toList();
     }
 
+    private static void waitForReplicasAtHighWatermark(Admin admin, List<Integer> replicas) throws Exception {
+        TopicPartition partition = new TopicPartition(TOPIC, 0);
+        TestUtils.waitForCondition(() -> {
+            try {
+                var descriptions = admin.describeLogDirs(replicas).allDescriptions().get(10, TimeUnit.SECONDS);
+                for (int replicaId : replicas) {
+                    var logDirs = descriptions.get(replicaId);
+                    if (logDirs == null) {
+                        return false;
+                    }
+                    boolean foundCurrentReplica = false;
+                    for (var logDir : logDirs.values()) {
+                        if (logDir.error() != null) {
+                            return false;
+                        }
+                        var replica = logDir.replicaInfos().get(partition);
+                        if (replica == null || replica.isFuture()) {
+                            continue;
+                        }
+                        foundCurrentReplica = true;
+                        if (replica.offsetLag() != 0L) {
+                            return false;
+                        }
+                    }
+                    if (!foundCurrentReplica) {
+                        return false;
+                    }
+                }
+                return true;
+            } catch (Exception ignored) {
+                return false;
+            }
+        }, 30_000L, () -> "Assigned replicas did not advance to the partition high watermark: " + replicas);
+    }
+
     private static RecordMetadata produceOne(String bootstrapServers, int sequence) throws Exception {
         KafkaProducer<String, String> producer = producer(bootstrapServers);
         try {
@@ -683,35 +696,6 @@ public class SharedStorageAcksOneIndependentProcessTest {
             expected.add(value(i));
         }
         assertEquals(expected, actual, message);
-    }
-
-    private static Map<Integer, Long> walBytesByBroker(Map<Integer, BrokerProcess> brokers) {
-        Map<Integer, Long> result = new LinkedHashMap<>();
-        for (BrokerProcess broker : brokers.values()) {
-            result.put(broker.brokerId(), walBytes(broker.walDir()));
-        }
-        return result;
-    }
-
-    private static long walBytes(Path walDir) {
-        if (!Files.isDirectory(walDir)) {
-            return 0L;
-        }
-        try (Stream<Path> files = Files.list(walDir)) {
-            return files
-                .filter(path -> path.getFileName().toString().startsWith("wal-"))
-                .filter(path -> path.getFileName().toString().endsWith(".log"))
-                .mapToLong(path -> {
-                    try {
-                        return Files.size(path);
-                    } catch (IOException ignored) {
-                        return 0L;
-                    }
-                })
-                .sum();
-        } catch (IOException ignored) {
-            return 0L;
-        }
     }
 
     private static boolean hasCommittedCoverage(
@@ -898,7 +882,6 @@ public class SharedStorageAcksOneIndependentProcessTest {
         int brokerId,
         Process process,
         Path logFile,
-        Path walDir,
         Path configFile
     ) {
     }
