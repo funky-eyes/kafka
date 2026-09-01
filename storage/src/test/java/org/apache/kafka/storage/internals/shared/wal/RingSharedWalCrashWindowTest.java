@@ -97,6 +97,7 @@ class RingSharedWalCrashWindowTest {
     void survivesRepeatedWrapReclaimAndReopenAcrossGenerations() throws Exception {
         Path path = tempDir.resolve("multi-generation.wal");
         long previousWalOffset = -1L;
+        long previousReclaimedBeforeOffset = 0L;
 
         for (int generation = 0; generation < 12; generation++) {
             WalRecord record = dataRecord(generation, 20);
@@ -108,7 +109,10 @@ class RingSharedWalCrashWindowTest {
                 previousWalOffset = result.offset();
 
                 long reclaimed = wal.reclaim((candidate, ignored) -> true, Long.MAX_VALUE);
-                assertTrue(reclaimed > result.offset());
+                assertTrue(reclaimed > 0L, "each fully safe append group must release local WAL bytes");
+                assertTrue(wal.reclaimedBeforeOffset() > previousReclaimedBeforeOffset,
+                    "durable reclaim watermark must move forward across ring generations");
+                previousReclaimedBeforeOffset = wal.reclaimedBeforeOffset();
                 assertEquals(0L, wal.usedBytes());
             }
         }
@@ -118,6 +122,7 @@ class RingSharedWalCrashWindowTest {
             reopened.replay((record, ignored) -> replayed.add(record));
             assertEquals(List.of(), replayed);
             assertEquals(0L, reopened.usedBytes());
+            assertEquals(previousReclaimedBeforeOffset, reopened.reclaimedBeforeOffset());
             assertTrue(reopened.reclaimedBeforeOffset() > DATA_CAPACITY * 4,
                 "test must cross several physical ring generations");
         }
