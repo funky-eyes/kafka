@@ -108,8 +108,8 @@ public class SharedStorageS3OutageKRaftIntegrationTest {
             .setConfigProp("storage.extension.class",
                 "org.apache.kafka.storage.internals.shared.s3.S3SharedStorageExtension")
             .setConfigProp("shared.storage.topics", TOPIC)
+            .setConfigProp("shared.storage.wal.engine", "ring")
             .setConfigProp("shared.storage.wal.capacity.bytes", 64L * 1024 * 1024)
-            .setConfigProp("shared.storage.wal.segment.bytes", 4L * 1024 * 1024)
             .setConfigProp("shared.storage.object.target.bytes", 1024L * 1024)
             .setConfigProp("shared.storage.upload.interval.ms", UPLOAD_INTERVAL_MS)
             .setConfigProp("shared.storage.orphan.cleanup.interval.ms", 1_000L)
