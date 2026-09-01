@@ -41,7 +41,7 @@ concurrency:
 
 jobs:
   wal-capacity-backpressure:
-    name: S3 outage reaches fail-closed WAL capacity boundary
+    name: S3 outage reaches Ring WAL capacity and reuses reclaimed window
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -112,12 +112,14 @@ jobs:
           grep -q 'WAL_CAPACITY_OUTAGE_STARTED capacityBytes=' "$result_xml"
           grep -q 'WAL_CAPACITY_BACKPRESSURE acknowledged=' "$result_xml"
           grep -q 'WAL_CAPACITY_BROKER_ONLINE brokers=3' "$result_xml"
+          grep -q 'WAL_CAPACITY_RING_REUSED offset=' "$result_xml"
           grep -q 'WAL_CAPACITY_REMOTE_RECOVERED range=' "$result_xml"
 
           {
             grep 'WAL_CAPACITY_OUTAGE_STARTED capacityBytes=' "$result_xml"
             grep 'WAL_CAPACITY_BACKPRESSURE acknowledged=' "$result_xml"
             grep 'WAL_CAPACITY_BROKER_ONLINE brokers=3' "$result_xml"
+            grep 'WAL_CAPACITY_RING_REUSED offset=' "$result_xml"
             grep 'WAL_CAPACITY_REMOTE_RECOVERED range=' "$result_xml"
             printf 'WAL_CAPACITY_SUCCESS commit=%s\n' "$GITHUB_SHA"
           } > shared-storage-wal-capacity-proof.txt
