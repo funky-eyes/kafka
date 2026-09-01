@@ -147,7 +147,7 @@ public class SharedStorageIndependentProcessSigkillTest {
                 }
 
                 OffsetRange warmup = produceRange(bootstrapServers, 0, WARMUP_RECORDS);
-                waitForReplicatedWal(brokers, replicaIds);
+                waitForReplicasAtHighWatermark(admin, replicaIds);
                 TestUtils.waitForCondition(
                     () -> brokerCoverage(bootstrapServers, partition, oldLeader).covers(warmup),
                     90_000L,
@@ -376,8 +376,8 @@ public class SharedStorageIndependentProcessSigkillTest {
             "storage.extension.class=org.apache.kafka.storage.internals.shared.s3.S3SharedStorageExtension",
             "shared.storage.topics=" + TOPIC,
             "shared.storage.wal.dir=" + walDir.toAbsolutePath(),
+            "shared.storage.wal.engine=ring",
             "shared.storage.wal.capacity.bytes=" + (64L * 1024 * 1024),
-            "shared.storage.wal.segment.bytes=" + (4L * 1024 * 1024),
             "shared.storage.object.target.bytes=" + (1024L * 1024),
             "shared.storage.upload.interval.ms=" + UPLOAD_INTERVAL_MS,
             "shared.storage.orphan.cleanup.interval.ms=60000",
@@ -441,7 +441,6 @@ public class SharedStorageIndependentProcessSigkillTest {
             nodeId,
             process,
             log,
-            tempDir.resolve("node-" + nodeId).resolve("wal"),
             config
         );
     }
@@ -553,6 +552,41 @@ public class SharedStorageIndependentProcessSigkillTest {
     private static TopicDescription describeTopic(Admin admin, String topicName) throws Exception {
         return admin.describeTopics(List.of(topicName)).allTopicNames()
             .get(10, TimeUnit.SECONDS).get(topicName);
+    }
+
+    private static void waitForReplicasAtHighWatermark(Admin admin, List<Integer> replicaIds) throws Exception {
+        TopicPartition partition = new TopicPartition(TOPIC, 0);
+        TestUtils.waitForCondition(() -> {
+            try {
+                var descriptions = admin.describeLogDirs(replicaIds).allDescriptions().get(10, TimeUnit.SECONDS);
+                for (int replicaId : replicaIds) {
+                    var logDirs = descriptions.get(replicaId);
+                    if (logDirs == null) {
+                        return false;
+                    }
+                    boolean foundCurrentReplica = false;
+                    for (var logDir : logDirs.values()) {
+                        if (logDir.error() != null) {
+                            return false;
+                        }
+                        var replica = logDir.replicaInfos().get(partition);
+                        if (replica == null || replica.isFuture()) {
+                            continue;
+                        }
+                        foundCurrentReplica = true;
+                        if (replica.offsetLag() != 0L) {
+                            return false;
+                        }
+                    }
+                    if (!foundCurrentReplica) {
+                        return false;
+                    }
+                }
+                return true;
+            } catch (Exception ignored) {
+                return false;
+            }
+        }, 30_000L, () -> "Assigned replicas did not advance to the partition high watermark: " + replicaIds);
     }
 
     private static OffsetRange produceRange(
@@ -671,42 +705,6 @@ public class SharedStorageIndependentProcessSigkillTest {
             expected.add(value(i));
         }
         assertEquals(expected, actual, message);
-    }
-
-    private static void waitForReplicatedWal(
-        Map<Integer, BrokerProcess> brokers,
-        List<Integer> replicaIds
-    ) throws Exception {
-        for (int replicaId : replicaIds) {
-            BrokerProcess broker = brokers.get(replicaId);
-            TestUtils.waitForCondition(
-                () -> walBytes(broker.walDir()) > 0L,
-                30_000L,
-                () -> "Replica broker " + replicaId +
-                    " never received shared WAL data in " + broker.walDir()
-            );
-        }
-    }
-
-    private static long walBytes(Path walDir) {
-        if (!Files.isDirectory(walDir)) {
-            return 0L;
-        }
-        try (Stream<Path> files = Files.list(walDir)) {
-            return files
-                .filter(path -> path.getFileName().toString().startsWith("wal-"))
-                .filter(path -> path.getFileName().toString().endsWith(".log"))
-                .mapToLong(path -> {
-                    try {
-                        return Files.size(path);
-                    } catch (IOException ignored) {
-                        return 0L;
-                    }
-                })
-                .sum();
-        } catch (IOException ignored) {
-            return 0L;
-        }
     }
 
     private static void waitForFullRemoteCoverage(
@@ -896,7 +894,6 @@ public class SharedStorageIndependentProcessSigkillTest {
         int nodeId,
         Process process,
         Path logFile,
-        Path walDir,
         Path configFile
     ) {
     }
