@@ -99,6 +99,7 @@ public class SharedStorageKRaftIntegrationTest {
             .setConfigProp("storage.extension.class",
                 "org.apache.kafka.storage.internals.shared.s3.S3SharedStorageExtension")
             .setConfigProp("shared.storage.topics", TOPIC)
+            .setConfigProp("shared.storage.wal.engine", "ring")
             .setConfigProp("shared.storage.wal.capacity.bytes", 64L * 1024 * 1024)
             .setConfigProp("shared.storage.wal.segment.bytes", 4L * 1024 * 1024)
             .setConfigProp("shared.storage.object.target.bytes", 1024L * 1024)
@@ -130,7 +131,6 @@ public class SharedStorageKRaftIntegrationTest {
 
                 OffsetRange warmupRange = produceRange(producer, 0, WARMUP_RECORDS);
                 assertEquals(new OffsetRange(0L, WARMUP_RECORDS), warmupRange);
-                waitForReplicatedWalOnEveryBroker(cluster);
 
                 // Establish a known scheduler tick by waiting until the original leader has remotely committed warmup.
                 TestUtils.waitForCondition(
