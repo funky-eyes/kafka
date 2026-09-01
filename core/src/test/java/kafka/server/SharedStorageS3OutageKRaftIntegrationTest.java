@@ -72,8 +72,10 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  *
  * <p>After warmup reaches S3, MinIO is stopped. An RF=3/minISR=2 partition must continue accepting
  * {@code acks=all} writes into the replicated WAL. The current leader is then stopped while S3 is still unavailable;
- * the surviving replicas must elect a new leader, retain all acknowledged records, and continue accepting writes.
- * Once MinIO returns, the new leader must publish the complete outage-period WAL tail.</p>
+ * the surviving replicas must elect a new leader, retain the outage-period WAL tail, and continue accepting writes.
+ * Warmup data may already have been safely reclaimed from the local WAL and therefore intentionally remains a cold-read
+ * S3 dependency during the outage. Once MinIO returns, the new leader must publish the complete outage-period WAL tail
+ * and the full history must again be readable from offset zero.</p>
  */
 @Tag("integration")
 @Timeout(value = 6, unit = TimeUnit.MINUTES)
@@ -178,7 +180,18 @@ public class SharedStorageS3OutageKRaftIntegrationTest {
                         allCoverage(bootstrapServers, partition).covers(postFailover),
                         "Writes acknowledged while S3 is down must remain WAL-only until recovery"
                     );
-                    assertExpectedValues(consumeAssigned(bootstrapServers, TOTAL_RECORDS));
+
+                    // Warmup [0, 20) is already authoritative remote data and may have been reclaimed locally. While
+                    // S3 is intentionally unavailable, prove failover durability directly against the WAL-only tail.
+                    assertExpectedValues(
+                        consumeAssigned(
+                            bootstrapServers,
+                            WARMUP_RECORDS,
+                            OUTAGE_RECORDS + POST_FAILOVER_RECORDS
+                        ),
+                        WARMUP_RECORDS,
+                        TOTAL_RECORDS
+                    );
                     System.out.println("S3_OUTAGE_FAILOVER oldLeader=" + oldLeader +
                         " newLeader=" + newLeader + " postRange=" + postFailover);
 
@@ -193,7 +206,11 @@ public class SharedStorageS3OutageKRaftIntegrationTest {
                         () -> "New leader " + newLeader +
                             " never published the S3-outage WAL tail " + outageTail
                     );
-                    assertExpectedValues(consumeAssigned(bootstrapServers, TOTAL_RECORDS));
+                    assertExpectedValues(
+                        consumeAssigned(bootstrapServers, 0L, TOTAL_RECORDS),
+                        0,
+                        TOTAL_RECORDS
+                    );
                     System.out.println("S3_OUTAGE_RECOVERED newLeader=" + newLeader +
                         " remoteRange=" + outageTail + " records=" + TOTAL_RECORDS);
                 }
@@ -361,7 +378,11 @@ public class SharedStorageS3OutageKRaftIntegrationTest {
         return List.copyOf(latestCommitted.values());
     }
 
-    private static List<String> consumeAssigned(String bootstrapServers, int expectedCount) {
+    private static List<String> consumeAssigned(
+        String bootstrapServers,
+        long startOffset,
+        int expectedCount
+    ) {
         Properties properties = new Properties();
         properties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
         properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
@@ -371,7 +392,7 @@ public class SharedStorageS3OutageKRaftIntegrationTest {
         List<String> values = new ArrayList<>(expectedCount);
         try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(properties)) {
             consumer.assign(List.of(partition));
-            consumer.seekToBeginning(List.of(partition));
+            consumer.seek(partition, startOffset);
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
             while (values.size() < expectedCount && System.nanoTime() < deadline) {
                 consumer.poll(Duration.ofMillis(250)).forEach(record -> values.add(record.value()));
@@ -380,12 +401,16 @@ public class SharedStorageS3OutageKRaftIntegrationTest {
         return values;
     }
 
-    private static void assertExpectedValues(List<String> actual) {
-        List<String> expected = new ArrayList<>(TOTAL_RECORDS);
-        for (int i = 0; i < TOTAL_RECORDS; i++) {
-            expected.add(value(i));
+    private static void assertExpectedValues(
+        List<String> actual,
+        int startSequence,
+        int endSequenceExclusive
+    ) {
+        List<String> expected = new ArrayList<>(endSequenceExclusive - startSequence);
+        for (int sequence = startSequence; sequence < endSequenceExclusive; sequence++) {
+            expected.add(value(sequence));
         }
-        assertEquals(expected, actual, "All acknowledged records must survive S3 outage and leader failover");
+        assertEquals(expected, actual, "Acknowledged records must survive S3 outage and leader failover");
     }
 
     private static void stopContainer(String containerName) throws Exception {
