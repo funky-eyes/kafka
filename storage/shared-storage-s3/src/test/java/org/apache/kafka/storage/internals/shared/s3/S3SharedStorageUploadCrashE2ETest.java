@@ -138,9 +138,12 @@ class S3SharedStorageUploadCrashE2ETest {
                     TopicDescription topic = waitForTopicReady(admin);
                     SharedPartitionId partition = sharedPartitionId(topic.topicId(), 0);
                     int oldLeader = topic.partitions().get(0).leader().id();
+                    List<Integer> replicaIds = topic.partitions().get(0).replicas().stream()
+                        .map(node -> node.id())
+                        .toList();
 
                     OffsetRange warmup = produceRange(producer, 0, WARMUP_RECORDS);
-                    waitForReplicatedWal(brokers);
+                    waitForReplicasAtHighWatermark(admin, replicaIds);
                     waitForCondition(
                         () -> brokerCoverage(bootstrapServers, partition, oldLeader).covers(warmup),
                         90_000L,
@@ -464,8 +467,8 @@ class S3SharedStorageUploadCrashE2ETest {
             "storage.extension.class=org.apache.kafka.storage.internals.shared.s3.S3SharedStorageExtension",
             "shared.storage.topics=" + TOPIC,
             "shared.storage.wal.dir=" + walDir.toAbsolutePath(),
+            "shared.storage.wal.engine=ring",
             "shared.storage.wal.capacity.bytes=" + (64L * 1024 * 1024),
-            "shared.storage.wal.segment.bytes=" + (4L * 1024 * 1024),
             "shared.storage.object.target.bytes=" + (1024L * 1024),
             "shared.storage.upload.interval.ms=" + UPLOAD_INTERVAL_MS,
             "shared.storage.orphan.cleanup.interval.ms=" + ORPHAN_CLEANUP_INTERVAL_MS,
@@ -526,7 +529,7 @@ class S3SharedStorageUploadCrashE2ETest {
         builder.redirectErrorStream(true).redirectOutput(log.toFile());
         Process process = builder.start();
         System.out.println("UPLOAD_CRASH_STARTED brokerId=" + nodeId + " pid=" + process.pid());
-        return new BrokerProcess(nodeId, process, log, tempDir.resolve("node-" + nodeId).resolve("wal"));
+        return new BrokerProcess(nodeId, process, log);
     }
 
     private static void configureEnvironment(ProcessBuilder builder, Path processRuntime, int nodeId) {
@@ -600,6 +603,37 @@ class S3SharedStorageUploadCrashE2ETest {
         return admin.describeTopics(List.of(TOPIC)).allTopicNames().get(10, TimeUnit.SECONDS).get(TOPIC);
     }
 
+    private static void waitForReplicasAtHighWatermark(Admin admin, List<Integer> replicaIds) throws Exception {
+        TopicPartition partition = new TopicPartition(TOPIC, 0);
+        waitForCondition(() -> {
+            var descriptions = admin.describeLogDirs(replicaIds).allDescriptions().get(10, TimeUnit.SECONDS);
+            for (int replicaId : replicaIds) {
+                var logDirs = descriptions.get(replicaId);
+                if (logDirs == null) {
+                    return false;
+                }
+                boolean foundCurrentReplica = false;
+                for (var logDir : logDirs.values()) {
+                    if (logDir.error() != null) {
+                        return false;
+                    }
+                    var replica = logDir.replicaInfos().get(partition);
+                    if (replica == null || replica.isFuture()) {
+                        continue;
+                    }
+                    foundCurrentReplica = true;
+                    if (replica.offsetLag() != 0L) {
+                        return false;
+                    }
+                }
+                if (!foundCurrentReplica) {
+                    return false;
+                }
+            }
+            return true;
+        }, 30_000L, () -> "Upload-crash replicas did not advance to the partition high watermark: " + replicaIds);
+    }
+
     private static OffsetRange produceRange(
         KafkaProducer<String, String> producer,
         int start,
@@ -659,37 +693,6 @@ class S3SharedStorageUploadCrashE2ETest {
             }
         }
         return values;
-    }
-
-    private static void waitForReplicatedWal(Map<Integer, BrokerProcess> brokers) throws Exception {
-        for (BrokerProcess broker : brokers.values()) {
-            waitForCondition(
-                () -> walBytes(broker.walDir()) > 0L,
-                30_000L,
-                () -> "Broker " + broker.nodeId() + " never received shared WAL data in " + broker.walDir()
-            );
-        }
-    }
-
-    private static long walBytes(Path walDir) {
-        if (!Files.isDirectory(walDir)) {
-            return 0L;
-        }
-        try (Stream<Path> files = Files.list(walDir)) {
-            return files
-                .filter(path -> path.getFileName().toString().startsWith("wal-"))
-                .filter(path -> path.getFileName().toString().endsWith(".log"))
-                .mapToLong(path -> {
-                    try {
-                        return Files.size(path);
-                    } catch (IOException ignored) {
-                        return 0L;
-                    }
-                })
-                .sum();
-        } catch (IOException ignored) {
-            return 0L;
-        }
     }
 
     private static PartitionRemoteCoverage brokerCoverage(
@@ -970,6 +973,6 @@ class S3SharedStorageUploadCrashE2ETest {
     ) {
     }
 
-    private record BrokerProcess(int nodeId, Process process, Path logFile, Path walDir) {
+    private record BrokerProcess(int nodeId, Process process, Path logFile) {
     }
 }
