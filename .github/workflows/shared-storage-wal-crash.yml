@@ -22,6 +22,9 @@ on:
     paths:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/wal/**'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/wal/**'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedStorageConfiguration.java'
+      - 'storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3/S3SharedStorageExtension.java'
+      - 'storage/shared-storage-s3/src/test/java/org/apache/kafka/storage/internals/shared/s3/S3SharedStorageWalFactoryTest.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/metadata/LocalRemoteObjectCheckpoint.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/metadata/RemoteObjectIndex.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/metadata/LocalRemoteObjectCheckpointTest.java'
@@ -31,6 +34,9 @@ on:
     paths:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/wal/**'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/wal/**'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedStorageConfiguration.java'
+      - 'storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3/S3SharedStorageExtension.java'
+      - 'storage/shared-storage-s3/src/test/java/org/apache/kafka/storage/internals/shared/s3/S3SharedStorageWalFactoryTest.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/metadata/LocalRemoteObjectCheckpoint.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/metadata/RemoteObjectIndex.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/metadata/LocalRemoteObjectCheckpointTest.java'
@@ -47,7 +53,7 @@ concurrency:
 
 jobs:
   crash-window-gate:
-    name: WAL crash-window, checkpoint and rotating reclaim gate
+    name: WAL crash-window, checkpoint and reclaim gate
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -70,6 +76,7 @@ jobs:
             --tests 'org.apache.kafka.storage.internals.shared.wal.FileSharedWalTest' \
             --tests 'org.apache.kafka.storage.internals.shared.wal.FileSharedWalCrashWindowTest' \
             --tests 'org.apache.kafka.storage.internals.shared.wal.RotatingFileSharedWalTest' \
+            --tests 'org.apache.kafka.storage.internals.shared.wal.RingSharedWalCrashWindowTest' \
             --tests 'org.apache.kafka.storage.internals.shared.wal.RemoteCoverageWalReclaimPolicyTest' \
             --tests 'org.apache.kafka.storage.internals.shared.metadata.LocalRemoteObjectCheckpointTest' \
             --tests 'org.apache.kafka.storage.internals.shared.metadata.RemoteObjectIndexTest' \
