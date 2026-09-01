@@ -151,11 +151,14 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
                     configuration.walCapacityBytes()
                 );
             }
-            case ROTATING_FILE -> new RotatingFileSharedWal(
-                configuration.walDir(),
-                configuration.walCapacityBytes(),
-                configuration.walSegmentBytes()
-            );
+            case ROTATING_FILE -> {
+                ensureNoRingWalFile(configuration.walDir());
+                yield new RotatingFileSharedWal(
+                    configuration.walDir(),
+                    configuration.walCapacityBytes(),
+                    configuration.walSegmentBytes()
+                );
+            }
         };
     }
 
@@ -176,6 +179,17 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
                         "=rotating-file until the legacy WAL is fully recovered and safely retired before switching to ring."
                 );
             }
+        }
+    }
+
+    private static void ensureNoRingWalFile(Path walDir) throws IOException {
+        Path ringWal = walDir.resolve(RING_WAL_FILE);
+        if (Files.exists(ringWal)) {
+            throw new IOException(
+                "Refusing to start rotating-file WAL while ring WAL file exists: " + ringWal +
+                    ". Start with " + SharedStorageConfiguration.WAL_ENGINE_CONFIG +
+                    "=ring until the ring WAL is fully recovered and safely retired before switching to rotating-file."
+            );
         }
     }
 

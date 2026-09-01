@@ -33,6 +33,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -73,6 +74,40 @@ class S3SharedStorageWalFactoryTest {
             SharedStorageConfiguration.WAL_ENGINE_CONFIG + "=rotating-file"));
         assertTrue(Files.notExists(walDir.resolve("shared-ring.wal")),
             "migration guard must fail before creating the new ring file");
+    }
+
+    @Test
+    void refusesRotatingStartupWhenRingWalFileExists() throws Exception {
+        Path logDir = Files.createDirectory(tempDir.resolve("kafka-log-ring"));
+        Path walDir = tempDir.resolve("ring-wal");
+        SharedStorageConfiguration ringConfiguration = configuration(logDir, walDir, Map.of());
+
+        try (SharedWal ignored = S3SharedStorageExtension.createWal(ringConfiguration)) {
+            // Establish a valid fixed Ring WAL on disk before attempting the unsafe backend switch.
+        }
+        Path ringWal = walDir.resolve("shared-ring.wal");
+        assertTrue(Files.isRegularFile(ringWal));
+
+        SharedStorageConfiguration rotatingConfiguration = configuration(
+            logDir,
+            walDir,
+            Map.of(
+                SharedStorageConfiguration.WAL_ENGINE_CONFIG, "rotating-file",
+                SharedStorageConfiguration.WAL_SEGMENT_BYTES_CONFIG, 16L * 1024L
+            )
+        );
+        IOException error = assertThrows(
+            IOException.class,
+            () -> S3SharedStorageExtension.createWal(rotatingConfiguration)
+        );
+        assertTrue(error.getMessage().contains(ringWal.toString()));
+        assertTrue(error.getMessage().contains(SharedStorageConfiguration.WAL_ENGINE_CONFIG + "=ring"));
+        try (var entries = Files.list(walDir)) {
+            assertFalse(
+                entries.anyMatch(path -> path.getFileName().toString().endsWith(".log")),
+                "migration guard must fail before creating a rotating WAL segment"
+            );
+        }
     }
 
     @Test
