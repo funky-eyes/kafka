@@ -23,6 +23,7 @@ import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashSet;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
 import java.util.regex.Pattern;
@@ -31,6 +32,7 @@ import java.util.regex.PatternSyntaxException;
 /** Parsed, Kafka-independent configuration for the shared WAL storage extension. */
 public final class SharedStorageConfiguration {
     public static final String WAL_DIR_CONFIG = "shared.storage.wal.dir";
+    public static final String WAL_ENGINE_CONFIG = "shared.storage.wal.engine";
     public static final String WAL_CAPACITY_BYTES_CONFIG = "shared.storage.wal.capacity.bytes";
     public static final String WAL_SEGMENT_BYTES_CONFIG = "shared.storage.wal.segment.bytes";
     public static final String OBJECT_TARGET_BYTES_CONFIG = "shared.storage.object.target.bytes";
@@ -43,6 +45,7 @@ public final class SharedStorageConfiguration {
     public static final String TOPICS_CONFIG = "shared.storage.topics";
     public static final String TOPIC_PATTERN_CONFIG = "shared.storage.topic.pattern";
 
+    public static final WalEngine DEFAULT_WAL_ENGINE = WalEngine.RING;
     public static final long DEFAULT_WAL_CAPACITY_BYTES = 2L * 1024 * 1024 * 1024;
     public static final long DEFAULT_WAL_SEGMENT_BYTES = 64L * 1024 * 1024;
     public static final long DEFAULT_OBJECT_TARGET_BYTES = 32L * 1024 * 1024;
@@ -54,6 +57,7 @@ public final class SharedStorageConfiguration {
     public static final long DEFAULT_ORPHAN_GRACE_MS = 10L * 60 * 1_000;
 
     private final Path walDir;
+    private final WalEngine walEngine;
     private final long walCapacityBytes;
     private final long walSegmentBytes;
     private final long objectTargetBytes;
@@ -68,6 +72,7 @@ public final class SharedStorageConfiguration {
 
     private SharedStorageConfiguration(
         Path walDir,
+        WalEngine walEngine,
         long walCapacityBytes,
         long walSegmentBytes,
         long objectTargetBytes,
@@ -81,6 +86,7 @@ public final class SharedStorageConfiguration {
         Pattern topicPattern
     ) {
         this.walDir = walDir;
+        this.walEngine = walEngine;
         this.walCapacityBytes = walCapacityBytes;
         this.walSegmentBytes = walSegmentBytes;
         this.objectTargetBytes = objectTargetBytes;
@@ -102,6 +108,7 @@ public final class SharedStorageConfiguration {
             : Path.of(configuredWalDir.toString().trim()).toAbsolutePath().normalize();
         validateWalDirOutsideKafkaLogRoots(walDir, context);
 
+        WalEngine walEngine = WalEngine.parse(context.originals().get(WAL_ENGINE_CONFIG));
         long walCapacityBytes = positiveLong(
             context.originals().get(WAL_CAPACITY_BYTES_CONFIG),
             DEFAULT_WAL_CAPACITY_BYTES,
@@ -112,9 +119,10 @@ public final class SharedStorageConfiguration {
             DEFAULT_WAL_SEGMENT_BYTES,
             WAL_SEGMENT_BYTES_CONFIG
         );
-        if (walSegmentBytes > walCapacityBytes) {
+        if (walEngine == WalEngine.ROTATING_FILE && walSegmentBytes > walCapacityBytes) {
             throw new IllegalArgumentException(
-                WAL_SEGMENT_BYTES_CONFIG + " must not exceed " + WAL_CAPACITY_BYTES_CONFIG);
+                WAL_SEGMENT_BYTES_CONFIG + " must not exceed " + WAL_CAPACITY_BYTES_CONFIG +
+                    " when " + WAL_ENGINE_CONFIG + "=rotating-file");
         }
         long objectTargetBytes = positiveLong(
             context.originals().get(OBJECT_TARGET_BYTES_CONFIG),
@@ -156,6 +164,7 @@ public final class SharedStorageConfiguration {
         Pattern topicPattern = parsePattern(context.originals().get(TOPIC_PATTERN_CONFIG));
         return new SharedStorageConfiguration(
             walDir,
+            walEngine,
             walCapacityBytes,
             walSegmentBytes,
             objectTargetBytes,
@@ -197,6 +206,10 @@ public final class SharedStorageConfiguration {
 
     public Path walDir() {
         return walDir;
+    }
+
+    public WalEngine walEngine() {
+        return walEngine;
     }
 
     public long walCapacityBytes() {
@@ -313,6 +326,35 @@ public final class SharedStorageConfiguration {
             return Pattern.compile(value.toString().trim());
         } catch (PatternSyntaxException e) {
             throw new IllegalArgumentException("Invalid " + TOPIC_PATTERN_CONFIG + ": " + value, e);
+        }
+    }
+
+    public enum WalEngine {
+        RING("ring"),
+        ROTATING_FILE("rotating-file");
+
+        private final String configValue;
+
+        WalEngine(String configValue) {
+            this.configValue = configValue;
+        }
+
+        public String configValue() {
+            return configValue;
+        }
+
+        private static WalEngine parse(Object value) {
+            if (value == null || value.toString().isBlank()) {
+                return DEFAULT_WAL_ENGINE;
+            }
+            String normalized = value.toString().trim().toLowerCase(Locale.ROOT);
+            for (WalEngine engine : values()) {
+                if (engine.configValue.equals(normalized)) {
+                    return engine;
+                }
+            }
+            throw new IllegalArgumentException(
+                "Invalid " + WAL_ENGINE_CONFIG + ": " + value + "; expected ring or rotating-file");
         }
     }
 }

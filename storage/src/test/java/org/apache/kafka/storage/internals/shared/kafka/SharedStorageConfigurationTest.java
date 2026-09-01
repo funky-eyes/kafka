@@ -35,7 +35,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SharedStorageConfigurationTest {
     @Test
-    void defaultsToAllNonInternalTopicsAndBrokerWideWalDefaults() {
+    void defaultsToRingWalForAllNonInternalTopics() {
         File logDir = TestUtils.tempDirectory();
         SharedStorageConfiguration config = SharedStorageConfiguration.from(context(Map.of(), logDir));
         Path kafkaLogDir = logDir.toPath().toAbsolutePath().normalize();
@@ -45,6 +45,7 @@ class SharedStorageConfigurationTest {
             .resolve("wal")
             .normalize();
 
+        assertEquals(SharedStorageConfiguration.WalEngine.RING, config.walEngine());
         assertEquals(SharedStorageConfiguration.DEFAULT_WAL_CAPACITY_BYTES, config.walCapacityBytes());
         assertEquals(SharedStorageConfiguration.DEFAULT_WAL_SEGMENT_BYTES, config.walSegmentBytes());
         assertEquals(SharedStorageConfiguration.DEFAULT_OBJECT_TARGET_BYTES, config.objectTargetBytes());
@@ -58,6 +59,33 @@ class SharedStorageConfigurationTest {
         assertFalse(config.useSharedStorage("__consumer_offsets"));
         assertFalse(config.useSharedStorage("__transaction_state"));
         assertFalse(config.useSharedStorage("__shared_storage_metadata"));
+    }
+
+    @Test
+    void parsesRotatingFileWalAsExplicitRollbackBackend() {
+        Map<String, Object> originals = Map.of(
+            SharedStorageConfiguration.WAL_ENGINE_CONFIG,
+            "rotating-file"
+        );
+        SharedStorageConfiguration config = SharedStorageConfiguration.from(
+            context(originals, TestUtils.tempDirectory())
+        );
+
+        assertEquals(SharedStorageConfiguration.WalEngine.ROTATING_FILE, config.walEngine());
+    }
+
+    @Test
+    void rejectsUnknownWalEngine() {
+        Map<String, Object> originals = Map.of(
+            SharedStorageConfiguration.WAL_ENGINE_CONFIG,
+            "unknown"
+        );
+
+        IllegalArgumentException error = assertThrows(
+            IllegalArgumentException.class,
+            () -> SharedStorageConfiguration.from(context(originals, TestUtils.tempDirectory()))
+        );
+        assertTrue(error.getMessage().contains(SharedStorageConfiguration.WAL_ENGINE_CONFIG));
     }
 
     @Test
@@ -131,8 +159,9 @@ class SharedStorageConfigurationTest {
     }
 
     @Test
-    void validatesWalCapacityAndSegmentSize() {
+    void validatesWalCapacityAndSegmentSizeForRotatingBackend() {
         Map<String, Object> originals = new HashMap<>();
+        originals.put(SharedStorageConfiguration.WAL_ENGINE_CONFIG, "rotating-file");
         originals.put(SharedStorageConfiguration.WAL_CAPACITY_BYTES_CONFIG, 1024L);
         originals.put(SharedStorageConfiguration.WAL_SEGMENT_BYTES_CONFIG, 2048L);
 
@@ -140,6 +169,21 @@ class SharedStorageConfigurationTest {
             IllegalArgumentException.class,
             () -> SharedStorageConfiguration.from(context(originals, TestUtils.tempDirectory()))
         );
+    }
+
+    @Test
+    void ringBackendIgnoresLegacySegmentSizeRelationship() {
+        Map<String, Object> originals = new HashMap<>();
+        originals.put(SharedStorageConfiguration.WAL_ENGINE_CONFIG, "ring");
+        originals.put(SharedStorageConfiguration.WAL_CAPACITY_BYTES_CONFIG, 16_384L);
+        originals.put(SharedStorageConfiguration.WAL_SEGMENT_BYTES_CONFIG, 65_536L);
+
+        SharedStorageConfiguration config = SharedStorageConfiguration.from(
+            context(originals, TestUtils.tempDirectory())
+        );
+        assertEquals(SharedStorageConfiguration.WalEngine.RING, config.walEngine());
+        assertEquals(16_384L, config.walCapacityBytes());
+        assertEquals(65_536L, config.walSegmentBytes());
     }
 
     @Test

@@ -38,6 +38,7 @@ import org.apache.kafka.storage.internals.shared.object.SharedObjectPacker;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectReader;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectUploadHook;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectUploader;
+import org.apache.kafka.storage.internals.shared.wal.RingSharedWal;
 import org.apache.kafka.storage.internals.shared.wal.RotatingFileSharedWal;
 import org.apache.kafka.storage.internals.shared.wal.SharedWal;
 
@@ -71,6 +72,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
     private static final long BOOTSTRAP_EXECUTOR_STOP_TIMEOUT_SECONDS = 5L;
     private static final long METADATA_BOOTSTRAP_RETRY_BACKOFF_MS = 250L;
     private static final long METADATA_BOOTSTRAP_RETRY_TIMEOUT_MS = 30_000L;
+    private static final String RING_WAL_FILE = "shared-ring.wal";
     private static final String META_PROPERTIES_FILE = "meta.properties";
     private static final String CLUSTER_ID_PROPERTY = "cluster.id";
 
@@ -95,11 +97,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         }
 
         SharedStorageConfiguration configuration = SharedStorageConfiguration.from(context);
-        SharedWal wal = new RotatingFileSharedWal(
-            configuration.walDir(),
-            configuration.walCapacityBytes(),
-            configuration.walSegmentBytes()
-        );
+        SharedWal wal = createWal(configuration);
         S3ObjectStore newObjectStore = null;
         try {
             LocalRemoteObjectCheckpoint remoteCheckpoint =
@@ -138,6 +136,21 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             }
             throw asIOException("Unable to initialize local shared WAL storage", t);
         }
+    }
+
+    static SharedWal createWal(SharedStorageConfiguration configuration) throws IOException {
+        Objects.requireNonNull(configuration, "configuration");
+        return switch (configuration.walEngine()) {
+            case RING -> new RingSharedWal(
+                configuration.walDir().resolve(RING_WAL_FILE),
+                configuration.walCapacityBytes()
+            );
+            case ROTATING_FILE -> new RotatingFileSharedWal(
+                configuration.walDir(),
+                configuration.walCapacityBytes(),
+                configuration.walSegmentBytes()
+            );
+        };
     }
 
     @Override
