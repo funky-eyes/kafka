@@ -64,7 +64,6 @@ import java.util.Properties;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -73,16 +72,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
- * Proves safe producer backpressure when an S3 outage exhausts the configured broker-wide shared WAL window.
+ * Proves safe producer backpressure and reusable fixed-capacity Ring WAL behavior through an S3 outage.
  *
  * <p>The test stops MinIO before filling a deliberately small WAL. Every successful {@code acks=all} response must
  * remain readable from Kafka's replicated WAL. The first non-admitted append must fail without becoming visible and,
  * critically, without taking Kafka's physical log directory or broker offline. A classic topic on the same brokers
- * must remain writable. After MinIO returns, every acknowledged shared record must become authoritatively remote.</p>
+ * must remain writable.</p>
  *
- * <p>This gate intentionally does not claim that remote publication reclaims physical WAL bytes. Safe reclamation
- * requires an independently crash-safe checkpoint and cold-read path. Until that exists, reaching the configured
- * capacity is a fail-closed admission boundary rather than permission to overwrite acknowledged data.</p>
+ * <p>After MinIO returns, authoritative remote coverage must cross the local crash-safe checkpoint barrier, the Ring
+ * WAL head must become reclaimable, and the shared topic must accept a new append that previously could not fit. The
+ * physical {@code shared-ring.wal} file must remain exactly the configured fixed size throughout this cycle, proving
+ * that capacity recovery comes from logical ring reuse rather than file growth or destructive truncation.</p>
  */
 @Tag("integration")
 @Timeout(value = 7, unit = TimeUnit.MINUTES)
@@ -91,16 +91,16 @@ public class SharedStorageWalCapacityPressureKRaftIntegrationTest {
     private static final String CLASSIC_TOPIC = "classic-capacity-probe";
     private static final String METADATA_TOPIC = "__shared_storage_metadata";
     private static final String MINIO_CONTAINER_ENV = "SHARED_STORAGE_S3_CONTAINER";
+    private static final String RING_WAL_FILE = "shared-ring.wal";
     private static final int MAX_FILL_RECORDS = 128;
     private static final int VALUE_BYTES = 8 * 1024;
     private static final int CLASSIC_PROBE_RECORDS = 5;
     private static final long WAL_CAPACITY_BYTES = 256L * 1024;
-    private static final long WAL_SEGMENT_BYTES = 64L * 1024;
     private static final long OBJECT_TARGET_BYTES = 32L * 1024;
     private static final long UPLOAD_INTERVAL_MS = 500L;
 
     @Test
-    public void walCapacityRejectsSafelyWithoutOffliningBroker() throws Exception {
+    public void walCapacityRejectsSafelyAndReusesRingAfterRemoteRecovery() throws Exception {
         String s3Endpoint = System.getenv("SHARED_STORAGE_S3_ENDPOINT");
         String minioContainer = System.getenv(MINIO_CONTAINER_ENV);
         assumeTrue(s3Endpoint != null && !s3Endpoint.isBlank(), "S3/MinIO integration endpoint is not configured");
@@ -120,8 +120,8 @@ public class SharedStorageWalCapacityPressureKRaftIntegrationTest {
             .setConfigProp("storage.extension.class",
                 "org.apache.kafka.storage.internals.shared.s3.S3SharedStorageExtension")
             .setConfigProp("shared.storage.topics", SHARED_TOPIC)
+            .setConfigProp("shared.storage.wal.engine", "ring")
             .setConfigProp("shared.storage.wal.capacity.bytes", WAL_CAPACITY_BYTES)
-            .setConfigProp("shared.storage.wal.segment.bytes", WAL_SEGMENT_BYTES)
             .setConfigProp("shared.storage.object.target.bytes", OBJECT_TARGET_BYTES)
             .setConfigProp("shared.storage.upload.interval.ms", UPLOAD_INTERVAL_MS)
             .setConfigProp("shared.storage.orphan.cleanup.interval.ms", 1_000L)
@@ -152,6 +152,8 @@ public class SharedStorageWalCapacityPressureKRaftIntegrationTest {
                     TopicDescription sharedDescription = waitForTopicReady(admin, SHARED_TOPIC);
                     waitForTopicReady(admin, CLASSIC_TOPIC);
                     SharedPartitionId partition = sharedPartitionId(sharedDescription.topicId(), 0);
+                    Map<Integer, Long> initialRingBytes = ringFileBytesByBroker(cluster);
+                    assertFixedRingFiles(initialRingBytes);
 
                     stopContainer(minioContainer);
                     minioStopped = true;
@@ -185,13 +187,15 @@ public class SharedStorageWalCapacityPressureKRaftIntegrationTest {
                         "Only successfully acknowledged shared records may remain visible"
                     );
 
-                    Map<Integer, Long> walBytes = assertBrokerAndClassicTopicHealthy(
+                    Map<Integer, Long> ringBytesAtPressure = assertBrokerAndClassicTopicHealthy(
                         cluster,
                         admin,
                         bootstrapServers
                     );
+                    assertEquals(initialRingBytes, ringBytesAtPressure,
+                        "Ring WAL physical length must remain fixed under capacity pressure");
                     System.out.println("WAL_CAPACITY_BROKER_ONLINE brokers=3 isr=3 classicRecords=" +
-                        CLASSIC_PROBE_RECORDS + " walBytes=" + walBytes);
+                        CLASSIC_PROBE_RECORDS + " walBytes=" + ringBytesAtPressure);
 
                     startContainer(minioContainer);
                     minioStopped = false;
@@ -208,8 +212,30 @@ public class SharedStorageWalCapacityPressureKRaftIntegrationTest {
                         "Every acknowledged shared record must survive capacity backpressure and S3 recovery"
                     );
                     assertEquals(3, waitForTopicReady(admin, SHARED_TOPIC).partitions().get(0).isr().size());
+
+                    RecordMetadata resumed = waitForSharedWriteResumed(
+                        bootstrapServers,
+                        fill.rejectedSequence()
+                    );
+                    assertEquals(fill.acknowledgedValues().size(), resumed.offset(),
+                        "The first post-reclaim append must continue at the first previously rejected Kafka offset");
+
+                    List<String> expectedAfterReuse = new ArrayList<>(fill.acknowledgedValues());
+                    expectedAfterReuse.add(sharedValue(fill.rejectedSequence()));
+                    assertEquals(
+                        expectedAfterReuse,
+                        consumeAssigned(bootstrapServers, SHARED_TOPIC, expectedAfterReuse.size(), 60),
+                        "Ring reuse must preserve old acknowledged records and expose exactly one resumed append"
+                    );
+
+                    Map<Integer, Long> ringBytesAfterReuse = ringFileBytesByBroker(cluster);
+                    assertFixedRingFiles(ringBytesAfterReuse);
+                    assertEquals(initialRingBytes, ringBytesAfterReuse,
+                        "Ring WAL must reuse the fixed file instead of growing after reclamation");
+                    System.out.println("WAL_CAPACITY_RING_REUSED offset=" + resumed.offset() +
+                        " records=" + expectedAfterReuse.size() + " physicalBytes=" + ringBytesAfterReuse);
                     System.out.println("WAL_CAPACITY_REMOTE_RECOVERED range=" + fill.acknowledgedRange() +
-                        " records=" + fill.acknowledgedValues().size() + " overwriteAllowed=false");
+                        " records=" + fill.acknowledgedValues().size() + " ringReuseAllowed=true");
                 }
             } finally {
                 if (minioStopped) {
@@ -266,6 +292,35 @@ public class SharedStorageWalCapacityPressureKRaftIntegrationTest {
         );
     }
 
+    private static RecordMetadata waitForSharedWriteResumed(
+        String bootstrapServers,
+        int sequence
+    ) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(120);
+        Throwable lastCapacityFailure = null;
+        while (System.nanoTime() < deadline) {
+            try (KafkaProducer<String, String> producer = producer(bootstrapServers)) {
+                try {
+                    RecordMetadata metadata = producer.send(
+                        new ProducerRecord<>(SHARED_TOPIC, 0, Integer.toString(sequence), sharedValue(sequence))
+                    ).get(20, TimeUnit.SECONDS);
+                    producer.flush();
+                    return metadata;
+                } catch (ExecutionException e) {
+                    if (!hasCause(e, KafkaStorageException.class)) {
+                        throw e;
+                    }
+                    lastCapacityFailure = e;
+                }
+            }
+            Thread.sleep(250L);
+        }
+        throw new AssertionError(
+            "Shared producer never resumed after remote coverage should have reclaimed Ring WAL capacity",
+            lastCapacityFailure
+        );
+    }
+
     private static Map<Integer, Long> assertBrokerAndClassicTopicHealthy(
         KafkaClusterTestKit cluster,
         Admin admin,
@@ -277,13 +332,8 @@ public class SharedStorageWalCapacityPressureKRaftIntegrationTest {
         assertEquals(3, shared.partitions().get(0).isr().size(),
             "WAL capacity rejection must not remove healthy replicas from ISR");
 
-        Map<Integer, Long> walBytes = walBytesByBroker(cluster);
-        for (Map.Entry<Integer, Long> entry : walBytes.entrySet()) {
-            assertTrue(
-                entry.getValue() <= WAL_CAPACITY_BYTES,
-                "Broker " + entry.getKey() + " exceeded WAL capacity: " + entry.getValue()
-            );
-        }
+        Map<Integer, Long> ringBytes = ringFileBytesByBroker(cluster);
+        assertFixedRingFiles(ringBytes);
 
         List<String> expected = new ArrayList<>(CLASSIC_PROBE_RECORDS);
         try (KafkaProducer<String, String> producer = producer(bootstrapServers)) {
@@ -299,15 +349,29 @@ public class SharedStorageWalCapacityPressureKRaftIntegrationTest {
             consumeAssigned(bootstrapServers, CLASSIC_TOPIC, CLASSIC_PROBE_RECORDS, 30),
             "A classic topic on the same brokers must remain writable after shared WAL rejection"
         );
-        return walBytes;
+        return ringBytes;
     }
 
-    private static Map<Integer, Long> walBytesByBroker(KafkaClusterTestKit cluster) {
+    private static Map<Integer, Long> ringFileBytesByBroker(KafkaClusterTestKit cluster) throws IOException {
         Map<Integer, Long> result = new LinkedHashMap<>();
         for (Map.Entry<Integer, TestKitNode> broker : cluster.nodes().brokerNodes().entrySet()) {
-            result.put(broker.getKey(), walBytes(walDir(broker.getValue(), broker.getKey())));
+            Path ringFile = walDir(broker.getValue(), broker.getKey()).resolve(RING_WAL_FILE);
+            assertTrue(Files.isRegularFile(ringFile),
+                "Broker " + broker.getKey() + " is missing fixed Ring WAL file " + ringFile);
+            result.put(broker.getKey(), Files.size(ringFile));
         }
         return Map.copyOf(result);
+    }
+
+    private static void assertFixedRingFiles(Map<Integer, Long> ringBytes) {
+        assertEquals(3, ringBytes.size(), "All three brokers must expose one fixed Ring WAL file");
+        for (Map.Entry<Integer, Long> entry : ringBytes.entrySet()) {
+            assertEquals(
+                WAL_CAPACITY_BYTES,
+                entry.getValue().longValue(),
+                "Broker " + entry.getKey() + " Ring WAL file must remain at configured fixed capacity"
+            );
+        }
     }
 
     private static Path walDir(TestKitNode broker, int brokerId) {
@@ -318,27 +382,6 @@ public class SharedStorageWalCapacityPressureKRaftIntegrationTest {
             .resolveSibling(dataDir.getFileName() + ".shared-storage")
             .resolve("broker-" + brokerId)
             .resolve("wal");
-    }
-
-    private static long walBytes(Path walDir) {
-        if (!Files.isDirectory(walDir)) {
-            return 0L;
-        }
-        try (Stream<Path> files = Files.list(walDir)) {
-            return files
-                .filter(path -> path.getFileName().toString().startsWith("wal-"))
-                .filter(path -> path.getFileName().toString().endsWith(".log"))
-                .mapToLong(path -> {
-                    try {
-                        return Files.size(path);
-                    } catch (Exception ignored) {
-                        return 0L;
-                    }
-                })
-                .sum();
-        } catch (Exception ignored) {
-            return 0L;
-        }
     }
 
     private static KafkaProducer<String, String> producer(String bootstrapServers) {
