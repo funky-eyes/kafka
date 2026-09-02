@@ -66,6 +66,43 @@ class RingSharedWalCrashWindowTest {
     }
 
     @Test
+    void recoversReclaimedWindowWhenReusedSlotsAreForcedButNextCheckpointFails() throws Exception {
+        Path path = tempDir.resolve("reused-slot-checkpoint-failure.wal");
+        FailingCheckpointBackend backend = new FailingCheckpointBackend();
+        long reclaimedHead;
+
+        try (RingSharedWal wal = new RingSharedWal(path, TOTAL_CAPACITY, backend)) {
+            WalAppendResult first = wal.appendBatch(List.of(dataRecord(0L, 60))).join().get(0);
+            assertEquals(0L, first.offset());
+
+            long reclaimed = wal.reclaim((record, ignored) -> true, Long.MAX_VALUE);
+            assertEquals(180L, reclaimed,
+                "first append group must advance the durable head far enough that the next group wraps and reuses it");
+            reclaimedHead = wal.reclaimedBeforeOffset();
+            assertEquals(reclaimed, reclaimedHead);
+            assertEquals(0L, wal.usedBytes());
+
+            backend.failNextSuperblockWrite();
+            CompletionException failure = assertThrows(
+                CompletionException.class,
+                () -> wal.appendBatch(List.of(dataRecord(1L, 60))).join()
+            );
+            assertInstanceOf(IOException.class, failure.getCause());
+        }
+
+        try (RingSharedWal reopened = new RingSharedWal(path, TOTAL_CAPACITY)) {
+            assertEquals(reclaimedHead, reopened.reclaimedBeforeOffset(),
+                "recovery must select the reclaim checkpoint that no longer references the reused physical slots");
+            assertEquals(0L, reopened.usedBytes(),
+                "data forced into reused slots must stay invisible when its newer superblock never became durable");
+            List<WalRecord> replayed = new ArrayList<>();
+            reopened.replay((record, ignored) -> replayed.add(record));
+            assertEquals(List.of(), replayed,
+                "recovery must not fall back to the older superblock whose logical window was physically overwritten");
+        }
+    }
+
+    @Test
     void rejectsCorruptedWrapPaddingOnRecovery() throws Exception {
         Path path = tempDir.resolve("corrupted-padding.wal");
         WalRecord first = dataRecord(0L, 10);
