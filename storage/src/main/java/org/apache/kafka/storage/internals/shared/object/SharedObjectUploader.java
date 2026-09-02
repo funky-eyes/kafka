@@ -101,7 +101,7 @@ public final class SharedObjectUploader {
         try {
             result = metadataStore.prepare(objectId, createdTimeMs)
                 .thenCompose(ignored -> invokeHook(Phase.AFTER_PREPARE, context))
-                .thenCompose(ignored -> objectStore.put(objectId, packed.bytes()))
+                .thenCompose(ignored -> objectStore.put(objectId, packed.parts()))
                 .thenCompose(ignored -> invokeHook(Phase.AFTER_PUT, context))
                 .thenCompose(ignored -> metadataStore.commit(packed.metadata()))
                 .thenCompose(ignored -> invokeHook(Phase.AFTER_COMMIT, context))

@@ -19,12 +19,38 @@ package org.apache.kafka.storage.internals.shared.object;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
 
 import java.nio.ByteBuffer;
+import java.util.List;
 import java.util.Objects;
 
-public record PackedObject(ByteBuffer bytes, SharedObjectMetadata metadata) {
+/** A packed immutable object represented as ordered upload parts plus its committed metadata. */
+public record PackedObject(List<ByteBuffer> parts, SharedObjectMetadata metadata) {
     public PackedObject {
-        Objects.requireNonNull(bytes, "bytes");
+        Objects.requireNonNull(parts, "parts");
         Objects.requireNonNull(metadata, "metadata");
-        bytes = bytes.asReadOnlyBuffer();
+        if (parts.isEmpty()) {
+            throw new IllegalArgumentException("parts must not be empty");
+        }
+        parts = parts.stream()
+            .map(part -> Objects.requireNonNull(part, "part").asReadOnlyBuffer())
+            .toList();
+    }
+
+    public PackedObject(ByteBuffer bytes, SharedObjectMetadata metadata) {
+        this(List.of(Objects.requireNonNull(bytes, "bytes")), metadata);
+    }
+
+    /** Compatibility view for callers that still require one contiguous buffer. */
+    public ByteBuffer bytes() {
+        if (parts.size() == 1) {
+            return parts.get(0).asReadOnlyBuffer();
+        }
+        long totalBytes = parts.stream().mapToLong(ByteBuffer::remaining).sum();
+        if (totalBytes > Integer.MAX_VALUE) {
+            throw new IllegalStateException("Multipart object is too large for one Java ByteBuffer");
+        }
+        ByteBuffer joined = ByteBuffer.allocate(Math.toIntExact(totalBytes));
+        parts.forEach(part -> joined.put(part.duplicate()));
+        joined.flip();
+        return joined.asReadOnlyBuffer();
     }
 }

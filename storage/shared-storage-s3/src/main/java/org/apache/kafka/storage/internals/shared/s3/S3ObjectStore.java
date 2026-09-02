@@ -27,13 +27,21 @@ import software.amazon.awssdk.retries.DefaultRetryStrategy;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.S3ClientBuilder;
 import software.amazon.awssdk.services.s3.S3Configuration;
+import software.amazon.awssdk.services.s3.model.AbortMultipartUploadRequest;
+import software.amazon.awssdk.services.s3.model.CompleteMultipartUploadRequest;
+import software.amazon.awssdk.services.s3.model.CompletedMultipartUpload;
+import software.amazon.awssdk.services.s3.model.CompletedPart;
+import software.amazon.awssdk.services.s3.model.CreateMultipartUploadRequest;
 import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
+import software.amazon.awssdk.services.s3.model.UploadPartRequest;
 
 import java.nio.ByteBuffer;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
@@ -49,13 +57,15 @@ import java.util.concurrent.atomic.AtomicInteger;
  * plugin cannot introduce a second Netty stack into Kafka. ObjectStore's asynchronous contract is provided by a small,
  * bounded-size worker pool owned by this instance. Callers must not mutate a PUT buffer until its future completes.</p>
  *
+ * <p>Multipart publication keeps large immutable objects bounded by the caller's part size instead of requiring one
+ * object-sized heap buffer. All non-final parts must satisfy S3's 5 MiB minimum. A failed upload is explicitly aborted;
+ * metadata COMMIT remains outside this class and therefore still defines the remote visibility boundary.</p>
+ *
  * <p>This client belongs exclusively to asynchronous object publication and cold reads. Producer acknowledgement
  * durability is owned by the local and replicated WAL path; an S3 request must never be placed on that ACK path.</p>
- *
- * <p>HTTP connect/read waits, each individual attempt, the whole API call and maximum attempts are all explicit. This
- * prevents environment or SDK defaults from turning an object-store outage into an unbounded upload-worker stall.</p>
  */
 public final class S3ObjectStore implements ObjectStore {
+    static final int MIN_MULTIPART_PART_BYTES = 5 * 1024 * 1024;
     private static final long CLOSE_TIMEOUT_SECONDS = 30L;
 
     private final S3ObjectStoreConfig config;
@@ -80,14 +90,88 @@ public final class S3ObjectStore implements ObjectStore {
             return CompletableFuture.failedFuture(new IllegalArgumentException("objectId must be non-negative"));
         }
         ByteBuffer payload = data.asReadOnlyBuffer();
-        return runAsync(() -> client.putObject(
+        return runAsync(() -> putSingle(objectId, payload));
+    }
+
+    @Override
+    public CompletableFuture<Void> put(long objectId, List<ByteBuffer> parts) {
+        if (objectId < 0) {
+            return CompletableFuture.failedFuture(new IllegalArgumentException("objectId must be non-negative"));
+        }
+        Objects.requireNonNull(parts, "parts");
+        if (parts.isEmpty()) {
+            return CompletableFuture.failedFuture(new IllegalArgumentException("parts must not be empty"));
+        }
+        List<ByteBuffer> payloads = new ArrayList<>(parts.size());
+        for (int i = 0; i < parts.size(); i++) {
+            ByteBuffer part = Objects.requireNonNull(parts.get(i), "part").asReadOnlyBuffer();
+            if (i < parts.size() - 1 && part.remaining() < MIN_MULTIPART_PART_BYTES) {
+                return CompletableFuture.failedFuture(new IllegalArgumentException(
+                    "Non-final S3 multipart part must be at least " + MIN_MULTIPART_PART_BYTES + " bytes"));
+            }
+            payloads.add(part);
+        }
+        if (payloads.size() == 1) {
+            return put(objectId, payloads.get(0));
+        }
+        return runAsync(() -> putMultipart(objectId, payloads));
+    }
+
+    private void putSingle(long objectId, ByteBuffer payload) {
+        client.putObject(
             PutObjectRequest.builder()
                 .bucket(config.bucket())
                 .key(config.objectKey(objectId))
                 .contentLength((long) payload.remaining())
                 .build(),
             RequestBody.fromByteBuffer(payload)
-        ));
+        );
+    }
+
+    private void putMultipart(long objectId, List<ByteBuffer> payloads) {
+        String key = config.objectKey(objectId);
+        String uploadId = client.createMultipartUpload(
+            CreateMultipartUploadRequest.builder().bucket(config.bucket()).key(key).build()
+        ).uploadId();
+        List<CompletedPart> completed = new ArrayList<>(payloads.size());
+        try {
+            for (int i = 0; i < payloads.size(); i++) {
+                int partNumber = i + 1;
+                ByteBuffer payload = payloads.get(i).duplicate();
+                String eTag = client.uploadPart(
+                    UploadPartRequest.builder()
+                        .bucket(config.bucket())
+                        .key(key)
+                        .uploadId(uploadId)
+                        .partNumber(partNumber)
+                        .contentLength((long) payload.remaining())
+                        .build(),
+                    RequestBody.fromByteBuffer(payload)
+                ).eTag();
+                completed.add(CompletedPart.builder().partNumber(partNumber).eTag(eTag).build());
+            }
+            client.completeMultipartUpload(
+                CompleteMultipartUploadRequest.builder()
+                    .bucket(config.bucket())
+                    .key(key)
+                    .uploadId(uploadId)
+                    .multipartUpload(CompletedMultipartUpload.builder().parts(completed).build())
+                    .build()
+            );
+        } catch (RuntimeException uploadFailure) {
+            try {
+                client.abortMultipartUpload(
+                    AbortMultipartUploadRequest.builder()
+                        .bucket(config.bucket())
+                        .key(key)
+                        .uploadId(uploadId)
+                        .build()
+                );
+            } catch (RuntimeException abortFailure) {
+                uploadFailure.addSuppressed(abortFailure);
+            }
+            throw uploadFailure;
+        }
     }
 
     @Override
