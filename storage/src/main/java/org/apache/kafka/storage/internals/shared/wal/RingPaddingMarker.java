@@ -60,44 +60,85 @@ final class RingPaddingMarker {
 
     static void validate(ByteBuffer bytes, long paddingOffset, long expectedBoundaryOffset)
         throws WalCorruptionException {
+        ByteBuffer source = markerBytes(bytes, paddingOffset);
+        int base = source.position();
+        validateMagic(source.getInt(), paddingOffset);
+        validateVersion(source.getShort(), paddingOffset);
+        validateFlags(source.getShort(), paddingOffset);
+        long boundaryOffset = source.getLong();
+        long paddingBytes = source.getLong();
+        validateReserved(source.getInt(), paddingOffset);
+        validateChecksum(source, base, Integer.toUnsignedLong(source.getInt()), paddingOffset);
+
+        long expectedPaddingBytes = expectedPaddingBytes(paddingOffset, expectedBoundaryOffset);
+        validatePhysicalBoundary(
+            boundaryOffset,
+            paddingBytes,
+            paddingOffset,
+            expectedBoundaryOffset,
+            expectedPaddingBytes
+        );
+    }
+
+    private static ByteBuffer markerBytes(ByteBuffer bytes, long paddingOffset) throws WalCorruptionException {
         if (bytes == null || bytes.remaining() < MARKER_BYTES) {
             throw new WalCorruptionException("Ring WAL padding marker is truncated at logical offset " + paddingOffset);
         }
+        return bytes.duplicate().order(ByteOrder.BIG_ENDIAN);
+    }
 
-        ByteBuffer source = bytes.duplicate().order(ByteOrder.BIG_ENDIAN);
-        int base = source.position();
-        int magic = source.getInt();
-        short version = source.getShort();
-        short flags = source.getShort();
-        long boundaryOffset = source.getLong();
-        long paddingBytes = source.getLong();
-        int reserved = source.getInt();
-        long storedChecksum = Integer.toUnsignedLong(source.getInt());
-
+    private static void validateMagic(int magic, long paddingOffset) throws WalCorruptionException {
         if (magic != MAGIC) {
             throw new WalCorruptionException(
                 "Invalid ring WAL padding marker magic at logical offset " + paddingOffset + ": " +
                     Integer.toHexString(magic));
         }
+    }
+
+    private static void validateVersion(short version, long paddingOffset) throws WalCorruptionException {
         if (version != VERSION) {
             throw new WalCorruptionException(
                 "Unsupported ring WAL padding marker version at logical offset " + paddingOffset + ": " + version);
         }
-        if (flags != 0 || reserved != 0) {
+    }
+
+    private static void validateFlags(short flags, long paddingOffset) throws WalCorruptionException {
+        if (flags != 0) {
             throw new WalCorruptionException("Unsupported ring WAL padding marker flags at logical offset " + paddingOffset);
         }
+    }
+
+    private static void validateReserved(int reserved, long paddingOffset) throws WalCorruptionException {
+        if (reserved != 0) {
+            throw new WalCorruptionException("Unsupported ring WAL padding marker flags at logical offset " + paddingOffset);
+        }
+    }
+
+    private static void validateChecksum(ByteBuffer source, int base, long storedChecksum, long paddingOffset)
+        throws WalCorruptionException {
         long actualChecksum = crc32c(source, base, CHECKSUM_POSITION);
         if (storedChecksum != actualChecksum) {
             throw new WalCorruptionException(
                 "Ring WAL padding marker checksum mismatch at logical offset " + paddingOffset);
         }
+    }
 
-        final long expectedPaddingBytes;
+    private static long expectedPaddingBytes(long paddingOffset, long expectedBoundaryOffset)
+        throws WalCorruptionException {
         try {
-            expectedPaddingBytes = validateBounds(paddingOffset, expectedBoundaryOffset);
+            return validateBounds(paddingOffset, expectedBoundaryOffset);
         } catch (IllegalArgumentException e) {
             throw new WalCorruptionException("Invalid ring WAL padding bounds at logical offset " + paddingOffset);
         }
+    }
+
+    private static void validatePhysicalBoundary(
+        long boundaryOffset,
+        long paddingBytes,
+        long paddingOffset,
+        long expectedBoundaryOffset,
+        long expectedPaddingBytes
+    ) throws WalCorruptionException {
         if (expectedPaddingBytes < WalRecordCodec.MIN_RECORD_BYTES ||
             boundaryOffset != expectedBoundaryOffset || paddingBytes != expectedPaddingBytes) {
             throw new WalCorruptionException(
