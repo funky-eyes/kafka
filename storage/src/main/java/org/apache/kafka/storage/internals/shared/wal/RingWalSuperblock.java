@@ -78,12 +78,12 @@ final class RingWalSuperblock {
         int base = source.position();
         int magic = source.getInt();
         short version = source.getShort();
-        source.getShort();
+        short flags = source.getShort();
         long sequence = source.getLong();
         long headOffset = source.getLong();
         long tailOffset = source.getLong();
         long dataCapacityBytes = source.getLong();
-        source.getLong();
+        long reserved = source.getLong();
         long storedChecksum = Integer.toUnsignedLong(source.getInt());
 
         if (magic != MAGIC) {
@@ -91,6 +91,12 @@ final class RingWalSuperblock {
         }
         if (version != VERSION) {
             throw new WalCorruptionException("Unsupported ring WAL superblock version: " + version);
+        }
+        if (flags != 0) {
+            throw new WalCorruptionException("Unsupported ring WAL superblock flags: " + flags);
+        }
+        if (reserved != 0L) {
+            throw new WalCorruptionException("Ring WAL superblock reserved field is non-zero");
         }
         long actualChecksum = crc32c(source, base, CHECKSUM_POSITION);
         if (storedChecksum != actualChecksum) {

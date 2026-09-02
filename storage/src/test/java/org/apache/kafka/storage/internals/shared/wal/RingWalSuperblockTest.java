@@ -20,11 +20,14 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.zip.CRC32C;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class RingWalSuperblockTest {
+    private static final int CHECKSUM_POSITION = 48;
+
     @Test
     void roundTripsDurableLogicalWindow() throws Exception {
         RingWalSuperblock.State state = new RingWalSuperblock.State(7, 128, 900, 1024);
@@ -42,6 +45,26 @@ class RingWalSuperblockTest {
         legacy.position(0);
 
         assertThrows(WalCorruptionException.class, () -> RingWalSuperblock.decode(legacy));
+    }
+
+    @Test
+    void rejectsCrcValidUnknownFlags() {
+        RingWalSuperblock.State state = new RingWalSuperblock.State(7, 128, 900, 1024);
+        ByteBuffer unsupported = mutableCopy(RingWalSuperblock.encode(state)).order(ByteOrder.BIG_ENDIAN);
+        unsupported.putShort(6, (short) 1);
+        refreshChecksum(unsupported);
+
+        assertThrows(WalCorruptionException.class, () -> RingWalSuperblock.decode(unsupported));
+    }
+
+    @Test
+    void rejectsCrcValidNonZeroReservedField() {
+        RingWalSuperblock.State state = new RingWalSuperblock.State(7, 128, 900, 1024);
+        ByteBuffer unsupported = mutableCopy(RingWalSuperblock.encode(state)).order(ByteOrder.BIG_ENDIAN);
+        unsupported.putLong(40, 1L);
+        refreshChecksum(unsupported);
+
+        assertThrows(WalCorruptionException.class, () -> RingWalSuperblock.decode(unsupported));
     }
 
     @Test
@@ -120,6 +143,16 @@ class RingWalSuperblockTest {
             WalCorruptionException.class,
             () -> RingWalSuperblock.selectNewest(first, second, 1024)
         );
+    }
+
+    private static void refreshChecksum(ByteBuffer bytes) {
+        ByteBuffer checksumInput = bytes.duplicate();
+        checksumInput.position(0);
+        checksumInput.limit(CHECKSUM_POSITION);
+        CRC32C crc = new CRC32C();
+        crc.update(checksumInput);
+        bytes.putInt(CHECKSUM_POSITION, (int) crc.getValue());
+        bytes.position(0);
     }
 
     private static ByteBuffer mutableCopy(ByteBuffer source) {
