@@ -21,7 +21,6 @@ import org.apache.kafka.storage.internals.log.StorageExtensionContext;
 import org.apache.kafka.storage.internals.log.StoragePartitionRoleListener;
 import org.apache.kafka.storage.internals.log.UnifiedLogFactory;
 import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
-import org.apache.kafka.storage.internals.shared.wal.FileSharedWal;
 import org.apache.kafka.storage.internals.shared.wal.SharedWal;
 
 import java.io.IOException;
@@ -47,11 +46,7 @@ public final class SharedStorageExtension implements KafkaStorageExtension {
         }
 
         SharedStorageConfiguration configuration = SharedStorageConfiguration.from(context);
-        SharedWal wal = new FileSharedWal(
-            configuration.walDir(),
-            configuration.walCapacityBytes(),
-            configuration.walSegmentBytes()
-        );
+        SharedWal wal = SharedStorageWalFactory.create(configuration);
         try {
             storage = new SharedStorageEngine(wal);
             commitProgress = new SharedCommitProgress();
