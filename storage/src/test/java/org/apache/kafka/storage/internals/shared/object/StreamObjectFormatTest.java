@@ -140,6 +140,76 @@ class StreamObjectFormatTest {
         }
     }
 
+    @Test
+    void shouldRejectCrcValidUnsupportedObjectHeader() throws Exception {
+        try (SharedStorageEngine engine = new SharedStorageEngine(
+            new FileSharedWal(tempDir.resolve("stream-object-v2-header"), 1024 * 1024, 4096))) {
+            append(engine, P0, 3, 0, 9, new byte[]{1, 2, 3});
+            PackedObject packed = new SharedObjectPacker().pack(
+                703,
+                engine.uploadCandidates(P0, 0, 10),
+                engine
+            );
+            ByteBuffer corrupted = writableCopy(packed.bytes());
+            StreamObjectFormat.Footer footer = StreamObjectFormat.readFooter(corrupted);
+            corrupted.putInt(0, 0x12345678);
+            repairFooterChecksums(corrupted, footer);
+
+            IOException error = assertThrows(
+                IOException.class,
+                () -> StreamObjectFormat.readFooter(corrupted)
+            );
+            assertTrue(error.getMessage().contains("stream object header"));
+        }
+    }
+
+    @Test
+    void shouldTranslateMalformedIndexEntryToIOException() throws Exception {
+        try (SharedStorageEngine engine = new SharedStorageEngine(
+            new FileSharedWal(tempDir.resolve("stream-object-v2-entry"), 1024 * 1024, 4096))) {
+            append(engine, P0, 3, 0, 9, new byte[]{4, 5, 6});
+            PackedObject packed = new SharedObjectPacker().pack(
+                704,
+                engine.uploadCandidates(P0, 0, 10),
+                engine
+            );
+            ByteBuffer corrupted = writableCopy(packed.bytes());
+            StreamObjectFormat.Footer footer = StreamObjectFormat.readFooter(corrupted);
+            int firstEntryPosition = Math.toIntExact(footer.indexPosition()) + StreamObjectFormat.INDEX_HEADER_BYTES;
+            corrupted.putInt(firstEntryPosition + 16, -1);
+            repairFooterChecksums(corrupted, footer);
+
+            StreamObjectFormat.Footer repairedFooter = StreamObjectFormat.readFooter(corrupted);
+            IOException error = assertThrows(
+                IOException.class,
+                () -> StreamObjectFormat.readIndex(corrupted, repairedFooter)
+            );
+            assertTrue(error.getMessage().contains("index entry 0"));
+        }
+    }
+
+    @Test
+    void shouldRejectOverflowingFooterIndexRangeAsIOException() throws Exception {
+        try (SharedStorageEngine engine = new SharedStorageEngine(
+            new FileSharedWal(tempDir.resolve("stream-object-v2-footer-overflow"), 1024 * 1024, 4096))) {
+            append(engine, P0, 3, 0, 9, new byte[]{7, 8, 9});
+            PackedObject packed = new SharedObjectPacker().pack(
+                705,
+                engine.uploadCandidates(P0, 0, 10),
+                engine
+            );
+            ByteBuffer corrupted = writableCopy(packed.bytes());
+            int footerPosition = corrupted.limit() - StreamObjectFormat.FOOTER_BYTES;
+            corrupted.putLong(footerPosition + 8, Long.MAX_VALUE);
+
+            IOException error = assertThrows(
+                IOException.class,
+                () -> StreamObjectFormat.readFooter(corrupted)
+            );
+            assertTrue(error.getMessage().contains("overflows"));
+        }
+    }
+
     private static ByteBuffer writableCopy(ByteBuffer source) {
         ByteBuffer copy = ByteBuffer.allocate(source.remaining());
         copy.put(source.duplicate());

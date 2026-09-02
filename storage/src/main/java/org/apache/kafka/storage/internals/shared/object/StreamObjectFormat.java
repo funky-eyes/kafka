@@ -143,8 +143,9 @@ final class StreamObjectFormat {
         if (objectLength < OBJECT_HEADER_BYTES + INDEX_HEADER_BYTES + FOOTER_BYTES) {
             throw new IOException("Stream object is too short: " + objectLength);
         }
+        validateObjectHeader(object, objectStart);
 
-        int footerPosition = objectStart + objectLength - FOOTER_BYTES;
+        int footerPosition = object.limit() - FOOTER_BYTES;
         object.position(footerPosition);
         int magic = object.getInt();
         short version = object.getShort();
@@ -161,7 +162,7 @@ final class StreamObjectFormat {
         if (indexPosition < OBJECT_HEADER_BYTES || indexLength < INDEX_HEADER_BYTES || dataBlockCount < 0) {
             throw new IOException("Invalid stream object footer bounds");
         }
-        long indexEnd = Math.addExact(indexPosition, indexLength);
+        long indexEnd = checkedAdd(indexPosition, indexLength, "Stream object footer index range overflows");
         if (indexEnd != objectLength - FOOTER_BYTES) {
             throw new IOException("Stream object index does not immediately precede footer");
         }
@@ -178,10 +179,19 @@ final class StreamObjectFormat {
     static List<DataBlockIndexEntry> readIndex(ByteBuffer source, Footer footer) throws IOException {
         Objects.requireNonNull(source, "source");
         Objects.requireNonNull(footer, "footer");
+        validateFooterForIndexRead(footer);
         ByteBuffer object = source.duplicate().order(ByteOrder.BIG_ENDIAN);
         int objectStart = object.position();
-        int indexPosition = Math.toIntExact(Math.addExact(objectStart, footer.indexPosition()));
-        int indexEnd = Math.addExact(indexPosition, footer.indexLength());
+        long absoluteIndexPosition = checkedAdd(
+            objectStart,
+            footer.indexPosition(),
+            "Stream object absolute index position overflows"
+        );
+        int indexPosition = checkedInt(absoluteIndexPosition, "Stream object index position exceeds buffer range");
+        int indexEnd = checkedInt(
+            checkedAdd(indexPosition, footer.indexLength(), "Stream object index end overflows"),
+            "Stream object index end exceeds buffer range"
+        );
         if (indexEnd > object.limit()) {
             throw new IOException("Stream object index is outside object bounds");
         }
@@ -203,14 +213,53 @@ final class StreamObjectFormat {
         if (magic != INDEX_MAGIC || version != VERSION) {
             throw new IOException("Unsupported stream object index: magic=" + magic + ", version=" + version);
         }
-        if (entryCount != footer.dataBlockCount() ||
-            entriesLength != Math.multiplyExact(entryCount, INDEX_ENTRY_BYTES) ||
-            footer.indexLength() != Math.addExact(INDEX_HEADER_BYTES, entriesLength)) {
-            throw new IOException("Stream object index length/count mismatch");
-        }
+        validateIndexShape(entryCount, entriesLength, footer);
 
         List<DataBlockIndexEntry> entries = new ArrayList<>(entryCount);
         for (int i = 0; i < entryCount; i++) {
+            entries.add(readIndexEntry(object, i));
+        }
+        validateDataBlockLayout(entries, footer.indexPosition());
+        return List.copyOf(entries);
+    }
+
+    private static void validateObjectHeader(ByteBuffer object, int objectStart) throws IOException {
+        ByteBuffer header = object.duplicate().order(ByteOrder.BIG_ENDIAN);
+        header.position(objectStart);
+        int magic = header.getInt();
+        short version = header.getShort();
+        if (magic != OBJECT_MAGIC || version != VERSION) {
+            throw new IOException("Unsupported stream object header: magic=" + magic + ", version=" + version);
+        }
+    }
+
+    private static void validateFooterForIndexRead(Footer footer) throws IOException {
+        if (footer.indexPosition() < OBJECT_HEADER_BYTES ||
+            footer.indexLength() < INDEX_HEADER_BYTES || footer.dataBlockCount() < 0) {
+            throw new IOException("Invalid stream object footer bounds");
+        }
+    }
+
+    private static void validateIndexShape(int entryCount, int entriesLength, Footer footer) throws IOException {
+        if (entryCount < 0 || entriesLength < 0 || entryCount != footer.dataBlockCount()) {
+            throw new IOException("Stream object index length/count mismatch");
+        }
+        int expectedEntriesLength = checkedMultiply(
+            entryCount,
+            INDEX_ENTRY_BYTES,
+            "Stream object index entry bytes overflow"
+        );
+        int expectedIndexLength = checkedInt(
+            checkedAdd(INDEX_HEADER_BYTES, expectedEntriesLength, "Stream object index length overflows"),
+            "Stream object index length exceeds buffer range"
+        );
+        if (entriesLength != expectedEntriesLength || footer.indexLength() != expectedIndexLength) {
+            throw new IOException("Stream object index length/count mismatch");
+        }
+    }
+
+    private static DataBlockIndexEntry readIndexEntry(ByteBuffer object, int entryIndex) throws IOException {
+        try {
             SharedPartitionId partition = new SharedPartitionId(object.getLong(), object.getLong(), object.getInt());
             int leaderEpoch = object.getInt();
             OffsetRange offsets = new OffsetRange(object.getLong(), object.getLong());
@@ -219,7 +268,7 @@ final class StreamObjectFormat {
             int batchCount = object.getInt();
             long checksum = Integer.toUnsignedLong(object.getInt());
             object.getInt();
-            entries.add(new DataBlockIndexEntry(
+            return new DataBlockIndexEntry(
                 partition,
                 leaderEpoch,
                 offsets,
@@ -227,10 +276,10 @@ final class StreamObjectFormat {
                 blockLength,
                 batchCount,
                 checksum
-            ));
+            );
+        } catch (IllegalArgumentException e) {
+            throw new IOException("Invalid stream object index entry " + entryIndex, e);
         }
-        validateDataBlockLayout(entries, footer.indexPosition());
-        return List.copyOf(entries);
     }
 
     private static void validateDataBlockLayout(List<DataBlockIndexEntry> entries, long indexPosition) throws IOException {
@@ -242,12 +291,11 @@ final class StreamObjectFormat {
                         ", actualPosition=" + entry.blockPosition()
                 );
             }
-            long blockEnd;
-            try {
-                blockEnd = Math.addExact(entry.blockPosition(), entry.blockLength());
-            } catch (ArithmeticException e) {
-                throw new IOException("Stream object data block range overflows", e);
-            }
+            long blockEnd = checkedAdd(
+                entry.blockPosition(),
+                entry.blockLength(),
+                "Stream object data block range overflows"
+            );
             if (blockEnd > indexPosition) {
                 throw new IOException(
                     "Stream object data block extends into index: blockEnd=" + blockEnd +
@@ -264,8 +312,32 @@ final class StreamObjectFormat {
         }
     }
 
+    private static long checkedAdd(long left, long right, String message) throws IOException {
+        try {
+            return Math.addExact(left, right);
+        } catch (ArithmeticException e) {
+            throw new IOException(message, e);
+        }
+    }
+
+    private static int checkedMultiply(int left, int right, String message) throws IOException {
+        try {
+            return Math.multiplyExact(left, right);
+        } catch (ArithmeticException e) {
+            throw new IOException(message, e);
+        }
+    }
+
+    private static int checkedInt(long value, String message) throws IOException {
+        try {
+            return Math.toIntExact(value);
+        } catch (ArithmeticException e) {
+            throw new IOException(message, e);
+        }
+    }
+
     static long crc32c(ByteBuffer source, int position, int length) {
-        if (position < 0 || length < 0 || Math.addExact(position, length) > source.limit()) {
+        if (position < 0 || length < 0 || position > source.limit() - length) {
             throw new IllegalArgumentException("CRC32C range is outside buffer bounds");
         }
         ByteBuffer data = source.duplicate();
