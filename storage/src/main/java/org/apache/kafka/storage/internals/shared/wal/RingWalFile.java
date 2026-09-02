@@ -54,6 +54,7 @@ final class RingWalFile implements AutoCloseable {
     private final WalIoBackend backend;
     private final WalIoBackend.Handle handle;
     private RingWalSuperblock.State state;
+    private Throwable checkpointFailure;
     private boolean closed;
 
     RingWalFile(Path path, long totalCapacityBytes) throws IOException {
@@ -146,14 +147,19 @@ final class RingWalFile implements AutoCloseable {
         RingWalSuperblock.State current = state;
         RingWalSuperblock.State next = current.next(headOffset, tailOffset);
 
-        handle.force();
-        writeSuperblock(next);
-        handle.force();
-        if (headOffset > current.headOffset()) {
-            mirrorSuperblock(next);
+        try {
+            handle.force();
+            writeSuperblock(next);
+            handle.force();
+            if (headOffset > current.headOffset()) {
+                mirrorSuperblock(next);
+            }
+            state = next;
+            return state;
+        } catch (IOException | RuntimeException failure) {
+            checkpointFailure = failure;
+            throw failure;
         }
-        state = next;
-        return state;
     }
 
     @Override
@@ -436,6 +442,12 @@ final class RingWalFile implements AutoCloseable {
     private void ensureOpen() {
         if (closed) {
             throw new IllegalStateException("Ring WAL file is closed");
+        }
+        if (checkpointFailure != null) {
+            throw new IllegalStateException(
+                "Ring WAL file is fenced after checkpoint failure; reopen required",
+                checkpointFailure
+            );
         }
     }
 }
