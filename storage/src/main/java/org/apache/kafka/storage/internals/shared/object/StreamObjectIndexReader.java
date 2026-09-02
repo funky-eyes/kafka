@@ -20,11 +20,13 @@ import org.apache.kafka.storage.internals.shared.metadata.RemoteObjectIndex;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.zip.CRC32C;
 
 /**
  * Reads the immutable KSO2 object descriptor with bounded range requests.
@@ -48,7 +50,7 @@ final class StreamObjectIndexReader {
         if (reference.objectSize() <
             StreamObjectFormat.OBJECT_HEADER_BYTES + StreamObjectFormat.INDEX_HEADER_BYTES +
                 StreamObjectFormat.FOOTER_BYTES) {
-            return CompletableFuture.failedFuture(new RemoteObjectCorruptionException(
+            return verifyLegacyDirectObject(reference, new IOException(
                 "Remote stream object is too short: object=" + reference.objectId() +
                     ", size=" + reference.objectSize()
             ));
@@ -66,32 +68,84 @@ final class StreamObjectIndexReader {
             StreamObjectFormat.FOOTER_BYTES
         );
 
-        return header.thenCombine(footer, (headerBytes, footerBytes) -> {
+        return header.thenCombine(footer, HeaderAndFooter::new).thenCompose(parts -> {
+            final long headerObjectId;
             try {
-                long headerObjectId = StreamObjectFormat.readObjectId(headerBytes);
-                if (headerObjectId != reference.objectId()) {
-                    throw new RemoteObjectCorruptionException(
-                        "Remote stream object ID mismatch: expected=" + reference.objectId() +
-                            ", actual=" + headerObjectId
-                    );
+                headerObjectId = StreamObjectFormat.readObjectId(parts.header());
+            } catch (IOException e) {
+                if (hasStreamObjectMagic(parts.header())) {
+                    return CompletableFuture.failedFuture(corruption(reference, e));
                 }
-                return StreamObjectFormat.readFooterTail(footerBytes, reference.objectSize());
-            } catch (IOException e) {
-                throw new CompletionException(corruption(reference, e));
+                return verifyLegacyDirectObject(reference, e);
             }
-        }).thenCompose(parsedFooter -> rangeReadExact(
-            reference.objectId(),
-            parsedFooter.indexPosition(),
-            parsedFooter.indexLength()
-        ).thenApply(indexBytes -> {
+            if (headerObjectId != reference.objectId()) {
+                return CompletableFuture.failedFuture(new RemoteObjectCorruptionException(
+                    "Remote stream object ID mismatch: expected=" + reference.objectId() +
+                        ", actual=" + headerObjectId
+                ));
+            }
+
+            final StreamObjectFormat.Footer parsedFooter;
             try {
-                List<StreamObjectFormat.DataBlockIndexEntry> entries =
-                    StreamObjectFormat.readIndexBlock(indexBytes, parsedFooter);
-                return Optional.of(new IndexSnapshot(parsedFooter, entries));
+                parsedFooter = StreamObjectFormat.readFooterTail(parts.footer(), reference.objectSize());
             } catch (IOException e) {
-                throw new CompletionException(corruption(reference, e));
+                return CompletableFuture.failedFuture(corruption(reference, e));
             }
-        }));
+            return rangeReadExact(
+                reference.objectId(),
+                parsedFooter.indexPosition(),
+                parsedFooter.indexLength()
+            ).thenApply(indexBytes -> {
+                try {
+                    List<StreamObjectFormat.DataBlockIndexEntry> entries =
+                        StreamObjectFormat.readIndexBlock(indexBytes, parsedFooter);
+                    return Optional.of(new IndexSnapshot(parsedFooter, entries));
+                } catch (IOException e) {
+                    throw new CompletionException(corruption(reference, e));
+                }
+            });
+        });
+    }
+
+    /**
+     * Descriptor fields pre-date KSO2, so objectSize/objectChecksum alone cannot prove that an object has a KSO2
+     * header. A descriptor-backed legacy object is accepted only after its complete bytes match the authoritative
+     * object checksum. This keeps migration compatibility without turning malformed KSO2 metadata into a direct-read
+     * fallback that could hide remote corruption.
+     */
+    private CompletableFuture<Optional<IndexSnapshot>> verifyLegacyDirectObject(
+        RemoteObjectIndex.RangeReference reference,
+        IOException streamFormatFailure
+    ) {
+        if (reference.objectSize() > Integer.MAX_VALUE) {
+            return CompletableFuture.failedFuture(corruption(reference, new IOException(
+                "Cannot checksum-verify descriptor-backed legacy object larger than Java ByteBuffer limit: size=" +
+                    reference.objectSize(),
+                streamFormatFailure
+            )));
+        }
+        int objectSize = Math.toIntExact(reference.objectSize());
+        return objectStore.rangeRead(reference.objectId(), 0, objectSize).thenApply(bytes -> {
+            if (bytes.remaining() != objectSize) {
+                throw new CompletionException(corruption(reference, new IOException(
+                    "Descriptor-backed legacy object length mismatch: expected=" + objectSize +
+                        ", actual=" + bytes.remaining(),
+                    streamFormatFailure
+                )));
+            }
+            if (hasStreamObjectMagic(bytes)) {
+                throw new CompletionException(corruption(reference, streamFormatFailure));
+            }
+            long actualChecksum = crc32c(bytes);
+            if (actualChecksum != reference.objectChecksum()) {
+                throw new CompletionException(corruption(reference, new IOException(
+                    "Remote object is neither valid KSO2 nor checksum-valid legacy direct data: expected checksum=" +
+                        reference.objectChecksum() + ", actual=" + actualChecksum,
+                    streamFormatFailure
+                )));
+            }
+            return Optional.empty();
+        });
     }
 
     private CompletableFuture<ByteBuffer> rangeReadExact(long objectId, long position, int length) {
@@ -107,6 +161,19 @@ final class StreamObjectIndexReader {
         });
     }
 
+    private static boolean hasStreamObjectMagic(ByteBuffer bytes) {
+        if (bytes.remaining() < Integer.BYTES) {
+            return false;
+        }
+        return bytes.duplicate().order(ByteOrder.BIG_ENDIAN).getInt() == StreamObjectFormat.OBJECT_MAGIC;
+    }
+
+    private static long crc32c(ByteBuffer data) {
+        CRC32C crc = new CRC32C();
+        crc.update(data.duplicate());
+        return crc.getValue();
+    }
+
     private static RemoteObjectCorruptionException corruption(
         RemoteObjectIndex.RangeReference reference,
         IOException cause
@@ -118,6 +185,13 @@ final class StreamObjectIndexReader {
             "Invalid remote stream object index metadata: object=" + reference.objectId(),
             cause
         );
+    }
+
+    private record HeaderAndFooter(ByteBuffer header, ByteBuffer footer) {
+        private HeaderAndFooter {
+            Objects.requireNonNull(header, "header");
+            Objects.requireNonNull(footer, "footer");
+        }
     }
 
     record IndexSnapshot(

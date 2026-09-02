@@ -17,8 +17,10 @@
 package org.apache.kafka.storage.internals.shared.object;
 
 import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
+import org.apache.kafka.storage.internals.shared.metadata.OffsetRange;
 import org.apache.kafka.storage.internals.shared.metadata.RemoteObjectIndex;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
+import org.apache.kafka.storage.internals.shared.metadata.SharedObjectRange;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 import org.apache.kafka.storage.internals.shared.wal.FileSharedWal;
 import org.junit.jupiter.api.Test;
@@ -32,6 +34,7 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.zip.CRC32C;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -84,8 +87,70 @@ class StreamObjectIndexReaderTest {
     }
 
     @Test
+    void shouldChecksumVerifyDescriptorBackedLegacyObjectBeforeFallback() throws Exception {
+        long objectId = 802;
+        byte[] legacyBytes = new byte[96];
+        for (int i = 0; i < legacyBytes.length; i++) {
+            legacyBytes[i] = (byte) (i * 13);
+        }
+        long checksum = checksum(legacyBytes);
+        SharedObjectRange range = new SharedObjectRange(
+            PARTITION,
+            new OffsetRange(0, 1),
+            3,
+            0,
+            legacyBytes.length,
+            checksum
+        );
+        RecordingObjectStore store = new RecordingObjectStore(objectId, ByteBuffer.wrap(legacyBytes));
+        StreamObjectIndexReader reader = new StreamObjectIndexReader(store);
+        RemoteObjectIndex.RangeReference reference = new RemoteObjectIndex.RangeReference(
+            objectId,
+            legacyBytes.length,
+            checksum,
+            range
+        );
+
+        assertEquals(Optional.empty(), reader.load(reference).get(10, TimeUnit.SECONDS));
+        assertEquals(List.of(
+            new Read(0, StreamObjectFormat.OBJECT_HEADER_BYTES),
+            new Read(legacyBytes.length - StreamObjectFormat.FOOTER_BYTES, StreamObjectFormat.FOOTER_BYTES),
+            new Read(0, legacyBytes.length)
+        ), store.reads());
+    }
+
+    @Test
+    void shouldRejectCorruptedKso2HeaderInsteadOfFallingBackToLegacyDirectRead() throws Exception {
+        PackedObject packed = packObject(803);
+        SharedObjectMetadata metadata = packed.metadata();
+        ByteBuffer corrupted = ByteBuffer.allocate(packed.bytes().remaining());
+        corrupted.put(packed.bytes().duplicate());
+        corrupted.flip();
+        corrupted.put(0, (byte) (corrupted.get(0) ^ 0x01));
+        RecordingObjectStore store = new RecordingObjectStore(metadata.objectId(), corrupted);
+        StreamObjectIndexReader reader = new StreamObjectIndexReader(store);
+        RemoteObjectIndex.RangeReference reference = new RemoteObjectIndex.RangeReference(
+            metadata.objectId(),
+            metadata.objectSize(),
+            metadata.objectChecksum(),
+            metadata.ranges().get(0)
+        );
+
+        ExecutionException error = assertThrows(
+            ExecutionException.class,
+            () -> reader.load(reference).get(10, TimeUnit.SECONDS)
+        );
+        assertInstanceOf(RemoteObjectCorruptionException.class, error.getCause());
+        assertEquals(List.of(
+            new Read(0, StreamObjectFormat.OBJECT_HEADER_BYTES),
+            new Read(metadata.objectSize() - StreamObjectFormat.FOOTER_BYTES, StreamObjectFormat.FOOTER_BYTES),
+            new Read(0, Math.toIntExact(metadata.objectSize()))
+        ), store.reads());
+    }
+
+    @Test
     void shouldRejectObjectWhoseHeaderIdDoesNotMatchMetadataReference() throws Exception {
-        PackedObject packed = packObject(802);
+        PackedObject packed = packObject(804);
         SharedObjectMetadata metadata = packed.metadata();
         long incorrectObjectId = 999;
         RecordingObjectStore store = new RecordingObjectStore(incorrectObjectId, packed.bytes());
@@ -121,6 +186,12 @@ class StreamObjectIndexReaderTest {
         throws Exception {
         engine.appendData(PARTITION, 3, firstOffset, lastOffset, ByteBuffer.wrap(payload))
             .get(10, TimeUnit.SECONDS);
+    }
+
+    private static long checksum(byte[] payload) {
+        CRC32C crc = new CRC32C();
+        crc.update(payload, 0, payload.length);
+        return crc.getValue();
     }
 
     private static final class RecordingObjectStore implements ObjectStore {
