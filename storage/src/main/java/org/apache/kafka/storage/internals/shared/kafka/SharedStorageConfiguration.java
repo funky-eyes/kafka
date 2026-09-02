@@ -82,14 +82,9 @@ public final class SharedStorageConfiguration {
         long walCapacityBytes,
         long walSegmentBytes,
         long objectTargetBytes,
-        int readIndexCacheEntries,
-        long readDataBlockCacheBytes,
-        long uploadIntervalMs,
-        long uploadMaxLingerMs,
-        int uploadWalPressurePercent,
-        int uploadMaxInflight,
-        long orphanCleanupIntervalMs,
-        long orphanGraceMs,
+        ReadCacheConfiguration readCache,
+        UploadConfiguration upload,
+        OrphanConfiguration orphan,
         Set<String> topics,
         Pattern topicPattern
     ) {
@@ -98,14 +93,14 @@ public final class SharedStorageConfiguration {
         this.walCapacityBytes = walCapacityBytes;
         this.walSegmentBytes = walSegmentBytes;
         this.objectTargetBytes = objectTargetBytes;
-        this.readIndexCacheEntries = readIndexCacheEntries;
-        this.readDataBlockCacheBytes = readDataBlockCacheBytes;
-        this.uploadIntervalMs = uploadIntervalMs;
-        this.uploadMaxLingerMs = uploadMaxLingerMs;
-        this.uploadWalPressurePercent = uploadWalPressurePercent;
-        this.uploadMaxInflight = uploadMaxInflight;
-        this.orphanCleanupIntervalMs = orphanCleanupIntervalMs;
-        this.orphanGraceMs = orphanGraceMs;
+        this.readIndexCacheEntries = readCache.indexEntries();
+        this.readDataBlockCacheBytes = readCache.dataBlockBytes();
+        this.uploadIntervalMs = upload.intervalMs();
+        this.uploadMaxLingerMs = upload.maxLingerMs();
+        this.uploadWalPressurePercent = upload.walPressurePercent();
+        this.uploadMaxInflight = upload.maxInflight();
+        this.orphanCleanupIntervalMs = orphan.cleanupIntervalMs();
+        this.orphanGraceMs = orphan.graceMs();
         this.topics = topics;
         this.topicPattern = topicPattern;
     }
@@ -139,45 +134,51 @@ public final class SharedStorageConfiguration {
             DEFAULT_OBJECT_TARGET_BYTES,
             OBJECT_TARGET_BYTES_CONFIG
         );
-        int readIndexCacheEntries = nonNegativeInt(
-            context.originals().get(READ_INDEX_CACHE_ENTRIES_CONFIG),
-            DEFAULT_READ_INDEX_CACHE_ENTRIES,
-            READ_INDEX_CACHE_ENTRIES_CONFIG
+        ReadCacheConfiguration readCache = new ReadCacheConfiguration(
+            nonNegativeInt(
+                context.originals().get(READ_INDEX_CACHE_ENTRIES_CONFIG),
+                DEFAULT_READ_INDEX_CACHE_ENTRIES,
+                READ_INDEX_CACHE_ENTRIES_CONFIG
+            ),
+            nonNegativeLong(
+                context.originals().get(READ_DATA_BLOCK_CACHE_BYTES_CONFIG),
+                DEFAULT_READ_DATA_BLOCK_CACHE_BYTES,
+                READ_DATA_BLOCK_CACHE_BYTES_CONFIG
+            )
         );
-        long readDataBlockCacheBytes = nonNegativeLong(
-            context.originals().get(READ_DATA_BLOCK_CACHE_BYTES_CONFIG),
-            DEFAULT_READ_DATA_BLOCK_CACHE_BYTES,
-            READ_DATA_BLOCK_CACHE_BYTES_CONFIG
+        UploadConfiguration upload = new UploadConfiguration(
+            positiveLong(
+                context.originals().get(UPLOAD_INTERVAL_MS_CONFIG),
+                DEFAULT_UPLOAD_INTERVAL_MS,
+                UPLOAD_INTERVAL_MS_CONFIG
+            ),
+            nonNegativeLong(
+                context.originals().get(UPLOAD_MAX_LINGER_MS_CONFIG),
+                DEFAULT_UPLOAD_MAX_LINGER_MS,
+                UPLOAD_MAX_LINGER_MS_CONFIG
+            ),
+            percentage(
+                context.originals().get(UPLOAD_WAL_PRESSURE_PERCENT_CONFIG),
+                DEFAULT_UPLOAD_WAL_PRESSURE_PERCENT,
+                UPLOAD_WAL_PRESSURE_PERCENT_CONFIG
+            ),
+            positiveInt(
+                context.originals().get(UPLOAD_MAX_INFLIGHT_CONFIG),
+                DEFAULT_UPLOAD_MAX_INFLIGHT,
+                UPLOAD_MAX_INFLIGHT_CONFIG
+            )
         );
-        long uploadIntervalMs = positiveLong(
-            context.originals().get(UPLOAD_INTERVAL_MS_CONFIG),
-            DEFAULT_UPLOAD_INTERVAL_MS,
-            UPLOAD_INTERVAL_MS_CONFIG
-        );
-        long uploadMaxLingerMs = nonNegativeLong(
-            context.originals().get(UPLOAD_MAX_LINGER_MS_CONFIG),
-            DEFAULT_UPLOAD_MAX_LINGER_MS,
-            UPLOAD_MAX_LINGER_MS_CONFIG
-        );
-        int uploadWalPressurePercent = percentage(
-            context.originals().get(UPLOAD_WAL_PRESSURE_PERCENT_CONFIG),
-            DEFAULT_UPLOAD_WAL_PRESSURE_PERCENT,
-            UPLOAD_WAL_PRESSURE_PERCENT_CONFIG
-        );
-        int uploadMaxInflight = positiveInt(
-            context.originals().get(UPLOAD_MAX_INFLIGHT_CONFIG),
-            DEFAULT_UPLOAD_MAX_INFLIGHT,
-            UPLOAD_MAX_INFLIGHT_CONFIG
-        );
-        long orphanCleanupIntervalMs = positiveLong(
-            context.originals().get(ORPHAN_CLEANUP_INTERVAL_MS_CONFIG),
-            DEFAULT_ORPHAN_CLEANUP_INTERVAL_MS,
-            ORPHAN_CLEANUP_INTERVAL_MS_CONFIG
-        );
-        long orphanGraceMs = positiveLong(
-            context.originals().get(ORPHAN_GRACE_MS_CONFIG),
-            DEFAULT_ORPHAN_GRACE_MS,
-            ORPHAN_GRACE_MS_CONFIG
+        OrphanConfiguration orphan = new OrphanConfiguration(
+            positiveLong(
+                context.originals().get(ORPHAN_CLEANUP_INTERVAL_MS_CONFIG),
+                DEFAULT_ORPHAN_CLEANUP_INTERVAL_MS,
+                ORPHAN_CLEANUP_INTERVAL_MS_CONFIG
+            ),
+            positiveLong(
+                context.originals().get(ORPHAN_GRACE_MS_CONFIG),
+                DEFAULT_ORPHAN_GRACE_MS,
+                ORPHAN_GRACE_MS_CONFIG
+            )
         );
 
         Set<String> topics = parseTopics(context.originals().get(TOPICS_CONFIG));
@@ -188,14 +189,9 @@ public final class SharedStorageConfiguration {
             walCapacityBytes,
             walSegmentBytes,
             objectTargetBytes,
-            readIndexCacheEntries,
-            readDataBlockCacheBytes,
-            uploadIntervalMs,
-            uploadMaxLingerMs,
-            uploadWalPressurePercent,
-            uploadMaxInflight,
-            orphanCleanupIntervalMs,
-            orphanGraceMs,
+            readCache,
+            upload,
+            orphan,
             topics,
             topicPattern
         );
@@ -365,6 +361,20 @@ public final class SharedStorageConfiguration {
         } catch (PatternSyntaxException e) {
             throw new IllegalArgumentException("Invalid " + TOPIC_PATTERN_CONFIG + ": " + value, e);
         }
+    }
+
+    private record ReadCacheConfiguration(int indexEntries, long dataBlockBytes) {
+    }
+
+    private record UploadConfiguration(
+        long intervalMs,
+        long maxLingerMs,
+        int walPressurePercent,
+        int maxInflight
+    ) {
+    }
+
+    private record OrphanConfiguration(long cleanupIntervalMs, long graceMs) {
     }
 
     public enum WalEngine {
