@@ -27,6 +27,7 @@ on:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/object/PackedObject.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/metadata/SharedObjectMetadata.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/metadata/SharedObjectRange.java'
+      - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/metadata/SharedObjectMetadataTest.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/object/StreamObjectFormatTest.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/object/SharedObjectUploaderTest.java'
       - '.github/workflows/shared-storage-object-format.yml'
@@ -39,6 +40,7 @@ on:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/object/PackedObject.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/metadata/SharedObjectMetadata.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/metadata/SharedObjectRange.java'
+      - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/metadata/SharedObjectMetadataTest.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/object/StreamObjectFormatTest.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/object/SharedObjectUploaderTest.java'
       - '.github/workflows/shared-storage-object-format.yml'
@@ -75,14 +77,17 @@ jobs:
           ./gradlew :storage:test \
             --tests 'org.apache.kafka.storage.internals.shared.object.StreamObjectFormatTest' \
             --tests 'org.apache.kafka.storage.internals.shared.object.SharedObjectUploaderTest' \
+            --tests 'org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadataTest' \
             --no-scan 2>&1 | tee shared-storage-object-format.log
 
           result_dir='storage/build/test-results/test'
           test -f "$result_dir/TEST-org.apache.kafka.storage.internals.shared.object.StreamObjectFormatTest.xml"
           test -f "$result_dir/TEST-org.apache.kafka.storage.internals.shared.object.SharedObjectUploaderTest.xml"
+          test -f "$result_dir/TEST-org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadataTest.xml"
           if grep -E 'failures="[1-9]|errors="[1-9]|skipped="[1-9]' \
               "$result_dir/TEST-org.apache.kafka.storage.internals.shared.object.StreamObjectFormatTest.xml" \
-              "$result_dir/TEST-org.apache.kafka.storage.internals.shared.object.SharedObjectUploaderTest.xml"; then
+              "$result_dir/TEST-org.apache.kafka.storage.internals.shared.object.SharedObjectUploaderTest.xml" \
+              "$result_dir/TEST-org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadataTest.xml"; then
             exit 1
           fi
           printf 'OBJECT_FORMAT_CORRECTNESS_SUCCESS commit=%s\n' "$GITHUB_SHA" \

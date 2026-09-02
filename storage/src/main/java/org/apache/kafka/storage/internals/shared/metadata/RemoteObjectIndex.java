@@ -51,7 +51,12 @@ public final class RemoteObjectIndex {
     public synchronized void add(SharedObjectMetadata object) {
         Objects.requireNonNull(object, "object");
         List<RangeReference> references = object.ranges().stream()
-            .map(range -> new RangeReference(object.objectId(), range))
+            .map(range -> new RangeReference(
+                object.objectId(),
+                object.objectSize(),
+                object.objectChecksum(),
+                range
+            ))
             .toList();
         addReferences(references);
     }
@@ -70,7 +75,7 @@ public final class RemoteObjectIndex {
 
     private void addReferences(List<RangeReference> references) {
         Map<SharedPartitionId, NavigableMap<Long, RangeReference>> stagedByPartition = new HashMap<>();
-        List<RangeReference> newRanges = new ArrayList<>();
+        List<RangeReference> updates = new ArrayList<>();
 
         for (RangeReference incoming : references) {
             Objects.requireNonNull(incoming, "range reference");
@@ -82,17 +87,22 @@ public final class RemoteObjectIndex {
             );
             RangeReference overlapping = overlappingReference(staged, range.offsets());
             if (overlapping != null) {
-                if (sameLogicalRange(overlapping.range(), range)) {
-                    continue;
+                if (!sameLogicalRange(overlapping.range(), range)) {
+                    throw conflict(overlapping, incoming);
                 }
-                throw conflict(overlapping, incoming);
+                RangeReference merged = mergeEquivalentReference(overlapping, incoming);
+                if (merged != overlapping) {
+                    staged.put(range.offsets().startOffset(), merged);
+                    updates.add(merged);
+                }
+                continue;
             }
             staged.put(range.offsets().startOffset(), incoming);
-            newRanges.add(incoming);
+            updates.add(incoming);
         }
 
         // No validation below this point can fail for ordinary metadata. Publish only after the whole batch validates.
-        for (RangeReference reference : newRanges) {
+        for (RangeReference reference : updates) {
             SharedObjectRange range = reference.range();
             byPartition
                 .computeIfAbsent(range.partition(), ignored -> new ConcurrentSkipListMap<>())
@@ -102,6 +112,27 @@ public final class RemoteObjectIndex {
             SharedObjectRange range = reference.range();
             coverage(range.partition()).add(range.offsets());
         }
+    }
+
+    private static RangeReference mergeEquivalentReference(RangeReference existing, RangeReference incoming) {
+        if (existing.objectId() != incoming.objectId()) {
+            // A physically duplicated object with identical logical content may keep the first durable reference.
+            return existing;
+        }
+        if (!existing.range().equals(incoming.range())) {
+            throw conflict(existing, incoming);
+        }
+        if (existing.hasObjectDescriptor() && incoming.hasObjectDescriptor()) {
+            if (existing.objectSize() != incoming.objectSize() ||
+                existing.objectChecksum() != incoming.objectChecksum()) {
+                throw conflict(existing, incoming);
+            }
+            return existing;
+        }
+        if (!existing.hasObjectDescriptor() && incoming.hasObjectDescriptor()) {
+            return incoming;
+        }
+        return existing;
     }
 
     public Optional<RangeReference> find(SharedPartitionId partition, long offset) {
@@ -166,12 +197,41 @@ public final class RemoteObjectIndex {
             "Conflicting remote Kafka ranges: existing=" + existing + ", incoming=" + incoming);
     }
 
-    public record RangeReference(long objectId, SharedObjectRange range) {
+    public record RangeReference(
+        long objectId,
+        long objectSize,
+        long objectChecksum,
+        SharedObjectRange range
+    ) {
+        private static final long UNKNOWN_OBJECT_SIZE = -1L;
+
+        public RangeReference(long objectId, SharedObjectRange range) {
+            this(objectId, UNKNOWN_OBJECT_SIZE, 0L, range);
+        }
+
         public RangeReference {
             if (objectId <= 0) {
                 throw new IllegalArgumentException("objectId must be positive");
             }
             Objects.requireNonNull(range, "range");
+            if (objectSize != UNKNOWN_OBJECT_SIZE && objectSize <= 0) {
+                throw new IllegalArgumentException("objectSize must be positive or unknown");
+            }
+            if (objectSize > 0) {
+                long rangeEnd;
+                try {
+                    rangeEnd = Math.addExact(range.objectPosition(), range.objectLength());
+                } catch (ArithmeticException e) {
+                    throw new IllegalArgumentException("object range end overflows", e);
+                }
+                if (rangeEnd > objectSize) {
+                    throw new IllegalArgumentException("object range exceeds object size");
+                }
+            }
+        }
+
+        public boolean hasObjectDescriptor() {
+            return objectSize > 0;
         }
     }
 }

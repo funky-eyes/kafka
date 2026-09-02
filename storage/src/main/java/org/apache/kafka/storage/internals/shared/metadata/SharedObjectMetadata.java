@@ -26,7 +26,7 @@ public record SharedObjectMetadata(
     List<SharedObjectRange> ranges
 ) {
     public SharedObjectMetadata {
-        if (objectId < 0 || objectSize <= 0) {
+        if (objectId <= 0 || objectSize <= 0) {
             throw new IllegalArgumentException("invalid object identity or size");
         }
         Objects.requireNonNull(ranges, "ranges");
@@ -35,7 +35,14 @@ public record SharedObjectMetadata(
         }
         ranges = List.copyOf(ranges);
         for (SharedObjectRange range : ranges) {
-            if (range.objectPosition() + range.objectLength() > objectSize) {
+            Objects.requireNonNull(range, "range");
+            long rangeEnd;
+            try {
+                rangeEnd = Math.addExact(range.objectPosition(), range.objectLength());
+            } catch (ArithmeticException e) {
+                throw new IllegalArgumentException("object range end overflows: " + range, e);
+            }
+            if (rangeEnd > objectSize) {
                 throw new IllegalArgumentException("object range exceeds object size: " + range);
             }
         }

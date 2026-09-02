@@ -74,6 +74,37 @@ class RemoteObjectIndexTest {
     }
 
     @Test
+    void shouldUpgradeLegacyReferenceDescriptorWhenSameObjectReplayed() {
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        SharedObjectRange legacyRange = range(PARTITION, 0, 100, 777);
+        index.restore(List.of(new RemoteObjectIndex.RangeReference(10, legacyRange)));
+
+        assertFalse(index.find(PARTITION, 50).orElseThrow().hasObjectDescriptor());
+
+        SharedObjectMetadata authoritative = object(10, 0, 100, 777);
+        index.add(authoritative);
+
+        RemoteObjectIndex.RangeReference upgraded = index.find(PARTITION, 50).orElseThrow();
+        assertTrue(upgraded.hasObjectDescriptor());
+        assertEquals(authoritative.objectSize(), upgraded.objectSize());
+        assertEquals(authoritative.objectChecksum(), upgraded.objectChecksum());
+    }
+
+    @Test
+    void shouldRejectDescriptorChangeForSamePhysicalObject() {
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(object(10, 0, 100, 777));
+
+        SharedObjectMetadata conflicting = new SharedObjectMetadata(
+            10,
+            101,
+            778,
+            List.of(range(PARTITION, 0, 100, 777))
+        );
+        assertThrows(RemoteMetadataConflictException.class, () -> index.add(conflicting));
+    }
+
+    @Test
     void shouldRejectConflictingDuplicateContent() {
         RemoteObjectIndex index = new RemoteObjectIndex();
         index.add(object(10, 0, 100, 777));

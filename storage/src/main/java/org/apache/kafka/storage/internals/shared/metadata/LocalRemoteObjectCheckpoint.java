@@ -50,13 +50,15 @@ import java.util.zip.CRC32C;
  * fail closed because the corresponding WAL bytes may already have been reclaimed.</p>
  */
 public final class LocalRemoteObjectCheckpoint {
-    static final int MAGIC = 0x4b524331; // KRC1
-    static final short VERSION = 1;
+    static final int MAGIC = 0x4b524331; // KRC checkpoint family
+    static final short LEGACY_VERSION = 1;
+    static final short VERSION = 2;
     static final String FILE_NAME = "remote-object-ranges.checkpoint";
     private static final int HEADER_BYTES = Integer.BYTES + Short.BYTES + Short.BYTES + Integer.BYTES;
-    private static final int ENTRY_BYTES =
+    private static final int ENTRY_V1_BYTES =
         Long.BYTES + Long.BYTES + Long.BYTES + Integer.BYTES + Integer.BYTES +
             Long.BYTES + Long.BYTES + Long.BYTES + Integer.BYTES + Long.BYTES;
+    private static final int ENTRY_V2_BYTES = ENTRY_V1_BYTES + Long.BYTES + Long.BYTES;
     private static final int CHECKSUM_BYTES = Integer.BYTES;
 
     private final Path directory;
@@ -150,19 +152,51 @@ public final class LocalRemoteObjectCheckpoint {
         SharedObjectMetadata object
     ) throws IOException {
         for (SharedObjectRange range : object.ranges()) {
-            RemoteObjectIndex.RangeReference incoming = new RemoteObjectIndex.RangeReference(object.objectId(), range);
+            RemoteObjectIndex.RangeReference incoming = new RemoteObjectIndex.RangeReference(
+                object.objectId(),
+                object.objectSize(),
+                object.objectChecksum(),
+                range
+            );
             NavigableMap<Long, RemoteObjectIndex.RangeReference> ranges = staged.computeIfAbsent(
                 range.partition(), ignored -> new TreeMap<>());
             RemoteObjectIndex.RangeReference overlap = overlappingReference(ranges, range.offsets());
             if (overlap != null) {
-                if (sameLogicalRange(overlap.range(), range)) {
-                    continue;
+                if (!sameLogicalRange(overlap.range(), range)) {
+                    throw new IOException(
+                        "Conflicting local remote checkpoint range: existing=" + overlap + ", incoming=" + incoming);
                 }
-                throw new IOException(
-                    "Conflicting local remote checkpoint range: existing=" + overlap + ", incoming=" + incoming);
+                RemoteObjectIndex.RangeReference merged = mergeEquivalentReference(overlap, incoming);
+                if (merged != overlap) {
+                    ranges.put(range.offsets().startOffset(), merged);
+                }
+                continue;
             }
             ranges.put(range.offsets().startOffset(), incoming);
         }
+    }
+
+    private static RemoteObjectIndex.RangeReference mergeEquivalentReference(
+        RemoteObjectIndex.RangeReference existing,
+        RemoteObjectIndex.RangeReference incoming
+    ) throws IOException {
+        if (existing.objectId() != incoming.objectId()) {
+            return existing;
+        }
+        if (!existing.range().equals(incoming.range())) {
+            throw new IOException(
+                "Conflicting physical range for shared object " + existing.objectId() +
+                    ": existing=" + existing.range() + ", incoming=" + incoming.range()
+            );
+        }
+        if (existing.hasObjectDescriptor() && incoming.hasObjectDescriptor()) {
+            if (existing.objectSize() != incoming.objectSize() ||
+                existing.objectChecksum() != incoming.objectChecksum()) {
+                throw new IOException("Conflicting descriptor for shared object " + existing.objectId());
+            }
+            return existing;
+        }
+        return !existing.hasObjectDescriptor() && incoming.hasObjectDescriptor() ? incoming : existing;
     }
 
     private Map<SharedPartitionId, NavigableMap<Long, RemoteObjectIndex.RangeReference>> load() throws IOException {
@@ -172,9 +206,9 @@ public final class LocalRemoteObjectCheckpoint {
         long fileSize = validateCheckpointFileSize();
         ByteBuffer bytes = readCheckpoint(fileSize);
         validateChecksum(bytes);
-        int count = readAndValidateHeader(bytes, fileSize);
+        Header header = readAndValidateHeader(bytes, fileSize);
         Map<SharedPartitionId, NavigableMap<Long, RemoteObjectIndex.RangeReference>> loaded =
-            decodeEntries(bytes, count);
+            decodeEntries(bytes, header);
         consumeChecksum(bytes);
         return loaded;
     }
@@ -205,24 +239,28 @@ public final class LocalRemoteObjectCheckpoint {
         }
     }
 
-    private static int readAndValidateHeader(ByteBuffer bytes, long fileSize) throws IOException {
+    private static Header readAndValidateHeader(ByteBuffer bytes, long fileSize) throws IOException {
         int magic = bytes.getInt();
         short version = bytes.getShort();
         short reserved = bytes.getShort();
         int count = bytes.getInt();
         validateHeaderFields(magic, version, reserved, count);
-        validateExpectedSize(fileSize, count);
-        return count;
+        validateExpectedSize(fileSize, count, entryBytes(version));
+        return new Header(version, count);
     }
 
     private static void validateHeaderFields(int magic, short version, short reserved, int count) throws IOException {
-        if (magic != MAGIC || version != VERSION || reserved != 0 || count < 0) {
+        if (magic != MAGIC || (version != LEGACY_VERSION && version != VERSION) || reserved != 0 || count < 0) {
             throw new IOException("Invalid local remote checkpoint header");
         }
     }
 
-    private static void validateExpectedSize(long fileSize, int count) throws IOException {
-        long expectedSize = HEADER_BYTES + Math.multiplyExact((long) count, ENTRY_BYTES) + CHECKSUM_BYTES;
+    private static int entryBytes(short version) {
+        return version == LEGACY_VERSION ? ENTRY_V1_BYTES : ENTRY_V2_BYTES;
+    }
+
+    private static void validateExpectedSize(long fileSize, int count, int entryBytes) throws IOException {
+        long expectedSize = HEADER_BYTES + Math.multiplyExact((long) count, entryBytes) + CHECKSUM_BYTES;
         if (expectedSize != fileSize) {
             throw new IOException(
                 "Local remote checkpoint length mismatch: expected=" + expectedSize + ", actual=" + fileSize);
@@ -231,11 +269,11 @@ public final class LocalRemoteObjectCheckpoint {
 
     private static Map<SharedPartitionId, NavigableMap<Long, RemoteObjectIndex.RangeReference>> decodeEntries(
         ByteBuffer bytes,
-        int count
+        Header header
     ) throws IOException {
         Map<SharedPartitionId, NavigableMap<Long, RemoteObjectIndex.RangeReference>> loaded = new HashMap<>();
-        for (int i = 0; i < count; i++) {
-            addDecodedReference(loaded, decode(bytes));
+        for (int i = 0; i < header.count(); i++) {
+            addDecodedReference(loaded, decode(bytes, header.version()));
         }
         return loaded;
     }
@@ -260,7 +298,7 @@ public final class LocalRemoteObjectCheckpoint {
     }
 
     private void persist(List<RemoteObjectIndex.RangeReference> references) throws IOException {
-        long totalBytes = HEADER_BYTES + Math.multiplyExact((long) references.size(), ENTRY_BYTES) + CHECKSUM_BYTES;
+        long totalBytes = HEADER_BYTES + Math.multiplyExact((long) references.size(), ENTRY_V2_BYTES) + CHECKSUM_BYTES;
         if (totalBytes > Integer.MAX_VALUE) {
             throw new IOException("Local remote checkpoint exceeds Java buffer limit: " + totalBytes);
         }
@@ -301,6 +339,8 @@ public final class LocalRemoteObjectCheckpoint {
     private static void encode(ByteBuffer bytes, RemoteObjectIndex.RangeReference reference) {
         SharedObjectRange range = reference.range();
         bytes.putLong(reference.objectId());
+        bytes.putLong(reference.objectSize());
+        bytes.putLong(reference.objectChecksum());
         bytes.putLong(range.partition().topicIdHigh());
         bytes.putLong(range.partition().topicIdLow());
         bytes.putInt(range.partition().partition());
@@ -312,26 +352,32 @@ public final class LocalRemoteObjectCheckpoint {
         bytes.putLong(range.checksum());
     }
 
-    private static RemoteObjectIndex.RangeReference decode(ByteBuffer bytes) throws IOException {
+    private static RemoteObjectIndex.RangeReference decode(ByteBuffer bytes, short version) throws IOException {
         try {
             long objectId = bytes.getLong();
+            long objectSize = -1L;
+            long objectChecksum = 0L;
+            if (version == VERSION) {
+                objectSize = bytes.getLong();
+                objectChecksum = bytes.getLong();
+            }
             SharedPartitionId partition = new SharedPartitionId(bytes.getLong(), bytes.getLong(), bytes.getInt());
             int leaderEpoch = bytes.getInt();
             OffsetRange offsets = new OffsetRange(bytes.getLong(), bytes.getLong());
             long objectPosition = bytes.getLong();
             int objectLength = bytes.getInt();
             long checksum = bytes.getLong();
-            return new RemoteObjectIndex.RangeReference(
-                objectId,
-                new SharedObjectRange(
-                    partition,
-                    offsets,
-                    leaderEpoch,
-                    objectPosition,
-                    objectLength,
-                    checksum
-                )
+            SharedObjectRange range = new SharedObjectRange(
+                partition,
+                offsets,
+                leaderEpoch,
+                objectPosition,
+                objectLength,
+                checksum
             );
+            return version == LEGACY_VERSION
+                ? new RemoteObjectIndex.RangeReference(objectId, range)
+                : new RemoteObjectIndex.RangeReference(objectId, objectSize, objectChecksum, range);
         } catch (IllegalArgumentException | java.nio.BufferUnderflowException e) {
             throw new IOException("Invalid local remote checkpoint entry", e);
         }
@@ -423,4 +469,7 @@ public final class LocalRemoteObjectCheckpoint {
         .thenComparingLong(reference -> reference.range().partition().topicIdLow())
         .thenComparingInt(reference -> reference.range().partition().partition())
         .thenComparingLong(reference -> reference.range().offsets().startOffset());
+
+    private record Header(short version, int count) {
+    }
 }

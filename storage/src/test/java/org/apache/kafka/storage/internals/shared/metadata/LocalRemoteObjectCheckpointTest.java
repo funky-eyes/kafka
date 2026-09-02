@@ -20,10 +20,13 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.List;
+import java.util.zip.CRC32C;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -32,6 +35,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class LocalRemoteObjectCheckpointTest {
     private static final SharedPartitionId PARTITION = new SharedPartitionId(11, 22, 3);
+    private static final int LEGACY_HEADER_BYTES = Integer.BYTES + Short.BYTES + Short.BYTES + Integer.BYTES;
+    private static final int LEGACY_ENTRY_BYTES =
+        Long.BYTES + Long.BYTES + Long.BYTES + Integer.BYTES + Integer.BYTES +
+            Long.BYTES + Long.BYTES + Long.BYTES + Integer.BYTES + Long.BYTES;
 
     @TempDir
     Path tempDir;
@@ -44,7 +51,11 @@ class LocalRemoteObjectCheckpointTest {
         checkpoint.add(first);
         checkpoint.add(second);
 
-        assertEquals(100L, checkpoint.find(PARTITION, 105).orElseThrow().objectId());
+        RemoteObjectIndex.RangeReference firstReference = checkpoint.find(PARTITION, 105).orElseThrow();
+        assertEquals(100L, firstReference.objectId());
+        assertTrue(firstReference.hasObjectDescriptor());
+        assertEquals(first.objectSize(), firstReference.objectSize());
+        assertEquals(first.objectChecksum(), firstReference.objectChecksum());
         assertEquals(101L, checkpoint.find(PARTITION, 119).orElseThrow().objectId());
         assertTrue(checkpoint.find(PARTITION, 120).isEmpty());
 
@@ -52,6 +63,32 @@ class LocalRemoteObjectCheckpointTest {
         assertEquals(checkpoint.references(), reopened.references());
         assertEquals(2, reopened.ranges(PARTITION, 105, 120).size());
         assertFalse(Files.exists(tempDir.resolve(LocalRemoteObjectCheckpoint.FILE_NAME + ".tmp")));
+    }
+
+    @Test
+    void shouldReadLegacyVersionOneAndUpgradeDescriptorOnAuthoritativeReplay() throws Exception {
+        SharedObjectMetadata legacyObject = object(100, 100, 110, 444);
+        writeLegacyCheckpoint(tempDir, legacyObject);
+
+        LocalRemoteObjectCheckpoint checkpoint = new LocalRemoteObjectCheckpoint(tempDir);
+        RemoteObjectIndex.RangeReference legacy = checkpoint.find(PARTITION, 105).orElseThrow();
+        assertEquals(legacyObject.objectId(), legacy.objectId());
+        assertFalse(legacy.hasObjectDescriptor());
+
+        checkpoint.add(legacyObject);
+        RemoteObjectIndex.RangeReference upgraded = checkpoint.find(PARTITION, 105).orElseThrow();
+        assertTrue(upgraded.hasObjectDescriptor());
+        assertEquals(legacyObject.objectSize(), upgraded.objectSize());
+        assertEquals(legacyObject.objectChecksum(), upgraded.objectChecksum());
+
+        byte[] rewritten = Files.readAllBytes(tempDir.resolve(LocalRemoteObjectCheckpoint.FILE_NAME));
+        ByteBuffer header = ByteBuffer.wrap(rewritten).order(ByteOrder.BIG_ENDIAN);
+        assertEquals(LocalRemoteObjectCheckpoint.VERSION, header.getShort(Integer.BYTES));
+
+        LocalRemoteObjectCheckpoint reopened = new LocalRemoteObjectCheckpoint(tempDir);
+        RemoteObjectIndex.RangeReference durable = reopened.find(PARTITION, 105).orElseThrow();
+        assertTrue(durable.hasObjectDescriptor());
+        assertEquals(upgraded, durable);
     }
 
     @Test
@@ -91,6 +128,32 @@ class LocalRemoteObjectCheckpointTest {
 
         IOException failure = assertThrows(IOException.class, () -> new LocalRemoteObjectCheckpoint(tempDir));
         assertTrue(failure.getMessage().contains("checksum"));
+    }
+
+    private static void writeLegacyCheckpoint(Path directory, SharedObjectMetadata object) throws IOException {
+        SharedObjectRange range = object.ranges().get(0);
+        ByteBuffer bytes = ByteBuffer.allocate(LEGACY_HEADER_BYTES + LEGACY_ENTRY_BYTES + Integer.BYTES)
+            .order(ByteOrder.BIG_ENDIAN);
+        bytes.putInt(LocalRemoteObjectCheckpoint.MAGIC)
+            .putShort(LocalRemoteObjectCheckpoint.LEGACY_VERSION)
+            .putShort((short) 0)
+            .putInt(1)
+            .putLong(object.objectId())
+            .putLong(range.partition().topicIdHigh())
+            .putLong(range.partition().topicIdLow())
+            .putInt(range.partition().partition())
+            .putInt(range.leaderEpoch())
+            .putLong(range.offsets().startOffset())
+            .putLong(range.offsets().endOffset())
+            .putLong(range.objectPosition())
+            .putInt(range.objectLength())
+            .putLong(range.checksum());
+        ByteBuffer checksummed = bytes.duplicate();
+        checksummed.flip();
+        CRC32C crc = new CRC32C();
+        crc.update(checksummed);
+        bytes.putInt((int) crc.getValue());
+        Files.write(directory.resolve(LocalRemoteObjectCheckpoint.FILE_NAME), bytes.array());
     }
 
     private static SharedObjectMetadata object(
