@@ -71,6 +71,7 @@ jobs:
             --tests 'org.apache.kafka.storage.internals.shared.object.StreamObjectIndexReaderTest' \
             --tests 'org.apache.kafka.storage.internals.shared.object.StreamObjectDataBlockReaderTest' \
             --tests 'org.apache.kafka.storage.internals.shared.object.StreamObjectIndexCacheTest' \
+            --tests 'org.apache.kafka.storage.internals.shared.object.StreamObjectDataBlockCacheTest' \
             --tests 'org.apache.kafka.storage.internals.shared.object.SharedObjectReaderTest' \
             --tests 'org.apache.kafka.storage.internals.shared.object.SharedObjectUploaderTest' \
             --tests 'org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadataTest' \
@@ -81,6 +82,7 @@ jobs:
           test -f "$result_dir/TEST-org.apache.kafka.storage.internals.shared.object.StreamObjectIndexReaderTest.xml"
           test -f "$result_dir/TEST-org.apache.kafka.storage.internals.shared.object.StreamObjectDataBlockReaderTest.xml"
           test -f "$result_dir/TEST-org.apache.kafka.storage.internals.shared.object.StreamObjectIndexCacheTest.xml"
+          test -f "$result_dir/TEST-org.apache.kafka.storage.internals.shared.object.StreamObjectDataBlockCacheTest.xml"
           test -f "$result_dir/TEST-org.apache.kafka.storage.internals.shared.object.SharedObjectReaderTest.xml"
           test -f "$result_dir/TEST-org.apache.kafka.storage.internals.shared.object.SharedObjectUploaderTest.xml"
           test -f "$result_dir/TEST-org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadataTest.xml"
@@ -89,6 +91,7 @@ jobs:
               "$result_dir/TEST-org.apache.kafka.storage.internals.shared.object.StreamObjectIndexReaderTest.xml" \
               "$result_dir/TEST-org.apache.kafka.storage.internals.shared.object.StreamObjectDataBlockReaderTest.xml" \
               "$result_dir/TEST-org.apache.kafka.storage.internals.shared.object.StreamObjectIndexCacheTest.xml" \
+              "$result_dir/TEST-org.apache.kafka.storage.internals.shared.object.StreamObjectDataBlockCacheTest.xml" \
               "$result_dir/TEST-org.apache.kafka.storage.internals.shared.object.SharedObjectReaderTest.xml" \
               "$result_dir/TEST-org.apache.kafka.storage.internals.shared.object.SharedObjectUploaderTest.xml" \
               "$result_dir/TEST-org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadataTest.xml"; then

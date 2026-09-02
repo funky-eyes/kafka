@@ -30,21 +30,38 @@ import java.util.zip.CRC32C;
 
 public final class SharedObjectReader {
     static final int DEFAULT_INDEX_CACHE_ENTRIES = 1_024;
+    static final long DEFAULT_DATA_BLOCK_CACHE_BYTES = 64L * 1024 * 1024;
 
     private final ObjectStore objectStore;
     private final RemoteObjectIndex remoteIndex;
     private final StreamObjectIndexReader indexReader;
     private final StreamObjectIndexCache indexCache;
+    private final StreamObjectDataBlockCache dataBlockCache;
 
     public SharedObjectReader(ObjectStore objectStore, RemoteObjectIndex remoteIndex) {
-        this(objectStore, remoteIndex, DEFAULT_INDEX_CACHE_ENTRIES);
+        this(
+            objectStore,
+            remoteIndex,
+            DEFAULT_INDEX_CACHE_ENTRIES,
+            DEFAULT_DATA_BLOCK_CACHE_BYTES
+        );
     }
 
     SharedObjectReader(ObjectStore objectStore, RemoteObjectIndex remoteIndex, int indexCacheEntries) {
+        this(objectStore, remoteIndex, indexCacheEntries, DEFAULT_DATA_BLOCK_CACHE_BYTES);
+    }
+
+    SharedObjectReader(
+        ObjectStore objectStore,
+        RemoteObjectIndex remoteIndex,
+        int indexCacheEntries,
+        long dataBlockCacheBytes
+    ) {
         this.objectStore = Objects.requireNonNull(objectStore, "objectStore");
         this.remoteIndex = Objects.requireNonNull(remoteIndex, "remoteIndex");
         this.indexReader = new StreamObjectIndexReader(objectStore);
         this.indexCache = new StreamObjectIndexCache(indexCacheEntries);
+        this.dataBlockCache = new StreamObjectDataBlockCache(dataBlockCacheBytes);
     }
 
     /** Returns the complete Kafka RecordBatch containing {@code offset}, if it is remotely covered. */
@@ -78,6 +95,23 @@ public final class SharedObjectReader {
         RemoteObjectIndex.RangeReference reference,
         StreamObjectFormat.DataBlockIndexEntry block
     ) {
+        return dataBlockCache.get(
+            reference,
+            block,
+            () -> loadDataBlock(reference, block)
+        ).thenApply(snapshot -> {
+            try {
+                return Optional.of(snapshot.batch(reference.range()));
+            } catch (IOException e) {
+                throw new CompletionException(corruption(reference, e));
+            }
+        });
+    }
+
+    private CompletableFuture<StreamObjectDataBlockReader.DataBlockSnapshot> loadDataBlock(
+        RemoteObjectIndex.RangeReference reference,
+        StreamObjectFormat.DataBlockIndexEntry block
+    ) {
         return objectStore.rangeRead(reference.objectId(), block.blockPosition(), block.blockLength())
             .thenApply(bytes -> {
                 if (bytes.remaining() != block.blockLength()) {
@@ -90,9 +124,7 @@ public final class SharedObjectReader {
                     ));
                 }
                 try {
-                    StreamObjectDataBlockReader.DataBlockSnapshot snapshot =
-                        StreamObjectDataBlockReader.read(bytes, block);
-                    return Optional.of(snapshot.batch(reference.range()));
+                    return StreamObjectDataBlockReader.read(bytes, block);
                 } catch (IOException e) {
                     throw new CompletionException(corruption(reference, e));
                 }

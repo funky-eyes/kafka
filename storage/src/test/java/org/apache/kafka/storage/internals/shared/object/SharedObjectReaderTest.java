@@ -84,7 +84,6 @@ class SharedObjectReaderTest {
             new Read(0, StreamObjectFormat.OBJECT_HEADER_BYTES),
             new Read(metadata.objectSize() - StreamObjectFormat.FOOTER_BYTES, StreamObjectFormat.FOOTER_BYTES),
             new Read(footer.indexPosition(), footer.indexLength()),
-            new Read(block.blockPosition(), block.blockLength()),
             new Read(block.blockPosition(), block.blockLength())
         ), store.reads());
         assertTrue(store.reads().stream().noneMatch(
@@ -134,28 +133,21 @@ class SharedObjectReaderTest {
     }
 
     @Test
-    void shouldPreserveObjectStoreTransportFailure() throws Exception {
+    void shouldPreserveObjectStoreTransportFailureAndRetryDataBlockLoad() throws Exception {
         PackedObject packed = packObject(953);
+        SharedObjectMetadata metadata = packed.metadata();
         RemoteObjectIndex index = new RemoteObjectIndex();
-        index.add(packed.metadata());
+        index.add(metadata);
+        StreamObjectFormat.Footer footer = StreamObjectFormat.readFooter(packed.bytes());
+        StreamObjectFormat.DataBlockIndexEntry block = StreamObjectFormat.readIndex(packed.bytes(), footer).get(0);
         IOException transportFailure = new IOException("temporary object-store failure");
-        ObjectStore failingStore = new ObjectStore() {
-            @Override
-            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
-                return CompletableFuture.failedFuture(new UnsupportedOperationException("put not used"));
-            }
-
-            @Override
-            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
-                return CompletableFuture.failedFuture(transportFailure);
-            }
-
-            @Override
-            public CompletableFuture<Void> delete(long objectId) {
-                return CompletableFuture.failedFuture(new UnsupportedOperationException("delete not used"));
-            }
-        };
-        SharedObjectReader reader = new SharedObjectReader(failingStore, index, 4);
+        RetryingBlockObjectStore store = new RetryingBlockObjectStore(
+            metadata.objectId(),
+            packed.bytes(),
+            block,
+            transportFailure
+        );
+        SharedObjectReader reader = new SharedObjectReader(store, index, 4);
 
         ExecutionException error = assertThrows(
             ExecutionException.class,
@@ -163,6 +155,11 @@ class SharedObjectReaderTest {
         );
         assertSame(transportFailure, rootCause(error));
         assertFalse(hasCause(error, RemoteObjectCorruptionException.class));
+
+        assertArrayEquals(new byte[]{1, 2, 3, 4, 5}, toArray(
+            reader.read(PARTITION, 2).get(10, TimeUnit.SECONDS).orElseThrow()
+        ));
+        assertEquals(2, store.blockReadCount());
     }
 
     private PackedObject packObject(long objectId) throws Exception {
@@ -224,10 +221,7 @@ class SharedObjectReaderTest {
 
         private RecordingObjectStore(long objectId, ByteBuffer object) {
             this.objectId = objectId;
-            ByteBuffer copy = ByteBuffer.allocate(object.remaining());
-            copy.put(object.duplicate());
-            copy.flip();
-            this.object = copy.asReadOnlyBuffer();
+            this.object = copy(object);
         }
 
         @Override
@@ -244,10 +238,7 @@ class SharedObjectReaderTest {
                 return CompletableFuture.failedFuture(new IllegalArgumentException("invalid range"));
             }
             reads.add(new Read(position, length));
-            ByteBuffer range = object.duplicate();
-            range.position(Math.toIntExact(position));
-            range.limit(Math.toIntExact(position + length));
-            return CompletableFuture.completedFuture(range.slice().asReadOnlyBuffer());
+            return CompletableFuture.completedFuture(slice(object, position, length));
         }
 
         @Override
@@ -258,6 +249,71 @@ class SharedObjectReaderTest {
         private synchronized List<Read> reads() {
             return List.copyOf(reads);
         }
+    }
+
+    private static final class RetryingBlockObjectStore implements ObjectStore {
+        private final long objectId;
+        private final ByteBuffer object;
+        private final StreamObjectFormat.DataBlockIndexEntry block;
+        private final IOException firstBlockFailure;
+        private int blockReadCount;
+
+        private RetryingBlockObjectStore(
+            long objectId,
+            ByteBuffer object,
+            StreamObjectFormat.DataBlockIndexEntry block,
+            IOException firstBlockFailure
+        ) {
+            this.objectId = objectId;
+            this.object = copy(object);
+            this.block = block;
+            this.firstBlockFailure = firstBlockFailure;
+        }
+
+        @Override
+        public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+            return CompletableFuture.failedFuture(new UnsupportedOperationException("put not used"));
+        }
+
+        @Override
+        public synchronized CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+            if (objectId != this.objectId) {
+                return CompletableFuture.failedFuture(new IllegalArgumentException("unknown object " + objectId));
+            }
+            if (position == block.blockPosition() && length == block.blockLength()) {
+                blockReadCount++;
+                if (blockReadCount == 1) {
+                    return CompletableFuture.failedFuture(firstBlockFailure);
+                }
+            }
+            return CompletableFuture.completedFuture(slice(object, position, length));
+        }
+
+        @Override
+        public CompletableFuture<Void> delete(long objectId) {
+            return CompletableFuture.failedFuture(new UnsupportedOperationException("delete not used"));
+        }
+
+        private synchronized int blockReadCount() {
+            return blockReadCount;
+        }
+    }
+
+    private static ByteBuffer copy(ByteBuffer source) {
+        ByteBuffer copy = ByteBuffer.allocate(source.remaining());
+        copy.put(source.duplicate());
+        copy.flip();
+        return copy.asReadOnlyBuffer();
+    }
+
+    private static ByteBuffer slice(ByteBuffer source, long position, int length) {
+        if (position < 0 || length < 0 || position > source.limit() - (long) length) {
+            throw new IllegalArgumentException("invalid range");
+        }
+        ByteBuffer range = source.duplicate();
+        range.position(Math.toIntExact(position));
+        range.limit(Math.toIntExact(position + length));
+        return range.slice().asReadOnlyBuffer();
     }
 
     private record Read(long position, int length) {
