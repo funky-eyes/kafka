@@ -20,8 +20,8 @@ on:
     branches:
       - shared-wal-s3-4.3.1
     paths:
-      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/object/SharedObjectUploadHook.java'
-      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/object/SharedObjectUploader.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/object/**'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/metadata/**'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/wal/**'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedStorageConfiguration.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedStorageWalFactory.java'
@@ -30,8 +30,8 @@ on:
       - '.github/workflows/shared-storage-upload-crash.yml'
   pull_request:
     paths:
-      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/object/SharedObjectUploadHook.java'
-      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/object/SharedObjectUploader.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/object/**'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/metadata/**'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/wal/**'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedStorageConfiguration.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedStorageWalFactory.java'
