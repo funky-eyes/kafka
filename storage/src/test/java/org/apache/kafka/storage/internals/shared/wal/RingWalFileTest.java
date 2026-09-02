@@ -19,14 +19,17 @@ package org.apache.kafka.storage.internals.shared.wal;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class RingWalFileTest {
@@ -118,11 +121,30 @@ class RingWalFileTest {
     }
 
     @Test
+    void removesFreshFileWhenInitializationFailsSoRetryCanCreateIt() throws Exception {
+        Path path = tempDir.resolve("failed-initialization.wal");
+        IOException failure = assertThrows(
+            IOException.class,
+            () -> new RingWalFile(path, TOTAL_CAPACITY, new FailFirstForceBackend())
+        );
+        assertEquals("injected initial ring WAL force failure", failure.getMessage());
+        assertFalse(Files.exists(path), "failed fresh initialization must not poison the durable WAL path");
+
+        try (RingWalFile retried = new RingWalFile(path, TOTAL_CAPACITY)) {
+            assertEquals(
+                new RingWalSuperblock.State(0L, 0L, 0L, DATA_CAPACITY),
+                retried.state()
+            );
+        }
+    }
+
+    @Test
     void rejectsExistingFileWithDifferentConfiguredCapacity() throws Exception {
         Path path = tempDir.resolve("wrong-size.wal");
         Files.write(path, new byte[32]);
 
         assertThrows(WalCorruptionException.class, () -> new RingWalFile(path, TOTAL_CAPACITY));
+        assertEquals(32L, Files.size(path), "recovery failures must never delete a pre-existing WAL");
     }
 
     @Test
@@ -142,5 +164,77 @@ class RingWalFileTest {
         byte[] result = new byte[duplicate.remaining()];
         duplicate.get(result);
         return result;
+    }
+
+    private static final class FailFirstForceBackend implements WalIoBackend {
+        private final WalIoBackend delegate = new FileChannelWalIoBackend();
+        private final AtomicBoolean failFirstForce = new AtomicBoolean(true);
+
+        @Override
+        public Handle openRead(Path path) throws IOException {
+            return wrap(delegate.openRead(path));
+        }
+
+        @Override
+        public Handle reopen(Path path) throws IOException {
+            return wrap(delegate.reopen(path));
+        }
+
+        @Override
+        public Handle create(Path path) throws IOException {
+            return wrap(delegate.create(path));
+        }
+
+        @Override
+        public long size(Path path) throws IOException {
+            return delegate.size(path);
+        }
+
+        @Override
+        public void close() throws IOException {
+            delegate.close();
+        }
+
+        private Handle wrap(Handle handle) {
+            return new Handle() {
+                @Override
+                public long size() throws IOException {
+                    return handle.size();
+                }
+
+                @Override
+                public int read(ByteBuffer destination, long position) throws IOException {
+                    return handle.read(destination, position);
+                }
+
+                @Override
+                public int write(ByteBuffer source, long position) throws IOException {
+                    return handle.write(source, position);
+                }
+
+                @Override
+                public void truncate(long size) throws IOException {
+                    handle.truncate(size);
+                }
+
+                @Override
+                public void force() throws IOException {
+                    if (failFirstForce.compareAndSet(true, false)) {
+                        throw new IOException("injected initial ring WAL force failure");
+                    }
+                    handle.force();
+                }
+
+                @Override
+                public void seal() throws IOException {
+                    handle.seal();
+                }
+
+                @Override
+                public void close() throws IOException {
+                    handle.close();
+                }
+            };
+        }
     }
 }

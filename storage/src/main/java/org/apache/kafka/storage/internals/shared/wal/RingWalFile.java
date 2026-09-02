@@ -16,6 +16,8 @@
  */
 package org.apache.kafka.storage.internals.shared.wal;
 
+import org.apache.kafka.common.utils.Utils;
+
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
@@ -29,6 +31,10 @@ import java.util.Objects;
  * {@link #forceAndCheckpoint(long, long)}, which forces data, writes the next alternating superblock, then forces the
  * superblock. Recovery therefore observes either the previous durable window or the new one, never metadata pointing
  * beyond data that skipped the durability barrier.</p>
+ *
+ * <p>If initialization of a newly created file fails before this object becomes usable, the incomplete file is removed
+ * and the parent directory is flushed so a later broker start can retry cleanly. Recovery failures for files that
+ * existed before this object was opened remain fail-closed and never delete the existing WAL.</p>
  *
  * <p>This class establishes the configured file length but does not claim that the portable FileChannel backend has
  * physically reserved every filesystem block. True fallocate/preallocation is a separate backend capability and can be
@@ -69,6 +75,9 @@ final class RingWalFile implements AutoCloseable {
             this.handle = opened;
         } catch (Throwable failure) {
             closeAfterOpenFailure(opened, failure);
+            if (!exists) {
+                cleanupFailedInitialization(failure);
+            }
             if (failure instanceof IOException ioException) {
                 throw ioException;
             }
@@ -292,6 +301,19 @@ final class RingWalFile implements AutoCloseable {
             backend.close();
         } catch (Throwable closeFailure) {
             failure.addSuppressed(closeFailure);
+        }
+    }
+
+    private void cleanupFailedInitialization(Throwable failure) {
+        try {
+            if (Files.deleteIfExists(path)) {
+                Path parent = path.toAbsolutePath().normalize().getParent();
+                if (parent != null) {
+                    Utils.flushDir(parent);
+                }
+            }
+        } catch (Throwable cleanupFailure) {
+            failure.addSuppressed(cleanupFailure);
         }
     }
 
