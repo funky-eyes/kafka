@@ -27,6 +27,7 @@ import org.apache.kafka.storage.internals.shared.kafka.RoutingUnifiedLogFactory;
 import org.apache.kafka.storage.internals.shared.kafka.SharedCommitProgress;
 import org.apache.kafka.storage.internals.shared.kafka.SharedPartitionRoleListener;
 import org.apache.kafka.storage.internals.shared.kafka.SharedStorageConfiguration;
+import org.apache.kafka.storage.internals.shared.kafka.SharedStorageWalFactory;
 import org.apache.kafka.storage.internals.shared.kafka.SharedUnifiedLogFactory;
 import org.apache.kafka.storage.internals.shared.kafka.SharedUploadScheduler;
 import org.apache.kafka.storage.internals.shared.metadata.BrokerObjectId;
@@ -38,8 +39,6 @@ import org.apache.kafka.storage.internals.shared.object.SharedObjectPacker;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectReader;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectUploadHook;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectUploader;
-import org.apache.kafka.storage.internals.shared.wal.RingSharedWal;
-import org.apache.kafka.storage.internals.shared.wal.RotatingFileSharedWal;
 import org.apache.kafka.storage.internals.shared.wal.SharedWal;
 
 import java.io.File;
@@ -57,8 +56,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
-import java.util.regex.Pattern;
-import java.util.stream.Stream;
 
 /**
  * Production shared-storage extension using a broker-wide replicated WAL, Kafka-backed authoritative metadata and S3.
@@ -74,8 +71,6 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
     private static final long BOOTSTRAP_EXECUTOR_STOP_TIMEOUT_SECONDS = 5L;
     private static final long METADATA_BOOTSTRAP_RETRY_BACKOFF_MS = 250L;
     private static final long METADATA_BOOTSTRAP_RETRY_TIMEOUT_MS = 30_000L;
-    private static final String RING_WAL_FILE = "shared-ring.wal";
-    private static final Pattern LEGACY_ROTATING_WAL_SEGMENT = Pattern.compile("wal-\\d{20}\\.log");
     private static final String META_PROPERTIES_FILE = "meta.properties";
     private static final String CLUSTER_ID_PROPERTY = "cluster.id";
 
@@ -142,55 +137,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
     }
 
     static SharedWal createWal(SharedStorageConfiguration configuration) throws IOException {
-        Objects.requireNonNull(configuration, "configuration");
-        return switch (configuration.walEngine()) {
-            case RING -> {
-                ensureNoLegacyRotatingWalSegments(configuration.walDir());
-                yield new RingSharedWal(
-                    configuration.walDir().resolve(RING_WAL_FILE),
-                    configuration.walCapacityBytes()
-                );
-            }
-            case ROTATING_FILE -> {
-                ensureNoRingWalFile(configuration.walDir());
-                yield new RotatingFileSharedWal(
-                    configuration.walDir(),
-                    configuration.walCapacityBytes(),
-                    configuration.walSegmentBytes()
-                );
-            }
-        };
-    }
-
-    private static void ensureNoLegacyRotatingWalSegments(Path walDir) throws IOException {
-        if (!Files.isDirectory(walDir)) {
-            return;
-        }
-        try (Stream<Path> entries = Files.list(walDir)) {
-            Path legacySegment = entries
-                .filter(Files::isRegularFile)
-                .filter(path -> LEGACY_ROTATING_WAL_SEGMENT.matcher(path.getFileName().toString()).matches())
-                .findFirst()
-                .orElse(null);
-            if (legacySegment != null) {
-                throw new IOException(
-                    "Refusing to start ring WAL while legacy rotating WAL segment exists: " + legacySegment +
-                        ". Start with " + SharedStorageConfiguration.WAL_ENGINE_CONFIG +
-                        "=rotating-file until the legacy WAL is fully recovered and safely retired before switching to ring."
-                );
-            }
-        }
-    }
-
-    private static void ensureNoRingWalFile(Path walDir) throws IOException {
-        Path ringWal = walDir.resolve(RING_WAL_FILE);
-        if (Files.exists(ringWal)) {
-            throw new IOException(
-                "Refusing to start rotating-file WAL while ring WAL file exists: " + ringWal +
-                    ". Start with " + SharedStorageConfiguration.WAL_ENGINE_CONFIG +
-                    "=ring until the ring WAL is fully recovered and safely retired before switching to rotating-file."
-            );
-        }
+        return SharedStorageWalFactory.create(configuration);
     }
 
     @Override
