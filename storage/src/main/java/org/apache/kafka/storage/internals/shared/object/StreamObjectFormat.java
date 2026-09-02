@@ -135,6 +135,25 @@ final class StreamObjectFormat {
         target.putInt((int) objectBodyChecksum);
     }
 
+    static long readObjectId(ByteBuffer source) throws IOException {
+        Objects.requireNonNull(source, "source");
+        if (source.remaining() != OBJECT_HEADER_BYTES) {
+            throw new IOException("Stream object header length mismatch: " + source.remaining());
+        }
+        ByteBuffer header = source.duplicate().order(ByteOrder.BIG_ENDIAN);
+        int magic = header.getInt();
+        short version = header.getShort();
+        short reserved = header.getShort();
+        long objectId = header.getLong();
+        if (magic != OBJECT_MAGIC || version != VERSION || reserved != 0 || objectId <= 0) {
+            throw new IOException(
+                "Unsupported stream object header: magic=" + magic + ", version=" + version +
+                    ", reserved=" + reserved + ", objectId=" + objectId
+            );
+        }
+        return objectId;
+    }
+
     static Footer readFooter(ByteBuffer source) throws IOException {
         Objects.requireNonNull(source, "source");
         ByteBuffer object = source.duplicate().order(ByteOrder.BIG_ENDIAN);
@@ -143,37 +162,57 @@ final class StreamObjectFormat {
         if (objectLength < OBJECT_HEADER_BYTES + INDEX_HEADER_BYTES + FOOTER_BYTES) {
             throw new IOException("Stream object is too short: " + objectLength);
         }
-        validateObjectHeader(object, objectStart);
+        readObjectId(slice(source, objectStart, OBJECT_HEADER_BYTES));
 
         int footerPosition = object.limit() - FOOTER_BYTES;
-        object.position(footerPosition);
-        int magic = object.getInt();
-        short version = object.getShort();
-        object.getShort();
-        long indexPosition = object.getLong();
-        int indexLength = object.getInt();
-        int dataBlockCount = object.getInt();
-        long indexChecksum = Integer.toUnsignedLong(object.getInt());
-        long objectBodyChecksum = Integer.toUnsignedLong(object.getInt());
-
-        if (magic != FOOTER_MAGIC || version != VERSION) {
-            throw new IOException("Unsupported stream object footer: magic=" + magic + ", version=" + version);
-        }
-        if (indexPosition < OBJECT_HEADER_BYTES || indexLength < INDEX_HEADER_BYTES || dataBlockCount < 0) {
-            throw new IOException("Invalid stream object footer bounds");
-        }
-        long indexEnd = checkedAdd(indexPosition, indexLength, "Stream object footer index range overflows");
-        if (indexEnd != objectLength - FOOTER_BYTES) {
-            throw new IOException("Stream object index does not immediately precede footer");
-        }
+        Footer footer = readFooterTail(slice(source, footerPosition, FOOTER_BYTES), objectLength);
         long actualBodyChecksum = crc32c(source, objectStart, footerPosition - objectStart);
-        if (actualBodyChecksum != objectBodyChecksum) {
+        if (actualBodyChecksum != footer.objectBodyChecksum()) {
             throw new IOException(
-                "Stream object body checksum mismatch: expected=" + objectBodyChecksum +
+                "Stream object body checksum mismatch: expected=" + footer.objectBodyChecksum() +
                     ", actual=" + actualBodyChecksum
             );
         }
-        return new Footer(indexPosition, indexLength, dataBlockCount, indexChecksum, objectBodyChecksum);
+        return footer;
+    }
+
+    static Footer readFooterTail(ByteBuffer source, long objectSize) throws IOException {
+        Objects.requireNonNull(source, "source");
+        if (source.remaining() != FOOTER_BYTES) {
+            throw new IOException("Stream object footer length mismatch: " + source.remaining());
+        }
+        if (objectSize < OBJECT_HEADER_BYTES + INDEX_HEADER_BYTES + FOOTER_BYTES) {
+            throw new IOException("Stream object is too short: " + objectSize);
+        }
+        ByteBuffer footer = source.duplicate().order(ByteOrder.BIG_ENDIAN);
+        int magic = footer.getInt();
+        short version = footer.getShort();
+        short reserved = footer.getShort();
+        long indexPosition = footer.getLong();
+        int indexLength = footer.getInt();
+        int dataBlockCount = footer.getInt();
+        long indexChecksum = Integer.toUnsignedLong(footer.getInt());
+        long objectBodyChecksum = Integer.toUnsignedLong(footer.getInt());
+
+        if (magic != FOOTER_MAGIC || version != VERSION || reserved != 0) {
+            throw new IOException(
+                "Unsupported stream object footer: magic=" + magic + ", version=" + version +
+                    ", reserved=" + reserved
+            );
+        }
+        Footer parsed = new Footer(
+            indexPosition,
+            indexLength,
+            dataBlockCount,
+            indexChecksum,
+            objectBodyChecksum
+        );
+        validateFooterForIndexRead(parsed);
+        long indexEnd = checkedAdd(indexPosition, indexLength, "Stream object footer index range overflows");
+        if (indexEnd != objectSize - FOOTER_BYTES) {
+            throw new IOException("Stream object index does not immediately precede footer");
+        }
+        return parsed;
     }
 
     static List<DataBlockIndexEntry> readIndex(ByteBuffer source, Footer footer) throws IOException {
@@ -195,8 +234,21 @@ final class StreamObjectFormat {
         if (indexEnd > object.limit()) {
             throw new IOException("Stream object index is outside object bounds");
         }
+        return readIndexBlock(slice(source, indexPosition, footer.indexLength()), footer);
+    }
 
-        long actualIndexChecksum = crc32c(source, indexPosition, footer.indexLength());
+    static List<DataBlockIndexEntry> readIndexBlock(ByteBuffer source, Footer footer) throws IOException {
+        Objects.requireNonNull(source, "source");
+        Objects.requireNonNull(footer, "footer");
+        validateFooterForIndexRead(footer);
+        if (source.remaining() != footer.indexLength()) {
+            throw new IOException(
+                "Stream object index length mismatch: expected=" + footer.indexLength() +
+                    ", actual=" + source.remaining()
+            );
+        }
+        int indexStart = source.position();
+        long actualIndexChecksum = crc32c(source, indexStart, footer.indexLength());
         if (actualIndexChecksum != footer.indexChecksum()) {
             throw new IOException(
                 "Stream object index checksum mismatch: expected=" + footer.indexChecksum() +
@@ -204,33 +256,29 @@ final class StreamObjectFormat {
             );
         }
 
-        object.position(indexPosition);
-        int magic = object.getInt();
-        short version = object.getShort();
-        object.getShort();
-        int entryCount = object.getInt();
-        int entriesLength = object.getInt();
-        if (magic != INDEX_MAGIC || version != VERSION) {
-            throw new IOException("Unsupported stream object index: magic=" + magic + ", version=" + version);
+        ByteBuffer index = source.duplicate().order(ByteOrder.BIG_ENDIAN);
+        int magic = index.getInt();
+        short version = index.getShort();
+        short reserved = index.getShort();
+        int entryCount = index.getInt();
+        int entriesLength = index.getInt();
+        if (magic != INDEX_MAGIC || version != VERSION || reserved != 0) {
+            throw new IOException(
+                "Unsupported stream object index: magic=" + magic + ", version=" + version +
+                    ", reserved=" + reserved
+            );
         }
         validateIndexShape(entryCount, entriesLength, footer);
 
         List<DataBlockIndexEntry> entries = new ArrayList<>(entryCount);
         for (int i = 0; i < entryCount; i++) {
-            entries.add(readIndexEntry(object, i));
+            entries.add(readIndexEntry(index, i));
+        }
+        if (index.hasRemaining()) {
+            throw new IOException("Trailing bytes in stream object index");
         }
         validateDataBlockLayout(entries, footer.indexPosition());
         return List.copyOf(entries);
-    }
-
-    private static void validateObjectHeader(ByteBuffer object, int objectStart) throws IOException {
-        ByteBuffer header = object.duplicate().order(ByteOrder.BIG_ENDIAN);
-        header.position(objectStart);
-        int magic = header.getInt();
-        short version = header.getShort();
-        if (magic != OBJECT_MAGIC || version != VERSION) {
-            throw new IOException("Unsupported stream object header: magic=" + magic + ", version=" + version);
-        }
     }
 
     private static void validateFooterForIndexRead(Footer footer) throws IOException {
@@ -267,7 +315,10 @@ final class StreamObjectFormat {
             int blockLength = object.getInt();
             int batchCount = object.getInt();
             long checksum = Integer.toUnsignedLong(object.getInt());
-            object.getInt();
+            int reserved = object.getInt();
+            if (reserved != 0) {
+                throw new IllegalArgumentException("reserved index entry field must be zero");
+            }
             return new DataBlockIndexEntry(
                 partition,
                 leaderEpoch,
@@ -310,6 +361,16 @@ final class StreamObjectFormat {
                     ", indexPosition=" + indexPosition
             );
         }
+    }
+
+    private static ByteBuffer slice(ByteBuffer source, int position, int length) throws IOException {
+        if (position < source.position() || length < 0 || position > source.limit() - length) {
+            throw new IOException("Stream object slice is outside buffer bounds");
+        }
+        ByteBuffer slice = source.duplicate().order(ByteOrder.BIG_ENDIAN);
+        slice.position(position);
+        slice.limit(position + length);
+        return slice.slice().order(ByteOrder.BIG_ENDIAN);
     }
 
     private static long checkedAdd(long left, long right, String message) throws IOException {
