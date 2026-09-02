@@ -26,6 +26,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -65,6 +66,16 @@ class RingWalFileTest {
             assertEquals(durable, reopened.state());
             assertArrayEquals(payload, bytes(reopened.read(allocation.walOffset(), payload.length)));
         }
+    }
+
+    @Test
+    void usesBackendPreallocationForFreshRingWal() throws Exception {
+        Path path = tempDir.resolve("preallocated-ring.wal");
+        TrackingPreallocationBackend backend = new TrackingPreallocationBackend();
+        try (RingWalFile ignored = new RingWalFile(path, TOTAL_CAPACITY, backend)) {
+            assertEquals(TOTAL_CAPACITY, backend.preallocatedBytes.get());
+        }
+        assertEquals(TOTAL_CAPACITY, Files.size(path));
     }
 
     @Test
@@ -184,6 +195,86 @@ class RingWalFileTest {
         byte[] result = new byte[duplicate.remaining()];
         duplicate.get(result);
         return result;
+    }
+
+    private static final class TrackingPreallocationBackend implements WalIoBackend {
+        private final WalIoBackend delegate = new FileChannelWalIoBackend();
+        private final AtomicLong preallocatedBytes = new AtomicLong(-1L);
+
+        @Override
+        public Handle openRead(Path path) throws IOException {
+            return wrap(delegate.openRead(path));
+        }
+
+        @Override
+        public Handle reopen(Path path) throws IOException {
+            return wrap(delegate.reopen(path));
+        }
+
+        @Override
+        public Handle create(Path path) throws IOException {
+            return wrap(delegate.create(path));
+        }
+
+        @Override
+        public long size(Path path) throws IOException {
+            return delegate.size(path);
+        }
+
+        @Override
+        public boolean supportsPreallocation() {
+            return true;
+        }
+
+        @Override
+        public void close() throws IOException {
+            delegate.close();
+        }
+
+        private Handle wrap(Handle handle) {
+            return new Handle() {
+                @Override
+                public long size() throws IOException {
+                    return handle.size();
+                }
+
+                @Override
+                public int read(ByteBuffer destination, long position) throws IOException {
+                    return handle.read(destination, position);
+                }
+
+                @Override
+                public int write(ByteBuffer source, long position) throws IOException {
+                    return handle.write(source, position);
+                }
+
+                @Override
+                public void truncate(long size) throws IOException {
+                    handle.truncate(size);
+                }
+
+                @Override
+                public void preallocate(long size) throws IOException {
+                    preallocatedBytes.set(size);
+                    handle.preallocate(size);
+                }
+
+                @Override
+                public void force() throws IOException {
+                    handle.force();
+                }
+
+                @Override
+                public void seal() throws IOException {
+                    handle.seal();
+                }
+
+                @Override
+                public void close() throws IOException {
+                    handle.close();
+                }
+            };
+        }
     }
 
     private static final class FailFirstForceBackend implements WalIoBackend {

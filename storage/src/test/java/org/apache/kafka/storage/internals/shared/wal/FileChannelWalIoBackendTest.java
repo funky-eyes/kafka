@@ -19,6 +19,7 @@ package org.apache.kafka.storage.internals.shared.wal;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
 import java.nio.file.FileAlreadyExistsException;
@@ -28,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class FileChannelWalIoBackendTest {
 
@@ -61,12 +63,43 @@ class FileChannelWalIoBackendTest {
     }
 
     @Test
-    void createIsExclusiveAndCapabilitiesDefaultToPortableFileChannelSemantics() throws Exception {
+    void preallocationMaterializesFreshFileBeforePublication() throws Exception {
+        Path path = tempDir.resolve("preallocated");
+        long capacity = 2L * 1024L * 1024L + 17L;
+        try (WalIoBackend backend = new FileChannelWalIoBackend();
+             WalIoBackend.Handle handle = backend.create(path)) {
+            assertTrue(backend.supportsPreallocation());
+            handle.preallocate(capacity);
+            handle.force();
+            assertEquals(capacity, handle.size());
+
+            ByteBuffer first = ByteBuffer.allocate(1);
+            ByteBuffer last = ByteBuffer.allocate(1);
+            assertEquals(1, handle.read(first, 0L));
+            assertEquals(1, handle.read(last, capacity - 1L));
+            assertArrayEquals(new byte[] {0}, first.array());
+            assertArrayEquals(new byte[] {0}, last.array());
+        }
+    }
+
+    @Test
+    void preallocationRejectsNonEmptyPhysicalUnit() throws Exception {
+        Path path = tempDir.resolve("non-empty-preallocation");
+        try (WalIoBackend backend = new FileChannelWalIoBackend();
+             WalIoBackend.Handle handle = backend.create(path)) {
+            assertEquals(1, handle.write(ByteBuffer.wrap(new byte[] {1}), 0L));
+            IOException failure = assertThrows(IOException.class, () -> handle.preallocate(1024L));
+            assertTrue(failure.getMessage().contains("newly-created empty file"));
+        }
+    }
+
+    @Test
+    void createIsExclusiveAndCapabilitiesMatchPortableFileChannelSemantics() throws Exception {
         Path path = tempDir.resolve("exclusive");
         try (WalIoBackend backend = new FileChannelWalIoBackend();
              WalIoBackend.Handle ignored = backend.create(path)) {
             assertThrows(FileAlreadyExistsException.class, () -> backend.create(path));
-            assertFalse(backend.supportsPreallocation());
+            assertTrue(backend.supportsPreallocation());
             assertFalse(backend.supportsDirectIo());
         }
     }

@@ -41,7 +41,7 @@ public interface WalIoBackend extends AutoCloseable {
     /** Returns the current physical size of a unit. */
     long size(Path path) throws IOException;
 
-    /** Whether this backend can preallocate physical storage without changing the logical WAL format. */
+    /** Whether this backend can materialize the requested physical WAL capacity during fresh-file creation. */
     default boolean supportsPreallocation() {
         return false;
     }
@@ -71,6 +71,18 @@ public interface WalIoBackend extends AutoCloseable {
         int write(ByteBuffer source, long position) throws IOException;
 
         void truncate(long size) throws IOException;
+
+        /**
+         * Materializes a newly-created empty physical unit to the requested capacity.
+         *
+         * <p>Callers must check {@link WalIoBackend#supportsPreallocation()} first. Implementations may use native
+         * allocation primitives or a portable full-file materialization strategy, but a successful return must ensure
+         * that subsequent {@link #force()} can surface allocation failures during initialization instead of deferring
+         * them until normal WAL reuse.</p>
+         */
+        default void preallocate(long size) throws IOException {
+            throw new UnsupportedOperationException("WAL I/O backend does not support preallocation");
+        }
 
         void force() throws IOException;
 

@@ -38,9 +38,10 @@ import java.util.Objects;
  * or the machine loses power during first creation. A stale staging file is non-authoritative and is discarded when the
  * final WAL does not exist. Recovery failures for an already-published WAL remain fail-closed and never delete it.</p>
  *
- * <p>This class establishes the configured file length but does not claim that the portable FileChannel backend has
- * physically reserved every filesystem block. True fallocate/preallocation is a separate backend capability and can be
- * added without changing the ring format.</p>
+ * <p>Fresh files ask the I/O backend to materialize the full configured capacity when it advertises preallocation
+ * support. The portable FileChannel backend does this by writing the complete staging file before the initialization
+ * force, so disk-allocation failures surface before the WAL is published instead of during later ring reuse. Backends
+ * without preallocation support retain the logical-length fallback and must not claim physical reservation.</p>
  */
 final class RingWalFile implements AutoCloseable {
     private static final String INITIALIZING_SUFFIX = ".initializing";
@@ -210,8 +211,12 @@ final class RingWalFile implements AutoCloseable {
     }
 
     private void initializeNewFile(WalIoBackend.Handle opened) throws IOException {
-        ByteBuffer lastByte = ByteBuffer.allocate(1);
-        writeFully(opened, lastByte, layout.totalCapacityBytes() - 1L);
+        if (backend.supportsPreallocation()) {
+            opened.preallocate(layout.totalCapacityBytes());
+        } else {
+            ByteBuffer lastByte = ByteBuffer.allocate(1);
+            writeFully(opened, lastByte, layout.totalCapacityBytes() - 1L);
+        }
         writeSuperblock(opened, initialState());
         opened.force();
         long actualSize = opened.size();

@@ -27,6 +27,8 @@ import java.nio.file.StandardOpenOption;
 
 /** Portable reference {@link WalIoBackend} backed by {@link FileChannel}. */
 public final class FileChannelWalIoBackend implements WalIoBackend {
+    private static final int PREALLOCATION_CHUNK_BYTES = 1024 * 1024;
+    private static final ByteBuffer ZERO_CHUNK = ByteBuffer.allocate(PREALLOCATION_CHUNK_BYTES).asReadOnlyBuffer();
 
     @Override
     public Handle openRead(Path path) throws IOException {
@@ -61,6 +63,11 @@ public final class FileChannelWalIoBackend implements WalIoBackend {
         return Files.size(path);
     }
 
+    @Override
+    public boolean supportsPreallocation() {
+        return true;
+    }
+
     private static final class FileChannelHandle implements Handle {
         private final Path path;
         private final FileChannel channel;
@@ -90,6 +97,36 @@ public final class FileChannelWalIoBackend implements WalIoBackend {
         @Override
         public void truncate(long size) throws IOException {
             channel.truncate(size);
+        }
+
+        @Override
+        public void preallocate(long size) throws IOException {
+            if (size <= 0) {
+                throw new IllegalArgumentException("preallocation size must be positive");
+            }
+            long currentSize = channel.size();
+            if (currentSize != 0L) {
+                throw new IOException(
+                    "WAL preallocation requires a newly-created empty file: path=" + path + ", size=" + currentSize);
+            }
+
+            long position = 0L;
+            while (position < size) {
+                int chunkBytes = (int) Math.min(PREALLOCATION_CHUNK_BYTES, size - position);
+                ByteBuffer zeroes = ZERO_CHUNK.duplicate();
+                zeroes.limit(chunkBytes);
+                while (zeroes.hasRemaining()) {
+                    int written = channel.write(zeroes, position);
+                    if (written <= 0) {
+                        throw new IOException("Unable to make progress preallocating WAL at position " + position);
+                    }
+                    position = Math.addExact(position, written);
+                }
+            }
+            if (channel.size() != size) {
+                throw new IOException(
+                    "WAL preallocation established unexpected size: expected=" + size + ", actual=" + channel.size());
+            }
         }
 
         @Override
