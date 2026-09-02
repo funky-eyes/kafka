@@ -44,6 +44,7 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class RingSharedWal implements SharedWal {
     private static final int MAX_DRAINED_APPENDS = 1024;
     private static final int ZERO_CHUNK_BYTES = 64 * 1024;
+    private static final long DEFAULT_WRITER_SHUTDOWN_TIMEOUT_MS = TimeUnit.SECONDS.toMillis(30);
     private static final ByteBuffer ZERO_CHUNK = ByteBuffer.allocate(ZERO_CHUNK_BYTES).asReadOnlyBuffer();
 
     private final RingWalFile file;
@@ -51,21 +52,37 @@ public final class RingSharedWal implements SharedWal {
     private final LinkedBlockingQueue<PendingAppend> pendingAppends = new LinkedBlockingQueue<>();
     private final AtomicBoolean running = new AtomicBoolean(true);
     private final AtomicBoolean closed = new AtomicBoolean(false);
+    private final AtomicBoolean ioResourcesClosed = new AtomicBoolean(false);
     private final AtomicLong nextGroupId;
     private final Object lifecycleLock = new Object();
     private final Object ioLock = new Object();
+    private final long writerShutdownTimeoutMs;
     private final Thread writerThread;
 
     private volatile boolean accepting = true;
     private volatile Throwable failure;
+    private volatile IOException deferredCloseFailure;
 
     public RingSharedWal(Path path, long totalCapacityBytes) throws IOException {
-        this(path, totalCapacityBytes, new FileChannelWalIoBackend());
+        this(path, totalCapacityBytes, new FileChannelWalIoBackend(), DEFAULT_WRITER_SHUTDOWN_TIMEOUT_MS);
     }
 
     RingSharedWal(Path path, long totalCapacityBytes, WalIoBackend ioBackend) throws IOException {
+        this(path, totalCapacityBytes, ioBackend, DEFAULT_WRITER_SHUTDOWN_TIMEOUT_MS);
+    }
+
+    RingSharedWal(
+        Path path,
+        long totalCapacityBytes,
+        WalIoBackend ioBackend,
+        long writerShutdownTimeoutMs
+    ) throws IOException {
         Objects.requireNonNull(path, "path");
         Objects.requireNonNull(ioBackend, "ioBackend");
+        if (writerShutdownTimeoutMs <= 0) {
+            throw new IllegalArgumentException("writerShutdownTimeoutMs must be positive");
+        }
+        this.writerShutdownTimeoutMs = writerShutdownTimeoutMs;
         this.file = new RingWalFile(path, totalCapacityBytes, ioBackend);
         this.layout = file.layout();
 
@@ -277,38 +294,83 @@ public final class RingSharedWal implements SharedWal {
         if (!closed.compareAndSet(false, true)) {
             return;
         }
+        stopWriter();
+
+        WriterStopResult writerStop = awaitWriterStop();
+        IOException closeError = writerStop.error();
+        if (writerStop.stopped()) {
+            closeError = closeIoResources(closeError);
+            closeError = mergeCloseError(closeError, deferredCloseFailure);
+        }
+        if (closeError != null) {
+            throw closeError;
+        }
+    }
+
+    private void stopWriter() {
         synchronized (lifecycleLock) {
             accepting = false;
             if (running.getAndSet(false)) {
                 pendingAppends.offer(PendingAppend.poisonPill());
             }
         }
+    }
 
-        IOException closeError = null;
+    private WriterStopResult awaitWriterStop() {
         try {
-            writerThread.join(TimeUnit.SECONDS.toMillis(30));
+            writerThread.join(writerShutdownTimeoutMs);
             if (writerThread.isAlive()) {
-                closeError = new IOException("Timed out waiting for ring WAL writer to stop");
+                return new WriterStopResult(
+                    false,
+                    new IOException("Timed out waiting for ring WAL writer to stop after " +
+                        writerShutdownTimeoutMs + " ms")
+                );
             }
+            return new WriterStopResult(true, null);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            closeError = new IOException("Interrupted while closing ring WAL", e);
+            return new WriterStopResult(
+                !writerThread.isAlive(),
+                new IOException("Interrupted while closing ring WAL", e)
+            );
         }
+    }
 
+    private IOException closeIoResources(IOException closeError) {
+        if (!ioResourcesClosed.compareAndSet(false, true)) {
+            return closeError;
+        }
         synchronized (ioLock) {
             try {
                 file.close();
             } catch (IOException closeFailure) {
-                if (closeError == null) {
-                    closeError = closeFailure;
-                } else {
-                    closeError.addSuppressed(closeFailure);
-                }
+                closeError = mergeCloseError(closeError, closeFailure);
             }
         }
-        if (closeError != null) {
-            throw closeError;
+        return closeError;
+    }
+
+    private void closeResourcesAfterWriterExit() {
+        if (!closed.get()) {
+            return;
         }
+        IOException closeFailure = closeIoResources(null);
+        if (closeFailure != null) {
+            deferredCloseFailure = closeFailure;
+        }
+    }
+
+    private static IOException mergeCloseError(IOException closeError, IOException additional) {
+        if (additional == null) {
+            return closeError;
+        }
+        if (closeError == null) {
+            return additional;
+        }
+        if (closeError != additional) {
+            closeError.addSuppressed(additional);
+        }
+        return closeError;
     }
 
     private void validateRecordFitsRing(WalRecordCodec.EncodedRecord encoded) {
@@ -321,37 +383,41 @@ public final class RingSharedWal implements SharedWal {
 
     private void writerLoop() {
         List<PendingAppend> drained = new ArrayList<>(MAX_DRAINED_APPENDS);
-        while (running.get() || !pendingAppends.isEmpty()) {
-            try {
-                drained.clear();
-                PendingAppend first = pendingAppends.take();
-                if (first.poison()) {
-                    if (!running.get() && pendingAppends.isEmpty()) {
-                        break;
+        try {
+            while (running.get() || !pendingAppends.isEmpty()) {
+                try {
+                    drained.clear();
+                    PendingAppend first = pendingAppends.take();
+                    if (first.poison()) {
+                        if (!running.get() && pendingAppends.isEmpty()) {
+                            break;
+                        }
+                        continue;
                     }
-                    continue;
+                    drained.add(first);
+                    while (drained.size() < MAX_DRAINED_APPENDS) {
+                        PendingAppend next = pendingAppends.poll();
+                        if (next == null) {
+                            break;
+                        }
+                        if (next.poison()) {
+                            pendingAppends.offer(next);
+                            break;
+                        }
+                        drained.add(next);
+                    }
+                    writeDrainedGroups(drained);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    failWriter(new IOException("Ring WAL writer interrupted", e), drained);
+                    return;
+                } catch (Throwable t) {
+                    failWriter(t, drained);
+                    return;
                 }
-                drained.add(first);
-                while (drained.size() < MAX_DRAINED_APPENDS) {
-                    PendingAppend next = pendingAppends.poll();
-                    if (next == null) {
-                        break;
-                    }
-                    if (next.poison()) {
-                        pendingAppends.offer(next);
-                        break;
-                    }
-                    drained.add(next);
-                }
-                writeDrainedGroups(drained);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                failWriter(new IOException("Ring WAL writer interrupted", e), drained);
-                return;
-            } catch (Throwable t) {
-                failWriter(t, drained);
-                return;
             }
+        } finally {
+            closeResourcesAfterWriterExit();
         }
     }
 
@@ -690,5 +756,8 @@ public final class RingSharedWal implements SharedWal {
     }
 
     private record ScanItem(long offset, long nextOffset, int length, WalRecord record) {
+    }
+
+    private record WriterStopResult(boolean stopped, IOException error) {
     }
 }
