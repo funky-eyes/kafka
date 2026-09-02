@@ -121,14 +121,16 @@ class RingWalFileTest {
     }
 
     @Test
-    void removesFreshFileWhenInitializationFailsSoRetryCanCreateIt() throws Exception {
+    void failedFreshInitializationNeverPublishesDurablePath() throws Exception {
         Path path = tempDir.resolve("failed-initialization.wal");
+        Path stagingPath = RingWalFile.initializationPath(path);
         IOException failure = assertThrows(
             IOException.class,
             () -> new RingWalFile(path, TOTAL_CAPACITY, new FailFirstForceBackend())
         );
         assertEquals("injected initial ring WAL force failure", failure.getMessage());
-        assertFalse(Files.exists(path), "failed fresh initialization must not poison the durable WAL path");
+        assertFalse(Files.exists(path), "failed initialization must never expose a partial durable WAL");
+        assertFalse(Files.exists(stagingPath), "failed initialization should clean its staging artifact");
 
         try (RingWalFile retried = new RingWalFile(path, TOTAL_CAPACITY)) {
             assertEquals(
@@ -136,6 +138,24 @@ class RingWalFileTest {
                 retried.state()
             );
         }
+    }
+
+    @Test
+    void discardsStagingArtifactLeftByProcessCrashBeforePublish() throws Exception {
+        Path path = tempDir.resolve("crashed-initialization.wal");
+        Path stagingPath = RingWalFile.initializationPath(path);
+        Files.write(stagingPath, new byte[] {1, 2, 3, 4});
+        assertFalse(Files.exists(path));
+
+        try (RingWalFile recovered = new RingWalFile(path, TOTAL_CAPACITY)) {
+            assertEquals(
+                new RingWalSuperblock.State(0L, 0L, 0L, DATA_CAPACITY),
+                recovered.state()
+            );
+        }
+
+        assertFalse(Files.exists(stagingPath), "crash residue must not survive successful publication");
+        assertEquals(TOTAL_CAPACITY, Files.size(path));
     }
 
     @Test

@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.Objects;
 
 /**
@@ -32,15 +33,18 @@ import java.util.Objects;
  * superblock. Recovery therefore observes either the previous durable window or the new one, never metadata pointing
  * beyond data that skipped the durability barrier.</p>
  *
- * <p>If initialization of a newly created file fails before this object becomes usable, the incomplete file is removed
- * and the parent directory is flushed so a later broker start can retry cleanly. Recovery failures for files that
- * existed before this object was opened remain fail-closed and never delete the existing WAL.</p>
+ * <p>A brand-new WAL is fully initialized and forced through a sibling staging file before an atomic rename publishes
+ * it at the durable path. The final path therefore never names a half-initialized WAL, even if the broker is SIGKILLed
+ * or the machine loses power during first creation. A stale staging file is non-authoritative and is discarded when the
+ * final WAL does not exist. Recovery failures for an already-published WAL remain fail-closed and never delete it.</p>
  *
  * <p>This class establishes the configured file length but does not claim that the portable FileChannel backend has
  * physically reserved every filesystem block. True fallocate/preallocation is a separate backend capability and can be
  * added without changing the ring format.</p>
  */
 final class RingWalFile implements AutoCloseable {
+    private static final String INITIALIZING_SUFFIX = ".initializing";
+
     private final Path path;
     private final RingWalLayout layout;
     private final WalIoBackend backend;
@@ -62,32 +66,20 @@ final class RingWalFile implements AutoCloseable {
             Files.createDirectories(parent);
         }
 
-        boolean exists = Files.exists(path);
-        WalIoBackend.Handle opened = exists ? backend.reopen(path) : backend.create(path);
+        WalIoBackend.Handle opened = null;
         try {
-            if (exists) {
+            if (Files.exists(path)) {
+                opened = backend.reopen(path);
                 validateExistingLength(opened);
                 this.state = recoverState(opened);
             } else {
-                initializeNewFile(opened);
-                this.state = new RingWalSuperblock.State(0L, 0L, 0L, layout.dataCapacityBytes());
+                opened = createAndPublishNewFile();
+                this.state = initialState();
             }
             this.handle = opened;
         } catch (Throwable failure) {
             closeAfterOpenFailure(opened, failure);
-            if (!exists) {
-                cleanupFailedInitialization(failure);
-            }
-            if (failure instanceof IOException ioException) {
-                throw ioException;
-            }
-            if (failure instanceof RuntimeException runtimeException) {
-                throw runtimeException;
-            }
-            if (failure instanceof Error error) {
-                throw error;
-            }
-            throw new IOException("Unexpected failure opening ring WAL file", failure);
+            throw propagateOpenFailure(failure);
         }
     }
 
@@ -182,12 +174,45 @@ final class RingWalFile implements AutoCloseable {
         }
     }
 
+    private WalIoBackend.Handle createAndPublishNewFile() throws IOException {
+        Path stagingPath = initializationPath(path);
+        removeStaleInitialization(stagingPath);
+
+        WalIoBackend.Handle stagingHandle = backend.create(stagingPath);
+        boolean stagingClosed = false;
+        boolean published = false;
+        try {
+            initializeNewFile(stagingHandle);
+            stagingHandle.close();
+            stagingClosed = true;
+
+            Files.move(stagingPath, path, StandardCopyOption.ATOMIC_MOVE);
+            published = true;
+            flushParentDirectory(path);
+            return backend.reopen(path);
+        } catch (Throwable failure) {
+            if (!stagingClosed) {
+                try {
+                    stagingHandle.close();
+                } catch (Throwable closeFailure) {
+                    failure.addSuppressed(closeFailure);
+                }
+            }
+            if (!published) {
+                cleanupStagedInitialization(stagingPath, failure);
+            }
+            throw propagateOpenFailure(failure);
+        }
+    }
+
+    private RingWalSuperblock.State initialState() {
+        return new RingWalSuperblock.State(0L, 0L, 0L, layout.dataCapacityBytes());
+    }
+
     private void initializeNewFile(WalIoBackend.Handle opened) throws IOException {
         ByteBuffer lastByte = ByteBuffer.allocate(1);
         writeFully(opened, lastByte, layout.totalCapacityBytes() - 1L);
-        RingWalSuperblock.State initial =
-            new RingWalSuperblock.State(0L, 0L, 0L, layout.dataCapacityBytes());
-        writeSuperblock(opened, initial);
+        writeSuperblock(opened, initialState());
         opened.force();
         long actualSize = opened.size();
         if (actualSize != layout.totalCapacityBytes()) {
@@ -291,11 +316,45 @@ final class RingWalFile implements AutoCloseable {
         }
     }
 
-    private void closeAfterOpenFailure(WalIoBackend.Handle opened, Throwable failure) {
+    static Path initializationPath(Path durablePath) {
+        Objects.requireNonNull(durablePath, "durablePath");
+        Path fileName = durablePath.getFileName();
+        if (fileName == null) {
+            throw new IllegalArgumentException("Ring WAL path must name a file: " + durablePath);
+        }
+        return durablePath.resolveSibling(fileName.toString() + INITIALIZING_SUFFIX);
+    }
+
+    private static void removeStaleInitialization(Path stagingPath) throws IOException {
+        if (Files.deleteIfExists(stagingPath)) {
+            flushParentDirectory(stagingPath);
+        }
+    }
+
+    private static void cleanupStagedInitialization(Path stagingPath, Throwable failure) {
         try {
-            opened.close();
-        } catch (Throwable closeFailure) {
-            failure.addSuppressed(closeFailure);
+            if (Files.deleteIfExists(stagingPath)) {
+                flushParentDirectory(stagingPath);
+            }
+        } catch (Throwable cleanupFailure) {
+            failure.addSuppressed(cleanupFailure);
+        }
+    }
+
+    private static void flushParentDirectory(Path target) throws IOException {
+        Path parent = target.toAbsolutePath().normalize().getParent();
+        if (parent != null) {
+            Utils.flushDir(parent);
+        }
+    }
+
+    private void closeAfterOpenFailure(WalIoBackend.Handle opened, Throwable failure) {
+        if (opened != null) {
+            try {
+                opened.close();
+            } catch (Throwable closeFailure) {
+                failure.addSuppressed(closeFailure);
+            }
         }
         try {
             backend.close();
@@ -304,17 +363,17 @@ final class RingWalFile implements AutoCloseable {
         }
     }
 
-    private void cleanupFailedInitialization(Throwable failure) {
-        try {
-            if (Files.deleteIfExists(path)) {
-                Path parent = path.toAbsolutePath().normalize().getParent();
-                if (parent != null) {
-                    Utils.flushDir(parent);
-                }
-            }
-        } catch (Throwable cleanupFailure) {
-            failure.addSuppressed(cleanupFailure);
+    private static IOException propagateOpenFailure(Throwable failure) {
+        if (failure instanceof IOException ioException) {
+            return ioException;
         }
+        if (failure instanceof RuntimeException runtimeException) {
+            throw runtimeException;
+        }
+        if (failure instanceof Error error) {
+            throw error;
+        }
+        return new IOException("Unexpected failure opening ring WAL file", failure);
     }
 
     private void ensureOpen() {
