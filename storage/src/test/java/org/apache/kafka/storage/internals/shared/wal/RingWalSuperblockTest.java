@@ -83,6 +83,35 @@ class RingWalSuperblockTest {
     }
 
     @Test
+    void acceptsMirroredCopiesWithSameSequenceAndState() throws Exception {
+        RingWalSuperblock.State mirrored = new RingWalSuperblock.State(12, 300, 900, 1024);
+
+        assertEquals(
+            mirrored,
+            RingWalSuperblock.selectNewest(
+                RingWalSuperblock.encode(mirrored),
+                RingWalSuperblock.encode(mirrored),
+                1024
+            )
+        );
+    }
+
+    @Test
+    void rejectsCrcValidSequenceGapThatCheckpointingCannotProduce() {
+        RingWalSuperblock.State older = new RingWalSuperblock.State(10, 100, 700, 1024);
+        RingWalSuperblock.State impossibleNewer = new RingWalSuperblock.State(12, 200, 900, 1024);
+
+        assertThrows(
+            WalCorruptionException.class,
+            () -> RingWalSuperblock.selectNewest(
+                RingWalSuperblock.encode(older),
+                RingWalSuperblock.encode(impossibleNewer),
+                1024
+            )
+        );
+    }
+
+    @Test
     void fallsBackToPreviousCopyWhenLatestCheckpointIsTorn() throws Exception {
         RingWalSuperblock.State older = new RingWalSuperblock.State(20, 256, 800, 1024);
         RingWalSuperblock.State newer = new RingWalSuperblock.State(21, 300, 1000, 1024);

@@ -123,11 +123,25 @@ final class RingWalSuperblock {
         if (secondState == null) {
             return firstState;
         }
-        if (firstState.sequence() == secondState.sequence() && !firstState.equals(secondState)) {
-            throw new WalCorruptionException(
-                "Conflicting ring WAL superblocks share sequence " + firstState.sequence());
+        if (firstState.sequence() == secondState.sequence()) {
+            if (!firstState.equals(secondState)) {
+                throw new WalCorruptionException(
+                    "Conflicting ring WAL superblocks share sequence " + firstState.sequence());
+            }
+            return firstState;
         }
-        return firstState.sequence() >= secondState.sequence() ? firstState : secondState;
+        validateSequenceGap(firstState, secondState);
+        return firstState.sequence() > secondState.sequence() ? firstState : secondState;
+    }
+
+    private static void validateSequenceGap(State firstState, State secondState) throws WalCorruptionException {
+        long newerSequence = Math.max(firstState.sequence(), secondState.sequence());
+        long olderSequence = Math.min(firstState.sequence(), secondState.sequence());
+        if (newerSequence - olderSequence != 1L) {
+            throw new WalCorruptionException(
+                "Unreachable ring WAL superblock sequence gap: first=" + firstState.sequence() +
+                    ", second=" + secondState.sequence());
+        }
     }
 
     private static State tryDecode(ByteBuffer bytes, long expectedDataCapacityBytes) {
