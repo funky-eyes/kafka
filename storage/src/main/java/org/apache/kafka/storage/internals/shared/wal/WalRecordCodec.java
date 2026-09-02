@@ -244,9 +244,10 @@ final class WalRecordCodec {
             if (read < 0) {
                 throw new EOFException("Unexpected EOF while reading WAL at position " + currentPosition);
             }
-            if (read > 0) {
-                currentPosition += read;
+            if (read == 0) {
+                throw new IOException("Unable to make progress reading WAL at position " + currentPosition);
             }
+            currentPosition += read;
         }
     }
 
