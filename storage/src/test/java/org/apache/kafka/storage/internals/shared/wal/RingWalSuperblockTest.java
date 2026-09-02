@@ -19,6 +19,7 @@ package org.apache.kafka.storage.internals.shared.wal;
 import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -31,6 +32,16 @@ class RingWalSuperblockTest {
         assertEquals(state, RingWalSuperblock.decode(RingWalSuperblock.encode(state)));
         assertEquals(1, RingWalSuperblock.copyIndex(state.sequence()));
         assertEquals(0, RingWalSuperblock.copyIndex(state.next(200, 950).sequence()));
+    }
+
+    @Test
+    void rejectsLegacyRingFormatVersion() {
+        RingWalSuperblock.State state = new RingWalSuperblock.State(7, 128, 900, 1024);
+        ByteBuffer legacy = mutableCopy(RingWalSuperblock.encode(state)).order(ByteOrder.BIG_ENDIAN);
+        legacy.putShort(4, (short) 1);
+        legacy.position(0);
+
+        assertThrows(WalCorruptionException.class, () -> RingWalSuperblock.decode(legacy));
     }
 
     @Test

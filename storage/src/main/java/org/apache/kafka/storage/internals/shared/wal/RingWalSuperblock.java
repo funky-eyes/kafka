@@ -31,7 +31,8 @@ import java.util.zip.CRC32C;
  */
 final class RingWalSuperblock {
     static final int MAGIC = 0x4b575231; // KWR1
-    static final short VERSION = 1;
+    // Version 2 requires authenticated markers for wrap padding large enough to contain a WAL record.
+    static final short VERSION = 2;
     static final int SUPERBLOCK_BYTES = RingWalLayout.SUPERBLOCK_BYTES;
 
     private static final int CHECKSUM_POSITION = 48;

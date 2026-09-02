@@ -37,9 +37,10 @@ import java.util.concurrent.atomic.AtomicLong;
  * same DATA/TRUNCATE + GROUP_COMMIT format as the file WAL and one drained writer batch crosses one physical force +
  * superblock checkpoint barrier.</p>
  *
- * <p>Wrap padding is explicitly zeroed before the next generation is written. Recovery accepts a zero suffix only when
- * a later durable generation exists beyond the physical boundary; non-zero bytes where padding is expected are treated
- * as corruption. This prevents stale bytes from an older generation from being replayed as current WAL records.</p>
+ * <p>Wrap padding large enough to hide a complete WAL record begins with an authenticated {@link RingPaddingMarker}.
+ * Smaller suffixes remain zero-filled because no valid record can begin there. Recovery validates the marker's absolute
+ * next-generation boundary, padding length and CRC before skipping a large suffix. This makes a fully zeroed or
+ * otherwise destroyed committed record fail closed instead of being silently reclassified as wrap padding.</p>
  */
 public final class RingSharedWal implements SharedWal {
     private static final int MAX_DRAINED_APPENDS = 1024;
@@ -482,7 +483,23 @@ public final class RingSharedWal implements SharedWal {
 
     private void writePadding(RingWalLayout.Allocation allocation) throws IOException {
         long remaining = allocation.paddingBytes();
+        if (remaining <= 0L) {
+            return;
+        }
+
         long cursor = allocation.walOffset() - remaining;
+        if (remaining >= WalRecordCodec.MIN_RECORD_BYTES) {
+            ByteBuffer marker = RingPaddingMarker.encode(cursor, allocation.walOffset());
+            writeRaw(cursor, marker);
+            cursor += RingPaddingMarker.MARKER_BYTES;
+            remaining -= RingPaddingMarker.MARKER_BYTES;
+        }
+        writeZeroPadding(cursor, remaining);
+    }
+
+    private void writeZeroPadding(long startOffset, long length) throws IOException {
+        long remaining = length;
+        long cursor = startOffset;
         while (remaining > 0) {
             int chunkBytes = (int) Math.min(ZERO_CHUNK_BYTES, remaining);
             ByteBuffer zeroes = ZERO_CHUNK.duplicate();
@@ -560,15 +577,20 @@ public final class RingSharedWal implements SharedWal {
         long bytesToBoundary = layout.dataCapacityBytes() - positionInRing;
         long boundaryOffset = Math.addExact(walOffset, bytesToBoundary);
         if (bytesToBoundary < WalRecordCodec.MIN_RECORD_BYTES) {
-            return scanPadding(state, walOffset, boundaryOffset);
+            return scanSmallPadding(state, walOffset, boundaryOffset);
         }
 
         if (state.tailOffset() - walOffset < Integer.BYTES) {
             throw new WalCorruptionException("Durable ring WAL tail truncates a record prefix at offset " + walOffset);
         }
         ByteBuffer magicBytes = file.read(walOffset, Integer.BYTES).order(ByteOrder.BIG_ENDIAN);
-        if (magicBytes.getInt() != WalRecordCodec.MAGIC) {
-            return scanPadding(state, walOffset, boundaryOffset);
+        int magic = magicBytes.getInt();
+        if (magic == RingPaddingMarker.MAGIC) {
+            return scanMarkedPadding(state, walOffset, boundaryOffset);
+        }
+        if (magic != WalRecordCodec.MAGIC) {
+            throw new WalCorruptionException(
+                "Unexpected ring WAL magic at logical offset " + walOffset + ": " + Integer.toHexString(magic));
         }
 
         final WalRecordCodec.ReadResult result;
@@ -589,7 +611,7 @@ public final class RingSharedWal implements SharedWal {
         return new ScanItem(walOffset, nextOffset, result.length(), result.record());
     }
 
-    private ScanItem scanPadding(
+    private ScanItem scanSmallPadding(
         RingWalSuperblock.State state,
         long paddingOffset,
         long boundaryOffset
@@ -600,6 +622,22 @@ public final class RingSharedWal implements SharedWal {
                     ", tail=" + state.tailOffset());
         }
         verifyZeroPadding(paddingOffset, boundaryOffset);
+        return new ScanItem(paddingOffset, boundaryOffset, 0, null);
+    }
+
+    private ScanItem scanMarkedPadding(
+        RingWalSuperblock.State state,
+        long paddingOffset,
+        long boundaryOffset
+    ) throws IOException {
+        if (boundaryOffset >= state.tailOffset()) {
+            throw new WalCorruptionException(
+                "Unexpected marked padding at durable ring WAL tail: offset=" + paddingOffset +
+                    ", tail=" + state.tailOffset());
+        }
+        ByteBuffer marker = file.read(paddingOffset, RingPaddingMarker.MARKER_BYTES);
+        RingPaddingMarker.validate(marker, paddingOffset, boundaryOffset);
+        verifyZeroPadding(Math.addExact(paddingOffset, RingPaddingMarker.MARKER_BYTES), boundaryOffset);
         return new ScanItem(paddingOffset, boundaryOffset, 0, null);
     }
 
