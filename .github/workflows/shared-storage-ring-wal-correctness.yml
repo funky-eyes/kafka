@@ -83,7 +83,7 @@ jobs:
           test -f "$s3_result_dir/TEST-org.apache.kafka.storage.internals.shared.s3.S3SharedStorageWalFactoryTest.xml"
           if grep -R -E 'failures="[1-9]|errors="[1-9]|skipped="[1-9]' \
               "$storage_result_dir"/TEST-org.apache.kafka.storage.internals.shared.wal.Ring*Test.xml \
-              "$s3_result_dir/TEST-org.apache.kafka.storage.internals.shared.s3.S3SharedStorageWalFactoryTest.xml; then
+              "$s3_result_dir/TEST-org.apache.kafka.storage.internals.shared.s3.S3SharedStorageWalFactoryTest.xml"; then
             exit 1
           fi
           printf 'RING_WAL_CORRECTNESS_SUCCESS commit=%s\n' "$GITHUB_SHA" | tee shared-storage-ring-wal-proof.txt
