@@ -102,7 +102,12 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
                 new LocalRemoteObjectCheckpoint(configuration.walDir());
             SharedStorageEngine newStorage = new SharedStorageEngine(wal, remoteCheckpoint);
             newObjectStore = new S3ObjectStore(objectStoreConfiguration(context));
-            newStorage.installRemoteReader(new SharedObjectReader(newObjectStore, newStorage.remoteIndex()));
+            newStorage.installRemoteReader(new SharedObjectReader(
+                newObjectStore,
+                newStorage.remoteIndex(),
+                configuration.readIndexCacheEntries(),
+                configuration.readDataBlockCacheBytes()
+            ));
 
             SharedCommitProgress newCommitProgress = new SharedCommitProgress();
             UnifiedLogFactory newFactory = new RoutingUnifiedLogFactory(

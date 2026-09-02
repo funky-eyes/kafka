@@ -100,10 +100,25 @@ class StreamObjectDataBlockCacheTest {
     }
 
     @Test
+    void shouldAllowDisablingDataBlockCache() throws Exception {
+        StreamObjectDataBlockCache cache = new StreamObjectDataBlockCache(0);
+        RemoteObjectIndex.RangeReference reference = reference(3);
+        StreamObjectFormat.DataBlockIndexEntry block = block(16, 80, 301);
+        AtomicInteger loads = new AtomicInteger();
+
+        cache.get(reference, block, () -> completedLoad(loads)).get(10, TimeUnit.SECONDS);
+        cache.get(reference, block, () -> completedLoad(loads)).get(10, TimeUnit.SECONDS);
+
+        assertEquals(2, loads.get());
+        assertEquals(0, cache.size());
+        assertEquals(0, cache.cachedBytes());
+    }
+
+    @Test
     void shouldNotRetainFailedOrOversizedLoads() throws Exception {
         StreamObjectDataBlockCache cache = new StreamObjectDataBlockCache(64);
-        RemoteObjectIndex.RangeReference reference = reference(3);
-        StreamObjectFormat.DataBlockIndexEntry oversized = block(16, 80, 301);
+        RemoteObjectIndex.RangeReference reference = reference(4);
+        StreamObjectFormat.DataBlockIndexEntry oversized = block(16, 80, 401);
         AtomicInteger oversizedLoads = new AtomicInteger();
 
         cache.get(reference, oversized, () -> completedLoad(oversizedLoads)).get(10, TimeUnit.SECONDS);
@@ -112,7 +127,7 @@ class StreamObjectDataBlockCacheTest {
         assertEquals(0, cache.size());
         assertEquals(0, cache.cachedBytes());
 
-        StreamObjectFormat.DataBlockIndexEntry failedBlock = block(16, 64, 302);
+        StreamObjectFormat.DataBlockIndexEntry failedBlock = block(16, 64, 402);
         AtomicInteger failedLoads = new AtomicInteger();
         IOException failure = new IOException("temporary block read failure");
         for (int i = 0; i < 2; i++) {

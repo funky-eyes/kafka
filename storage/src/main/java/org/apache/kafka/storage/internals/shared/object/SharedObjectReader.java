@@ -51,7 +51,7 @@ public final class SharedObjectReader {
         this(objectStore, remoteIndex, indexCacheEntries, DEFAULT_DATA_BLOCK_CACHE_BYTES);
     }
 
-    SharedObjectReader(
+    public SharedObjectReader(
         ObjectStore objectStore,
         RemoteObjectIndex remoteIndex,
         int indexCacheEntries,

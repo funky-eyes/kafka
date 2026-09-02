@@ -30,7 +30,7 @@ import java.util.function.Supplier;
  *
  * <p>Loads for the same immutable object/block descriptor are coalesced. Failed loads are removed immediately so a
  * transient object-store failure or corruption result cannot poison later reads. Entries larger than the complete
- * cache budget bypass the cache rather than evicting all useful blocks.</p>
+ * cache budget bypass the cache rather than evicting all useful blocks. A zero-byte budget disables caching.</p>
  */
 final class StreamObjectDataBlockCache {
     private final long maxBytes;
@@ -38,8 +38,8 @@ final class StreamObjectDataBlockCache {
     private long cachedBytes;
 
     StreamObjectDataBlockCache(long maxBytes) {
-        if (maxBytes <= 0) {
-            throw new IllegalArgumentException("maxBytes must be positive");
+        if (maxBytes < 0) {
+            throw new IllegalArgumentException("maxBytes must not be negative");
         }
         this.maxBytes = maxBytes;
     }
@@ -52,7 +52,7 @@ final class StreamObjectDataBlockCache {
         Objects.requireNonNull(reference, "reference");
         Objects.requireNonNull(block, "block");
         Objects.requireNonNull(loader, "loader");
-        if (block.blockLength() > maxBytes) {
+        if (maxBytes == 0 || block.blockLength() > maxBytes) {
             return load(loader);
         }
 

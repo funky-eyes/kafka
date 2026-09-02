@@ -36,6 +36,8 @@ public final class SharedStorageConfiguration {
     public static final String WAL_CAPACITY_BYTES_CONFIG = "shared.storage.wal.capacity.bytes";
     public static final String WAL_SEGMENT_BYTES_CONFIG = "shared.storage.wal.segment.bytes";
     public static final String OBJECT_TARGET_BYTES_CONFIG = "shared.storage.object.target.bytes";
+    public static final String READ_INDEX_CACHE_ENTRIES_CONFIG = "shared.storage.read.index.cache.entries";
+    public static final String READ_DATA_BLOCK_CACHE_BYTES_CONFIG = "shared.storage.read.data.block.cache.bytes";
     public static final String UPLOAD_INTERVAL_MS_CONFIG = "shared.storage.upload.interval.ms";
     public static final String UPLOAD_MAX_LINGER_MS_CONFIG = "shared.storage.upload.max.linger.ms";
     public static final String UPLOAD_WAL_PRESSURE_PERCENT_CONFIG = "shared.storage.upload.wal.pressure.percent";
@@ -49,6 +51,8 @@ public final class SharedStorageConfiguration {
     public static final long DEFAULT_WAL_CAPACITY_BYTES = 2L * 1024 * 1024 * 1024;
     public static final long DEFAULT_WAL_SEGMENT_BYTES = 64L * 1024 * 1024;
     public static final long DEFAULT_OBJECT_TARGET_BYTES = 32L * 1024 * 1024;
+    public static final int DEFAULT_READ_INDEX_CACHE_ENTRIES = 1_024;
+    public static final long DEFAULT_READ_DATA_BLOCK_CACHE_BYTES = 64L * 1024 * 1024;
     public static final long DEFAULT_UPLOAD_INTERVAL_MS = 100L;
     public static final long DEFAULT_UPLOAD_MAX_LINGER_MS = 1_000L;
     public static final int DEFAULT_UPLOAD_WAL_PRESSURE_PERCENT = 70;
@@ -61,6 +65,8 @@ public final class SharedStorageConfiguration {
     private final long walCapacityBytes;
     private final long walSegmentBytes;
     private final long objectTargetBytes;
+    private final int readIndexCacheEntries;
+    private final long readDataBlockCacheBytes;
     private final long uploadIntervalMs;
     private final long uploadMaxLingerMs;
     private final int uploadWalPressurePercent;
@@ -76,6 +82,8 @@ public final class SharedStorageConfiguration {
         long walCapacityBytes,
         long walSegmentBytes,
         long objectTargetBytes,
+        int readIndexCacheEntries,
+        long readDataBlockCacheBytes,
         long uploadIntervalMs,
         long uploadMaxLingerMs,
         int uploadWalPressurePercent,
@@ -90,6 +98,8 @@ public final class SharedStorageConfiguration {
         this.walCapacityBytes = walCapacityBytes;
         this.walSegmentBytes = walSegmentBytes;
         this.objectTargetBytes = objectTargetBytes;
+        this.readIndexCacheEntries = readIndexCacheEntries;
+        this.readDataBlockCacheBytes = readDataBlockCacheBytes;
         this.uploadIntervalMs = uploadIntervalMs;
         this.uploadMaxLingerMs = uploadMaxLingerMs;
         this.uploadWalPressurePercent = uploadWalPressurePercent;
@@ -128,6 +138,16 @@ public final class SharedStorageConfiguration {
             context.originals().get(OBJECT_TARGET_BYTES_CONFIG),
             DEFAULT_OBJECT_TARGET_BYTES,
             OBJECT_TARGET_BYTES_CONFIG
+        );
+        int readIndexCacheEntries = nonNegativeInt(
+            context.originals().get(READ_INDEX_CACHE_ENTRIES_CONFIG),
+            DEFAULT_READ_INDEX_CACHE_ENTRIES,
+            READ_INDEX_CACHE_ENTRIES_CONFIG
+        );
+        long readDataBlockCacheBytes = nonNegativeLong(
+            context.originals().get(READ_DATA_BLOCK_CACHE_BYTES_CONFIG),
+            DEFAULT_READ_DATA_BLOCK_CACHE_BYTES,
+            READ_DATA_BLOCK_CACHE_BYTES_CONFIG
         );
         long uploadIntervalMs = positiveLong(
             context.originals().get(UPLOAD_INTERVAL_MS_CONFIG),
@@ -168,6 +188,8 @@ public final class SharedStorageConfiguration {
             walCapacityBytes,
             walSegmentBytes,
             objectTargetBytes,
+            readIndexCacheEntries,
+            readDataBlockCacheBytes,
             uploadIntervalMs,
             uploadMaxLingerMs,
             uploadWalPressurePercent,
@@ -224,6 +246,14 @@ public final class SharedStorageConfiguration {
         return objectTargetBytes;
     }
 
+    public int readIndexCacheEntries() {
+        return readIndexCacheEntries;
+    }
+
+    public long readDataBlockCacheBytes() {
+        return readDataBlockCacheBytes;
+    }
+
     public long uploadIntervalMs() {
         return uploadIntervalMs;
     }
@@ -277,6 +307,14 @@ public final class SharedStorageConfiguration {
         long parsed = longValue(value, defaultValue);
         if (parsed <= 0 || parsed > Integer.MAX_VALUE) {
             throw new IllegalArgumentException(name + " must be in [1, " + Integer.MAX_VALUE + "]");
+        }
+        return Math.toIntExact(parsed);
+    }
+
+    private static int nonNegativeInt(Object value, int defaultValue, String name) {
+        long parsed = longValue(value, defaultValue);
+        if (parsed < 0 || parsed > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException(name + " must be in [0, " + Integer.MAX_VALUE + "]");
         }
         return Math.toIntExact(parsed);
     }

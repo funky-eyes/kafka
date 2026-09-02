@@ -49,6 +49,8 @@ class SharedStorageConfigurationTest {
         assertEquals(SharedStorageConfiguration.DEFAULT_WAL_CAPACITY_BYTES, config.walCapacityBytes());
         assertEquals(SharedStorageConfiguration.DEFAULT_WAL_SEGMENT_BYTES, config.walSegmentBytes());
         assertEquals(SharedStorageConfiguration.DEFAULT_OBJECT_TARGET_BYTES, config.objectTargetBytes());
+        assertEquals(SharedStorageConfiguration.DEFAULT_READ_INDEX_CACHE_ENTRIES, config.readIndexCacheEntries());
+        assertEquals(SharedStorageConfiguration.DEFAULT_READ_DATA_BLOCK_CACHE_BYTES, config.readDataBlockCacheBytes());
         assertEquals(SharedStorageConfiguration.DEFAULT_UPLOAD_INTERVAL_MS, config.uploadIntervalMs());
         assertEquals(SharedStorageConfiguration.DEFAULT_ORPHAN_CLEANUP_INTERVAL_MS, config.orphanCleanupIntervalMs());
         assertEquals(SharedStorageConfiguration.DEFAULT_ORPHAN_GRACE_MS, config.orphanGraceMs());
@@ -141,9 +143,11 @@ class SharedStorageConfigurationTest {
     }
 
     @Test
-    void parsesExplicitUploadAndCleanupTuning() {
+    void parsesExplicitReadUploadAndCleanupTuning() {
         Map<String, Object> originals = new HashMap<>();
         originals.put(SharedStorageConfiguration.OBJECT_TARGET_BYTES_CONFIG, "67108864");
+        originals.put(SharedStorageConfiguration.READ_INDEX_CACHE_ENTRIES_CONFIG, "256");
+        originals.put(SharedStorageConfiguration.READ_DATA_BLOCK_CACHE_BYTES_CONFIG, 128L * 1024 * 1024);
         originals.put(SharedStorageConfiguration.UPLOAD_INTERVAL_MS_CONFIG, 250L);
         originals.put(SharedStorageConfiguration.ORPHAN_CLEANUP_INTERVAL_MS_CONFIG, 5_000L);
         originals.put(SharedStorageConfiguration.ORPHAN_GRACE_MS_CONFIG, "120000");
@@ -153,9 +157,26 @@ class SharedStorageConfigurationTest {
         );
 
         assertEquals(64L * 1024 * 1024, config.objectTargetBytes());
+        assertEquals(256, config.readIndexCacheEntries());
+        assertEquals(128L * 1024 * 1024, config.readDataBlockCacheBytes());
         assertEquals(250L, config.uploadIntervalMs());
         assertEquals(5_000L, config.orphanCleanupIntervalMs());
         assertEquals(120_000L, config.orphanGraceMs());
+    }
+
+    @Test
+    void allowsDisablingRemoteReadCaches() {
+        Map<String, Object> originals = Map.of(
+            SharedStorageConfiguration.READ_INDEX_CACHE_ENTRIES_CONFIG, 0,
+            SharedStorageConfiguration.READ_DATA_BLOCK_CACHE_BYTES_CONFIG, 0L
+        );
+
+        SharedStorageConfiguration config = SharedStorageConfiguration.from(
+            context(originals, TestUtils.tempDirectory())
+        );
+
+        assertEquals(0, config.readIndexCacheEntries());
+        assertEquals(0L, config.readDataBlockCacheBytes());
     }
 
     @Test
@@ -184,6 +205,35 @@ class SharedStorageConfigurationTest {
         assertEquals(SharedStorageConfiguration.WalEngine.RING, config.walEngine());
         assertEquals(16_384L, config.walCapacityBytes());
         assertEquals(65_536L, config.walSegmentBytes());
+    }
+
+    @Test
+    void rejectsInvalidReadCacheTuning() {
+        File logDir = TestUtils.tempDirectory();
+
+        Map<String, Object> negativeIndexEntries = new HashMap<>();
+        negativeIndexEntries.put(SharedStorageConfiguration.READ_INDEX_CACHE_ENTRIES_CONFIG, -1);
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> SharedStorageConfiguration.from(context(negativeIndexEntries, logDir))
+        );
+
+        Map<String, Object> excessiveIndexEntries = new HashMap<>();
+        excessiveIndexEntries.put(
+            SharedStorageConfiguration.READ_INDEX_CACHE_ENTRIES_CONFIG,
+            (long) Integer.MAX_VALUE + 1
+        );
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> SharedStorageConfiguration.from(context(excessiveIndexEntries, logDir))
+        );
+
+        Map<String, Object> negativeDataBlockBytes = new HashMap<>();
+        negativeDataBlockBytes.put(SharedStorageConfiguration.READ_DATA_BLOCK_CACHE_BYTES_CONFIG, -1L);
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> SharedStorageConfiguration.from(context(negativeDataBlockBytes, logDir))
+        );
     }
 
     @Test

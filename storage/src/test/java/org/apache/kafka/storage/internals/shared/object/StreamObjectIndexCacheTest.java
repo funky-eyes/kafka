@@ -82,8 +82,25 @@ class StreamObjectIndexCacheTest {
     }
 
     @Test
-    void shouldNotRetainLegacyDescriptorMiss() throws Exception {
+    void shouldAllowDisablingIndexCache() throws Exception {
         PackedObject packed = packObject(923);
+        SharedObjectMetadata metadata = packed.metadata();
+        CountingObjectStore store = new CountingObjectStore();
+        store.install(metadata.objectId(), packed.bytes());
+        StreamObjectIndexReader loader = new StreamObjectIndexReader(store);
+        StreamObjectIndexCache cache = new StreamObjectIndexCache(0);
+        RemoteObjectIndex.RangeReference reference = reference(metadata);
+
+        cache.get(reference, loader).get(10, TimeUnit.SECONDS);
+        cache.get(reference, loader).get(10, TimeUnit.SECONDS);
+
+        assertEquals(6, store.readCount());
+        assertEquals(0, cache.size());
+    }
+
+    @Test
+    void shouldNotRetainLegacyDescriptorMiss() throws Exception {
+        PackedObject packed = packObject(924);
         CountingObjectStore store = new CountingObjectStore();
         store.install(packed.metadata().objectId(), packed.bytes());
         StreamObjectIndexReader loader = new StreamObjectIndexReader(store);

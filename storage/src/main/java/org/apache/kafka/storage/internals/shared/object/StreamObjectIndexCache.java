@@ -32,8 +32,8 @@ final class StreamObjectIndexCache {
         new LinkedHashMap<>(16, 0.75f, true);
 
     StreamObjectIndexCache(int maxEntries) {
-        if (maxEntries <= 0) {
-            throw new IllegalArgumentException("maxEntries must be positive");
+        if (maxEntries < 0) {
+            throw new IllegalArgumentException("maxEntries must not be negative");
         }
         this.maxEntries = maxEntries;
     }
@@ -44,7 +44,7 @@ final class StreamObjectIndexCache {
     ) {
         Objects.requireNonNull(reference, "reference");
         Objects.requireNonNull(loader, "loader");
-        if (!reference.hasObjectDescriptor()) {
+        if (maxEntries == 0 || !reference.hasObjectDescriptor()) {
             return loader.load(reference);
         }
 
