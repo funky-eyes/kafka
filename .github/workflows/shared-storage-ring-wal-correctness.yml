@@ -73,10 +73,7 @@ jobs:
         run: |
           set -o pipefail
           ./gradlew :storage:test \
-            --tests 'org.apache.kafka.storage.internals.shared.wal.RingWalLayoutTest' \
-            --tests 'org.apache.kafka.storage.internals.shared.wal.RingWalSuperblockTest' \
-            --tests 'org.apache.kafka.storage.internals.shared.wal.RingWalFileTest' \
-            --tests 'org.apache.kafka.storage.internals.shared.wal.RingSharedWal*Test' \
+            --tests 'org.apache.kafka.storage.internals.shared.wal.Ring*Test' \
             --tests 'org.apache.kafka.storage.internals.shared.kafka.SharedStorageWalFactoryTest' \
             --tests 'org.apache.kafka.storage.internals.shared.kafka.SharedStorageExtensionWalRuntimeTest' \
             --no-scan 2>&1 | tee shared-storage-ring-wal-correctness.log
@@ -89,7 +86,7 @@ jobs:
           s3_result_dir='storage/shared-storage-s3/build/test-results/test'
           test -d "$storage_result_dir"
           test -d "$s3_result_dir"
-          test "$(find "$storage_result_dir" -name 'TEST-org.apache.kafka.storage.internals.shared.wal.Ring*Test.xml' | wc -l)" -ge 6
+          test "$(find "$storage_result_dir" -name 'TEST-org.apache.kafka.storage.internals.shared.wal.Ring*Test.xml' | wc -l)" -ge 9
           test -f "$storage_result_dir/TEST-org.apache.kafka.storage.internals.shared.kafka.SharedStorageWalFactoryTest.xml"
           test -f "$storage_result_dir/TEST-org.apache.kafka.storage.internals.shared.kafka.SharedStorageExtensionWalRuntimeTest.xml"
           test -f "$s3_result_dir/TEST-org.apache.kafka.storage.internals.shared.s3.S3SharedStorageWalFactoryTest.xml"
