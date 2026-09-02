@@ -22,4 +22,8 @@ public final class RemoteObjectCorruptionException extends IOException {
     public RemoteObjectCorruptionException(String message) {
         super(message);
     }
+
+    public RemoteObjectCorruptionException(String message, Throwable cause) {
+        super(message, cause);
+    }
 }

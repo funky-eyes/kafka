@@ -47,7 +47,7 @@ concurrency:
 
 jobs:
   object-format-correctness:
-    name: Stream object pack, index, block, cache, and corruption gates
+    name: Stream object pack, index, block, reader, cache, and corruption gates
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -71,6 +71,7 @@ jobs:
             --tests 'org.apache.kafka.storage.internals.shared.object.StreamObjectIndexReaderTest' \
             --tests 'org.apache.kafka.storage.internals.shared.object.StreamObjectDataBlockReaderTest' \
             --tests 'org.apache.kafka.storage.internals.shared.object.StreamObjectIndexCacheTest' \
+            --tests 'org.apache.kafka.storage.internals.shared.object.SharedObjectReaderTest' \
             --tests 'org.apache.kafka.storage.internals.shared.object.SharedObjectUploaderTest' \
             --tests 'org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadataTest' \
             --no-scan 2>&1 | tee shared-storage-object-format.log
@@ -80,6 +81,7 @@ jobs:
           test -f "$result_dir/TEST-org.apache.kafka.storage.internals.shared.object.StreamObjectIndexReaderTest.xml"
           test -f "$result_dir/TEST-org.apache.kafka.storage.internals.shared.object.StreamObjectDataBlockReaderTest.xml"
           test -f "$result_dir/TEST-org.apache.kafka.storage.internals.shared.object.StreamObjectIndexCacheTest.xml"
+          test -f "$result_dir/TEST-org.apache.kafka.storage.internals.shared.object.SharedObjectReaderTest.xml"
           test -f "$result_dir/TEST-org.apache.kafka.storage.internals.shared.object.SharedObjectUploaderTest.xml"
           test -f "$result_dir/TEST-org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadataTest.xml"
           if grep -E 'failures="[1-9]|errors="[1-9]|skipped="[1-9]' \
@@ -87,6 +89,7 @@ jobs:
               "$result_dir/TEST-org.apache.kafka.storage.internals.shared.object.StreamObjectIndexReaderTest.xml" \
               "$result_dir/TEST-org.apache.kafka.storage.internals.shared.object.StreamObjectDataBlockReaderTest.xml" \
               "$result_dir/TEST-org.apache.kafka.storage.internals.shared.object.StreamObjectIndexCacheTest.xml" \
+              "$result_dir/TEST-org.apache.kafka.storage.internals.shared.object.SharedObjectReaderTest.xml" \
               "$result_dir/TEST-org.apache.kafka.storage.internals.shared.object.SharedObjectUploaderTest.xml" \
               "$result_dir/TEST-org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadataTest.xml"; then
             exit 1

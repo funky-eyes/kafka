@@ -77,7 +77,7 @@ final class StreamObjectIndexReader {
                 }
                 return StreamObjectFormat.readFooterTail(footerBytes, reference.objectSize());
             } catch (IOException e) {
-                throw new CompletionException(e);
+                throw new CompletionException(corruption(reference, e));
             }
         }).thenCompose(parsedFooter -> rangeReadExact(
             reference.objectId(),
@@ -89,7 +89,7 @@ final class StreamObjectIndexReader {
                     StreamObjectFormat.readIndexBlock(indexBytes, parsedFooter);
                 return Optional.of(new IndexSnapshot(parsedFooter, entries));
             } catch (IOException e) {
-                throw new CompletionException(e);
+                throw new CompletionException(corruption(reference, e));
             }
         }));
     }
@@ -105,6 +105,19 @@ final class StreamObjectIndexReader {
             }
             return bytes.asReadOnlyBuffer();
         });
+    }
+
+    private static RemoteObjectCorruptionException corruption(
+        RemoteObjectIndex.RangeReference reference,
+        IOException cause
+    ) {
+        if (cause instanceof RemoteObjectCorruptionException corruption) {
+            return corruption;
+        }
+        return new RemoteObjectCorruptionException(
+            "Invalid remote stream object index metadata: object=" + reference.objectId(),
+            cause
+        );
     }
 
     record IndexSnapshot(
