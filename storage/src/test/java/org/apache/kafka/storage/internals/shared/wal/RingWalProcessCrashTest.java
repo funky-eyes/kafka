@@ -20,7 +20,6 @@ import org.apache.kafka.common.utils.Utils;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.net.CodeSource;
 import java.net.URI;
 import java.net.URL;
 import java.net.URLClassLoader;
@@ -29,6 +28,7 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.security.CodeSource;
 import java.util.LinkedHashSet;
 import java.util.Locale;
 import java.util.Set;
