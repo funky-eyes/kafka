@@ -31,7 +31,10 @@ import java.util.Objects;
  * <p>Data writes are staged first. A new logical head/tail becomes recoverable only through
  * {@link #forceAndCheckpoint(long, long)}, which forces data, writes the next alternating superblock, then forces the
  * superblock. Recovery therefore observes either the previous durable window or the new one, never metadata pointing
- * beyond data that skipped the durability barrier.</p>
+ * beyond data that skipped the durability barrier. When a checkpoint advances the durable head, the same new state is
+ * forced into the fallback superblock before the head becomes reusable. Recovery likewise repairs an older or invalid
+ * fallback copy from the selected state. A CRC-valid fallback can therefore never keep references to physical slots
+ * that a newer generation is allowed to overwrite.</p>
  *
  * <p>A brand-new WAL is fully initialized and forced through a sibling staging file before an atomic rename publishes
  * it at the durable path. The final path therefore never names a half-initialized WAL, even if the broker is SIGKILLed
@@ -140,11 +143,15 @@ final class RingWalFile implements AutoCloseable {
     synchronized RingWalSuperblock.State forceAndCheckpoint(long headOffset, long tailOffset) throws IOException {
         ensureOpen();
         validateForwardCheckpoint(headOffset, tailOffset);
-        RingWalSuperblock.State next = state.next(headOffset, tailOffset);
+        RingWalSuperblock.State current = state;
+        RingWalSuperblock.State next = current.next(headOffset, tailOffset);
 
         handle.force();
         writeSuperblock(next);
         handle.force();
+        if (headOffset > current.headOffset()) {
+            mirrorSuperblock(next);
+        }
         state = next;
         return state;
     }
@@ -239,7 +246,38 @@ final class RingWalFile implements AutoCloseable {
     private RingWalSuperblock.State recoverState(WalIoBackend.Handle opened) throws IOException {
         ByteBuffer first = readSuperblock(opened, 0);
         ByteBuffer second = readSuperblock(opened, 1);
-        return RingWalSuperblock.selectNewest(first, second, layout.dataCapacityBytes());
+        RingWalSuperblock.State firstState = decodeSuperblock(first);
+        RingWalSuperblock.State secondState = decodeSuperblock(second);
+        RingWalSuperblock.State recovered = RingWalSuperblock.selectNewest(
+            first,
+            second,
+            layout.dataCapacityBytes()
+        );
+        repairFallbackCopy(opened, recovered, firstState, secondState);
+        return recovered;
+    }
+
+    private RingWalSuperblock.State decodeSuperblock(ByteBuffer bytes) {
+        try {
+            RingWalSuperblock.State decoded = RingWalSuperblock.decode(bytes);
+            return decoded.dataCapacityBytes() == layout.dataCapacityBytes() ? decoded : null;
+        } catch (WalCorruptionException e) {
+            return null;
+        }
+    }
+
+    private void repairFallbackCopy(
+        WalIoBackend.Handle opened,
+        RingWalSuperblock.State recovered,
+        RingWalSuperblock.State firstState,
+        RingWalSuperblock.State secondState
+    ) throws IOException {
+        if (recovered.equals(firstState) && recovered.equals(secondState)) {
+            return;
+        }
+        int repairCopy = recovered.equals(firstState) ? 1 : 0;
+        writeSuperblock(opened, recovered, repairCopy);
+        opened.force();
     }
 
     private ByteBuffer readSuperblock(WalIoBackend.Handle opened, int copyIndex) throws IOException {
@@ -253,9 +291,23 @@ final class RingWalFile implements AutoCloseable {
         writeSuperblock(handle, checkpoint);
     }
 
+    private void mirrorSuperblock(RingWalSuperblock.State checkpoint) throws IOException {
+        int canonicalCopy = RingWalSuperblock.copyIndex(checkpoint.sequence());
+        writeSuperblock(handle, checkpoint, 1 - canonicalCopy);
+        handle.force();
+    }
+
     private void writeSuperblock(WalIoBackend.Handle target, RingWalSuperblock.State checkpoint) throws IOException {
+        writeSuperblock(target, checkpoint, RingWalSuperblock.copyIndex(checkpoint.sequence()));
+    }
+
+    private void writeSuperblock(
+        WalIoBackend.Handle target,
+        RingWalSuperblock.State checkpoint,
+        int copyIndex
+    ) throws IOException {
         ByteBuffer encoded = RingWalSuperblock.encode(checkpoint);
-        writeFully(target, encoded, superblockPosition(RingWalSuperblock.copyIndex(checkpoint.sequence())));
+        writeFully(target, encoded, superblockPosition(copyIndex));
     }
 
     private static long superblockPosition(int copyIndex) {
