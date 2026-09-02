@@ -24,6 +24,7 @@ import org.apache.kafka.storage.internals.shared.wal.FileSharedWal;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -32,6 +33,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class StreamObjectFormatTest {
@@ -105,6 +107,53 @@ class StreamObjectFormatTest {
             assertEquals(1, index.get(0).batchCount());
             assertEquals(1, index.get(1).batchCount());
         }
+    }
+
+    @Test
+    void shouldRejectCrcValidOverlappingDataBlockIndexEntries() throws Exception {
+        try (SharedStorageEngine engine = new SharedStorageEngine(
+            new FileSharedWal(tempDir.resolve("stream-object-v2-overlap"), 1024 * 1024, 4096))) {
+            append(engine, P0, 3, 0, 9, new byte[32]);
+            append(engine, P0, 3, 10, 19, new byte[32]);
+
+            PackedObject packed = new SharedObjectPacker(56).pack(
+                702,
+                engine.uploadCandidates(P0, 0, 20),
+                engine
+            );
+            ByteBuffer corrupted = writableCopy(packed.bytes());
+            StreamObjectFormat.Footer footer = StreamObjectFormat.readFooter(corrupted);
+            int indexPosition = Math.toIntExact(footer.indexPosition());
+            int firstEntryPosition = indexPosition + StreamObjectFormat.INDEX_HEADER_BYTES;
+            int secondEntryPosition = firstEntryPosition + StreamObjectFormat.INDEX_ENTRY_BYTES;
+            int blockPositionFieldOffset = 40;
+            long firstBlockPosition = corrupted.getLong(firstEntryPosition + blockPositionFieldOffset);
+            corrupted.putLong(secondEntryPosition + blockPositionFieldOffset, firstBlockPosition);
+            repairFooterChecksums(corrupted, footer);
+
+            StreamObjectFormat.Footer repairedFooter = StreamObjectFormat.readFooter(corrupted);
+            IOException error = assertThrows(
+                IOException.class,
+                () -> StreamObjectFormat.readIndex(corrupted, repairedFooter)
+            );
+            assertTrue(error.getMessage().contains("non-contiguous"));
+        }
+    }
+
+    private static ByteBuffer writableCopy(ByteBuffer source) {
+        ByteBuffer copy = ByteBuffer.allocate(source.remaining());
+        copy.put(source.duplicate());
+        copy.flip();
+        return copy;
+    }
+
+    private static void repairFooterChecksums(ByteBuffer object, StreamObjectFormat.Footer footer) {
+        int indexPosition = Math.toIntExact(footer.indexPosition());
+        int footerPosition = object.limit() - StreamObjectFormat.FOOTER_BYTES;
+        long indexChecksum = StreamObjectFormat.crc32c(object, indexPosition, footer.indexLength());
+        object.putInt(footerPosition + 24, (int) indexChecksum);
+        long objectBodyChecksum = StreamObjectFormat.crc32c(object, 0, footerPosition);
+        object.putInt(footerPosition + 28, (int) objectBodyChecksum);
     }
 
     private static void append(

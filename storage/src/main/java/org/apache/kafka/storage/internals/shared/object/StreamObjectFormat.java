@@ -229,7 +229,39 @@ final class StreamObjectFormat {
                 checksum
             ));
         }
+        validateDataBlockLayout(entries, footer.indexPosition());
         return List.copyOf(entries);
+    }
+
+    private static void validateDataBlockLayout(List<DataBlockIndexEntry> entries, long indexPosition) throws IOException {
+        long expectedBlockPosition = OBJECT_HEADER_BYTES;
+        for (DataBlockIndexEntry entry : entries) {
+            if (entry.blockPosition() != expectedBlockPosition) {
+                throw new IOException(
+                    "Stream object data block index is non-contiguous: expectedPosition=" + expectedBlockPosition +
+                        ", actualPosition=" + entry.blockPosition()
+                );
+            }
+            long blockEnd;
+            try {
+                blockEnd = Math.addExact(entry.blockPosition(), entry.blockLength());
+            } catch (ArithmeticException e) {
+                throw new IOException("Stream object data block range overflows", e);
+            }
+            if (blockEnd > indexPosition) {
+                throw new IOException(
+                    "Stream object data block extends into index: blockEnd=" + blockEnd +
+                        ", indexPosition=" + indexPosition
+                );
+            }
+            expectedBlockPosition = blockEnd;
+        }
+        if (expectedBlockPosition != indexPosition) {
+            throw new IOException(
+                "Stream object data blocks do not cover the complete data section: blockEnd=" + expectedBlockPosition +
+                    ", indexPosition=" + indexPosition
+            );
+        }
     }
 
     static long crc32c(ByteBuffer source, int position, int length) {
