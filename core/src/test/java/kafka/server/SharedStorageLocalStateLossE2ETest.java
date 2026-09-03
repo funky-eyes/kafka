@@ -173,7 +173,15 @@ public class SharedStorageLocalStateLossE2ETest {
                 Set<TopicPartition> partitions = description.partitions().stream()
                     .map(partition -> new TopicPartition(TOPIC, partition.partition()))
                     .collect(Collectors.toSet());
-                admin.electLeaders(ElectionType.PREFERRED, partitions).all().get(30, TimeUnit.SECONDS);
+                var electionResults = admin.electLeaders(ElectionType.PREFERRED, partitions)
+                    .partitions().get(30, TimeUnit.SECONDS);
+                for (var entry : electionResults.entrySet()) {
+                    if (entry.getValue().isPresent() &&
+                        !(entry.getValue().get() instanceof org.apache.kafka.common.errors.ElectionNotNeededException)) {
+                        throw new AssertionError(
+                            "Preferred leader election failed for " + entry.getKey(), entry.getValue().get());
+                    }
+                }
                 description = waitForPreferredLeaders(admin);
 
                 Set<Integer> leaders = description.partitions().stream()
