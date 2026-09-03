@@ -71,7 +71,8 @@ class FileSharedObjectUploadBarrierTest {
             tempDir,
             2
         );
-        UploadContext context = new UploadContext(200, 2_000, metadata(200));
+        SharedObjectMetadata metadata = metadata(200);
+        UploadContext context = new UploadContext(200, 2_000, metadata.objectSize(), metadata);
 
         assertTrue(barrier.onPhase(Phase.AFTER_PREPARE, context).isDone());
         assertTrue(barrier.onPhase(Phase.AFTER_PUT, context).isDone());
@@ -86,9 +87,29 @@ class FileSharedObjectUploadBarrierTest {
         assertTrue(evidence.contains("brokerId=2"));
         assertTrue(evidence.contains("objectId=200"));
         assertTrue(evidence.contains("createdTimeMs=2000"));
+        assertTrue(evidence.contains("objectSize=1"));
 
         paused.complete(null);
         assertTrue(barrier.onPhase(Phase.AFTER_PUT, context).isDone());
+    }
+
+    @Test
+    void shouldWritePlannedObjectSizeBeforeMetadataExists() throws Exception {
+        FileSharedObjectUploadBarrier barrier = new FileSharedObjectUploadBarrier(
+            Phase.AFTER_PREPARE,
+            tempDir,
+            3
+        );
+        Files.writeString(barrier.armFile(), "armed\n");
+
+        CompletableFuture<Void> paused = barrier.onPhase(
+            Phase.AFTER_PREPARE,
+            UploadContext.planned(201, 2_001, 4_096)
+        );
+
+        assertFalse(paused.isDone());
+        assertTrue(Files.readString(barrier.reachedFile()).contains("objectSize=4096"));
+        paused.complete(null);
     }
 
     private static SharedObjectMetadata metadata(long objectId) {

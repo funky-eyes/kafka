@@ -16,7 +16,9 @@
  */
 package org.apache.kafka.storage.internals.shared.object;
 
+import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
@@ -29,7 +31,7 @@ public interface ObjectStore extends AutoCloseable {
      *
      * <p>The default implementation preserves compatibility for stores without native multipart support by joining
      * the parts and delegating to {@link #put(long, ByteBuffer)}. Production stores should override this method when
-     * they can stream parts without materializing the complete object in heap.</p>
+     * they can upload parts without materializing the complete object in heap.</p>
      */
     default CompletableFuture<Void> put(long objectId, List<ByteBuffer> parts) {
         Objects.requireNonNull(parts, "parts");
@@ -53,9 +55,43 @@ public interface ObjectStore extends AutoCloseable {
         return put(objectId, joined.asReadOnlyBuffer());
     }
 
+    /**
+     * Publishes one immutable object by pulling ordered parts lazily from {@code source}.
+     *
+     * <p>The compatibility implementation drains the source before delegating to the list API. S3 and other remote
+     * stores should override this method so serialization, WAL reads and network upload stay pipelined and bounded by
+     * the part size rather than the complete object size.</p>
+     */
+    default CompletableFuture<Void> put(long objectId, PartSource source) {
+        Objects.requireNonNull(source, "source");
+        List<ByteBuffer> parts = new ArrayList<>();
+        try (source) {
+            ByteBuffer part;
+            while ((part = source.nextPart()) != null) {
+                if (!part.hasRemaining()) {
+                    return CompletableFuture.failedFuture(new IllegalArgumentException(
+                        "Object part source returned an empty part"));
+                }
+                parts.add(part.asReadOnlyBuffer());
+            }
+        } catch (IOException | RuntimeException e) {
+            return CompletableFuture.failedFuture(e);
+        }
+        return put(objectId, parts);
+    }
+
     CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length);
 
     CompletableFuture<Void> delete(long objectId);
+
+    /** Pull-based ordered object byte source. {@code null} marks end-of-object. */
+    interface PartSource extends AutoCloseable {
+        ByteBuffer nextPart() throws IOException;
+
+        @Override
+        default void close() {
+        }
+    }
 
     @Override
     default void close() throws Exception {

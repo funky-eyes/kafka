@@ -38,6 +38,8 @@ import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.UploadPartRequest;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -55,14 +57,11 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  * <p>The AWS SDK synchronous client intentionally uses JDK URLConnection rather than its Netty client so loading this
  * plugin cannot introduce a second Netty stack into Kafka. ObjectStore's asynchronous contract is provided by a small,
- * bounded-size worker pool owned by this instance. Callers must not mutate a PUT buffer until its future completes.</p>
+ * bounded-size worker pool owned by this instance.</p>
  *
- * <p>Multipart publication keeps large immutable objects bounded by the caller's part size instead of requiring one
- * object-sized heap buffer. All non-final parts must satisfy S3's 5 MiB minimum. A failed upload is explicitly aborted;
- * metadata COMMIT remains outside this class and therefore still defines the remote visibility boundary.</p>
- *
- * <p>This client belongs exclusively to asynchronous object publication and cold reads. Producer acknowledgement
- * durability is owned by the local and replicated WAL path; an S3 request must never be placed on that ACK path.</p>
+ * <p>Multipart publication pulls object parts lazily. The serializer and S3 client therefore only need the current
+ * and next part in memory while preserving S3's rule that every non-final part is at least 5 MiB. A failed multipart
+ * upload is explicitly aborted; metadata COMMIT remains outside this class and defines the remote visibility boundary.</p>
  */
 public final class S3ObjectStore implements ObjectStore {
     static final int MIN_MULTIPART_PART_BYTES = 5 * 1024 * 1024;
@@ -117,6 +116,44 @@ public final class S3ObjectStore implements ObjectStore {
         return runAsync(() -> putMultipart(objectId, payloads));
     }
 
+    @Override
+    public CompletableFuture<Void> put(long objectId, PartSource source) {
+        if (objectId < 0) {
+            return CompletableFuture.failedFuture(new IllegalArgumentException("objectId must be non-negative"));
+        }
+        Objects.requireNonNull(source, "source");
+        return runAsync(() -> putFromSource(objectId, source));
+    }
+
+    private void putFromSource(long objectId, PartSource source) {
+        try (source) {
+            ByteBuffer first = nextPart(source);
+            if (first == null) {
+                throw new IllegalArgumentException("Object part source must not be empty");
+            }
+            ByteBuffer second = nextPart(source);
+            if (second == null) {
+                putSingle(objectId, first);
+                return;
+            }
+            putMultipart(objectId, first, second, source);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Unable to produce S3 multipart object bytes", e);
+        }
+    }
+
+    private static ByteBuffer nextPart(PartSource source) throws IOException {
+        ByteBuffer part = source.nextPart();
+        if (part == null) {
+            return null;
+        }
+        ByteBuffer payload = part.asReadOnlyBuffer();
+        if (!payload.hasRemaining()) {
+            throw new IllegalArgumentException("Object part source returned an empty part");
+        }
+        return payload;
+    }
+
     private void putSingle(long objectId, ByteBuffer payload) {
         client.putObject(
             PutObjectRequest.builder()
@@ -130,47 +167,97 @@ public final class S3ObjectStore implements ObjectStore {
 
     private void putMultipart(long objectId, List<ByteBuffer> payloads) {
         String key = config.objectKey(objectId);
-        String uploadId = client.createMultipartUpload(
-            CreateMultipartUploadRequest.builder().bucket(config.bucket()).key(key).build()
-        ).uploadId();
+        String uploadId = createMultipartUpload(key);
         List<CompletedPart> completed = new ArrayList<>(payloads.size());
         try {
             for (int i = 0; i < payloads.size(); i++) {
-                int partNumber = i + 1;
-                ByteBuffer payload = payloads.get(i).duplicate();
-                String eTag = client.uploadPart(
-                    UploadPartRequest.builder()
-                        .bucket(config.bucket())
-                        .key(key)
-                        .uploadId(uploadId)
-                        .partNumber(partNumber)
-                        .contentLength((long) payload.remaining())
-                        .build(),
-                    RequestBody.fromByteBuffer(payload)
-                ).eTag();
-                completed.add(CompletedPart.builder().partNumber(partNumber).eTag(eTag).build());
+                completed.add(uploadPart(key, uploadId, i + 1, payloads.get(i)));
             }
-            client.completeMultipartUpload(
-                CompleteMultipartUploadRequest.builder()
+            completeMultipartUpload(key, uploadId, completed);
+        } catch (RuntimeException uploadFailure) {
+            abortMultipartUpload(key, uploadId, uploadFailure);
+            throw uploadFailure;
+        }
+    }
+
+    private void putMultipart(
+        long objectId,
+        ByteBuffer first,
+        ByteBuffer second,
+        PartSource source
+    ) throws IOException {
+        String key = config.objectKey(objectId);
+        String uploadId = createMultipartUpload(key);
+        List<CompletedPart> completed = new ArrayList<>();
+        ByteBuffer current = first;
+        ByteBuffer next = second;
+        int partNumber = 1;
+        try {
+            while (true) {
+                if (next != null && current.remaining() < MIN_MULTIPART_PART_BYTES) {
+                    throw new IllegalArgumentException(
+                        "Non-final S3 multipart part must be at least " + MIN_MULTIPART_PART_BYTES + " bytes");
+                }
+                completed.add(uploadPart(key, uploadId, partNumber++, current));
+                if (next == null) {
+                    break;
+                }
+                current = next;
+                next = nextPart(source);
+            }
+            completeMultipartUpload(key, uploadId, completed);
+        } catch (IOException uploadFailure) {
+            abortMultipartUpload(key, uploadId, uploadFailure);
+            throw uploadFailure;
+        } catch (RuntimeException uploadFailure) {
+            abortMultipartUpload(key, uploadId, uploadFailure);
+            throw uploadFailure;
+        }
+    }
+
+    private String createMultipartUpload(String key) {
+        return client.createMultipartUpload(
+            CreateMultipartUploadRequest.builder().bucket(config.bucket()).key(key).build()
+        ).uploadId();
+    }
+
+    private CompletedPart uploadPart(String key, String uploadId, int partNumber, ByteBuffer source) {
+        ByteBuffer payload = source.duplicate();
+        String eTag = client.uploadPart(
+            UploadPartRequest.builder()
+                .bucket(config.bucket())
+                .key(key)
+                .uploadId(uploadId)
+                .partNumber(partNumber)
+                .contentLength((long) payload.remaining())
+                .build(),
+            RequestBody.fromByteBuffer(payload)
+        ).eTag();
+        return CompletedPart.builder().partNumber(partNumber).eTag(eTag).build();
+    }
+
+    private void completeMultipartUpload(String key, String uploadId, List<CompletedPart> completed) {
+        client.completeMultipartUpload(
+            CompleteMultipartUploadRequest.builder()
+                .bucket(config.bucket())
+                .key(key)
+                .uploadId(uploadId)
+                .multipartUpload(CompletedMultipartUpload.builder().parts(completed).build())
+                .build()
+        );
+    }
+
+    private void abortMultipartUpload(String key, String uploadId, Throwable uploadFailure) {
+        try {
+            client.abortMultipartUpload(
+                AbortMultipartUploadRequest.builder()
                     .bucket(config.bucket())
                     .key(key)
                     .uploadId(uploadId)
-                    .multipartUpload(CompletedMultipartUpload.builder().parts(completed).build())
                     .build()
             );
-        } catch (RuntimeException uploadFailure) {
-            try {
-                client.abortMultipartUpload(
-                    AbortMultipartUploadRequest.builder()
-                        .bucket(config.bucket())
-                        .key(key)
-                        .uploadId(uploadId)
-                        .build()
-                );
-            } catch (RuntimeException abortFailure) {
-                uploadFailure.addSuppressed(abortFailure);
-            }
-            throw uploadFailure;
+        } catch (RuntimeException abortFailure) {
+            uploadFailure.addSuppressed(abortFailure);
         }
     }
 

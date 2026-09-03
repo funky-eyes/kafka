@@ -23,10 +23,6 @@ import java.util.concurrent.CompletableFuture;
 
 /**
  * Asynchronous lifecycle hook for deterministic fault injection around the immutable-object publish protocol.
- *
- * <p>Production callers use {@link #NOOP}. Tests may return an incomplete future to stop an upload exactly after a
- * durable protocol transition without blocking the uploader thread. The upload remains registered in
- * {@link ActiveObjectUploads} until the returned future completes or the process terminates.</p>
  */
 @FunctionalInterface
 public interface SharedObjectUploadHook {
@@ -40,9 +36,14 @@ public interface SharedObjectUploadHook {
         AFTER_COMMIT
     }
 
+    /**
+     * Upload lifecycle context. Metadata is absent before the object byte stream has been fully produced.
+     * The planned object size is exact and available at every phase.
+     */
     record UploadContext(
         long objectId,
         long createdTimeMs,
+        long objectSize,
         SharedObjectMetadata metadata
     ) {
         public UploadContext {
@@ -52,11 +53,36 @@ public interface SharedObjectUploadHook {
             if (createdTimeMs < 0) {
                 throw new IllegalArgumentException("createdTimeMs must be non-negative");
             }
-            Objects.requireNonNull(metadata, "metadata");
-            if (metadata.objectId() != objectId) {
-                throw new IllegalArgumentException(
-                    "metadata objectId " + metadata.objectId() + " does not match upload objectId " + objectId);
+            if (objectSize <= 0) {
+                throw new IllegalArgumentException("objectSize must be positive");
             }
+            if (metadata != null) {
+                if (metadata.objectId() != objectId) {
+                    throw new IllegalArgumentException(
+                        "metadata objectId " + metadata.objectId() + " does not match upload objectId " + objectId);
+                }
+                if (metadata.objectSize() != objectSize) {
+                    throw new IllegalArgumentException(
+                        "metadata objectSize " + metadata.objectSize() + " does not match planned size " + objectSize);
+                }
+            }
+        }
+
+        public static UploadContext planned(long objectId, long createdTimeMs, long objectSize) {
+            return new UploadContext(objectId, createdTimeMs, objectSize, null);
+        }
+
+        public UploadContext withMetadata(SharedObjectMetadata committedMetadata) {
+            return new UploadContext(
+                objectId,
+                createdTimeMs,
+                objectSize,
+                Objects.requireNonNull(committedMetadata, "committedMetadata")
+            );
+        }
+
+        public SharedObjectMetadata requiredMetadata() {
+            return Objects.requireNonNull(metadata, "metadata is not available before object publication");
         }
     }
 }

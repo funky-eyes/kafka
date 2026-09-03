@@ -119,7 +119,7 @@ final class FileSharedObjectUploadBarrier implements SharedObjectUploadHook {
             "brokerId=" + brokerId,
             "objectId=" + context.objectId(),
             "createdTimeMs=" + context.createdTimeMs(),
-            "objectSize=" + context.metadata().objectSize(),
+            "objectSize=" + context.objectSize(),
             ""
         );
         try {

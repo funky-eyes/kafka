@@ -19,10 +19,10 @@ package org.apache.kafka.storage.internals.shared.object;
 import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
 import org.apache.kafka.storage.internals.shared.metadata.ObjectMetadataStore;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
+import org.apache.kafka.storage.internals.shared.object.SharedObjectPacker.UploadPlan;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectUploadHook.Phase;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectUploadHook.UploadContext;
 
-import java.io.IOException;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
@@ -87,33 +87,39 @@ public final class SharedObjectUploader {
         long createdTimeMs,
         List<SharedStorageEngine.UploadCandidate> candidates
     ) {
-        final PackedObject packed;
-        final UploadContext context;
+        final UploadPlan plan;
+        final UploadContext plannedContext;
         try {
-            packed = packer.pack(objectId, candidates, engine);
-            context = new UploadContext(objectId, createdTimeMs, packed.metadata());
+            plan = packer.plan(objectId, candidates, engine);
+            plannedContext = UploadContext.planned(objectId, createdTimeMs, plan.objectSize());
             activeUploads.begin(objectId);
-        } catch (IOException | RuntimeException e) {
+        } catch (RuntimeException e) {
             return CompletableFuture.failedFuture(e);
         }
 
         CompletableFuture<SharedObjectMetadata> result;
         try {
             result = metadataStore.prepare(objectId, createdTimeMs)
-                .thenCompose(ignored -> invokeHook(Phase.AFTER_PREPARE, context))
-                .thenCompose(ignored -> objectStore.put(objectId, packed.parts()))
-                .thenCompose(ignored -> invokeHook(Phase.AFTER_PUT, context))
-                .thenCompose(ignored -> metadataStore.commit(packed.metadata()))
-                .thenCompose(ignored -> invokeHook(Phase.AFTER_COMMIT, context))
-                .thenApply(ignored -> {
-                    engine.commitRemoteObject(packed.metadata());
-                    return packed.metadata();
-                });
+                .thenCompose(ignored -> invokeHook(Phase.AFTER_PREPARE, plannedContext))
+                .thenCompose(ignored -> objectStore.put(objectId, plan.openPartSource()))
+                .thenCompose(ignored -> finishUpload(plan, plannedContext));
         } catch (RuntimeException e) {
             activeUploads.end(objectId);
             return CompletableFuture.failedFuture(e);
         }
         return result.whenComplete((ignored, error) -> activeUploads.end(objectId));
+    }
+
+    private CompletableFuture<SharedObjectMetadata> finishUpload(UploadPlan plan, UploadContext plannedContext) {
+        SharedObjectMetadata metadata = plan.metadata();
+        UploadContext completedContext = plannedContext.withMetadata(metadata);
+        return invokeHook(Phase.AFTER_PUT, completedContext)
+            .thenCompose(ignored -> metadataStore.commit(metadata))
+            .thenCompose(ignored -> invokeHook(Phase.AFTER_COMMIT, completedContext))
+            .thenApply(ignored -> {
+                engine.commitRemoteObject(metadata);
+                return metadata;
+            });
     }
 
     private CompletableFuture<Void> invokeHook(Phase phase, UploadContext context) {
