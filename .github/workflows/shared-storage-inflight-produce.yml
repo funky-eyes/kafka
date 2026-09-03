@@ -1,0 +1,133 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements. See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License. You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Shared Storage Inflight Idempotent Produce
+
+on:
+  push:
+    branches:
+      - shared-wal-s3-4.3.1
+    paths:
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/**'
+      - 'storage/shared-storage-s3/**'
+      - 'core/src/main/scala/kafka/cluster/Partition.scala'
+      - 'core/src/main/scala/kafka/log/LogManager.scala'
+      - 'core/src/main/scala/kafka/server/BrokerServer.scala'
+      - 'core/src/main/scala/kafka/server/ReplicaManager.scala'
+      - 'core/src/test/java/kafka/server/SharedStorageInflightIdempotentProduceE2ETest.java'
+      - '.github/workflows/shared-storage-inflight-produce.yml'
+  pull_request:
+    paths:
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/**'
+      - 'storage/shared-storage-s3/**'
+      - 'core/src/main/scala/kafka/cluster/Partition.scala'
+      - 'core/src/main/scala/kafka/log/LogManager.scala'
+      - 'core/src/main/scala/kafka/server/BrokerServer.scala'
+      - 'core/src/main/scala/kafka/server/ReplicaManager.scala'
+      - 'core/src/test/java/kafka/server/SharedStorageInflightIdempotentProduceE2ETest.java'
+      - '.github/workflows/shared-storage-inflight-produce.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shared-storage-inflight-produce-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  inflight-idempotent-produce:
+    name: Pending acks=all retries across leader loss
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Start MinIO
+        run: |
+          docker run --detach \
+            --name kafka-shared-inflight-minio \
+            --publish 9000:9000 \
+            --env MINIO_ROOT_USER=minioadmin \
+            --env MINIO_ROOT_PASSWORD=minioadmin123 \
+            minio/minio:latest \
+            server /data --address :9000
+
+      - name: Wait for MinIO readiness
+        run: |
+          for i in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs kafka-shared-inflight-minio
+          exit 1
+
+      - name: Ensure MinIO bucket exists
+        run: |
+          docker run --rm --network host --entrypoint /bin/sh minio/mc:latest -c '
+            mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
+            mc mb --ignore-existing local/kafka-shared-storage-inflight-produce >/dev/null
+          '
+
+      - name: Setup Gradle
+        uses: ./.github/actions/setup-gradle
+        with:
+          java-version: 25
+          gradle-cache-read-only: true
+
+      - name: Kill leader with unresolved idempotent produce futures
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin123
+          AWS_REGION: us-east-1
+          SHARED_STORAGE_S3_ENDPOINT: http://127.0.0.1:9000
+          SHARED_STORAGE_S3_REGION: us-east-1
+          SHARED_STORAGE_S3_BUCKET: kafka-shared-storage-inflight-produce
+        run: |
+          set -o pipefail
+          ./gradlew :core:test \
+            --tests 'kafka.server.SharedStorageInflightIdempotentProduceE2ETest' \
+            --no-scan 2>&1 | tee shared-storage-inflight-produce.log
+
+      - name: Show inflight-produce S3 objects
+        if: always()
+        run: |
+          docker run --rm --network host --entrypoint /bin/sh minio/mc:latest -c '
+            mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
+            mc ls --recursive local/kafka-shared-storage-inflight-produce || true
+          ' | tee shared-storage-inflight-produce-objects.log
+
+      - name: Upload inflight-produce diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shared-storage-inflight-produce
+          path: |
+            shared-storage-inflight-produce.log
+            shared-storage-inflight-produce-objects.log
+            core/build/reports/tests/test
+            core/build/test-results/test
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: MinIO logs
+        if: always()
+        run: docker logs kafka-shared-inflight-minio || true
