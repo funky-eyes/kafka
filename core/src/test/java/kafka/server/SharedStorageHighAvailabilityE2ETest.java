@@ -81,6 +81,7 @@ public class SharedStorageHighAvailabilityE2ETest {
     private static final int VALUE_BYTES = 4 * 1024;
     private static final long WAL_CAPACITY_BYTES = 512L * 1024;
     private static final long OBJECT_TARGET_BYTES = 64L * 1024;
+    private static final long MAX_SEQUENTIAL_BROKER_STARTUP_MS = 30_000L;
 
     @Test
     public void rollingAndFullBrokerRestartPreserveRecycledWalHistory() throws Exception {
@@ -158,16 +159,7 @@ public class SharedStorageHighAvailabilityE2ETest {
                 }
             }
 
-            for (BrokerServer broker : cluster.brokers().values()) {
-                broker.shutdown();
-            }
-            for (BrokerServer broker : cluster.brokers().values()) {
-                broker.awaitShutdown();
-            }
-            for (BrokerServer broker : cluster.brokers().values()) {
-                broker.startup();
-            }
-            cluster.waitForReadyBrokers();
+            restartAllBrokersSequentially(cluster);
 
             try (Admin restartedAdmin = cluster.admin()) {
                 description = waitForTopicState(restartedAdmin, 3, null);
@@ -185,6 +177,24 @@ public class SharedStorageHighAvailabilityE2ETest {
                     "Every partition must finish with the same deterministic acknowledged record count");
             }
         }
+    }
+
+    private static void restartAllBrokersSequentially(KafkaClusterTestKit cluster) throws Exception {
+        for (BrokerServer broker : cluster.brokers().values()) {
+            broker.shutdown();
+        }
+        for (BrokerServer broker : cluster.brokers().values()) {
+            broker.awaitShutdown();
+        }
+        for (BrokerServer broker : cluster.brokers().values()) {
+            long startNanos = System.nanoTime();
+            broker.startup();
+            long startupMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+            assertTrue(startupMs < MAX_SEQUENTIAL_BROKER_STARTUP_MS,
+                "Each broker must finish sequential cold startup without waiting for the next broker; took " +
+                    startupMs + " ms");
+        }
+        cluster.waitForReadyBrokers();
     }
 
     private static KafkaProducer<String, String> producer(String bootstrapServers) {
