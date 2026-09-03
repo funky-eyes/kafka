@@ -20,3 +20,5 @@ limitations under the License.
 This runtime-neutral marker exists so a single commit can deliberately trigger
 shared-storage correctness workflows whose path filters cover the WAL subtree.
 Change it together with the object marker when a full exact-tree correctness run is required.
+
+Verification generation: 2
