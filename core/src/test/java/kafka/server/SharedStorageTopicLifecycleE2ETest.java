@@ -412,6 +412,9 @@ public class SharedStorageTopicLifecycleE2ETest {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(90);
         while (records.size() < expectedRecords && System.nanoTime() < deadline) {
             for (ConsumerRecord<String, String> record : consumer.poll(Duration.ofMillis(250))) {
+                if (records.size() >= expectedRecords) {
+                    break;
+                }
                 records.add(record);
             }
         }
