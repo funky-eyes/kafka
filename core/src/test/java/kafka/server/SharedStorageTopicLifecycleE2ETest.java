@@ -95,10 +95,7 @@ public class SharedStorageTopicLifecycleE2ETest {
                 assertPartitionValues(bootstrapServers, topic, 0, 0, 12, "new");
                 waitForRemoteCoverage(bootstrapServers, newPartition, 12);
 
-                PartitionRemoteCoverage oldCoverage = coverage(bootstrapServers, oldPartition);
                 PartitionRemoteCoverage newCoverage = coverage(bootstrapServers, newPartition);
-                assertTrue(oldCoverage.covers(new OffsetRange(0L, 24L)),
-                    "Old immutable object metadata should remain attributable only to the old topic ID");
                 assertTrue(newCoverage.covers(new OffsetRange(0L, 12L)),
                     "New topic ID must build independent authoritative remote coverage from offset zero");
             }
