@@ -1,0 +1,223 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements. See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License. You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Shared Storage Kafka Semantics and HA
+
+on:
+  push:
+    branches:
+      - shared-wal-s3-4.3.1
+    paths:
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/**'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/log/**'
+      - 'storage/shared-storage-s3/**'
+      - 'core/src/main/scala/kafka/cluster/Partition.scala'
+      - 'core/src/main/scala/kafka/log/LogManager.scala'
+      - 'core/src/main/scala/kafka/server/BrokerServer.scala'
+      - 'core/src/main/scala/kafka/server/ReplicaManager.scala'
+      - 'core/src/main/java/kafka/server/builders/LogManagerBuilder.java'
+      - 'core/src/test/java/kafka/server/SharedStorageKafkaSemanticsParityIntegrationTest.java'
+      - 'core/src/test/java/kafka/server/SharedStorageHighAvailabilityE2ETest.java'
+      - '.github/workflows/shared-storage-kafka-semantics-ha.yml'
+  pull_request:
+    paths:
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/**'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/log/**'
+      - 'storage/shared-storage-s3/**'
+      - 'core/src/main/scala/kafka/cluster/Partition.scala'
+      - 'core/src/main/scala/kafka/log/LogManager.scala'
+      - 'core/src/main/scala/kafka/server/BrokerServer.scala'
+      - 'core/src/main/scala/kafka/server/ReplicaManager.scala'
+      - 'core/src/main/java/kafka/server/builders/LogManagerBuilder.java'
+      - 'core/src/test/java/kafka/server/SharedStorageKafkaSemanticsParityIntegrationTest.java'
+      - 'core/src/test/java/kafka/server/SharedStorageHighAvailabilityE2ETest.java'
+      - '.github/workflows/shared-storage-kafka-semantics-ha.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shared-storage-kafka-semantics-ha-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  kafka-semantics-parity:
+    name: Classic Kafka vs shared storage client semantics
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Start MinIO
+        run: |
+          docker run --detach \
+            --name kafka-shared-parity-minio \
+            --publish 9000:9000 \
+            --env MINIO_ROOT_USER=minioadmin \
+            --env MINIO_ROOT_PASSWORD=minioadmin123 \
+            minio/minio:latest \
+            server /data --address :9000
+
+      - name: Wait for MinIO readiness
+        run: |
+          for i in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs kafka-shared-parity-minio
+          exit 1
+
+      - name: Ensure MinIO bucket exists
+        run: |
+          docker run --rm --network host --entrypoint /bin/sh minio/mc:latest -c '
+            mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
+            mc mb --ignore-existing local/kafka-shared-storage-parity >/dev/null
+          '
+
+      - name: Setup Gradle
+        uses: ./.github/actions/setup-gradle
+        with:
+          java-version: 25
+          gradle-cache-read-only: true
+
+      - name: Compare classic Kafka and shared storage semantics
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin123
+          AWS_REGION: us-east-1
+          SHARED_STORAGE_S3_ENDPOINT: http://127.0.0.1:9000
+          SHARED_STORAGE_S3_REGION: us-east-1
+          SHARED_STORAGE_S3_BUCKET: kafka-shared-storage-parity
+        run: |
+          set -o pipefail
+          ./gradlew :core:test \
+            --tests 'kafka.server.SharedStorageKafkaSemanticsParityIntegrationTest' \
+            --no-scan 2>&1 | tee shared-storage-kafka-parity.log
+
+      - name: Show parity S3 objects
+        if: always()
+        run: |
+          docker run --rm --network host --entrypoint /bin/sh minio/mc:latest -c '
+            mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
+            mc ls --recursive local/kafka-shared-storage-parity || true
+          ' | tee shared-storage-kafka-parity-objects.log
+
+      - name: Upload parity diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shared-storage-kafka-parity
+          path: |
+            shared-storage-kafka-parity.log
+            shared-storage-kafka-parity-objects.log
+            core/build/reports/tests/test
+            core/build/test-results/test
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: MinIO logs
+        if: always()
+        run: docker logs kafka-shared-parity-minio || true
+
+  broker-lifecycle-ha:
+    name: Ring WAL reuse, rolling restart, and full broker restart
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Start MinIO
+        run: |
+          docker run --detach \
+            --name kafka-shared-ha-minio \
+            --publish 9000:9000 \
+            --env MINIO_ROOT_USER=minioadmin \
+            --env MINIO_ROOT_PASSWORD=minioadmin123 \
+            minio/minio:latest \
+            server /data --address :9000
+
+      - name: Wait for MinIO readiness
+        run: |
+          for i in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs kafka-shared-ha-minio
+          exit 1
+
+      - name: Ensure MinIO bucket exists
+        run: |
+          docker run --rm --network host --entrypoint /bin/sh minio/mc:latest -c '
+            mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
+            mc mb --ignore-existing local/kafka-shared-storage-ha >/dev/null
+          '
+
+      - name: Setup Gradle
+        uses: ./.github/actions/setup-gradle
+        with:
+          java-version: 25
+          gradle-cache-read-only: true
+
+      - name: Exercise rolling and full broker restart recovery
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin123
+          AWS_REGION: us-east-1
+          SHARED_STORAGE_S3_ENDPOINT: http://127.0.0.1:9000
+          SHARED_STORAGE_S3_REGION: us-east-1
+          SHARED_STORAGE_S3_BUCKET: kafka-shared-storage-ha
+        run: |
+          set -o pipefail
+          ./gradlew :core:test \
+            --tests 'kafka.server.SharedStorageHighAvailabilityE2ETest' \
+            --no-scan 2>&1 | tee shared-storage-ha-lifecycle.log
+
+      - name: Show HA S3 objects
+        if: always()
+        run: |
+          docker run --rm --network host --entrypoint /bin/sh minio/mc:latest -c '
+            mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
+            mc ls --recursive local/kafka-shared-storage-ha || true
+          ' | tee shared-storage-ha-objects.log
+
+      - name: Upload HA diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shared-storage-ha-lifecycle
+          path: |
+            shared-storage-ha-lifecycle.log
+            shared-storage-ha-objects.log
+            core/build/reports/tests/test
+            core/build/test-results/test
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: MinIO logs
+        if: always()
+        run: docker logs kafka-shared-ha-minio || true
