@@ -41,6 +41,9 @@ import org.apache.kafka.storage.internals.shared.object.SharedObjectUploadHook;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectUploader;
 import org.apache.kafka.storage.internals.shared.wal.SharedWal;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -62,11 +65,14 @@ import java.util.function.LongSupplier;
  *
  * <p>{@link #start(StorageExtensionContext)} restores the local remote-range checkpoint and WAL, opens the S3 reader
  * needed by Kafka LogLoader when old WAL bytes were already reclaimed, and installs the shared log factory.
- * {@link #onBrokerReady(StorageExtensionBrokerContext)} then replays the classic metadata topic, fences the broker
- * object-ID allocator and starts asynchronous S3 upload and orphan cleanup. Producer acknowledgement never waits on
- * S3; the early S3 client is a cold-read dependency only for data whose WAL recovery copy was already reclaimed.</p>
+ * {@link #onBrokerReady(StorageExtensionBrokerContext)} then starts remote-control-plane bootstrap without delaying
+ * broker availability. Until the Kafka-backed metadata plane is readable, uploads and WAL reclamation remain disabled;
+ * producer durability continues through the replicated local WAL and therefore naturally backpressures at WAL
+ * capacity instead of acknowledging data that cannot be retained safely. Once metadata replay succeeds, the broker
+ * fences its object-ID allocator and starts asynchronous S3 upload and orphan cleanup.</p>
  */
 public final class S3SharedStorageExtension implements KafkaStorageExtension {
+    private static final Logger LOG = LoggerFactory.getLogger(S3SharedStorageExtension.class);
     private static final int DEFAULT_OBJECT_ID_BLOCK_SIZE = 4_096;
     private static final long BOOTSTRAP_EXECUTOR_STOP_TIMEOUT_SECONDS = 5L;
     private static final long METADATA_BOOTSTRAP_RETRY_BACKOFF_MS = 250L;
@@ -172,23 +178,74 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         if (closed) {
             return CompletableFuture.failedFuture(new IllegalStateException("S3 shared storage extension is closed"));
         }
-        if (brokerReadyFuture != null) {
-            return brokerReadyFuture;
+        if (brokerReadyFuture == null) {
+            SharedStorageConfiguration configuration = storageConfiguration;
+            SharedStorageEngine engine = storage;
+            SharedCommitProgress progress = commitProgress;
+            S3ObjectStore objects = objectStore;
+            ExecutorService executor = bootstrapExecutor;
+            brokerReadyFuture = CompletableFuture.runAsync(() ->
+                initializeRemotePlaneUntilAvailable(context, configuration, engine, progress, objects), executor
+            ).whenComplete((ignored, error) -> {
+                if (error != null && !closed) {
+                    LOG.error(
+                        "Shared storage remote control plane stopped; broker remains on the replicated WAL path " +
+                            "and will eventually apply WAL-capacity backpressure",
+                        error
+                    );
+                }
+                executor.shutdown();
+            });
         }
+        // Local WAL/checkpoint recovery and the S3 cold reader are already installed by start(). Do not make one
+        // broker's process startup depend on the RF>1 internal metadata topic having another broker online yet.
+        return CompletableFuture.completedFuture(null);
+    }
 
-        SharedStorageConfiguration configuration = storageConfiguration;
-        SharedStorageEngine engine = storage;
-        SharedCommitProgress progress = commitProgress;
-        S3ObjectStore objects = objectStore;
-        ExecutorService executor = bootstrapExecutor;
-        brokerReadyFuture = CompletableFuture.runAsync(() -> {
+    private void initializeRemotePlaneUntilAvailable(
+        StorageExtensionBrokerContext context,
+        SharedStorageConfiguration configuration,
+        SharedStorageEngine engine,
+        SharedCommitProgress progress,
+        S3ObjectStore sharedObjectStore
+    ) {
+        while (true) {
             try {
-                initializeRemotePlane(context, configuration, engine, progress, objects);
-            } catch (IOException e) {
-                throw new CompletionException(e);
+                initializeRemotePlane(context, configuration, engine, progress, sharedObjectStore);
+                LOG.info("Shared storage metadata control plane is ready on broker {}", context.brokerId());
+                return;
+            } catch (IOException | RuntimeException e) {
+                if (closedOrReplaced(engine, sharedObjectStore)) {
+                    return;
+                }
+                if (!isRetriableMetadataBootstrapFailure(e)) {
+                    throw new CompletionException(e);
+                }
+                LOG.warn(
+                    "Shared storage metadata control plane is not readable yet on broker {}; " +
+                        "continuing with replicated WAL durability and retrying bootstrap",
+                    context.brokerId(),
+                    e
+                );
+                sleepBeforeRemotePlaneRetry();
             }
-        }, executor).whenComplete((ignored, error) -> executor.shutdown());
-        return brokerReadyFuture;
+        }
+    }
+
+    private synchronized boolean closedOrReplaced(
+        SharedStorageEngine engine,
+        S3ObjectStore sharedObjectStore
+    ) {
+        return closed || storage != engine || objectStore != sharedObjectStore;
+    }
+
+    private static void sleepBeforeRemotePlaneRetry() {
+        try {
+            Thread.sleep(METADATA_BOOTSTRAP_RETRY_BACKOFF_MS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new CompletionException(new IOException("Interrupted while retrying shared metadata bootstrap", e));
+        }
     }
 
     private void initializeRemotePlane(
@@ -444,7 +501,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         try {
             resource.close();
         } catch (Exception ignored) {
-            // The primary bootstrap failure is reported to BrokerServer; cleanup failures are secondary here.
+            // Cleanup failures are secondary to the remote-control-plane bootstrap or shutdown path.
         }
     }
 
