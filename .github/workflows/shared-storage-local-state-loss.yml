@@ -105,19 +105,19 @@ jobs:
           path = Path('storage/src/main/java/org/apache/kafka/storage/internals/log/UnifiedLog.java')
           text = path.read_text()
           old = '''                        synchronized (lock) {
-                              leaderEpochCache.truncateFromEndAsyncFlush(logEndOffset());
-                          }
-                          return false;'''
+                            leaderEpochCache.truncateFromEndAsyncFlush(logEndOffset());
+                        }
+                        return false;'''
           new = '''                        synchronized (lock) {
-                              long currentLogEndOffset = localLog.logEndOffset();
-                              leaderEpochCache.truncateFromEndAsyncFlush(currentLogEndOffset);
-                              if (producerStateManager.mapEndOffset() > currentLogEndOffset) {
-                                  logger.warn("Producer state end offset {} is ahead of log end offset {} while truncating to {}; rebuilding producer state",
-                                          producerStateManager.mapEndOffset(), currentLogEndOffset, targetOffset);
-                                  rebuildProducerState(currentLogEndOffset, producerStateManager);
-                              }
-                          }
-                          return false;'''
+                            long currentLogEndOffset = localLog.logEndOffset();
+                            leaderEpochCache.truncateFromEndAsyncFlush(currentLogEndOffset);
+                            if (producerStateManager.mapEndOffset() > currentLogEndOffset) {
+                                logger.warn("Producer state end offset {} is ahead of log end offset {} while truncating to {}; rebuilding producer state",
+                                        producerStateManager.mapEndOffset(), currentLogEndOffset, targetOffset);
+                                rebuildProducerState(currentLogEndOffset, producerStateManager);
+                            }
+                        }
+                        return false;'''
           if text.count(old) != 1:
               raise SystemExit(f'expected exactly one no-op truncation block, found {text.count(old)}')
           path.write_text(text.replace(old, new))
