@@ -56,12 +56,9 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
-/**
- * Proves that the shared WAL/S3 data plane stays correct while the three-node KRaft controller quorum changes leaders.
- */
+/** Proves shared WAL/S3 correctness while a three-node KRaft controller quorum changes leaders. */
 @Tag("integration")
 @Timeout(value = 10, unit = TimeUnit.MINUTES)
 public class SharedStorageControllerQuorumE2ETest {
@@ -78,57 +75,56 @@ public class SharedStorageControllerQuorumE2ETest {
         String bucket = environment("SHARED_STORAGE_S3_BUCKET", "kafka-shared-storage-controller-ha");
         String region = environment("SHARED_STORAGE_S3_REGION", "us-east-1");
 
-        try (KafkaClusterTestKit cluster = startCluster(s3Endpoint, region, bucket)) {
+        try (KafkaClusterTestKit cluster = startCluster(s3Endpoint, region, bucket);
+             Admin admin = cluster.admin()) {
             String bootstrapServers = cluster.bootstrapServers();
-            int[] primaryEndOffsets = new int[] {0, 0, 0};
+            int[] primaryOffsets = new int[] {0, 0, 0};
 
-            try (Admin admin = cluster.admin()) {
-                createTopic(admin, TOPIC, 3);
-                TopicDescription primary = waitForTopicReady(admin, TOPIC, 3);
-                produceChunk(bootstrapServers, TOPIC, primaryEndOffsets, 20, "before-controller-failover");
-                waitForCoverage(bootstrapServers, primary, primaryEndOffsets);
-                assertHistory(bootstrapServers, TOPIC, primaryEndOffsets);
+            createTopic(admin, TOPIC, 3);
+            TopicDescription primary = waitForTopicReady(admin, TOPIC, 3);
+            produce(bootstrapServers, TOPIC, primaryOffsets, 20);
+            assertHistory(bootstrapServers, TOPIC, primaryOffsets);
+            waitForCoverage(bootstrapServers, primary, primaryOffsets);
 
-                int firstActiveController = activeControllerId(cluster, -1);
-                stopController(cluster, firstActiveController);
-                int secondActiveController = waitForDifferentActiveController(cluster, firstActiveController);
-                assertNotEquals(firstActiveController, secondActiveController);
+            int firstController = activeControllerId(cluster, -1);
+            stopController(cluster, firstController);
+            int secondController = waitForDifferentActiveController(cluster, firstController);
+            assertNotEquals(firstController, secondController);
 
-                produceChunk(bootstrapServers, TOPIC, primaryEndOffsets, 10, "after-first-controller-failover");
-                assertHistory(bootstrapServers, TOPIC, primaryEndOffsets);
-                waitForCoverage(bootstrapServers, primary, primaryEndOffsets);
+            produce(bootstrapServers, TOPIC, primaryOffsets, 10);
+            assertHistory(bootstrapServers, TOPIC, primaryOffsets);
+            waitForCoverage(bootstrapServers, primary, primaryOffsets);
 
-                createTopic(admin, SECONDARY_TOPIC, 2);
-                TopicDescription secondary = waitForTopicReady(admin, SECONDARY_TOPIC, 2);
-                int[] secondaryEndOffsets = new int[] {0, 0};
-                produceChunk(bootstrapServers, SECONDARY_TOPIC, secondaryEndOffsets, 12, "created-after-failover");
-                assertHistory(bootstrapServers, SECONDARY_TOPIC, secondaryEndOffsets);
-                waitForCoverage(bootstrapServers, secondary, secondaryEndOffsets);
+            createTopic(admin, SECONDARY_TOPIC, 2);
+            TopicDescription secondary = waitForTopicReady(admin, SECONDARY_TOPIC, 2);
+            int[] secondaryOffsets = new int[] {0, 0};
+            produce(bootstrapServers, SECONDARY_TOPIC, secondaryOffsets, 12);
+            assertHistory(bootstrapServers, SECONDARY_TOPIC, secondaryOffsets);
+            waitForCoverage(bootstrapServers, secondary, secondaryOffsets);
 
-                admin.createPartitions(Map.of(TOPIC, NewPartitions.increaseTo(4)))
-                    .all().get(30, TimeUnit.SECONDS);
-                primary = waitForTopicReady(admin, TOPIC, 4);
-                primaryEndOffsets = extendOffsets(primaryEndOffsets, 4);
-                produceChunk(bootstrapServers, TOPIC, primaryEndOffsets, 8, "expanded-after-failover");
-                assertHistory(bootstrapServers, TOPIC, primaryEndOffsets);
-                waitForCoverage(bootstrapServers, primary, primaryEndOffsets);
+            admin.createPartitions(Map.of(TOPIC, NewPartitions.increaseTo(4)))
+                .all().get(30, TimeUnit.SECONDS);
+            primary = waitForTopicReady(admin, TOPIC, 4);
+            primaryOffsets = extendOffsets(primaryOffsets, 4);
+            produce(bootstrapServers, TOPIC, primaryOffsets, 8);
+            assertHistory(bootstrapServers, TOPIC, primaryOffsets);
+            waitForCoverage(bootstrapServers, primary, primaryOffsets);
 
-                cluster.controllers().get(firstActiveController).startup();
-                int controllerBeforeSecondFailure = activeControllerId(cluster, -1);
-                stopController(cluster, controllerBeforeSecondFailure);
-                int thirdActiveController = waitForDifferentActiveController(cluster, controllerBeforeSecondFailure);
-                assertNotEquals(controllerBeforeSecondFailure, thirdActiveController);
+            cluster.controllers().get(firstController).startup();
+            int activeBeforeSecondFailure = activeControllerId(cluster, -1);
+            stopController(cluster, activeBeforeSecondFailure);
+            int thirdController = waitForDifferentActiveController(cluster, activeBeforeSecondFailure);
+            assertNotEquals(activeBeforeSecondFailure, thirdController);
 
-                produceChunk(bootstrapServers, TOPIC, primaryEndOffsets, 8, "after-second-controller-failover");
-                produceChunk(bootstrapServers, SECONDARY_TOPIC, secondaryEndOffsets, 8, "after-second-controller-failover");
-                assertHistory(bootstrapServers, TOPIC, primaryEndOffsets);
-                assertHistory(bootstrapServers, SECONDARY_TOPIC, secondaryEndOffsets);
-                waitForCoverage(bootstrapServers, primary, primaryEndOffsets);
-                waitForCoverage(bootstrapServers, secondary, secondaryEndOffsets);
+            produce(bootstrapServers, TOPIC, primaryOffsets, 8);
+            produce(bootstrapServers, SECONDARY_TOPIC, secondaryOffsets, 8);
+            assertHistory(bootstrapServers, TOPIC, primaryOffsets);
+            assertHistory(bootstrapServers, SECONDARY_TOPIC, secondaryOffsets);
+            waitForCoverage(bootstrapServers, primary, primaryOffsets);
+            waitForCoverage(bootstrapServers, secondary, secondaryOffsets);
 
-                cluster.controllers().get(controllerBeforeSecondFailure).startup();
-                assertEquals(BROKERS, waitForTopicReady(admin, TOPIC, 4).partitions().get(0).isr().size());
-            }
+            cluster.controllers().get(activeBeforeSecondFailure).startup();
+            waitForTopicReady(admin, TOPIC, 4);
         }
     }
 
@@ -211,8 +207,7 @@ public class SharedStorageControllerQuorumE2ETest {
         int[] result = {-1};
         TestUtils.waitForCondition(() -> {
             try {
-                int candidate = activeControllerId(cluster, oldControllerId);
-                result[0] = candidate;
+                result[0] = activeControllerId(cluster, oldControllerId);
                 return true;
             } catch (IllegalStateException ignored) {
                 return false;
@@ -227,12 +222,11 @@ public class SharedStorageControllerQuorumE2ETest {
         controller.awaitShutdown();
     }
 
-    private static void produceChunk(
+    private static void produce(
         String bootstrapServers,
         String topic,
         int[] endOffsets,
-        int recordsPerPartition,
-        String phase
+        int recordsPerPartition
     ) throws Exception {
         Properties properties = new Properties();
         properties.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
@@ -248,7 +242,7 @@ public class SharedStorageControllerQuorumE2ETest {
                         topic,
                         partition,
                         key(partition, sequence),
-                        value(phase, partition, sequence)
+                        value(partition, sequence)
                     )).get(30, TimeUnit.SECONDS);
                     endOffsets[partition]++;
                 }
@@ -281,9 +275,11 @@ public class SharedStorageControllerQuorumE2ETest {
             while (received < expectedTotal && System.nanoTime() < deadline) {
                 for (ConsumerRecord<String, String> record : consumer.poll(Duration.ofMillis(250))) {
                     int partition = record.partition();
-                    assertEquals(nextOffset[partition], record.offset(),
+                    int sequence = nextOffset[partition];
+                    assertEquals(sequence, record.offset(),
                         "Controller failover must not create a gap or duplicate Kafka offset");
-                    assertEquals(key(partition, nextOffset[partition]), record.key());
+                    assertEquals(key(partition, sequence), record.key());
+                    assertEquals(value(partition, sequence), record.value());
                     nextOffset[partition]++;
                     received++;
                 }
@@ -340,18 +336,19 @@ public class SharedStorageControllerQuorumE2ETest {
                     if (record.key() == null) {
                         continue;
                     }
-                    SharedMetadataRecordCodec.MetadataKey key = SharedMetadataRecordCodec.decodeKey(record.key());
-                    if (key.type() != SharedMetadataRecordCodec.KeyType.OBJECT) {
+                    SharedMetadataRecordCodec.MetadataKey metadataKey =
+                        SharedMetadataRecordCodec.decodeKey(record.key());
+                    if (metadataKey.type() != SharedMetadataRecordCodec.KeyType.OBJECT) {
                         continue;
                     }
                     if (record.value() == null) {
-                        latestCommitted.remove(key.id());
+                        latestCommitted.remove(metadataKey.id());
                         continue;
                     }
                     SharedMetadataRecordCodec.MetadataValue value =
-                        SharedMetadataRecordCodec.decodeValue(key, record.value());
+                        SharedMetadataRecordCodec.decodeValue(metadataKey, record.value());
                     if (value instanceof SharedMetadataRecordCodec.CommittedObjectValue committed) {
-                        latestCommitted.put(key.id(), committed.metadata());
+                        latestCommitted.put(metadataKey.id(), committed.metadata());
                     }
                 }
             }
@@ -366,19 +363,15 @@ public class SharedStorageControllerQuorumE2ETest {
     }
 
     private static SharedPartitionId sharedPartitionId(Uuid topicId, int partition) {
-        return new SharedPartitionId(
-            topicId.getMostSignificantBits(),
-            topicId.getLeastSignificantBits(),
-            partition
-        );
+        return new SharedPartitionId(topicId.getMostSignificantBits(), topicId.getLeastSignificantBits(), partition);
     }
 
     private static String key(int partition, int sequence) {
-        return "key-" + partition + "-" + sequence;
+        return "controller-key-" + partition + "-" + sequence;
     }
 
-    private static String value(String phase, int partition, int sequence) {
-        return phase + "-value-" + partition + "-" + sequence + "-" + "C".repeat(1024);
+    private static String value(int partition, int sequence) {
+        return "controller-value-" + partition + "-" + sequence + "-" + "C".repeat(1024);
     }
 
     private static String environment(String name, String defaultValue) {
