@@ -131,3 +131,5 @@ jobs:
       - name: MinIO logs
         if: always()
         run: docker logs kafka-shared-inflight-minio || true
+
+# exact-tree verification trigger

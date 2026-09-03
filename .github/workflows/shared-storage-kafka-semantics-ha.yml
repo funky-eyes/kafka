@@ -221,3 +221,5 @@ jobs:
       - name: MinIO logs
         if: always()
         run: docker logs kafka-shared-ha-minio || true
+
+# exact-tree verification trigger
