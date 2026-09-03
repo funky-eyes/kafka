@@ -21,4 +21,4 @@ This runtime-neutral marker exists so a single commit can deliberately trigger
 shared-storage correctness workflows whose path filters cover the object subtree.
 Change it together with the WAL marker when a full exact-tree correctness run is required.
 
-Verification generation: 2
+Verification generation: 3
