@@ -25,5 +25,6 @@
     <allow pkg="org.apache.kafka.storage.internals.log" />
     <allow pkg="org.apache.kafka.storage.internals.shared" />
     <allow pkg="org.junit" />
+    <allow pkg="org.slf4j" />
     <allow pkg="software.amazon.awssdk" />
 </import-control>
