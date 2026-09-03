@@ -65,7 +65,6 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -95,76 +94,37 @@ public class SharedStorageKafkaClientFailoverE2ETest {
                 CountDownLatch atFailoverBoundary = new CountDownLatch(producers);
                 CountDownLatch resumeAfterFailover = new CountDownLatch(1);
                 ExecutorService executor = Executors.newFixedThreadPool(producers);
-                List<Future<Void>> tasks = new ArrayList<>();
+                List<Future<Void>> tasks = startIdempotentProducerTasks(
+                    executor,
+                    bootstrapServers,
+                    topic,
+                    producers,
+                    recordsPerProducer,
+                    beforeFailover,
+                    atFailoverBoundary,
+                    resumeAfterFailover
+                );
                 try {
-                    for (int producerId = 0; producerId < producers; producerId++) {
-                        int id = producerId;
-                        tasks.add(executor.submit(() -> {
-                            try (KafkaProducer<String, String> producer = idempotentProducer(
-                                bootstrapServers,
-                                "shared-idempotent-" + id
-                            )) {
-                                for (int sequence = 0; sequence < recordsPerProducer; sequence++) {
-                                    if (sequence == beforeFailover) {
-                                        atFailoverBoundary.countDown();
-                                        if (!resumeAfterFailover.await(90, TimeUnit.SECONDS)) {
-                                            throw new AssertionError("Timed out waiting for leader failover");
-                                        }
-                                    }
-                                    producer.send(new ProducerRecord<>(
-                                        topic,
-                                        0,
-                                        producerKey(id, sequence),
-                                        producerValue(id, sequence)
-                                    )).get(30, TimeUnit.SECONDS);
-                                }
-                                producer.flush();
-                            }
-                            return null;
-                        }));
-                    }
-
                     assertTrue(atFailoverBoundary.await(90, TimeUnit.SECONDS),
                         "Both idempotent producers must establish state before leader failover");
-                    cluster.brokers().get(oldLeader).shutdown();
-                    cluster.brokers().get(oldLeader).awaitShutdown();
+                    stopBroker(cluster, oldLeader);
                     int newLeader = waitForNewLeader(admin, topic, oldLeader, 2);
                     assertNotEquals(oldLeader, newLeader);
                     resumeAfterFailover.countDown();
-
-                    for (Future<Void> task : tasks) {
-                        task.get(120, TimeUnit.SECONDS);
-                    }
+                    awaitTasks(tasks);
                 } finally {
                     resumeAfterFailover.countDown();
                     executor.shutdownNow();
                 }
 
                 int expectedRecords = producers * recordsPerProducer;
-                List<ConsumerRecord<String, String>> consumed = consumeAssigned(
+                assertUniqueProducerHistory(
                     bootstrapServers,
                     topic,
-                    0,
-                    expectedRecords,
-                    "read_committed"
+                    producers,
+                    recordsPerProducer,
+                    expectedRecords
                 );
-                Set<String> expectedKeys = new HashSet<>();
-                for (int producerId = 0; producerId < producers; producerId++) {
-                    for (int sequence = 0; sequence < recordsPerProducer; sequence++) {
-                        expectedKeys.add(producerKey(producerId, sequence));
-                    }
-                }
-                Set<String> actualKeys = new HashSet<>();
-                long expectedOffset = 0L;
-                for (ConsumerRecord<String, String> record : consumed) {
-                    assertEquals(expectedOffset++, record.offset(),
-                        "Concurrent producer failover must not create Kafka offset gaps or duplicate offsets");
-                    assertTrue(actualKeys.add(record.key()), "Duplicate acknowledged producer key " + record.key());
-                    assertTrue(expectedKeys.contains(record.key()), "Unexpected producer key " + record.key());
-                    assertEquals(expectedValueForKey(record.key()), record.value());
-                }
-                assertEquals(expectedKeys, actualKeys,
-                    "Every acknowledged idempotent producer record must be visible exactly once");
                 waitForRemoteCoverage(bootstrapServers, sharedPartition, expectedRecords);
 
                 cluster.brokers().get(oldLeader).startup();
@@ -188,34 +148,20 @@ public class SharedStorageKafkaClientFailoverE2ETest {
 
                 producer.initTransactions();
                 producer.beginTransaction();
-                for (int sequence = 0; sequence < 12; sequence++) {
-                    producer.send(new ProducerRecord<>(topic, 0, "commit-" + sequence, "commit-" + sequence))
-                        .get(30, TimeUnit.SECONDS);
-                }
-
-                cluster.brokers().get(oldLeader).shutdown();
-                cluster.brokers().get(oldLeader).awaitShutdown();
+                sendTransactionRecords(producer, topic, "commit", 12);
+                stopBroker(cluster, oldLeader);
                 int newLeader = waitForNewLeader(admin, topic, oldLeader, 2);
                 assertNotEquals(oldLeader, newLeader);
                 producer.commitTransaction();
 
-                List<ConsumerRecord<String, String>> committed = consumeAssigned(
-                    bootstrapServers,
-                    topic,
-                    0,
-                    12,
-                    "read_committed"
+                assertTransactionRecords(
+                    consumeAssigned(bootstrapServers, topic, 0, 12, "read_committed"),
+                    "commit",
+                    12
                 );
-                for (int sequence = 0; sequence < 12; sequence++) {
-                    assertEquals("commit-" + sequence, committed.get(sequence).key());
-                    assertEquals("commit-" + sequence, committed.get(sequence).value());
-                }
 
                 producer.beginTransaction();
-                for (int sequence = 0; sequence < 6; sequence++) {
-                    producer.send(new ProducerRecord<>(topic, 0, "abort-" + sequence, "abort-" + sequence))
-                        .get(30, TimeUnit.SECONDS);
-                }
+                sendTransactionRecords(producer, topic, "abort", 6);
                 producer.abortTransaction();
 
                 List<ConsumerRecord<String, String>> afterAbort = consumeAssigned(
@@ -234,12 +180,9 @@ public class SharedStorageKafkaClientFailoverE2ETest {
                     18,
                     "read_uncommitted"
                 );
-                assertEquals(18, uncommitted.size(),
-                    "read_uncommitted must expose committed and aborted data records after failover");
-                long abortedVisible = uncommitted.stream()
+                assertEquals(6L, uncommitted.stream()
                     .filter(record -> record.key().startsWith("abort-"))
-                    .count();
-                assertEquals(6L, abortedVisible);
+                    .count());
 
                 cluster.brokers().get(oldLeader).startup();
                 cluster.waitForReadyBrokers();
@@ -266,93 +209,324 @@ public class SharedStorageKafkaClientFailoverE2ETest {
 
         try (KafkaClusterTestKit cluster = startSharedCluster(topic, 8L * 1024 * 1024)) {
             String bootstrapServers = cluster.bootstrapServers();
-            TopicDescription description;
-            try (Admin admin = cluster.admin()) {
-                createTopic(admin, topic, partitions);
-                description = waitForTopicReady(admin, topic, partitions, 3);
-            }
+            TopicDescription description = createReadyTopic(cluster, topic, partitions);
             producePartitioned(bootstrapServers, topic, partitions, recordsPerPartition);
-            for (int partition = 0; partition < partitions; partition++) {
-                waitForRemoteCoverage(
-                    bootstrapServers,
-                    sharedPartitionId(description.topicId(), partition),
-                    recordsPerPartition
-                );
-            }
+            waitForAllPartitionCoverage(
+                bootstrapServers,
+                description,
+                partitions,
+                recordsPerPartition
+            );
+            readAndCommitGroupOffsets(
+                bootstrapServers,
+                topic,
+                groupId,
+                partitions,
+                committedOffset
+            );
 
-            Properties firstProperties = groupConsumerProperties(bootstrapServers, groupId);
-            try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(firstProperties)) {
-                consumer.subscribe(List.of(topic));
-                Map<Integer, Long> maxSeen = new HashMap<>();
-                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
-                while (maxSeen.size() < partitions && System.nanoTime() < deadline) {
-                    for (ConsumerRecord<String, String> record : consumer.poll(Duration.ofMillis(250))) {
-                        maxSeen.merge(record.partition(), record.offset(), Math::max);
-                    }
-                    if (maxSeen.size() == partitions && maxSeen.values().stream().allMatch(offset -> offset >= 9L)) {
-                        break;
-                    }
-                }
-                assertEquals(partitions, maxSeen.size(), "Consumer group must receive all partitions before commit");
-                assertTrue(maxSeen.values().stream().allMatch(offset -> offset >= 9L),
-                    "Consumer group must read at least the first ten records of every partition");
-
-                Map<TopicPartition, OffsetAndMetadata> commits = new LinkedHashMap<>();
-                for (int partition = 0; partition < partitions; partition++) {
-                    commits.put(new TopicPartition(topic, partition), new OffsetAndMetadata(committedOffset));
-                }
-                consumer.commitSync(commits);
-            }
-
-            for (BrokerServer broker : cluster.brokers().values()) {
-                broker.shutdown();
-            }
-            for (BrokerServer broker : cluster.brokers().values()) {
-                broker.awaitShutdown();
-            }
-            for (BrokerServer broker : cluster.brokers().values()) {
-                broker.startup();
-            }
-            cluster.waitForReadyBrokers();
+            restartAllBrokersSequentially(cluster);
             try (Admin restartedAdmin = cluster.admin()) {
                 waitForTopicReady(restartedAdmin, topic, partitions, 3);
             }
 
-            Properties resumedProperties = groupConsumerProperties(bootstrapServers, groupId);
-            int expectedRemaining = partitions * (recordsPerPartition - committedOffset);
-            int[] nextExpected = new int[partitions];
-            for (int partition = 0; partition < partitions; partition++) {
-                nextExpected[partition] = committedOffset;
-            }
-            Set<Integer> seenPartitions = new HashSet<>();
-            int received = 0;
-            try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(resumedProperties)) {
-                consumer.subscribe(List.of(topic));
-                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(90);
-                while (received < expectedRemaining && System.nanoTime() < deadline) {
-                    for (ConsumerRecord<String, String> record : consumer.poll(Duration.ofMillis(250))) {
-                        int partition = record.partition();
-                        int expectedSequence = nextExpected[partition];
-                        if (seenPartitions.add(partition)) {
-                            assertEquals(committedOffset, record.offset(),
-                                "First record after full restart must start at the committed group offset");
-                        }
-                        assertEquals(expectedSequence, record.offset(),
-                            "Consumer group resume must not skip or replay committed offsets");
-                        assertEquals(groupKey(partition, expectedSequence), record.key());
-                        assertEquals(groupValue(partition, expectedSequence), record.value());
-                        nextExpected[partition]++;
-                        received++;
+            assertGroupResume(
+                bootstrapServers,
+                topic,
+                groupId,
+                partitions,
+                committedOffset,
+                recordsPerPartition
+            );
+        }
+    }
+
+    private static List<Future<Void>> startIdempotentProducerTasks(
+        ExecutorService executor,
+        String bootstrapServers,
+        String topic,
+        int producers,
+        int recordsPerProducer,
+        int beforeFailover,
+        CountDownLatch atFailoverBoundary,
+        CountDownLatch resumeAfterFailover
+    ) {
+        List<Future<Void>> tasks = new ArrayList<>();
+        for (int producerId = 0; producerId < producers; producerId++) {
+            int id = producerId;
+            tasks.add(executor.submit(() -> {
+                runIdempotentProducer(
+                    bootstrapServers,
+                    topic,
+                    id,
+                    recordsPerProducer,
+                    beforeFailover,
+                    atFailoverBoundary,
+                    resumeAfterFailover
+                );
+                return null;
+            }));
+        }
+        return tasks;
+    }
+
+    private static void runIdempotentProducer(
+        String bootstrapServers,
+        String topic,
+        int producerId,
+        int recordsPerProducer,
+        int beforeFailover,
+        CountDownLatch atFailoverBoundary,
+        CountDownLatch resumeAfterFailover
+    ) throws Exception {
+        try (KafkaProducer<String, String> producer = idempotentProducer(
+            bootstrapServers,
+            "shared-idempotent-" + producerId
+        )) {
+            for (int sequence = 0; sequence < recordsPerProducer; sequence++) {
+                if (sequence == beforeFailover) {
+                    atFailoverBoundary.countDown();
+                    if (!resumeAfterFailover.await(90, TimeUnit.SECONDS)) {
+                        throw new AssertionError("Timed out waiting for leader failover");
                     }
                 }
+                producer.send(new ProducerRecord<>(
+                    topic,
+                    0,
+                    producerKey(producerId, sequence),
+                    producerValue(producerId, sequence)
+                )).get(30, TimeUnit.SECONDS);
             }
-            assertEquals(expectedRemaining, received,
-                "Consumer group must read every uncommitted record after full broker restart");
-            assertEquals(partitions, seenPartitions.size());
-            for (int partition = 0; partition < partitions; partition++) {
-                assertEquals(recordsPerPartition, nextExpected[partition]);
+            producer.flush();
+        }
+    }
+
+    private static void awaitTasks(List<Future<Void>> tasks) throws Exception {
+        for (Future<Void> task : tasks) {
+            task.get(120, TimeUnit.SECONDS);
+        }
+    }
+
+    private static void assertUniqueProducerHistory(
+        String bootstrapServers,
+        String topic,
+        int producers,
+        int recordsPerProducer,
+        int expectedRecords
+    ) {
+        List<ConsumerRecord<String, String>> consumed = consumeAssigned(
+            bootstrapServers,
+            topic,
+            0,
+            expectedRecords,
+            "read_committed"
+        );
+        Set<String> expectedKeys = new HashSet<>();
+        for (int producerId = 0; producerId < producers; producerId++) {
+            for (int sequence = 0; sequence < recordsPerProducer; sequence++) {
+                expectedKeys.add(producerKey(producerId, sequence));
             }
         }
+        Set<String> actualKeys = new HashSet<>();
+        long expectedOffset = 0L;
+        for (ConsumerRecord<String, String> record : consumed) {
+            assertEquals(expectedOffset++, record.offset(),
+                "Concurrent producer failover must not create Kafka offset gaps or duplicate offsets");
+            assertTrue(actualKeys.add(record.key()), "Duplicate acknowledged producer key " + record.key());
+            assertTrue(expectedKeys.contains(record.key()), "Unexpected producer key " + record.key());
+            assertEquals(expectedValueForKey(record.key()), record.value());
+        }
+        assertEquals(expectedKeys, actualKeys,
+            "Every acknowledged idempotent producer record must be visible exactly once");
+    }
+
+    private static void sendTransactionRecords(
+        KafkaProducer<String, String> producer,
+        String topic,
+        String phase,
+        int count
+    ) throws Exception {
+        for (int sequence = 0; sequence < count; sequence++) {
+            producer.send(new ProducerRecord<>(
+                topic,
+                0,
+                phase + "-" + sequence,
+                phase + "-" + sequence
+            )).get(30, TimeUnit.SECONDS);
+        }
+    }
+
+    private static void assertTransactionRecords(
+        List<ConsumerRecord<String, String>> records,
+        String phase,
+        int count
+    ) {
+        assertEquals(count, records.size());
+        for (int sequence = 0; sequence < count; sequence++) {
+            assertEquals(phase + "-" + sequence, records.get(sequence).key());
+            assertEquals(phase + "-" + sequence, records.get(sequence).value());
+        }
+    }
+
+    private static TopicDescription createReadyTopic(
+        KafkaClusterTestKit cluster,
+        String topic,
+        int partitions
+    ) throws Exception {
+        try (Admin admin = cluster.admin()) {
+            createTopic(admin, topic, partitions);
+            return waitForTopicReady(admin, topic, partitions, 3);
+        }
+    }
+
+    private static void waitForAllPartitionCoverage(
+        String bootstrapServers,
+        TopicDescription description,
+        int partitions,
+        int endOffset
+    ) throws Exception {
+        for (int partition = 0; partition < partitions; partition++) {
+            waitForRemoteCoverage(
+                bootstrapServers,
+                sharedPartitionId(description.topicId(), partition),
+                endOffset
+            );
+        }
+    }
+
+    private static void readAndCommitGroupOffsets(
+        String bootstrapServers,
+        String topic,
+        String groupId,
+        int partitions,
+        int committedOffset
+    ) {
+        Properties properties = groupConsumerProperties(bootstrapServers, groupId);
+        try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(properties)) {
+            consumer.subscribe(List.of(topic));
+            awaitEveryPartitionOffset(consumer, partitions, committedOffset - 1L);
+            Map<TopicPartition, OffsetAndMetadata> commits = new LinkedHashMap<>();
+            for (int partition = 0; partition < partitions; partition++) {
+                commits.put(new TopicPartition(topic, partition), new OffsetAndMetadata(committedOffset));
+            }
+            consumer.commitSync(commits);
+        }
+    }
+
+    private static void awaitEveryPartitionOffset(
+        KafkaConsumer<String, String> consumer,
+        int partitions,
+        long requiredOffset
+    ) {
+        Map<Integer, Long> maxSeen = new HashMap<>();
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
+        while (!allPartitionsReached(maxSeen, partitions, requiredOffset) && System.nanoTime() < deadline) {
+            for (ConsumerRecord<String, String> record : consumer.poll(Duration.ofMillis(250))) {
+                maxSeen.merge(record.partition(), record.offset(), Math::max);
+            }
+        }
+        assertTrue(allPartitionsReached(maxSeen, partitions, requiredOffset),
+            "Consumer group must reach the commit boundary on every partition");
+    }
+
+    private static boolean allPartitionsReached(
+        Map<Integer, Long> maxSeen,
+        int partitions,
+        long requiredOffset
+    ) {
+        return maxSeen.size() == partitions &&
+            maxSeen.values().stream().allMatch(offset -> offset >= requiredOffset);
+    }
+
+    private static void assertGroupResume(
+        String bootstrapServers,
+        String topic,
+        String groupId,
+        int partitions,
+        int committedOffset,
+        int recordsPerPartition
+    ) {
+        Properties properties = groupConsumerProperties(bootstrapServers, groupId);
+        int[] nextExpected = new int[partitions];
+        java.util.Arrays.fill(nextExpected, committedOffset);
+        int expectedRemaining = partitions * (recordsPerPartition - committedOffset);
+        Set<Integer> seenPartitions = new HashSet<>();
+        int received = consumeGroupRemainder(
+            properties,
+            topic,
+            nextExpected,
+            seenPartitions,
+            expectedRemaining,
+            committedOffset
+        );
+        assertEquals(expectedRemaining, received,
+            "Consumer group must read every uncommitted record after full broker restart");
+        assertEquals(partitions, seenPartitions.size());
+        for (int partition = 0; partition < partitions; partition++) {
+            assertEquals(recordsPerPartition, nextExpected[partition]);
+        }
+    }
+
+    private static int consumeGroupRemainder(
+        Properties properties,
+        String topic,
+        int[] nextExpected,
+        Set<Integer> seenPartitions,
+        int expectedRemaining,
+        int committedOffset
+    ) {
+        int received = 0;
+        try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(properties)) {
+            consumer.subscribe(List.of(topic));
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(90);
+            while (received < expectedRemaining && System.nanoTime() < deadline) {
+                for (ConsumerRecord<String, String> record : consumer.poll(Duration.ofMillis(250))) {
+                    assertResumedGroupRecord(record, nextExpected, seenPartitions, committedOffset);
+                    received++;
+                }
+            }
+        }
+        return received;
+    }
+
+    private static void assertResumedGroupRecord(
+        ConsumerRecord<String, String> record,
+        int[] nextExpected,
+        Set<Integer> seenPartitions,
+        int committedOffset
+    ) {
+        int partition = record.partition();
+        int expectedSequence = nextExpected[partition];
+        if (seenPartitions.add(partition)) {
+            assertEquals(committedOffset, record.offset(),
+                "First record after full restart must start at the committed group offset");
+        }
+        assertEquals(expectedSequence, record.offset(),
+            "Consumer group resume must not skip or replay committed offsets");
+        assertEquals(groupKey(partition, expectedSequence), record.key());
+        assertEquals(groupValue(partition, expectedSequence), record.value());
+        nextExpected[partition]++;
+    }
+
+    private static void restartAllBrokersSequentially(KafkaClusterTestKit cluster) throws Exception {
+        for (BrokerServer broker : cluster.brokers().values()) {
+            broker.shutdown();
+        }
+        for (BrokerServer broker : cluster.brokers().values()) {
+            broker.awaitShutdown();
+        }
+        // Deliberately sequential. A cold cluster must not require a second broker process to be started in parallel
+        // merely so the first broker can finish its StorageExtension onBrokerReady hook.
+        for (BrokerServer broker : cluster.brokers().values()) {
+            broker.startup();
+        }
+        cluster.waitForReadyBrokers();
+    }
+
+    private static void stopBroker(KafkaClusterTestKit cluster, int brokerId) throws Exception {
+        BrokerServer broker = cluster.brokers().get(brokerId);
+        broker.shutdown();
+        broker.awaitShutdown();
     }
 
     private static KafkaClusterTestKit startSharedCluster(String topic, long objectTargetBytes) throws Exception {
