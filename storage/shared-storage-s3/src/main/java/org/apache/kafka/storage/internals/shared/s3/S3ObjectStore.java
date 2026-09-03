@@ -59,9 +59,9 @@ import java.util.concurrent.atomic.AtomicInteger;
  * plugin cannot introduce a second Netty stack into Kafka. ObjectStore's asynchronous contract is provided by a small,
  * bounded-size worker pool owned by this instance.</p>
  *
- * <p>Multipart publication pulls object parts lazily. The serializer and S3 client therefore only need the current
- * and next part in memory while preserving S3's rule that every non-final part is at least 5 MiB. A failed multipart
- * upload is explicitly aborted; metadata COMMIT remains outside this class and defines the remote visibility boundary.</p>
+ * <p>When the serialized object size is known, multipart publication pulls and uploads exactly one part at a time.
+ * Unknown-size sources retain a two-part look-ahead fallback so S3's 5 MiB non-final-part rule is still enforced.
+ * Metadata COMMIT remains outside this class and defines the remote visibility boundary.</p>
  */
 public final class S3ObjectStore implements ObjectStore {
     static final int MIN_MULTIPART_PART_BYTES = 5 * 1024 * 1024;
@@ -117,15 +117,47 @@ public final class S3ObjectStore implements ObjectStore {
     }
 
     @Override
+    public CompletableFuture<Void> put(long objectId, long objectSize, PartSource source) {
+        if (objectId < 0) {
+            return CompletableFuture.failedFuture(new IllegalArgumentException("objectId must be non-negative"));
+        }
+        if (objectSize <= 0) {
+            return CompletableFuture.failedFuture(new IllegalArgumentException("objectSize must be positive"));
+        }
+        Objects.requireNonNull(source, "source");
+        return runAsync(() -> putKnownSizeSource(objectId, objectSize, source));
+    }
+
+    @Override
     public CompletableFuture<Void> put(long objectId, PartSource source) {
         if (objectId < 0) {
             return CompletableFuture.failedFuture(new IllegalArgumentException("objectId must be non-negative"));
         }
         Objects.requireNonNull(source, "source");
-        return runAsync(() -> putFromSource(objectId, source));
+        return runAsync(() -> putUnknownSizeSource(objectId, source));
     }
 
-    private void putFromSource(long objectId, PartSource source) {
+    private void putKnownSizeSource(long objectId, long objectSize, PartSource source) {
+        try (source) {
+            ByteBuffer first = nextPart(source);
+            if (first == null) {
+                throw new IllegalArgumentException("Object part source must not be empty");
+            }
+            if (first.remaining() > objectSize) {
+                throw new IllegalArgumentException("Object part source exceeded declared object size");
+            }
+            if (first.remaining() == objectSize) {
+                requireEndOfSource(source);
+                putSingle(objectId, first);
+                return;
+            }
+            putKnownSizeMultipart(objectId, objectSize, first, source);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Unable to produce S3 multipart object bytes", e);
+        }
+    }
+
+    private void putUnknownSizeSource(long objectId, PartSource source) {
         try (source) {
             ByteBuffer first = nextPart(source);
             if (first == null) {
@@ -136,7 +168,7 @@ public final class S3ObjectStore implements ObjectStore {
                 putSingle(objectId, first);
                 return;
             }
-            putMultipart(objectId, first, second, source);
+            putUnknownSizeMultipart(objectId, first, second, source);
         } catch (IOException e) {
             throw new UncheckedIOException("Unable to produce S3 multipart object bytes", e);
         }
@@ -152,6 +184,12 @@ public final class S3ObjectStore implements ObjectStore {
             throw new IllegalArgumentException("Object part source returned an empty part");
         }
         return payload;
+    }
+
+    private static void requireEndOfSource(PartSource source) throws IOException {
+        if (nextPart(source) != null) {
+            throw new IllegalArgumentException("Object part source exceeded declared object size");
+        }
     }
 
     private void putSingle(long objectId, ByteBuffer payload) {
@@ -180,7 +218,53 @@ public final class S3ObjectStore implements ObjectStore {
         }
     }
 
-    private void putMultipart(
+    private void putKnownSizeMultipart(
+        long objectId,
+        long objectSize,
+        ByteBuffer first,
+        PartSource source
+    ) throws IOException {
+        String key = config.objectKey(objectId);
+        String uploadId = createMultipartUpload(key);
+        List<CompletedPart> completed = new ArrayList<>();
+        long emitted = 0L;
+        int partNumber = 1;
+        ByteBuffer current = first;
+        try {
+            while (true) {
+                long remaining = objectSize - emitted;
+                if (current.remaining() > remaining) {
+                    throw new IllegalArgumentException("Object part source exceeded declared object size");
+                }
+                boolean finalPart = current.remaining() == remaining;
+                if (!finalPart && current.remaining() < MIN_MULTIPART_PART_BYTES) {
+                    throw new IllegalArgumentException(
+                        "Non-final S3 multipart part must be at least " + MIN_MULTIPART_PART_BYTES + " bytes");
+                }
+                int currentBytes = current.remaining();
+                completed.add(uploadPart(key, uploadId, partNumber++, current));
+                emitted = Math.addExact(emitted, currentBytes);
+                if (finalPart) {
+                    requireEndOfSource(source);
+                    break;
+                }
+                current = nextPart(source);
+                if (current == null) {
+                    throw new IllegalArgumentException(
+                        "Object part source ended early: expected=" + objectSize + ", actual=" + emitted);
+                }
+            }
+            completeMultipartUpload(key, uploadId, completed);
+        } catch (IOException uploadFailure) {
+            abortMultipartUpload(key, uploadId, uploadFailure);
+            throw uploadFailure;
+        } catch (RuntimeException uploadFailure) {
+            abortMultipartUpload(key, uploadId, uploadFailure);
+            throw uploadFailure;
+        }
+    }
+
+    private void putUnknownSizeMultipart(
         long objectId,
         ByteBuffer first,
         ByteBuffer second,

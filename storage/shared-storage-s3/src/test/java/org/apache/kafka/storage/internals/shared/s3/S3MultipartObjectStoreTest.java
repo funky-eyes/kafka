@@ -41,7 +41,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 class S3MultipartObjectStoreTest {
     @Test
-    void shouldPullMultipartSourceInOrderAndPublishOneObject() throws Exception {
+    void shouldPullKnownSizeMultipartSourceInOrderAndPublishOneObject() throws Exception {
         String endpoint = System.getenv("SHARED_STORAGE_S3_ENDPOINT");
         assumeTrue(endpoint != null && !endpoint.isBlank(), "S3 integration endpoint is not configured");
 
@@ -62,7 +62,7 @@ class S3MultipartObjectStoreTest {
         };
 
         try (S3ObjectStore store = new S3ObjectStore(config)) {
-            store.put(objectId, source).get(20, TimeUnit.SECONDS);
+            store.put(objectId, first.length + (long) last.length, source).get(20, TimeUnit.SECONDS);
 
             ByteBuffer crossingBoundary = store.rangeRead(
                 objectId,

@@ -101,7 +101,11 @@ public final class SharedObjectUploader {
         try {
             result = metadataStore.prepare(objectId, createdTimeMs)
                 .thenCompose(ignored -> invokeHook(Phase.AFTER_PREPARE, plannedContext))
-                .thenCompose(ignored -> objectStore.put(objectId, plan.openPartSource()))
+                .thenCompose(ignored -> objectStore.put(
+                    objectId,
+                    plan.objectSize(),
+                    plan.openPartSource()
+                ))
                 .thenCompose(ignored -> finishUpload(plan, plannedContext));
         } catch (RuntimeException e) {
             activeUploads.end(objectId);

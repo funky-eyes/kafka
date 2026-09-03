@@ -56,6 +56,19 @@ public interface ObjectStore extends AutoCloseable {
     }
 
     /**
+     * Publishes a lazily produced immutable object with a known exact serialized size.
+     *
+     * <p>Stores with native multipart support should override this overload. Knowing the exact size lets them decide
+     * whether the current part is final without pulling a second part into memory.</p>
+     */
+    default CompletableFuture<Void> put(long objectId, long objectSize, PartSource source) {
+        if (objectSize <= 0) {
+            return CompletableFuture.failedFuture(new IllegalArgumentException("objectSize must be positive"));
+        }
+        return drainAndPut(objectId, objectSize, source);
+    }
+
+    /**
      * Publishes one immutable object by pulling ordered parts lazily from {@code source}.
      *
      * <p>The compatibility implementation drains the source before delegating to the list API. S3 and other remote
@@ -63,8 +76,13 @@ public interface ObjectStore extends AutoCloseable {
      * the part size rather than the complete object size.</p>
      */
     default CompletableFuture<Void> put(long objectId, PartSource source) {
+        return drainAndPut(objectId, -1L, source);
+    }
+
+    private CompletableFuture<Void> drainAndPut(long objectId, long expectedSize, PartSource source) {
         Objects.requireNonNull(source, "source");
         List<ByteBuffer> parts = new ArrayList<>();
+        long totalBytes = 0L;
         try (source) {
             ByteBuffer part;
             while ((part = source.nextPart()) != null) {
@@ -72,10 +90,15 @@ public interface ObjectStore extends AutoCloseable {
                     return CompletableFuture.failedFuture(new IllegalArgumentException(
                         "Object part source returned an empty part"));
                 }
+                totalBytes = Math.addExact(totalBytes, part.remaining());
                 parts.add(part.asReadOnlyBuffer());
             }
         } catch (IOException | RuntimeException e) {
             return CompletableFuture.failedFuture(e);
+        }
+        if (expectedSize >= 0 && totalBytes != expectedSize) {
+            return CompletableFuture.failedFuture(new IllegalArgumentException(
+                "Object part source size mismatch: expected=" + expectedSize + ", actual=" + totalBytes));
         }
         return put(objectId, parts);
     }
