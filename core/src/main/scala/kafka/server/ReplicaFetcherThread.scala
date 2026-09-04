@@ -197,6 +197,18 @@ class ReplicaFetcherThread(name: String,
    */
   override def truncate(tp: TopicPartition, offsetTruncationState: OffsetTruncationState): Unit = {
     val partition = replicaMgr.getPartitionOrException(tp)
+    val log = partition.localLogOrException
+
+    // The shared metadata image can restore a durable, remotely committed prefix after ReplicaFetcherThread captured
+    // its initial fetch offset from an empty local log. In that startup race the fetcher may try to truncate the log
+    // back to the stale offset before its first fetch response arrives. Never destroy an already-exposed shared
+    // high-watermark prefix in that case. Keeping the recovered LEO lets processPartitionData observe the stale fetch
+    // offset and re-seed this fetcher at the recovered end on the first response.
+    if (log.activeSegment.isInstanceOf[SharedLogSegment] && offsetTruncationState.offset < log.highWatermark) {
+      info(s"Ignoring stale shared-storage truncation for $tp from recovered high watermark ${log.highWatermark} " +
+        s"to ${offsetTruncationState.offset}; the follower fetch cursor will be re-synchronized to the recovered LEO")
+      return
+    }
 
     partition.truncateTo(offsetTruncationState.offset, isFuture = false)
 
