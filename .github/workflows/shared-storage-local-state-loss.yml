@@ -103,20 +103,19 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-
           path = Path('core/src/main/scala/kafka/server/AbstractFetcherThread.scala')
           text = path.read_text()
-          old = '''      if (requestEpoch.isPresent && requestEpoch.get == currentLeaderEpoch) {
-        info(s"Partition $tp has an older epoch ($currentLeaderEpoch) than the current leader. Will await " +
-          s"the new LeaderAndIsr state before resuming fetching.")
-        markPartitionFailed(tp)
-        false
-      } else {'''
-          new = '''      if (requestEpoch.isPresent && requestEpoch.get == currentLeaderEpoch) {
-        warn(s"Partition $tp fetch was fenced at epoch $currentLeaderEpoch before local metadata advanced; " +
-          s"keeping the partition active so metadata convergence can resume replication")
-        true
-      } else {'''
+          old = "      if (requestEpoch.isPresent && requestEpoch.get == currentLeaderEpoch) {\n" + \
+                "        info(s\"Partition $tp has an older epoch ($currentLeaderEpoch) than the current leader. Will await \" +\n" + \
+                "          s\"the new LeaderAndIsr state before resuming fetching.\")\n" + \
+                "        markPartitionFailed(tp)\n" + \
+                "        false\n" + \
+                "      } else {"
+          new = "      if (requestEpoch.isPresent && requestEpoch.get == currentLeaderEpoch) {\n" + \
+                "        warn(s\"Partition $tp fetch was fenced at epoch $currentLeaderEpoch before local metadata advanced; \" +\n" + \
+                "          s\"keeping the partition active so metadata convergence can resume replication\")\n" + \
+                "        true\n" + \
+                "      } else {"
           if text.count(old) != 1:
               raise SystemExit(f'expected exactly one fenced-partition block, found {text.count(old)}')
           path.write_text(text.replace(old, new))
