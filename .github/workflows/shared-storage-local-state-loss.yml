@@ -98,6 +98,46 @@ jobs:
           java-version: 25
           gradle-cache-read-only: true
 
+      - name: Apply OOR truncation-state reconciliation candidate
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('core/src/main/scala/kafka/server/AbstractFetcherThread.scala')
+          text = path.read_text()
+          old = '''    } else if (leaderEndOffset < replicaEndOffset) {
+              warn(s"Reset fetch offset for partition $topicPartition from $replicaEndOffset to current " +
+                s"leader's latest offset $leaderEndOffset")
+              truncate(topicPartition, OffsetTruncationState(leaderEndOffset, truncationCompleted = true))
+
+              fetcherLagStats.getAndMaybePut(topicPartition).lag = 0
+              new PartitionFetchState(topicId.toJava, leaderEndOffset, Optional.of(0L), currentLeaderEpoch,
+                ReplicaState.FETCHING, latestEpoch(topicPartition))
+            } else {'''
+          new = '''    } else if (leaderEndOffset < replicaEndOffset) {
+              val requestedTruncationState = OffsetTruncationState(leaderEndOffset, truncationCompleted = true)
+              val effectiveTruncationState = adjustTruncationState(topicPartition, requestedTruncationState)
+              val effectiveFetchOffset = effectiveTruncationState.offset
+              warn(s"Reset fetch offset for partition $topicPartition from $replicaEndOffset to current " +
+                s"leader's latest offset $leaderEndOffset (effective truncation offset $effectiveFetchOffset)")
+              truncate(topicPartition, effectiveTruncationState)
+
+              fetcherLagStats.getAndMaybePut(topicPartition).lag = 0
+              val fetchDelay = if (effectiveFetchOffset > leaderEndOffset)
+                Optional.of(fetchBackOffMs.toLong)
+              else
+                Optional.empty[java.lang.Long]()
+              new PartitionFetchState(topicId.toJava, effectiveFetchOffset, Optional.of(0L), currentLeaderEpoch,
+                fetchDelay, ReplicaState.FETCHING, latestEpoch(topicPartition))
+            } else {'''
+          if text.count(old) != 1:
+              raise SystemExit(f'expected exactly one OOR truncation block, found {text.count(old)}')
+          path.write_text(text.replace(old, new))
+          PY
+          git diff --check
+          git diff -- core/src/main/scala/kafka/server/AbstractFetcherThread.scala
+
       - name: Delete all broker shared state and recover from remote truth
         shell: bash
         env:
