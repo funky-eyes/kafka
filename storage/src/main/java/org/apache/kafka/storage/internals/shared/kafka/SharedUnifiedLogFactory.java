@@ -25,6 +25,7 @@ import org.apache.kafka.storage.internals.log.LoadedLogOffsets;
 import org.apache.kafka.storage.internals.log.LogDirFailureChannel;
 import org.apache.kafka.storage.internals.log.LogLoader;
 import org.apache.kafka.storage.internals.log.LogOffsetsListener;
+import org.apache.kafka.storage.internals.log.LogSegment;
 import org.apache.kafka.storage.internals.log.LogSegmentFactory;
 import org.apache.kafka.storage.internals.log.LogSegments;
 import org.apache.kafka.storage.internals.log.ProducerStateManager;
@@ -37,8 +38,11 @@ import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 /**
  * Kafka 4.3.x compatibility factory that builds a standard {@link UnifiedLog} over shared-storage physical segments.
@@ -50,6 +54,7 @@ import java.util.Optional;
 public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
     private final SharedStorageEngine storage;
     private final SharedCommitProgress commitProgress;
+    private final ConcurrentMap<File, LoadedSharedLog> loadedLogs = new ConcurrentHashMap<>();
 
     public SharedUnifiedLogFactory(SharedStorageEngine storage) {
         this(storage, new SharedCommitProgress());
@@ -154,7 +159,84 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
                 commitProgress.onHighWatermarkUpdated(sharedPartition, highWatermark);
             }
         });
+        loadedLogs.put(
+            dir.getAbsoluteFile(),
+            new LoadedSharedLog(sharedPartition, localLog, log)
+        );
         return log;
+    }
+
+    /**
+     * Reconciles logs that were loaded before the Kafka-backed shared metadata image became readable.
+     *
+     * <p>Broker startup is deliberately allowed to complete while the RF&gt;1 metadata topic is unavailable so brokers
+     * can be started sequentially. If the broker-local shared WAL and remote checkpoint were both lost, LogLoader can
+     * therefore initially see an empty shared segment. Once metadata replay completes, reopen those logical segments
+     * against the now-populated remote index, rebuild Kafka's producer/epoch compatibility state, advance the cached
+     * LEO, and expose only the contiguous remotely committed prefix through the high watermark.</p>
+     */
+    public void reconcileRemoteStateAfterMetadataReplay() throws IOException {
+        for (LoadedSharedLog loaded : loadedLogs.values()) {
+            if (!Files.isDirectory(loaded.localLog().dir().toPath())) {
+                continue;
+            }
+            synchronized (loaded) {
+                long logStartOffset = loaded.log().logStartOffset();
+                long committedEnd = storage.remoteIndex()
+                    .coverage(loaded.partition())
+                    .contiguousEnd(logStartOffset);
+                if (committedEnd <= loaded.localLog().logEndOffset()) {
+                    continue;
+                }
+
+                long recoveredEnd = reopenSegmentsFromSharedStorage(loaded);
+                if (recoveredEnd < committedEnd) {
+                    throw new IOException(
+                        "Shared remote metadata covers through offset " + committedEnd +
+                            " but reconstructed log " + loaded.log().topicPartition() +
+                            " ends at " + recoveredEnd);
+                }
+
+                rebuildKafkaCompatibilityState(loaded, logStartOffset);
+                loaded.localLog().updateLogEndOffset(recoveredEnd);
+                if (loaded.log().highWatermark() < committedEnd) {
+                    loaded.log().updateHighWatermark(committedEnd);
+                }
+            }
+        }
+    }
+
+    private long reopenSegmentsFromSharedStorage(LoadedSharedLog loaded) throws IOException {
+        SharedLocalLog localLog = loaded.localLog();
+        List<Long> baseOffsets = List.copyOf(localLog.segments().baseOffsets());
+        for (long baseOffset : baseOffsets) {
+            SharedLogSegment replacement = SharedLogSegment.open(
+                localLog.dir(),
+                baseOffset,
+                localLog.config(),
+                localLog.time(),
+                storage,
+                loaded.partition(),
+                true,
+                ""
+            );
+            LogSegment previous = localLog.segments().add(replacement);
+            if (previous != null && previous != replacement) {
+                previous.close();
+            }
+        }
+        return localLog.segments().activeSegment().readNextOffset();
+    }
+
+    private static void rebuildKafkaCompatibilityState(
+        LoadedSharedLog loaded,
+        long logStartOffset
+    ) throws IOException {
+        ProducerStateManager producerStateManager = loaded.log().producerStateManager();
+        producerStateManager.truncateFullyAndStartAt(logStartOffset);
+        for (LogSegment segment : loaded.localLog().segments().values()) {
+            segment.recover(producerStateManager, loaded.log().leaderEpochCache());
+        }
     }
 
     private static LogSegmentFactory sharedSegmentFactory(
@@ -204,5 +286,12 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
         metadataFile.record(newTopicId);
         metadataFile.maybeFlush();
         return newTopicId;
+    }
+
+    private record LoadedSharedLog(
+        SharedPartitionId partition,
+        SharedLocalLog localLog,
+        UnifiedLog log
+    ) {
     }
 }

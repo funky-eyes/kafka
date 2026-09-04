@@ -68,8 +68,9 @@ import java.util.function.LongSupplier;
  * {@link #onBrokerReady(StorageExtensionBrokerContext)} then starts remote-control-plane bootstrap without delaying
  * broker availability. Until the Kafka-backed metadata plane is readable, uploads and WAL reclamation remain disabled;
  * producer durability continues through the replicated local WAL and therefore naturally backpressures at WAL
- * capacity instead of acknowledging data that cannot be retained safely. Once metadata replay succeeds, the broker
- * fences its object-ID allocator and starts asynchronous S3 upload and orphan cleanup.</p>
+ * capacity instead of acknowledging data that cannot be retained safely. Once metadata replay succeeds, logs that were
+ * loaded before the authoritative image became available are reconciled from S3, then the broker fences its object-ID
+ * allocator and starts asynchronous S3 upload and orphan cleanup.</p>
  */
 public final class S3SharedStorageExtension implements KafkaStorageExtension {
     private static final Logger LOG = LoggerFactory.getLogger(S3SharedStorageExtension.class);
@@ -83,6 +84,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
     private SharedStorageConfiguration storageConfiguration;
     private SharedStorageEngine storage;
     private SharedCommitProgress commitProgress;
+    private SharedUnifiedLogFactory sharedUnifiedLogFactory;
     private UnifiedLogFactory unifiedLogFactory;
     private StoragePartitionRoleListener partitionRoleListener;
     private ExecutorService bootstrapExecutor;
@@ -116,9 +118,11 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             ));
 
             SharedCommitProgress newCommitProgress = new SharedCommitProgress();
+            SharedUnifiedLogFactory newSharedUnifiedLogFactory =
+                new SharedUnifiedLogFactory(newStorage, newCommitProgress);
             UnifiedLogFactory newFactory = new RoutingUnifiedLogFactory(
                 configuration,
-                new SharedUnifiedLogFactory(newStorage, newCommitProgress)
+                newSharedUnifiedLogFactory
             );
             StoragePartitionRoleListener newPartitionRoleListener =
                 new SharedPartitionRoleListener(configuration, newCommitProgress);
@@ -131,6 +135,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             storageConfiguration = configuration;
             storage = newStorage;
             commitProgress = newCommitProgress;
+            sharedUnifiedLogFactory = newSharedUnifiedLogFactory;
             unifiedLogFactory = newFactory;
             partitionRoleListener = newPartitionRoleListener;
             bootstrapExecutor = newBootstrapExecutor;
@@ -171,7 +176,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
     public synchronized CompletableFuture<Void> onBrokerReady(StorageExtensionBrokerContext context) {
         Objects.requireNonNull(context, "context");
         if (storage == null || bootstrapExecutor == null || storageConfiguration == null ||
-            commitProgress == null || objectStore == null) {
+            commitProgress == null || sharedUnifiedLogFactory == null || objectStore == null) {
             return CompletableFuture.failedFuture(
                 new IllegalStateException("S3 shared storage extension has not been started"));
         }
@@ -262,8 +267,9 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         try {
             SharedMetadataClientConfiguration metadataConfiguration =
                 SharedMetadataClientConfiguration.from(context);
-            // Initial replay and live commits from every broker update this engine's remote coverage.
+            // open() does not return until the initial authoritative image has been replayed into the engine.
             newMetadataStore = openMetadataStoreWithRetry(metadataConfiguration, engine);
+            reconcileLoadedLogsAfterMetadataReplay(engine);
 
             KafkaObjectMetadataStore.SequenceBlock initialBlock =
                 newMetadataStore.reserveSequenceBlock(DEFAULT_OBJECT_ID_BLOCK_SIZE);
@@ -319,6 +325,20 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
                 closeIgnoringFailure(newMetadataStore);
             }
         }
+    }
+
+    private void reconcileLoadedLogsAfterMetadataReplay(SharedStorageEngine engine) throws IOException {
+        SharedUnifiedLogFactory factory;
+        synchronized (this) {
+            if (closed || storage != engine) {
+                throw new IOException("S3 shared storage extension closed or restarted during log reconciliation");
+            }
+            factory = sharedUnifiedLogFactory;
+        }
+        if (factory == null) {
+            throw new IOException("Shared log factory is unavailable during remote metadata reconciliation");
+        }
+        factory.reconcileRemoteStateAfterMetadataReplay();
     }
 
     private KafkaObjectMetadataStore openMetadataStoreWithRetry(
@@ -445,6 +465,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             storageConfiguration = null;
             storage = null;
             commitProgress = null;
+            sharedUnifiedLogFactory = null;
             unifiedLogFactory = null;
             partitionRoleListener = null;
         }
