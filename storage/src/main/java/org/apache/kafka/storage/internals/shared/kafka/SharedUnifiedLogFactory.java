@@ -38,6 +38,7 @@ import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -171,11 +172,19 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
      *
      * <p>Broker startup is deliberately allowed to complete while the RF&gt;1 metadata topic is unavailable so brokers
      * can be started sequentially. If the broker-local shared WAL and remote checkpoint were both lost, LogLoader can
-     * therefore initially see an empty shared segment. Once metadata replay completes, reopen those logical segments
-     * against the now-populated remote index, rebuild Kafka's producer/epoch compatibility state, advance the cached
-     * LEO, and expose only the contiguous remotely committed prefix through the high watermark.</p>
+     * therefore initially see an empty shared segment. Once metadata replay completes, first publish the authoritative
+     * logical end offset for every affected partition without doing S3 I/O. This prevents follower fetchers from
+     * replaying an already-remotely-committed history into the bounded WAL while another partition is still rebuilding.
+     * A second pass then reopens the logical segments against the populated remote index, rebuilds Kafka's producer and
+     * leader-epoch compatibility state, and exposes only the contiguous remotely committed prefix through the high
+     * watermark.</p>
      */
     public void reconcileRemoteStateAfterMetadataReplay() throws IOException {
+        List<RemoteRecovery> recoveries = new ArrayList<>();
+
+        // Phase 1 is metadata-only and intentionally fast for all partitions. A follower fetch response may already be
+        // in flight at the old LEO; ReplicaFetcherThread recognizes that shared-storage recovery advanced the LEO and
+        // re-seeds its cursor instead of appending the stale response into the WAL.
         for (LoadedSharedLog loaded : loadedLogs.values()) {
             if (!Files.isDirectory(loaded.localLog().dir().toPath())) {
                 continue;
@@ -185,22 +194,36 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
                 long committedEnd = storage.remoteIndex()
                     .coverage(loaded.partition())
                     .contiguousEnd(logStartOffset);
-                if (committedEnd <= loaded.localLog().logEndOffset()) {
+                long currentEnd = loaded.localLog().logEndOffset();
+                if (committedEnd <= currentEnd) {
                     continue;
                 }
 
+                loaded.localLog().updateLogEndOffset(committedEnd);
+                recoveries.add(new RemoteRecovery(loaded, logStartOffset, committedEnd));
+            }
+        }
+
+        // Phase 2 may read many remote batches and is therefore deliberately separated from the LEO publication above.
+        for (RemoteRecovery recovery : recoveries) {
+            LoadedSharedLog loaded = recovery.loaded();
+            synchronized (loaded) {
                 long recoveredEnd = reopenSegmentsFromSharedStorage(loaded);
-                if (recoveredEnd < committedEnd) {
+                if (recoveredEnd < recovery.committedEnd()) {
                     throw new IOException(
-                        "Shared remote metadata covers through offset " + committedEnd +
+                        "Shared remote metadata covers through offset " + recovery.committedEnd() +
                             " but reconstructed log " + loaded.log().topicPartition() +
                             " ends at " + recoveredEnd);
                 }
 
-                rebuildKafkaCompatibilityState(loaded, logStartOffset);
-                loaded.localLog().updateLogEndOffset(recoveredEnd);
-                if (loaded.log().highWatermark() < committedEnd) {
-                    loaded.log().updateHighWatermark(committedEnd);
+                rebuildKafkaCompatibilityState(loaded, recovery.logStartOffset());
+                // A legitimate append may have advanced the logical end after phase 1. Reopening reads both remote
+                // objects and the surviving WAL, so never move the cached LEO backwards while publishing rebuilt state.
+                loaded.localLog().updateLogEndOffset(
+                    Math.max(loaded.localLog().logEndOffset(), recoveredEnd)
+                );
+                if (loaded.log().highWatermark() < recovery.committedEnd()) {
+                    loaded.log().updateHighWatermark(recovery.committedEnd());
                 }
             }
         }
@@ -292,6 +315,13 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
         SharedPartitionId partition,
         SharedLocalLog localLog,
         UnifiedLog log
+    ) {
+    }
+
+    private record RemoteRecovery(
+        LoadedSharedLog loaded,
+        long logStartOffset,
+        long committedEnd
     ) {
     }
 }

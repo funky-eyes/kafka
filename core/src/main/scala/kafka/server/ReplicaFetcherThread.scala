@@ -21,6 +21,7 @@ import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.requests.FetchResponse
 import org.apache.kafka.server.common.OffsetAndEpoch
 import org.apache.kafka.storage.internals.log.{LogAppendInfo, LogStartOffsetIncrementReason}
+import org.apache.kafka.storage.internals.shared.kafka.SharedLogSegment
 import org.apache.kafka.server.LeaderEndPoint
 
 import java.util.Optional
@@ -119,10 +120,31 @@ class ReplicaFetcherThread(name: String,
     val partition = replicaMgr.getPartitionOrException(topicPartition)
     val log = partition.localLogOrException
     val records = toMemoryRecords(FetchResponse.recordsOrFail(partitionData))
+    val currentLogEndOffset = log.logEndOffset
 
-    if (fetchOffset != log.logEndOffset)
+    if (fetchOffset != currentLogEndOffset) {
+      // Shared-storage metadata replay may restore an acknowledged remote prefix after this fetch request was built.
+      // The response is valid for the old cursor but must not be appended again into the shared WAL. Re-seed this
+      // follower from the recovered LEO and discard the stale response. Ordinary Kafka logs retain the strict offset
+      // mismatch failure below.
+      if (fetchOffset < currentLogEndOffset && log.activeSegment.isInstanceOf[SharedLogSegment]) {
+        val topicId = if (log.topicId().isPresent) Some(log.topicId().get()) else None
+        removePartitions(Set(topicPartition))
+        addPartitions(Map(
+          topicPartition -> InitialFetchState(
+            topicId,
+            leader.brokerEndPoint(),
+            partitionLeaderEpoch,
+            currentLogEndOffset
+          )
+        ))
+        info(s"Shared-storage recovery advanced $topicPartition from fetch offset $fetchOffset " +
+          s"to local log end offset $currentLogEndOffset; discarding the stale fetch response and resuming there")
+        return None
+      }
       throw new IllegalStateException("Offset mismatch for partition %s: fetched offset = %d, log end offset = %d.".format(
-        topicPartition, fetchOffset, log.logEndOffset))
+        topicPartition, fetchOffset, currentLogEndOffset))
+    }
 
     if (logTrace)
       trace("Follower has replica log end offset %d for partition %s. Received %d bytes of messages and leader hw %d"
