@@ -24,6 +24,7 @@ on:
       - 'core/src/test/java/kafka/server/SharedStorageAcksOneKRaftIntegrationTest.java'
       - 'storage/src/main/**'
       - 'storage/shared-storage-s3/**'
+      - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
       - '.github/workflows/shared-storage-acks-one.yml'
   pull_request:
     paths:
@@ -31,6 +32,7 @@ on:
       - 'core/src/test/java/kafka/server/SharedStorageAcksOneKRaftIntegrationTest.java'
       - 'storage/src/main/**'
       - 'storage/shared-storage-s3/**'
+      - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
       - '.github/workflows/shared-storage-acks-one.yml'
   workflow_dispatch:
 

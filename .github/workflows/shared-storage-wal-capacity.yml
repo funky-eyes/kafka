@@ -23,12 +23,14 @@ on:
       - 'core/src/test/java/kafka/server/SharedStorageWalCapacityPressureKRaftIntegrationTest.java'
       - 'storage/src/main/**'
       - 'storage/shared-storage-s3/src/main/**'
+      - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
       - '.github/workflows/shared-storage-wal-capacity.yml'
   pull_request:
     paths:
       - 'core/src/test/java/kafka/server/SharedStorageWalCapacityPressureKRaftIntegrationTest.java'
       - 'storage/src/main/**'
       - 'storage/shared-storage-s3/src/main/**'
+      - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
       - '.github/workflows/shared-storage-wal-capacity.yml'
   workflow_dispatch:
 

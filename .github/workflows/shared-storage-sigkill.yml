@@ -23,12 +23,14 @@ on:
       - 'core/src/test/java/kafka/server/SharedStorageIndependentProcessSigkillTest.java'
       - 'storage/src/main/**'
       - 'storage/shared-storage-s3/**'
+      - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
       - '.github/workflows/shared-storage-sigkill.yml'
   pull_request:
     paths:
       - 'core/src/test/java/kafka/server/SharedStorageIndependentProcessSigkillTest.java'
       - 'storage/src/main/**'
       - 'storage/shared-storage-s3/**'
+      - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
       - '.github/workflows/shared-storage-sigkill.yml'
   workflow_dispatch:
 

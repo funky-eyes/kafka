@@ -23,12 +23,14 @@ on:
       - 'core/src/test/java/kafka/server/SharedStorageS3OutageKRaftIntegrationTest.java'
       - 'storage/src/main/**'
       - 'storage/shared-storage-s3/src/main/**'
+      - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
       - '.github/workflows/shared-storage-s3-outage.yml'
   pull_request:
     paths:
       - 'core/src/test/java/kafka/server/SharedStorageS3OutageKRaftIntegrationTest.java'
       - 'storage/src/main/**'
       - 'storage/shared-storage-s3/src/main/**'
+      - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
       - '.github/workflows/shared-storage-s3-outage.yml'
   workflow_dispatch:
 

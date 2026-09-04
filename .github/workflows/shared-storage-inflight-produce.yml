@@ -26,6 +26,7 @@ on:
       - 'core/src/main/scala/kafka/log/LogManager.scala'
       - 'core/src/main/scala/kafka/server/BrokerServer.scala'
       - 'core/src/main/scala/kafka/server/ReplicaManager.scala'
+      - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
       - 'core/src/test/java/kafka/server/SharedStorageInflightIdempotentProduceE2ETest.java'
       - '.github/workflows/shared-storage-inflight-produce.yml'
   pull_request:
@@ -36,6 +37,7 @@ on:
       - 'core/src/main/scala/kafka/log/LogManager.scala'
       - 'core/src/main/scala/kafka/server/BrokerServer.scala'
       - 'core/src/main/scala/kafka/server/ReplicaManager.scala'
+      - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
       - 'core/src/test/java/kafka/server/SharedStorageInflightIdempotentProduceE2ETest.java'
       - '.github/workflows/shared-storage-inflight-produce.yml'
   workflow_dispatch:
