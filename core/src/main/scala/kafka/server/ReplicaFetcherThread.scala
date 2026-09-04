@@ -64,6 +64,22 @@ class ReplicaFetcherThread(name: String,
     replicaMgr.localLogOrException(topicPartition).endOffsetForEpoch(epoch)
   }
 
+  override protected def adjustTruncationState(
+    topicPartition: TopicPartition,
+    truncationState: OffsetTruncationState
+  ): OffsetTruncationState = {
+    val log = replicaMgr.localLogOrException(topicPartition)
+    val recoveredHighWatermark = log.highWatermark
+    if (log.activeSegment.isInstanceOf[SharedLogSegment] && truncationState.offset < recoveredHighWatermark) {
+      val adjusted = OffsetTruncationState(recoveredHighWatermark, truncationState.truncationCompleted)
+      info(s"Raising stale shared-storage truncation for $topicPartition from ${truncationState.offset} " +
+        s"to recovered high watermark $recoveredHighWatermark so the follower log and fetch cursor advance atomically")
+      adjusted
+    } else {
+      truncationState
+    }
+  }
+
   override protected[server] def shouldFetchFromLastTieredOffset(topicPartition: TopicPartition, leaderEndOffset: Long, replicaEndOffset: Long): Boolean = {
     val isCompactTopic = replicaMgr.localLog(topicPartition).exists(_.config.compact)
     val remoteStorageEnabled = replicaMgr.localLog(topicPartition).exists(_.remoteLogEnabled())
@@ -197,19 +213,6 @@ class ReplicaFetcherThread(name: String,
    */
   override def truncate(tp: TopicPartition, offsetTruncationState: OffsetTruncationState): Unit = {
     val partition = replicaMgr.getPartitionOrException(tp)
-    val log = partition.localLogOrException
-
-    // The shared metadata image can restore a durable, remotely committed prefix after ReplicaFetcherThread captured
-    // its initial fetch offset from an empty local log. In that startup race the fetcher may try to truncate the log
-    // back to the stale offset before its first fetch response arrives. Never destroy an already-exposed shared
-    // high-watermark prefix in that case. Keeping the recovered LEO lets processPartitionData observe the stale fetch
-    // offset and re-seed this fetcher at the recovered end on the first response.
-    if (log.activeSegment.isInstanceOf[SharedLogSegment] && offsetTruncationState.offset < log.highWatermark) {
-      info(s"Ignoring stale shared-storage truncation for $tp from recovered high watermark ${log.highWatermark} " +
-        s"to ${offsetTruncationState.offset}; the follower fetch cursor will be re-synchronized to the recovered LEO")
-      return
-    }
-
     partition.truncateTo(offsetTruncationState.offset, isFuture = false)
 
     // mark the future replica for truncation only when we do last truncation

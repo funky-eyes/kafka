@@ -86,6 +86,14 @@ abstract class AbstractFetcherThread(name: String,
 
   protected def truncate(topicPartition: TopicPartition, truncationState: OffsetTruncationState): Unit
 
+  /**
+   * Allows a concrete fetcher to preserve a stronger local durability boundary while keeping the
+   * fetch cursor synchronized with the actual truncation that will be performed. The default is
+   * deliberately identity so existing Kafka and ReplicaAlterLogDirs behavior is unchanged.
+   */
+  protected def adjustTruncationState(topicPartition: TopicPartition,
+                                      truncationState: OffsetTruncationState): OffsetTruncationState = truncationState
+
   protected def truncateFullyAndStartAt(topicPartition: TopicPartition, offset: Long): Unit
 
   protected def latestEpoch(topicPartition: TopicPartition): Optional[Integer]
@@ -178,21 +186,23 @@ abstract class AbstractFetcherThread(name: String,
     }
   }
 
-  private def doTruncate(topicPartition: TopicPartition, truncationState: OffsetTruncationState): Boolean = {
+  private def doTruncate(topicPartition: TopicPartition,
+                         truncationState: OffsetTruncationState): Option[OffsetTruncationState] = {
+    val effectiveTruncationState = adjustTruncationState(topicPartition, truncationState)
     try {
-      truncate(topicPartition, truncationState)
-      true
+      truncate(topicPartition, effectiveTruncationState)
+      Some(effectiveTruncationState)
     }
     catch {
       case e: KafkaStorageException =>
-        error(s"Failed to truncate $topicPartition at offset ${truncationState.offset}", e)
+        error(s"Failed to truncate $topicPartition at offset ${effectiveTruncationState.offset}", e)
         markPartitionFailed(topicPartition)
-        false
+        None
       case t: Throwable =>
         error(s"Unexpected error occurred during truncation for $topicPartition "
-          + s"at offset ${truncationState.offset}", t)
+          + s"at offset ${effectiveTruncationState.offset}", t)
         markPartitionFailed(topicPartition)
-        false
+        None
     }
   }
 
@@ -249,8 +259,7 @@ abstract class AbstractFetcherThread(name: String,
         val truncationState = OffsetTruncationState(highWatermark, truncationCompleted = true)
 
         info(s"Truncating partition $tp with $truncationState due to local high watermark $highWatermark")
-        if (doTruncate(tp, truncationState))
-          fetchOffsets.put(tp, truncationState)
+        doTruncate(tp, truncationState).foreach(effective => fetchOffsets.put(tp, effective))
       }
     }
 
@@ -268,8 +277,7 @@ abstract class AbstractFetcherThread(name: String,
           case Errors.NONE =>
             val offsetTruncationState = getOffsetTruncationState(tp, leaderEpochOffset)
             info(s"Truncating partition $tp with $offsetTruncationState due to leader epoch and offset $leaderEpochOffset")
-            if (doTruncate(tp, offsetTruncationState))
-              fetchOffsets.put(tp, offsetTruncationState)
+            doTruncate(tp, offsetTruncationState).foreach(effective => fetchOffsets.put(tp, effective))
 
           case Errors.FENCED_LEADER_EPOCH =>
             val currentLeaderEpoch = latestEpochsForPartitions.get(tp)
