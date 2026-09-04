@@ -98,6 +98,32 @@ jobs:
           java-version: 25
           gradle-cache-read-only: true
 
+      - name: Apply fenced-epoch retry candidate
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('core/src/main/scala/kafka/server/AbstractFetcherThread.scala')
+          text = path.read_text()
+          old = '''      if (requestEpoch.isPresent && requestEpoch.get == currentLeaderEpoch) {
+        info(s"Partition $tp has an older epoch ($currentLeaderEpoch) than the current leader. Will await " +
+          s"the new LeaderAndIsr state before resuming fetching.")
+        markPartitionFailed(tp)
+        false
+      } else {'''
+          new = '''      if (requestEpoch.isPresent && requestEpoch.get == currentLeaderEpoch) {
+        warn(s"Partition $tp fetch was fenced at epoch $currentLeaderEpoch before local metadata advanced; " +
+          s"keeping the partition active so metadata convergence can resume replication")
+        true
+      } else {'''
+          if text.count(old) != 1:
+              raise SystemExit(f'expected exactly one fenced-partition block, found {text.count(old)}')
+          path.write_text(text.replace(old, new))
+          PY
+          git diff --check
+          git diff -- core/src/main/scala/kafka/server/AbstractFetcherThread.scala
+
       - name: Delete all broker shared state and recover from remote truth
         shell: bash
         env:
