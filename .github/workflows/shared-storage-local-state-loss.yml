@@ -32,8 +32,10 @@ on:
       - 'core/src/main/scala/kafka/server/AbstractFetcherThread.scala'
       - 'core/src/main/java/kafka/server/builders/LogManagerBuilder.java'
       - 'core/src/test/scala/unit/kafka/server/ReplicaFetcherThreadTest.scala'
+      - 'core/src/test/scala/unit/kafka/server/ReplicaFetcherThreadRecoveryTest.scala'
       - 'core/src/test/java/kafka/server/SharedStorageLocalStateLossE2ETest.java'
       - '.github/workflows/shared-storage-local-state-loss.yml'
+      - '.github/workflows/shared-storage-upload-crash.yml'
   pull_request:
     paths:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/**'
@@ -48,8 +50,10 @@ on:
       - 'core/src/main/scala/kafka/server/AbstractFetcherThread.scala'
       - 'core/src/main/java/kafka/server/builders/LogManagerBuilder.java'
       - 'core/src/test/scala/unit/kafka/server/ReplicaFetcherThreadTest.scala'
+      - 'core/src/test/scala/unit/kafka/server/ReplicaFetcherThreadRecoveryTest.scala'
       - 'core/src/test/java/kafka/server/SharedStorageLocalStateLossE2ETest.java'
       - '.github/workflows/shared-storage-local-state-loss.yml'
+      - '.github/workflows/shared-storage-upload-crash.yml'
   workflow_dispatch:
 
 permissions:
@@ -108,6 +112,9 @@ jobs:
         run: |
           ./gradlew :storage:test \
             --tests 'org.apache.kafka.storage.internals.shared.kafka.SharedLogSegmentRemoteRecoveryTest' \
+            --no-scan
+          ./gradlew :core:test \
+            --tests 'kafka.server.ReplicaFetcherThreadRecoveryTest' \
             --no-scan
 
       - name: Delete all broker shared state and recover from remote truth
