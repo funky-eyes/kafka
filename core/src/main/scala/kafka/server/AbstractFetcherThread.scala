@@ -693,10 +693,14 @@ abstract class AbstractFetcherThread(name: String,
     } else if (leaderEndOffset < replicaEndOffset) {
       warn(s"Reset fetch offset for partition $topicPartition from $replicaEndOffset to current " +
         s"leader's latest offset $leaderEndOffset")
-      truncate(topicPartition, OffsetTruncationState(leaderEndOffset, truncationCompleted = true))
+      val effectiveTruncationState = adjustTruncationState(
+        topicPartition,
+        OffsetTruncationState(leaderEndOffset, truncationCompleted = true)
+      )
+      truncate(topicPartition, effectiveTruncationState)
 
       fetcherLagStats.getAndMaybePut(topicPartition).lag = 0
-      new PartitionFetchState(topicId.toJava, leaderEndOffset, Optional.of(0L), currentLeaderEpoch,
+      new PartitionFetchState(topicId.toJava, effectiveTruncationState.offset, Optional.of(0L), currentLeaderEpoch,
         ReplicaState.FETCHING, latestEpoch(topicPartition))
     } else {
       /**
