@@ -59,6 +59,7 @@ import java.util.concurrent.ConcurrentNavigableMap;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.ExecutionException;
 import java.util.stream.Stream;
+import java.util.zip.CRC32C;
 
 /**
  * Kafka 4.3.x compatibility segment backed by SharedStorageEngine rather than a per-partition .log payload file.
@@ -171,11 +172,15 @@ public final class SharedLogSegment extends LogSegment {
             if (!offsetIndex().canAppendOffset(batch.lastOffset())) {
                 throw new LogSegmentOffsetOverflowException(this, batch.lastOffset());
             }
-            appendGroup.add(new SharedStorageEngine.OwnedDataBatch(
-                batch.leaderEpoch(), batch.firstOffset(), batch.lastOffset(), batch.bytes()));
+            if (!isRemoteDurable(batch)) {
+                appendGroup.add(new SharedStorageEngine.OwnedDataBatch(
+                    batch.leaderEpoch(), batch.firstOffset(), batch.lastOffset(), batch.bytes()));
+            }
         }
 
-        await(storage.appendOwnedBatchGroup(partition, appendGroup));
+        if (!appendGroup.isEmpty()) {
+            await(storage.appendOwnedBatchGroup(partition, appendGroup));
+        }
 
         int position = logicalSize;
         for (KafkaRecordBatchAdapter.SerializedBatch batch : serialized) {
@@ -214,6 +219,23 @@ public final class SharedLogSegment extends LogSegment {
             throw new IllegalStateException(
                 "Kafka append largest offset mismatch: expected=" + largestOffset + ", actual=" + lastOffset);
         }
+    }
+
+    private boolean isRemoteDurable(KafkaRecordBatchAdapter.SerializedBatch batch) {
+        var reference = storage.remoteIndex().find(partition, batch.firstOffset());
+        if (reference.isEmpty()) {
+            return false;
+        }
+        var range = reference.get().range();
+        if (range.offsets().startOffset() != batch.firstOffset() ||
+            range.offsets().endOffset() != Math.addExact(batch.lastOffset(), 1L) ||
+            range.leaderEpoch() != batch.leaderEpoch() ||
+            range.objectLength() != batch.bytes().remaining()) {
+            return false;
+        }
+        CRC32C checksum = new CRC32C();
+        checksum.update(batch.bytes().duplicate());
+        return range.checksum() == checksum.getValue();
     }
 
     @Override
