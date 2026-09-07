@@ -175,7 +175,7 @@ public final class SharedLogSegment extends LogSegment {
 
     private List<SharedStorageEngine.OwnedDataBatch> batchesRequiringWal(
         List<KafkaRecordBatchAdapter.SerializedBatch> serialized
-    ) {
+    ) throws IOException {
         List<SharedStorageEngine.OwnedDataBatch> appendGroup = new ArrayList<>(serialized.size());
         for (KafkaRecordBatchAdapter.SerializedBatch batch : serialized) {
             if (!offsetIndex().canAppendOffset(batch.lastOffset())) {
