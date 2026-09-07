@@ -31,6 +31,7 @@ on:
       - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
       - 'core/src/main/scala/kafka/server/AbstractFetcherThread.scala'
       - 'core/src/main/java/kafka/server/builders/LogManagerBuilder.java'
+      - 'core/src/test/scala/unit/kafka/server/ReplicaFetcherThreadTest.scala'
       - 'core/src/test/java/kafka/server/SharedStorageLocalStateLossE2ETest.java'
       - '.github/workflows/shared-storage-local-state-loss.yml'
   pull_request:
@@ -46,6 +47,7 @@ on:
       - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
       - 'core/src/main/scala/kafka/server/AbstractFetcherThread.scala'
       - 'core/src/main/java/kafka/server/builders/LogManagerBuilder.java'
+      - 'core/src/test/scala/unit/kafka/server/ReplicaFetcherThreadTest.scala'
       - 'core/src/test/java/kafka/server/SharedStorageLocalStateLossE2ETest.java'
       - '.github/workflows/shared-storage-local-state-loss.yml'
   workflow_dispatch:
