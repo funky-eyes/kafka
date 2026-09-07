@@ -138,6 +138,22 @@ class ReplicaFetcherThread(name: String,
     val records = toMemoryRecords(FetchResponse.recordsOrFail(partitionData))
     val currentLogEndOffset = log.logEndOffset
 
+    log.activeSegment match {
+      case sharedSegment: SharedLogSegment =>
+        val materializedEndOffset = sharedSegment.readNextOffset()
+        if (fetchOffset < materializedEndOffset && materializedEndOffset > currentLogEndOffset) {
+          // Metadata replay rebuilds SharedLogSegment's readable batch/index view before it publishes the recovered
+          // Kafka-visible LEO. A fetch response issued before recovery may arrive in that short interval. Appending it
+          // would duplicate already-materialized remote batches and corrupt the monotonically increasing offset index.
+          // Do not re-seed beyond the Kafka-visible LEO here; returning None keeps the current fetch cursor unchanged.
+          // Once recovery publishes the LEO, the existing stale-response branch below will atomically re-seed it.
+          info(s"Shared-storage recovery is materializing $topicPartition through offset $materializedEndOffset " +
+            s"while local log end offset is $currentLogEndOffset; discarding stale fetch response at $fetchOffset")
+          return None
+        }
+      case _ =>
+    }
+
     if (fetchOffset != currentLogEndOffset) {
       // Shared-storage metadata replay may restore an acknowledged remote prefix after this fetch request was built.
       // The response is valid for the old cursor but must not be appended again into the shared WAL. Re-seed this
