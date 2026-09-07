@@ -21,6 +21,7 @@ on:
       - shared-wal-s3-4.3.1
     paths:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/wal/**'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedLogSegment.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedStorageConfiguration.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedStorageExtension.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedStorageWalFactory.java'
@@ -34,6 +35,7 @@ on:
   pull_request:
     paths:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/wal/**'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedLogSegment.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedStorageConfiguration.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedStorageExtension.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedStorageWalFactory.java'
