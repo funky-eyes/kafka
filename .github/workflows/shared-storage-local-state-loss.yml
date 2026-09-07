@@ -114,7 +114,7 @@ jobs:
           java-version: 25
           gradle-cache-read-only: true
 
-      - name: Verify remote recovery WAL bypass invariants
+      - name: Verify remote recovery and fetcher recovery invariants
         run: |
           ./gradlew :storage:test \
             --tests 'org.apache.kafka.storage.internals.shared.kafka.SharedLogSegmentRemoteRecoveryTest' \
