@@ -172,19 +172,19 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
      *
      * <p>Broker startup is deliberately allowed to complete while the RF&gt;1 metadata topic is unavailable so brokers
      * can be started sequentially. If the broker-local shared WAL and remote checkpoint were both lost, LogLoader can
-     * therefore initially see an empty shared segment. Once metadata replay completes, first publish the authoritative
-     * logical end offset for every affected partition without doing S3 I/O. This prevents follower fetchers from
-     * replaying an already-remotely-committed history into the bounded WAL while another partition is still rebuilding.
-     * A second pass then reopens the logical segments against the populated remote index, rebuilds Kafka's producer and
-     * leader-epoch compatibility state, and exposes only the contiguous remotely committed prefix through the high
-     * watermark.</p>
+     * therefore initially see an empty shared segment. Once metadata replay completes, first build a recovery plan for
+     * every affected partition without mutating Kafka-visible offsets. A second pass reopens the logical segments against
+     * the populated remote index and rebuilds Kafka's producer and leader-epoch compatibility state before publishing the
+     * reconstructed LEO/high watermark. This prevents a replica from joining ISR or becoming leader with an offset that
+     * its {@link SharedLogSegment} read view cannot yet serve.</p>
      */
     public void reconcileRemoteStateAfterMetadataReplay() throws IOException {
         List<RemoteRecovery> recoveries = new ArrayList<>();
 
-        // Phase 1 is metadata-only and intentionally fast for all partitions. A follower fetch response may already be
-        // in flight at the old LEO; ReplicaFetcherThread recognizes that shared-storage recovery advanced the LEO and
-        // re-seeds its cursor instead of appending the stale response into the WAL.
+        // Phase 1 is metadata-only and intentionally does not publish the recovered LEO. Publishing an LEO before
+        // SharedLogSegment has materialized its remote batch/index view can let Kafka admit the replica to ISR and elect
+        // it leader while historical reads are still incomplete. Follower WAL-capacity pressure is retryable during this
+        // window; after phase 2 publishes the rebuilt LEO, ReplicaFetcherThread re-seeds any stale fetch cursor.
         for (LoadedSharedLog loaded : loadedLogs.values()) {
             if (!Files.isDirectory(loaded.localLog().dir().toPath())) {
                 continue;
@@ -200,14 +200,11 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
                     continue;
                 }
 
-                if (committedEnd > currentEnd) {
-                    loaded.localLog().updateLogEndOffset(committedEnd);
-                }
                 recoveries.add(new RemoteRecovery(loaded, logStartOffset, committedEnd));
             }
         }
 
-        // Phase 2 may read many remote batches and is therefore deliberately separated from the LEO publication above.
+        // Phase 2 may read many remote batches. Publish the LEO only after the segment read view is complete.
         for (RemoteRecovery recovery : recoveries) {
             LoadedSharedLog loaded = recovery.loaded();
             synchronized (loaded) {
@@ -220,8 +217,8 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
                 }
 
                 rebuildKafkaCompatibilityState(loaded, recovery.logStartOffset());
-                // A legitimate append may have advanced the logical end after phase 1. Reopening reads both remote
-                // objects and the surviving WAL, so never move the cached LEO backwards while publishing rebuilt state.
+                // A legitimate append may have advanced the logical end while remote state was being rebuilt. Reopening
+                // reads both remote objects and the surviving WAL, so never move the cached LEO backwards when publishing.
                 loaded.localLog().updateLogEndOffset(
                     Math.max(loaded.localLog().logEndOffset(), recoveredEnd)
                 );
