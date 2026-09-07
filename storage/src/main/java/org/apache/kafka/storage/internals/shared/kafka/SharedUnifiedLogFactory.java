@@ -195,11 +195,14 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
                     .coverage(loaded.partition())
                     .contiguousEnd(logStartOffset);
                 long currentEnd = loaded.localLog().logEndOffset();
-                if (committedEnd <= currentEnd) {
+                long materializedEnd = loaded.localLog().segments().activeSegment().readNextOffset();
+                if (committedEnd <= currentEnd && committedEnd <= materializedEnd) {
                     continue;
                 }
 
-                loaded.localLog().updateLogEndOffset(committedEnd);
+                if (committedEnd > currentEnd) {
+                    loaded.localLog().updateLogEndOffset(committedEnd);
+                }
                 recoveries.add(new RemoteRecovery(loaded, logStartOffset, committedEnd));
             }
         }
