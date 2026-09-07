@@ -111,13 +111,13 @@ jobs:
               s"the new LeaderAndIsr state before resuming fetching.")
             markPartitionFailed(tp)
             false
-          } else {'''.replace('          ', '')
+          } else {'''
           new = '''      if (requestEpoch.isPresent && requestEpoch.get == currentLeaderEpoch) {
             warn(s"RECOVERY_DIAG fenced partition $tp at fetcher epoch $currentLeaderEpoch; " +
               s"marking it failed until a newer metadata epoch re-adds it")
             markPartitionFailed(tp)
             false
-          } else {'''.replace('          ', '')
+          } else {'''
           if text.count(old) != 1:
               raise SystemExit(f'expected exactly one fenced-partition block, found {text.count(old)}')
           fetcher.write_text(text.replace(old, new))
