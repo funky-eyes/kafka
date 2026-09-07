@@ -302,6 +302,12 @@ abstract class AbstractFetcherThread(name: String,
   }
 
   /**
+   * Allow specialized fetchers to treat a fenced leader epoch as transient while their local metadata view is
+   * converging. The default preserves Kafka's existing behavior: remove the partition and wait for LeaderAndIsr.
+   */
+  protected[server] def shouldRetryFencedLeaderEpoch(topicPartition: TopicPartition): Boolean = false
+
+  /**
    * remove the partition if the partition state is NOT updated. Otherwise, keep the partition active.
    *
    * @return true if the epoch in this thread is updated. otherwise, false
@@ -311,10 +317,16 @@ abstract class AbstractFetcherThread(name: String,
     Option(partitionStates.stateValue(tp)).exists { currentFetchState =>
       val currentLeaderEpoch = currentFetchState.currentLeaderEpoch
       if (requestEpoch.isPresent && requestEpoch.get == currentLeaderEpoch) {
-        info(s"Partition $tp has an older epoch ($currentLeaderEpoch) than the current leader. Will await " +
-          s"the new LeaderAndIsr state before resuming fetching.")
-        markPartitionFailed(tp)
-        false
+        if (shouldRetryFencedLeaderEpoch(tp)) {
+          info(s"Partition $tp has an older epoch ($currentLeaderEpoch) than the current leader while local recovery " +
+            s"metadata is converging. Backing off and retrying instead of permanently failing the partition.")
+          true
+        } else {
+          info(s"Partition $tp has an older epoch ($currentLeaderEpoch) than the current leader. Will await " +
+            s"the new LeaderAndIsr state before resuming fetching.")
+          markPartitionFailed(tp)
+          false
+        }
       } else {
         info(s"Partition $tp has a newer epoch ($currentLeaderEpoch) than the current leader. Retry the partition later.")
         true

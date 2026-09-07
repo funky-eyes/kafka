@@ -32,7 +32,7 @@ import org.apache.kafka.server.storage.log.UnexpectedAppendOffsetException
 import org.apache.kafka.storage.internals.log.UnifiedLog
 import org.apache.kafka.storage.internals.shared.kafka.SharedLogSegment
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats
-import org.junit.jupiter.api.Assertions.{assertEquals, assertThrows, assertTrue}
+import org.junit.jupiter.api.Assertions.{assertEquals, assertFalse, assertThrows, assertTrue}
 import org.junit.jupiter.api.{AfterEach, Test}
 import org.mockito.ArgumentMatchers.{any, anyBoolean, anyInt}
 import org.mockito.Mockito.{mock, when}
@@ -328,4 +328,38 @@ class ReplicaFetcherThreadRecoveryTest {
       partitionData
     ))
   }
+  @Test
+  def shouldRetryFencedLeaderEpochOnlyForSharedLog(): Unit = {
+    val sharedPartition = new TopicPartition("shared-fenced-recovery", 0)
+    val regularPartition = new TopicPartition("regular-fenced-recovery", 0)
+    val config = KafkaConfig.fromProps(TestUtils.createBrokerConfig(1))
+    val brokerEndPoint = new BrokerEndPoint(0, "localhost", 1000)
+    val leader = mock(classOf[org.apache.kafka.server.LeaderEndPoint])
+    when(leader.brokerEndPoint()).thenReturn(brokerEndPoint)
+
+    val replicaManager = mock(classOf[ReplicaManager])
+    when(replicaManager.brokerTopicStats).thenReturn(new BrokerTopicStats)
+
+    val sharedLog = mock(classOf[UnifiedLog])
+    when(sharedLog.activeSegment).thenReturn(mock(classOf[SharedLogSegment]))
+    when(replicaManager.localLog(sharedPartition)).thenReturn(Some(sharedLog))
+
+    val regularLog = mock(classOf[UnifiedLog])
+    when(regularLog.activeSegment).thenReturn(null)
+    when(replicaManager.localLog(regularPartition)).thenReturn(Some(regularLog))
+
+    val thread = new ReplicaFetcherThread(
+      "shared-fenced-recovery-fetcher",
+      leader,
+      config,
+      new FailedPartitions,
+      replicaManager,
+      UNBOUNDED_QUOTA,
+      "[shared-fenced-recovery] "
+    )
+
+    assertTrue(thread.shouldRetryFencedLeaderEpoch(sharedPartition))
+    assertFalse(thread.shouldRetryFencedLeaderEpoch(regularPartition))
+  }
+
 }

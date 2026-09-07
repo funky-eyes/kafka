@@ -82,6 +82,9 @@ class ReplicaFetcherThread(name: String,
     }
   }
 
+  override protected[server] def shouldRetryFencedLeaderEpoch(topicPartition: TopicPartition): Boolean =
+    replicaMgr.localLog(topicPartition).exists(_.activeSegment.isInstanceOf[SharedLogSegment])
+
   override protected[server] def shouldFetchFromLastTieredOffset(topicPartition: TopicPartition, leaderEndOffset: Long, replicaEndOffset: Long): Boolean = {
     val isCompactTopic = replicaMgr.localLog(topicPartition).exists(_.config.compact)
     val remoteStorageEnabled = replicaMgr.localLog(topicPartition).exists(_.remoteLogEnabled())
