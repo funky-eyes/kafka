@@ -32,6 +32,7 @@ on:
       - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
       - 'core/src/main/scala/kafka/server/AbstractFetcherThread.scala'
       - 'core/src/main/java/kafka/server/builders/LogManagerBuilder.java'
+      - 'core/src/test/scala/unit/kafka/server/AbstractFetcherThreadRecoveredOffsetTest.scala'
       - 'core/src/test/scala/unit/kafka/server/ReplicaFetcherManagerShutdownTest.scala'
       - 'core/src/test/scala/unit/kafka/server/ReplicaFetcherThreadTest.scala'
       - 'core/src/test/scala/unit/kafka/server/ReplicaFetcherThreadRecoveryTest.scala'
@@ -52,6 +53,7 @@ on:
       - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
       - 'core/src/main/scala/kafka/server/AbstractFetcherThread.scala'
       - 'core/src/main/java/kafka/server/builders/LogManagerBuilder.java'
+      - 'core/src/test/scala/unit/kafka/server/AbstractFetcherThreadRecoveredOffsetTest.scala'
       - 'core/src/test/scala/unit/kafka/server/ReplicaFetcherManagerShutdownTest.scala'
       - 'core/src/test/scala/unit/kafka/server/ReplicaFetcherThreadTest.scala'
       - 'core/src/test/scala/unit/kafka/server/ReplicaFetcherThreadRecoveryTest.scala'
@@ -119,6 +121,7 @@ jobs:
             --no-scan
           ./gradlew :core:test \
             --tests 'kafka.server.ReplicaFetcherThreadRecoveryTest' \
+            --tests 'kafka.server.AbstractFetcherThreadRecoveredOffsetTest' \
             --tests 'kafka.server.ReplicaFetcherManagerShutdownTest' \
             --no-scan
 
