@@ -98,7 +98,7 @@ class ReplicaFetcherThreadRecoveryTest {
     val logContext = new LogContext(
       s"[ReplicaFetcher replicaId=${config.brokerId}, leaderId=${brokerEndPoint.id}, fetcherId=0] "
     )
-    val fetchSessionHandler = new FetchSessionHandler(logContext.logPrefix, brokerEndPoint.id)
+    val fetchSessionHandler = new FetchSessionHandler(logContext, brokerEndPoint.id)
     val leader = new RemoteLeaderEndPoint(
       logContext.logPrefix,
       blockingSend,
