@@ -52,6 +52,10 @@ class ReplicaFetcherManager(brokerConfig: KafkaConfig,
   def shutdown(): Unit = {
     info("shutting down")
     closeAllFetchers()
+    // A real broker process restart reconstructs ReplicaManager and therefore starts with an empty failed-partition set.
+    // KafkaClusterTestKit can restart the same BrokerServer instance, so preserve the same lifecycle semantics here and
+    // never let a fenced/storage failure from the previous broker incarnation poison follower assignment after startup.
+    failedPartitions.removeAll(failedPartitions.partitions())
     info("shutdown completed")
   }
 }
