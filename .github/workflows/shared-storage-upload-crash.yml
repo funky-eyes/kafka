@@ -23,20 +23,22 @@ on:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/object/**'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/metadata/**'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/wal/**'
-      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedStorageConfiguration.java'
-      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedStorageWalFactory.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/**'
       - 'storage/shared-storage-s3/src/main/**'
       - 'storage/shared-storage-s3/src/test/java/org/apache/kafka/storage/internals/shared/s3/S3SharedStorageUploadCrashE2ETest.java'
+      - 'core/src/main/scala/kafka/cluster/Partition.scala'
+      - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
       - '.github/workflows/shared-storage-upload-crash.yml'
   pull_request:
     paths:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/object/**'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/metadata/**'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/wal/**'
-      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedStorageConfiguration.java'
-      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedStorageWalFactory.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/**'
       - 'storage/shared-storage-s3/src/main/**'
       - 'storage/shared-storage-s3/src/test/java/org/apache/kafka/storage/internals/shared/s3/S3SharedStorageUploadCrashE2ETest.java'
+      - 'core/src/main/scala/kafka/cluster/Partition.scala'
+      - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
       - '.github/workflows/shared-storage-upload-crash.yml'
   workflow_dispatch:
 
@@ -193,4 +195,4 @@ jobs:
 
       - name: MinIO logs
         if: always()
-        run: docker logs kafka-shared-minio-upload-crash || true
+        run: docker logs kafka-shared-minio-upload-crash-minio || docker logs kafka-shared-minio-upload-crash || true
