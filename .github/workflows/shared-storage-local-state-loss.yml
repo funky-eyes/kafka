@@ -106,20 +106,10 @@ jobs:
 
           fetcher = Path('core/src/main/scala/kafka/server/AbstractFetcherThread.scala')
           text = fetcher.read_text()
-          old = '''      if (requestEpoch.isPresent && requestEpoch.get == currentLeaderEpoch) {
-            info(s"Partition $tp has an older epoch ($currentLeaderEpoch) than the current leader. Will await " +
-              s"the new LeaderAndIsr state before resuming fetching.")
-            markPartitionFailed(tp)
-            false
-          } else {'''
-          new = '''      if (requestEpoch.isPresent && requestEpoch.get == currentLeaderEpoch) {
-            warn(s"RECOVERY_DIAG fenced partition $tp at fetcher epoch $currentLeaderEpoch; " +
-              s"marking it failed until a newer metadata epoch re-adds it")
-            markPartitionFailed(tp)
-            false
-          } else {'''
+          old = '        info(s"Partition $tp has an older epoch ($currentLeaderEpoch) than the current leader. Will await " +'
+          new = '        warn(s"RECOVERY_DIAG fenced partition $tp at fetcher epoch $currentLeaderEpoch; will await " +'
           if text.count(old) != 1:
-              raise SystemExit(f'expected exactly one fenced-partition block, found {text.count(old)}')
+              raise SystemExit(f'expected exactly one fenced-partition log line, found {text.count(old)}')
           fetcher.write_text(text.replace(old, new))
 
           manager = Path('core/src/main/scala/kafka/server/AbstractFetcherManager.scala')
@@ -132,18 +122,11 @@ jobs:
 
           replica_manager = Path('core/src/main/scala/kafka/server/ReplicaManager.scala')
           text = replica_manager.read_text()
-          old = '''          val isNewLeaderEpoch = partition.makeFollower(info.partition, isNew, offsetCheckpoints, Some(info.topicId), partitionAssignedDirectoryId)
-
-          if (isInControlledShutdown && (info.partition.leader == NO_LEADER ||'''
-          new = '''          val isNewLeaderEpoch = partition.makeFollower(info.partition, isNew, offsetCheckpoints, Some(info.topicId), partitionAssignedDirectoryId)
-          stateChangeLogger.warn(s"RECOVERY_DIAG follower metadata $tp leader=${info.partition.leader} " +
-            s"leaderEpoch=${info.partition.leaderEpoch} isNew=$isNew isNewLeaderEpoch=$isNewLeaderEpoch " +
-            s"wasFailed=${replicaFetcherManager.failedPartitions.contains(tp)}")
-
-          if (isInControlledShutdown && (info.partition.leader == NO_LEADER ||'''
-          if text.count(old) != 1:
-              raise SystemExit(f'expected exactly one follower transition block, found {text.count(old)}')
-          replica_manager.write_text(text.replace(old, new))
+          needle = '          val isNewLeaderEpoch = partition.makeFollower(info.partition, isNew, offsetCheckpoints, Some(info.topicId), partitionAssignedDirectoryId)'
+          diagnostic = '          stateChangeLogger.warn(s"RECOVERY_DIAG follower metadata $tp leader=${info.partition.leader} leaderEpoch=${info.partition.leaderEpoch} isNew=$isNew isNewLeaderEpoch=$isNewLeaderEpoch wasFailed=${replicaFetcherManager.failedPartitions.contains(tp)}")'
+          if text.count(needle) != 1:
+              raise SystemExit(f'expected exactly one follower transition line, found {text.count(needle)}')
+          replica_manager.write_text(text.replace(needle, needle + '\n' + diagnostic))
           PY
           git diff --check
           git diff -- \
