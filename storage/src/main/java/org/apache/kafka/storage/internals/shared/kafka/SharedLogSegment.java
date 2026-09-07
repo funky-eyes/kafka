@@ -167,6 +167,15 @@ public final class SharedLogSegment extends LogSegment {
         if (serialized.isEmpty()) {
             return;
         }
+
+        appendToWal(batchesRequiringWal(serialized));
+        materializeLogicalMetadata(serialized);
+        validateLargestOffset(largestOffset);
+    }
+
+    private List<SharedStorageEngine.OwnedDataBatch> batchesRequiringWal(
+        List<KafkaRecordBatchAdapter.SerializedBatch> serialized
+    ) {
         List<SharedStorageEngine.OwnedDataBatch> appendGroup = new ArrayList<>(serialized.size());
         for (KafkaRecordBatchAdapter.SerializedBatch batch : serialized) {
             if (!offsetIndex().canAppendOffset(batch.lastOffset())) {
@@ -177,44 +186,55 @@ public final class SharedLogSegment extends LogSegment {
                     batch.leaderEpoch(), batch.firstOffset(), batch.lastOffset(), batch.bytes()));
             }
         }
+        return appendGroup;
+    }
 
+    private void appendToWal(List<SharedStorageEngine.OwnedDataBatch> appendGroup) throws IOException {
         if (!appendGroup.isEmpty()) {
             await(storage.appendOwnedBatchGroup(partition, appendGroup));
         }
+    }
 
+    private void materializeLogicalMetadata(List<KafkaRecordBatchAdapter.SerializedBatch> serialized) throws IOException {
         int position = logicalSize;
         for (KafkaRecordBatchAdapter.SerializedBatch batch : serialized) {
-            int batchSize = batch.bytes().remaining();
-            BatchMetadata metadata = new BatchMetadata(
-                batch.firstOffset(),
-                batch.lastOffset(),
-                position,
-                batchSize,
-                batch.maxTimestamp(),
-                batch.leaderEpoch()
-            );
-            batches.put(batch.firstOffset(), metadata);
-
-            if (firstBatchTimestamp == RecordBatch.NO_TIMESTAMP) {
-                firstBatchTimestamp = batch.maxTimestamp();
-            }
-            if (batch.maxTimestamp() > maxTimestampAndOffset.timestamp()) {
-                maxTimestampAndOffset = new TimestampOffset(batch.maxTimestamp(), batch.lastOffset());
-            }
-            if (bytesSinceLastIndexEntry > indexIntervalBytes) {
-                offsetIndex().append(batch.lastOffset(), position);
-                timeIndex().maybeAppend(maxTimestampAndOffset.timestamp(), maxTimestampAndOffset.offset());
-                bytesSinceLastIndexEntry = 0;
-            }
-
-            position = Math.addExact(position, batchSize);
-            bytesSinceLastIndexEntry = Math.addExact(bytesSinceLastIndexEntry, batchSize);
-            lastOffset = Math.max(lastOffset, batch.lastOffset());
-            latestLeaderEpoch = Math.max(latestLeaderEpoch, batch.leaderEpoch());
+            position = materializeLogicalBatch(batch, position);
         }
         logicalSize = position;
         lastModifiedMs = time.milliseconds();
+    }
 
+    private int materializeLogicalBatch(KafkaRecordBatchAdapter.SerializedBatch batch, int position) throws IOException {
+        int batchSize = batch.bytes().remaining();
+        BatchMetadata metadata = new BatchMetadata(
+            batch.firstOffset(),
+            batch.lastOffset(),
+            position,
+            batchSize,
+            batch.maxTimestamp(),
+            batch.leaderEpoch()
+        );
+        batches.put(batch.firstOffset(), metadata);
+
+        if (firstBatchTimestamp == RecordBatch.NO_TIMESTAMP) {
+            firstBatchTimestamp = batch.maxTimestamp();
+        }
+        if (batch.maxTimestamp() > maxTimestampAndOffset.timestamp()) {
+            maxTimestampAndOffset = new TimestampOffset(batch.maxTimestamp(), batch.lastOffset());
+        }
+        if (bytesSinceLastIndexEntry > indexIntervalBytes) {
+            offsetIndex().append(batch.lastOffset(), position);
+            timeIndex().maybeAppend(maxTimestampAndOffset.timestamp(), maxTimestampAndOffset.offset());
+            bytesSinceLastIndexEntry = 0;
+        }
+
+        bytesSinceLastIndexEntry = Math.addExact(bytesSinceLastIndexEntry, batchSize);
+        lastOffset = Math.max(lastOffset, batch.lastOffset());
+        latestLeaderEpoch = Math.max(latestLeaderEpoch, batch.leaderEpoch());
+        return Math.addExact(position, batchSize);
+    }
+
+    private void validateLargestOffset(long largestOffset) {
         if (lastOffset != largestOffset) {
             throw new IllegalStateException(
                 "Kafka append largest offset mismatch: expected=" + largestOffset + ", actual=" + lastOffset);
