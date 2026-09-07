@@ -343,6 +343,10 @@ class ReplicaFetcherThreadRecoveryTest {
     val sharedLog = mock(classOf[UnifiedLog])
     when(sharedLog.activeSegment).thenReturn(mock(classOf[SharedLogSegment]))
     when(replicaManager.localLog(sharedPartition)).thenReturn(Some(sharedLog))
+    val sharedPartitionState = mock(classOf[Partition])
+    when(sharedPartitionState.leaderReplicaIdOpt).thenReturn(Some(brokerEndPoint.id))
+    when(sharedPartitionState.getLeaderEpoch).thenReturn(2)
+    when(replicaManager.getPartitionOrException(sharedPartition)).thenReturn(sharedPartitionState)
 
     val regularLog = mock(classOf[UnifiedLog])
     when(regularLog.activeSegment).thenReturn(null)
@@ -360,6 +364,91 @@ class ReplicaFetcherThreadRecoveryTest {
 
     assertTrue(thread.shouldRetryFencedLeaderEpoch(sharedPartition))
     assertFalse(thread.shouldRetryFencedLeaderEpoch(regularPartition))
+  }
+
+  @Test
+  def shouldReseedSharedFollowerLeaderEpochAfterFence(): Unit = {
+    val topicPartition = new TopicPartition("shared-fenced-epoch-reseed", 0)
+    val topicId = Uuid.randomUuid()
+    val staleLeaderEpoch = 1
+    val recoveredLeaderEpoch = 2
+
+    val config = KafkaConfig.fromProps(TestUtils.createBrokerConfig(1))
+    val brokerEndPoint = new BrokerEndPoint(0, "localhost", 1000)
+    val leader = mock(classOf[org.apache.kafka.server.LeaderEndPoint])
+    when(leader.brokerEndPoint()).thenReturn(brokerEndPoint)
+
+    val replicaManager = mock(classOf[ReplicaManager])
+    when(replicaManager.brokerTopicStats).thenReturn(new BrokerTopicStats)
+
+    val sharedLog = mock(classOf[UnifiedLog])
+    when(sharedLog.activeSegment).thenReturn(mock(classOf[SharedLogSegment]))
+    when(replicaManager.localLog(topicPartition)).thenReturn(Some(sharedLog))
+
+    val partition = mock(classOf[Partition])
+    when(partition.leaderReplicaIdOpt).thenReturn(Some(brokerEndPoint.id))
+    when(partition.getLeaderEpoch).thenReturn(recoveredLeaderEpoch)
+    when(replicaManager.getPartitionOrException(topicPartition)).thenReturn(partition)
+
+    val failedPartitions = new FailedPartitions
+    val thread = new ReplicaFetcherThread(
+      "shared-fenced-epoch-reseed-fetcher",
+      leader,
+      config,
+      failedPartitions,
+      replicaManager,
+      UNBOUNDED_QUOTA,
+      "[shared-fenced-epoch-reseed] "
+    )
+    thread.addPartitions(Map(
+      topicPartition -> InitialFetchState(
+        topicId = Some(topicId),
+        leader = brokerEndPoint,
+        initOffset = 160L,
+        currentLeaderEpoch = staleLeaderEpoch
+      )
+    ))
+
+    assertTrue(thread.onPartitionFenced(topicPartition, Optional.of(Int.box(staleLeaderEpoch))))
+
+    val fetchState = thread.fetchState(topicPartition)
+    assertTrue(fetchState.isDefined)
+    assertEquals(160L, fetchState.get.fetchOffset)
+    assertEquals(recoveredLeaderEpoch, fetchState.get.currentLeaderEpoch)
+    assertFalse(failedPartitions.contains(topicPartition))
+  }
+
+  @Test
+  def shouldNotRetrySharedFenceAfterLocalLeaderMoves(): Unit = {
+    val topicPartition = new TopicPartition("shared-fenced-leader-move", 0)
+    val config = KafkaConfig.fromProps(TestUtils.createBrokerConfig(1))
+    val brokerEndPoint = new BrokerEndPoint(0, "localhost", 1000)
+    val leader = mock(classOf[org.apache.kafka.server.LeaderEndPoint])
+    when(leader.brokerEndPoint()).thenReturn(brokerEndPoint)
+
+    val replicaManager = mock(classOf[ReplicaManager])
+    when(replicaManager.brokerTopicStats).thenReturn(new BrokerTopicStats)
+    val sharedLog = mock(classOf[UnifiedLog])
+    when(sharedLog.activeSegment).thenReturn(mock(classOf[SharedLogSegment]))
+    when(replicaManager.localLog(topicPartition)).thenReturn(Some(sharedLog))
+
+    val partition = mock(classOf[Partition])
+    when(partition.leaderReplicaIdOpt).thenReturn(Some(2))
+    when(partition.getLeaderEpoch).thenReturn(2)
+    when(replicaManager.getPartitionOrException(topicPartition)).thenReturn(partition)
+
+    val thread = new ReplicaFetcherThread(
+      "shared-fenced-leader-move-fetcher",
+      leader,
+      config,
+      new FailedPartitions,
+      replicaManager,
+      UNBOUNDED_QUOTA,
+      "[shared-fenced-leader-move] "
+    )
+
+    assertFalse(thread.shouldRetryFencedLeaderEpoch(topicPartition))
+    assertEquals(Optional.empty(), thread.leaderEpochForFencedRetry(topicPartition, 1))
   }
 
 }

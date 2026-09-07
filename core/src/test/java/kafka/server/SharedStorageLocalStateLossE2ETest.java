@@ -339,10 +339,12 @@ public class SharedStorageLocalStateLossE2ETest {
 
     private static TopicDescription waitForTopicState(Admin admin, int expectedIsrSize) throws Exception {
         TopicDescription[] ready = new TopicDescription[1];
+        TopicDescription[] lastObserved = new TopicDescription[1];
         TestUtils.waitForCondition(() -> {
             try {
                 TopicDescription description = admin.describeTopics(List.of(TOPIC))
                     .allTopicNames().get(10, TimeUnit.SECONDS).get(TOPIC);
+                lastObserved[0] = description;
                 if (description == null || description.partitions().size() != PARTITIONS) {
                     return false;
                 }
@@ -357,8 +359,23 @@ public class SharedStorageLocalStateLossE2ETest {
             } catch (Exception ignored) {
                 return false;
             }
-        }, 90_000L, () -> "Topic did not converge to ISR=" + expectedIsrSize);
+        }, 90_000L, () -> "Topic did not converge to ISR=" + expectedIsrSize +
+            "; last observed state: " + topicStateSummary(lastObserved[0]));
         return ready[0];
+    }
+
+    private static String topicStateSummary(TopicDescription description) {
+        if (description == null) {
+            return "unavailable";
+        }
+        return description.partitions().stream()
+            .map(partition -> "p=" + partition.partition() +
+                " leader=" + (partition.leader() == null ? -1 : partition.leader().id()) +
+                " replicas=" + partition.replicas().stream().map(node -> Integer.toString(node.id()))
+                    .collect(Collectors.joining(",", "[", "]")) +
+                " isr=" + partition.isr().stream().map(node -> Integer.toString(node.id()))
+                    .collect(Collectors.joining(",", "[", "]")))
+            .collect(Collectors.joining("; "));
     }
 
     private static TopicDescription waitForPreferredLeaders(Admin admin) throws Exception {

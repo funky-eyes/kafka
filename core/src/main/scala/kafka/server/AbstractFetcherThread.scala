@@ -308,18 +308,43 @@ abstract class AbstractFetcherThread(name: String,
   protected[server] def shouldRetryFencedLeaderEpoch(topicPartition: TopicPartition): Boolean = false
 
   /**
+   * Return a locally-authoritative leader epoch that is newer than the fetcher's stale epoch, if one is available.
+   * The default is empty so existing Kafka fetchers never self-advance their leader epoch.
+   */
+  protected[server] def leaderEpochForFencedRetry(topicPartition: TopicPartition,
+                                                   currentLeaderEpoch: Int): Optional[Integer] =
+    Optional.empty()
+
+  /**
    * remove the partition if the partition state is NOT updated. Otherwise, keep the partition active.
    *
    * @return true if the epoch in this thread is updated. otherwise, false
    */
-  private def onPartitionFenced(tp: TopicPartition, requestEpoch: Optional[Integer]): Boolean =
+  private[server] def onPartitionFenced(tp: TopicPartition, requestEpoch: Optional[Integer]): Boolean =
     LockUtils.inLock(partitionMapLock, () => {
     Option(partitionStates.stateValue(tp)).exists { currentFetchState =>
       val currentLeaderEpoch = currentFetchState.currentLeaderEpoch
       if (requestEpoch.isPresent && requestEpoch.get == currentLeaderEpoch) {
         if (shouldRetryFencedLeaderEpoch(tp)) {
-          info(s"Partition $tp has an older epoch ($currentLeaderEpoch) than the current leader while local recovery " +
-            s"metadata is converging. Backing off and retrying instead of permanently failing the partition.")
+          val recoveredLeaderEpoch = leaderEpochForFencedRetry(tp, currentLeaderEpoch)
+          if (recoveredLeaderEpoch.isPresent && recoveredLeaderEpoch.get > currentLeaderEpoch) {
+            val updatedFetchState = new PartitionFetchState(
+              currentFetchState.topicId,
+              currentFetchState.fetchOffset,
+              currentFetchState.lag,
+              recoveredLeaderEpoch.get,
+              currentFetchState.delay,
+              currentFetchState.state,
+              currentFetchState.lastFetchedEpoch,
+              currentFetchState.dueMs
+            )
+            partitionStates.updateAndMoveToEnd(tp, updatedFetchState)
+            info(s"Partition $tp was fenced at stale leader epoch $currentLeaderEpoch while local recovery metadata " +
+              s"already knows leader epoch ${recoveredLeaderEpoch.get}. Re-seeding the fetch state and retrying.")
+          } else {
+            info(s"Partition $tp has an older epoch ($currentLeaderEpoch) than the current leader while local recovery " +
+              s"metadata is converging. Backing off until a newer local leader epoch is available.")
+          }
           true
         } else {
           info(s"Partition $tp has an older epoch ($currentLeaderEpoch) than the current leader. Will await " +

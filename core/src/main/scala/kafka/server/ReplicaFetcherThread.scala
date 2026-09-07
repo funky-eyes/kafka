@@ -82,8 +82,35 @@ class ReplicaFetcherThread(name: String,
     }
   }
 
+  private def sharedPartitionForCurrentFetcherLeader(
+    topicPartition: TopicPartition
+  ): Option[kafka.cluster.Partition] = {
+    if (!replicaMgr.localLog(topicPartition).exists(_.activeSegment.isInstanceOf[SharedLogSegment])) {
+      None
+    } else {
+      try {
+        val partition = replicaMgr.getPartitionOrException(topicPartition)
+        if (partition.leaderReplicaIdOpt.contains(leader.brokerEndPoint().id)) Some(partition) else None
+      } catch {
+        case _: org.apache.kafka.common.KafkaException => None
+      }
+    }
+  }
+
   override protected[server] def shouldRetryFencedLeaderEpoch(topicPartition: TopicPartition): Boolean =
-    replicaMgr.localLog(topicPartition).exists(_.activeSegment.isInstanceOf[SharedLogSegment])
+    sharedPartitionForCurrentFetcherLeader(topicPartition).nonEmpty
+
+  override protected[server] def leaderEpochForFencedRetry(
+    topicPartition: TopicPartition,
+    currentLeaderEpoch: Int
+  ): Optional[Integer] = {
+    sharedPartitionForCurrentFetcherLeader(topicPartition) match {
+      case Some(partition) if partition.getLeaderEpoch > currentLeaderEpoch =>
+        Optional.of(Int.box(partition.getLeaderEpoch))
+      case _ =>
+        Optional.empty()
+    }
+  }
 
   override protected[server] def shouldFetchFromLastTieredOffset(topicPartition: TopicPartition, leaderEndOffset: Long, replicaEndOffset: Long): Boolean = {
     val isCompactTopic = replicaMgr.localLog(topicPartition).exists(_.config.compact)
