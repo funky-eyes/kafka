@@ -1,0 +1,75 @@
+name: One-shot shared fetcher gate coverage
+
+on:
+  push:
+    branches:
+      - shared-wal-s3-4.3.1
+    paths:
+      - .github/workflows/one-shot-shared-fetcher-gate-coverage.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: shared-wal-s3-4.3.1
+
+      - name: Cover AbstractFetcherThread in shared-storage correctness gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch='shared-wal-s3-4.3.1'
+          base='8afabab5bd0364fde35359da7d6cf655259aff74'
+          workflow='.github/workflows/one-shot-shared-fetcher-gate-coverage.yml'
+          git fetch origin "$branch"
+          current="$(git rev-parse "origin/$branch")"
+
+          unexpected="$(git diff --name-only "$base" "$current" | grep -v -x "$workflow" || true)"
+          if [ -n "$unexpected" ]; then
+            echo 'Branch changed outside the temporary workflow; refusing to rewrite:'
+            printf '%s\n' "$unexpected"
+            exit 1
+          fi
+
+          git checkout --detach "$base"
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          replica = "      - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'"
+          abstract = "      - 'core/src/main/scala/kafka/server/AbstractFetcherThread.scala'"
+          changed = []
+          for path in sorted(Path('.github/workflows').glob('shared-storage*.yml')):
+              text = path.read_text()
+              if replica not in text or abstract in text:
+                  continue
+              text = text.replace(replica, replica + '\n' + abstract)
+              path.write_text(text)
+              changed.append(str(path))
+
+          if not changed:
+              raise SystemExit('no shared-storage correctness workflow needed AbstractFetcherThread coverage')
+          print('Patched workflows:')
+          print('\n'.join(changed))
+          PY
+
+          git diff --check
+          git diff --name-only
+          git add .github/workflows/shared-storage*.yml
+          git -c user.name='Jianbin Chen' -c user.email='jianbin@apache.org' commit \
+            -m 'CI: cover shared follower fetcher changes in correctness gates'
+
+          git fetch origin "$branch"
+          lease="$(git rev-parse "origin/$branch")"
+          unexpected="$(git diff --name-only "$base" "$lease" | grep -v -x "$workflow" || true)"
+          if [ -n "$unexpected" ]; then
+            echo 'Branch changed while patching; refusing to overwrite:'
+            printf '%s\n' "$unexpected"
+            exit 1
+          fi
+          git push origin "HEAD:refs/heads/$branch" --force-with-lease="refs/heads/$branch:$lease"
