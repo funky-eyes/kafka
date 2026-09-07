@@ -28,9 +28,11 @@ on:
       - 'core/src/main/scala/kafka/log/LogManager.scala'
       - 'core/src/main/scala/kafka/server/BrokerServer.scala'
       - 'core/src/main/scala/kafka/server/ReplicaManager.scala'
+      - 'core/src/main/scala/kafka/server/ReplicaFetcherManager.scala'
       - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
       - 'core/src/main/scala/kafka/server/AbstractFetcherThread.scala'
       - 'core/src/main/java/kafka/server/builders/LogManagerBuilder.java'
+      - 'core/src/test/scala/unit/kafka/server/ReplicaFetcherManagerShutdownTest.scala'
       - 'core/src/test/scala/unit/kafka/server/ReplicaFetcherThreadTest.scala'
       - 'core/src/test/scala/unit/kafka/server/ReplicaFetcherThreadRecoveryTest.scala'
       - 'core/src/test/java/kafka/server/SharedStorageLocalStateLossE2ETest.java'
@@ -46,9 +48,11 @@ on:
       - 'core/src/main/scala/kafka/log/LogManager.scala'
       - 'core/src/main/scala/kafka/server/BrokerServer.scala'
       - 'core/src/main/scala/kafka/server/ReplicaManager.scala'
+      - 'core/src/main/scala/kafka/server/ReplicaFetcherManager.scala'
       - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
       - 'core/src/main/scala/kafka/server/AbstractFetcherThread.scala'
       - 'core/src/main/java/kafka/server/builders/LogManagerBuilder.java'
+      - 'core/src/test/scala/unit/kafka/server/ReplicaFetcherManagerShutdownTest.scala'
       - 'core/src/test/scala/unit/kafka/server/ReplicaFetcherThreadTest.scala'
       - 'core/src/test/scala/unit/kafka/server/ReplicaFetcherThreadRecoveryTest.scala'
       - 'core/src/test/java/kafka/server/SharedStorageLocalStateLossE2ETest.java'
@@ -115,6 +119,7 @@ jobs:
             --no-scan
           ./gradlew :core:test \
             --tests 'kafka.server.ReplicaFetcherThreadRecoveryTest' \
+            --tests 'kafka.server.ReplicaFetcherManagerShutdownTest' \
             --no-scan
 
       - name: Delete all broker shared state and recover from remote truth
