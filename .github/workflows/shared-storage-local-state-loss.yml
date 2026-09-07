@@ -22,6 +22,7 @@ on:
     paths:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/**'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/log/**'
+      - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/kafka/SharedLogSegmentRemoteRecoveryTest.java'
       - 'storage/shared-storage-s3/**'
       - 'core/src/main/scala/kafka/cluster/Partition.scala'
       - 'core/src/main/scala/kafka/log/LogManager.scala'
@@ -35,6 +36,7 @@ on:
     paths:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/**'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/log/**'
+      - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/kafka/SharedLogSegmentRemoteRecoveryTest.java'
       - 'storage/shared-storage-s3/**'
       - 'core/src/main/scala/kafka/cluster/Partition.scala'
       - 'core/src/main/scala/kafka/log/LogManager.scala'
@@ -98,41 +100,11 @@ jobs:
           java-version: 25
           gradle-cache-read-only: true
 
-      - name: Instrument fenced-epoch recovery
-        shell: bash
+      - name: Verify remote recovery WAL bypass invariants
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          fetcher = Path('core/src/main/scala/kafka/server/AbstractFetcherThread.scala')
-          text = fetcher.read_text()
-          old = '        info(s"Partition $tp has an older epoch ($currentLeaderEpoch) than the current leader. Will await " +'
-          new = '        warn(s"RECOVERY_DIAG fenced partition $tp at fetcher epoch $currentLeaderEpoch; will await " +'
-          if text.count(old) != 1:
-              raise SystemExit(f'expected exactly one fenced-partition log line, found {text.count(old)}')
-          fetcher.write_text(text.replace(old, new))
-
-          manager = Path('core/src/main/scala/kafka/server/AbstractFetcherManager.scala')
-          text = manager.read_text()
-          old = '    info(s"Added fetcher to broker ${fetcherThread.leader.brokerEndPoint().id} for partitions $initialOffsetAndEpochs")'
-          new = '    warn(s"RECOVERY_DIAG added fetcher to broker ${fetcherThread.leader.brokerEndPoint().id} for partitions $initialOffsetAndEpochs")'
-          if text.count(old) != 1:
-              raise SystemExit(f'expected exactly one add-fetcher log, found {text.count(old)}')
-          manager.write_text(text.replace(old, new))
-
-          replica_manager = Path('core/src/main/scala/kafka/server/ReplicaManager.scala')
-          text = replica_manager.read_text()
-          needle = '          val isNewLeaderEpoch = partition.makeFollower(info.partition, isNew, offsetCheckpoints, Some(info.topicId), partitionAssignedDirectoryId)'
-          diagnostic = '          stateChangeLogger.warn(s"RECOVERY_DIAG follower metadata $tp leader=${info.partition.leader} leaderEpoch=${info.partition.leaderEpoch} isNew=$isNew isNewLeaderEpoch=$isNewLeaderEpoch wasFailed=${replicaFetcherManager.failedPartitions.contains(tp)}")'
-          if text.count(needle) != 1:
-              raise SystemExit(f'expected exactly one follower transition line, found {text.count(needle)}')
-          replica_manager.write_text(text.replace(needle, needle + '\n' + diagnostic))
-          PY
-          git diff --check
-          git diff -- \
-            core/src/main/scala/kafka/server/AbstractFetcherThread.scala \
-            core/src/main/scala/kafka/server/AbstractFetcherManager.scala \
-            core/src/main/scala/kafka/server/ReplicaManager.scala
+          ./gradlew :storage:test \
+            --tests 'org.apache.kafka.storage.internals.shared.kafka.SharedLogSegmentRemoteRecoveryTest' \
+            --no-scan
 
       - name: Delete all broker shared state and recover from remote truth
         shell: bash
@@ -175,6 +147,8 @@ jobs:
             core/build/reports/testOutput
             core/build/reports/tests/test
             core/build/test-results/test
+            storage/build/reports/tests/test
+            storage/build/test-results/test
           if-no-files-found: ignore
           retention-days: 7
 
