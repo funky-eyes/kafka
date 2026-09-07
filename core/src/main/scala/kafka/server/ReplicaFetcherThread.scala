@@ -18,10 +18,11 @@
 package kafka.server
 
 import org.apache.kafka.common.TopicPartition
+import org.apache.kafka.common.errors.InvalidOffsetException
 import org.apache.kafka.common.requests.FetchResponse
 import org.apache.kafka.server.common.OffsetAndEpoch
 import org.apache.kafka.server.storage.log.UnexpectedAppendOffsetException
-import org.apache.kafka.storage.internals.log.{LogAppendInfo, LogStartOffsetIncrementReason}
+import org.apache.kafka.storage.internals.log.{LogAppendInfo, LogStartOffsetIncrementReason, UnifiedLog}
 import org.apache.kafka.storage.internals.shared.kafka.SharedLogSegment
 import org.apache.kafka.server.LeaderEndPoint
 
@@ -184,28 +185,19 @@ class ReplicaFetcherThread(name: String,
         .format(log.logEndOffset, topicPartition, records.sizeInBytes, partitionData.highWatermark))
 
     // Append the leader's messages to the log. SharedUnifiedLog serializes this full append critical section against
-    // remote recovery. If recovery won the race after the pre-checks above, UnifiedLog will now reject this response as
-    // stale against the newly published LEO; re-seed instead of letting AbstractFetcherThread fail the partition.
+    // remote recovery. If recovery wins after the pre-checks above, the stale response may be rejected either by
+    // UnifiedLog's offset validation or by the shared segment's monotonic offset index. Only suppress either exception
+    // when a catch-time re-read proves that recovery advanced the shared log after the pre-check.
     val logAppendInfo = try {
       partition.appendRecordsToFollowerOrFutureReplica(records, isFuture = false, partitionLeaderEpoch)
     } catch {
       case e: UnexpectedAppendOffsetException =>
-        val recoveredLogEndOffset = log.logEndOffset
-        if (fetchOffset < recoveredLogEndOffset && log.activeSegment.isInstanceOf[SharedLogSegment]) {
-          val topicId = if (log.topicId().isPresent) Some(log.topicId().get()) else None
-          removePartitions(Set(topicPartition))
-          addPartitions(Map(
-            topicPartition -> InitialFetchState(
-              topicId,
-              leader.brokerEndPoint(),
-              partitionLeaderEpoch,
-              recoveredLogEndOffset
-            )
-          ))
-          info(s"Shared-storage recovery completed while appending a fetch response for $topicPartition; " +
-            s"discarding stale fetch offset $fetchOffset and resuming from recovered LEO $recoveredLogEndOffset")
+        if (handleSharedStorageRecoveryRace(topicPartition, fetchOffset, partitionLeaderEpoch, log, e.getClass.getSimpleName))
           return None
-        }
+        throw e
+      case e: InvalidOffsetException =>
+        if (handleSharedStorageRecoveryRace(topicPartition, fetchOffset, partitionLeaderEpoch, log, e.getClass.getSimpleName))
+          return None
         throw e
     }
 
@@ -238,6 +230,51 @@ class ReplicaFetcherThread(name: String,
     brokerTopicStats.updateReplicationBytesIn(records.sizeInBytes)
 
     logAppendInfo
+  }
+
+  private def handleSharedStorageRecoveryRace(
+    topicPartition: TopicPartition,
+    fetchOffset: Long,
+    partitionLeaderEpoch: Int,
+    log: UnifiedLog,
+    rejectedBy: String
+  ): Boolean = {
+    log.activeSegment match {
+      case sharedSegment: SharedLogSegment =>
+        // Re-read after the append failure. A recovery which has already published the Kafka-visible LEO can safely
+        // re-seed the follower there. This is the strongest proof and keeps fetch state atomic with the recovered log.
+        val recoveredLogEndOffset = log.logEndOffset
+        if (fetchOffset < recoveredLogEndOffset) {
+          val topicId = if (log.topicId().isPresent) Some(log.topicId().get()) else None
+          removePartitions(Set(topicPartition))
+          addPartitions(Map(
+            topicPartition -> InitialFetchState(
+              topicId,
+              leader.brokerEndPoint(),
+              partitionLeaderEpoch,
+              recoveredLogEndOffset
+            )
+          ))
+          info(s"Shared-storage recovery completed while appending a fetch response for $topicPartition; " +
+            s"$rejectedBy rejected stale fetch offset $fetchOffset, resuming from recovered LEO $recoveredLogEndOffset")
+          true
+        } else {
+          // Metadata replay materializes the shared batch/index view before publishing the recovered LEO. If the append
+          // failed in precisely that window, do not invent a Kafka-visible LEO or advance the fetch cursor. The remote
+          // materialized end still proves this response is stale, so discard it and let the next fetch iteration observe
+          // the published LEO. If neither re-read proves recovery advanced, the original exception must escape.
+          val materializedEndOffset = sharedSegment.readNextOffset()
+          if (fetchOffset < materializedEndOffset && materializedEndOffset > recoveredLogEndOffset) {
+            info(s"Shared-storage recovery materialized $topicPartition through offset $materializedEndOffset while " +
+              s"$rejectedBy rejected stale fetch offset $fetchOffset before recovered LEO publication; discarding the response")
+            true
+          } else {
+            false
+          }
+        }
+      case _ =>
+        false
+    }
   }
 
   private def completeDelayedFetchRequests(): Unit = {
