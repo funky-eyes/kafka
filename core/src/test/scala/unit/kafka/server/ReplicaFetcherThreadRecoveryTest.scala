@@ -80,6 +80,7 @@ class ReplicaFetcherThreadRecoveryTest {
     val partition = mock(classOf[Partition])
     when(partition.localLogOrException).thenReturn(log)
     when(replicaManager.getPartitionOrException(topicPartition)).thenReturn(partition)
+    when(replicaManager.localLogOrException(topicPartition)).thenReturn(log)
 
     val records = MemoryRecords.withRecords(
       Compression.NONE,
