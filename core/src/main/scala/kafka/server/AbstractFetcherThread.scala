@@ -35,6 +35,7 @@ import org.apache.kafka.server.log.remote.storage.RetriableRemoteStorageExceptio
 import org.apache.kafka.server.metrics.KafkaMetricsGroup
 import org.apache.kafka.server.util.{LockUtils, ShutdownableThread}
 import org.apache.kafka.storage.internals.log.LogAppendInfo
+import org.apache.kafka.storage.internals.shared.wal.WalCapacityExceededException
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats
 
 import java.nio.ByteBuffer
@@ -411,6 +412,10 @@ abstract class AbstractFetcherThread(name: String,
                       //    can cause this), we simply continue and should get fixed in the subsequent fetches
                       error(s"Found invalid messages during fetch for partition $topicPartition " +
                         s"offset ${currentFetchState.fetchOffset}", ime)
+                      partitionsWithError += topicPartition
+                    case e: WalCapacityExceededException =>
+                      warn(s"Shared WAL capacity backpressure while processing data for partition $topicPartition " +
+                        s"at offset ${currentFetchState.fetchOffset}; backing off instead of failing the partition: ${e.getMessage}")
                       partitionsWithError += topicPartition
                     case e: KafkaStorageException =>
                       error(s"Error while processing data for partition $topicPartition " +
