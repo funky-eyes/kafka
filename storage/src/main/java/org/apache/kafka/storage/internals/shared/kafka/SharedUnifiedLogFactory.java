@@ -38,7 +38,6 @@ import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -142,7 +141,7 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
             context.logDirFailureChannel(),
             segmentFactory
         );
-        UnifiedLog log = new UnifiedLog(
+        SharedUnifiedLog log = new SharedUnifiedLog(
             offsets.logStartOffset(),
             localLog,
             context.brokerTopicStats(),
@@ -172,24 +171,19 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
      *
      * <p>Broker startup is deliberately allowed to complete while the RF&gt;1 metadata topic is unavailable so brokers
      * can be started sequentially. If the broker-local shared WAL and remote checkpoint were both lost, LogLoader can
-     * therefore initially see an empty shared segment. Once metadata replay completes, first build a recovery plan for
-     * every affected partition without mutating Kafka-visible offsets. A second pass reopens the logical segments against
-     * the populated remote index and rebuilds Kafka's producer and leader-epoch compatibility state before publishing the
-     * reconstructed LEO/high watermark. This prevents a replica from joining ISR or becoming leader with an offset that
-     * its {@link SharedLogSegment} read view cannot yet serve.</p>
+     * therefore initially see an empty shared segment. Once metadata replay completes, remote recovery is serialized
+     * against the complete leader/follower append critical section: rebuild the logical segment view, rebuild Kafka's
+     * producer and leader-epoch compatibility state, then publish the reconstructed LEO/high watermark before allowing
+     * appends to resume. This prevents an in-flight fetch that was issued from the pre-recovery LEO from appending into
+     * an already-rebuilt offset index.</p>
      */
     public void reconcileRemoteStateAfterMetadataReplay() throws IOException {
-        List<RemoteRecovery> recoveries = new ArrayList<>();
-
-        // Phase 1 is metadata-only and intentionally does not publish the recovered LEO. Publishing an LEO before
-        // SharedLogSegment has materialized its remote batch/index view can let Kafka admit the replica to ISR and elect
-        // it leader while historical reads are still incomplete. Follower WAL-capacity pressure is retryable during this
-        // window; after phase 2 publishes the rebuilt LEO, ReplicaFetcherThread re-seeds any stale fetch cursor.
         for (LoadedSharedLog loaded : loadedLogs.values()) {
             if (!Files.isDirectory(loaded.localLog().dir().toPath())) {
                 continue;
             }
-            synchronized (loaded) {
+
+            loaded.log().withRemoteRecoveryFence(() -> {
                 long logStartOffset = loaded.log().logStartOffset();
                 long committedEnd = storage.remoteIndex()
                     .coverage(loaded.partition())
@@ -197,35 +191,28 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
                 long currentEnd = loaded.localLog().logEndOffset();
                 long materializedEnd = loaded.localLog().segments().activeSegment().readNextOffset();
                 if (committedEnd <= currentEnd && committedEnd <= materializedEnd) {
-                    continue;
+                    return null;
                 }
 
-                recoveries.add(new RemoteRecovery(loaded, logStartOffset, committedEnd));
-            }
-        }
-
-        // Phase 2 may read many remote batches. Publish the LEO only after the segment read view is complete.
-        for (RemoteRecovery recovery : recoveries) {
-            LoadedSharedLog loaded = recovery.loaded();
-            synchronized (loaded) {
                 long recoveredEnd = reopenSegmentsFromSharedStorage(loaded);
-                if (recoveredEnd < recovery.committedEnd()) {
+                if (recoveredEnd < committedEnd) {
                     throw new IOException(
-                        "Shared remote metadata covers through offset " + recovery.committedEnd() +
+                        "Shared remote metadata covers through offset " + committedEnd +
                             " but reconstructed log " + loaded.log().topicPartition() +
                             " ends at " + recoveredEnd);
                 }
 
-                rebuildKafkaCompatibilityState(loaded, recovery.logStartOffset());
-                // A legitimate append may have advanced the logical end while remote state was being rebuilt. Reopening
-                // reads both remote objects and the surviving WAL, so never move the cached LEO backwards when publishing.
+                rebuildKafkaCompatibilityState(loaded, logStartOffset);
+                // Reopening reads both remote objects and any surviving WAL. Publish the Kafka-visible LEO only after
+                // the complete shared read view and compatibility state are rebuilt while appends remain fenced out.
                 loaded.localLog().updateLogEndOffset(
                     Math.max(loaded.localLog().logEndOffset(), recoveredEnd)
                 );
-                if (loaded.log().highWatermark() < recovery.committedEnd()) {
-                    loaded.log().updateHighWatermark(recovery.committedEnd());
+                if (loaded.log().highWatermark() < committedEnd) {
+                    loaded.log().updateHighWatermark(committedEnd);
                 }
-            }
+                return null;
+            });
         }
     }
 
@@ -314,14 +301,7 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
     private record LoadedSharedLog(
         SharedPartitionId partition,
         SharedLocalLog localLog,
-        UnifiedLog log
-    ) {
-    }
-
-    private record RemoteRecovery(
-        LoadedSharedLog loaded,
-        long logStartOffset,
-        long committedEnd
+        SharedUnifiedLog log
     ) {
     }
 }

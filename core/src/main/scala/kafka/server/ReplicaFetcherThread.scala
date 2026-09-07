@@ -20,6 +20,7 @@ package kafka.server
 import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.requests.FetchResponse
 import org.apache.kafka.server.common.OffsetAndEpoch
+import org.apache.kafka.server.storage.log.UnexpectedAppendOffsetException
 import org.apache.kafka.storage.internals.log.{LogAppendInfo, LogStartOffsetIncrementReason}
 import org.apache.kafka.storage.internals.shared.kafka.SharedLogSegment
 import org.apache.kafka.server.LeaderEndPoint
@@ -182,8 +183,31 @@ class ReplicaFetcherThread(name: String,
       trace("Follower has replica log end offset %d for partition %s. Received %d bytes of messages and leader hw %d"
         .format(log.logEndOffset, topicPartition, records.sizeInBytes, partitionData.highWatermark))
 
-    // Append the leader's messages to the log
-    val logAppendInfo = partition.appendRecordsToFollowerOrFutureReplica(records, isFuture = false, partitionLeaderEpoch)
+    // Append the leader's messages to the log. SharedUnifiedLog serializes this full append critical section against
+    // remote recovery. If recovery won the race after the pre-checks above, UnifiedLog will now reject this response as
+    // stale against the newly published LEO; re-seed instead of letting AbstractFetcherThread fail the partition.
+    val logAppendInfo = try {
+      partition.appendRecordsToFollowerOrFutureReplica(records, isFuture = false, partitionLeaderEpoch)
+    } catch {
+      case e: UnexpectedAppendOffsetException =>
+        val recoveredLogEndOffset = log.logEndOffset
+        if (fetchOffset < recoveredLogEndOffset && log.activeSegment.isInstanceOf[SharedLogSegment]) {
+          val topicId = if (log.topicId().isPresent) Some(log.topicId().get()) else None
+          removePartitions(Set(topicPartition))
+          addPartitions(Map(
+            topicPartition -> InitialFetchState(
+              topicId,
+              leader.brokerEndPoint(),
+              partitionLeaderEpoch,
+              recoveredLogEndOffset
+            )
+          ))
+          info(s"Shared-storage recovery completed while appending a fetch response for $topicPartition; " +
+            s"discarding stale fetch offset $fetchOffset and resuming from recovered LEO $recoveredLogEndOffset")
+          return None
+        }
+        throw e
+    }
 
     if (logTrace)
       trace("Follower has replica log end offset %d after appending %d bytes of messages for partition %s"
