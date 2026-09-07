@@ -19,7 +19,6 @@ package org.apache.kafka.storage.internals.shared.kafka;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.record.internal.MemoryRecords;
 import org.apache.kafka.server.common.RequestLocal;
-import org.apache.kafka.server.common.TransactionVersion;
 import org.apache.kafka.storage.internals.epoch.LeaderEpochFileCache;
 import org.apache.kafka.storage.internals.log.AppendOrigin;
 import org.apache.kafka.storage.internals.log.LogAppendInfo;
