@@ -129,6 +129,9 @@ jobs:
             --tests 'kafka.server.AbstractFetcherThreadTest.testFencedTruncation' \
             --no-scan
 
+      - name: Enable local-state-loss state-machine diagnostics
+        run: sed -i 's/level: WARN/level: INFO/g' core/src/test/resources/log4j2.yaml
+
       - name: Delete all broker shared state and recover from remote truth
         shell: bash
         env:
