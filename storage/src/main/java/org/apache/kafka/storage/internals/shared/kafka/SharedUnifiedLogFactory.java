@@ -191,6 +191,7 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
                 long currentEnd = loaded.localLog().logEndOffset();
                 long materializedEnd = loaded.localLog().segments().activeSegment().readNextOffset();
                 if (committedEnd <= currentEnd && committedEnd <= materializedEnd) {
+                    loaded.log().installRemoteCommittedHighWatermarkFloor(committedEnd);
                     return null;
                 }
 
@@ -208,9 +209,7 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
                 loaded.localLog().updateLogEndOffset(
                     Math.max(loaded.localLog().logEndOffset(), recoveredEnd)
                 );
-                if (loaded.log().highWatermark() < committedEnd) {
-                    loaded.log().updateHighWatermark(committedEnd);
-                }
+                loaded.log().installRemoteCommittedHighWatermarkFloor(committedEnd);
                 return null;
             });
         }
