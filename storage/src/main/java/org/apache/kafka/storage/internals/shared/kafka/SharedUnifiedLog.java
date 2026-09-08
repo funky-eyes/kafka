@@ -47,6 +47,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  */
 public final class SharedUnifiedLog extends UnifiedLog {
     private final ReentrantReadWriteLock remoteRecoveryFence = new ReentrantReadWriteLock();
+    private volatile long remoteCommittedHighWatermarkFloor;
 
     public SharedUnifiedLog(
         long logStartOffset,
@@ -104,6 +105,42 @@ public final class SharedUnifiedLog extends UnifiedLog {
         } finally {
             remoteRecoveryFence.readLock().unlock();
         }
+    }
+
+    /**
+     * Kafka's broker-local high-watermark checkpoint can lag remote metadata replay during startup. Once a remote
+     * object is committed, its records were selected strictly below Kafka's high watermark and therefore form a
+     * durable committed prefix. Do not allow a later stale local checkpoint to move the shared log below that prefix.
+     */
+    @Override
+    public long updateHighWatermark(long highWatermark) throws IOException {
+        return super.updateHighWatermark(applyRemoteCommittedHighWatermarkFloor(highWatermark));
+    }
+
+    /**
+     * Followers can receive an older leader high watermark while their shared metadata view is converging. Preserve the
+     * same remote-committed floor here without changing the behavior of ordinary Kafka logs.
+     */
+    @Override
+    public Optional<Long> maybeUpdateHighWatermark(long highWatermark) throws IOException {
+        return super.maybeUpdateHighWatermark(applyRemoteCommittedHighWatermarkFloor(highWatermark));
+    }
+
+    public long installRemoteCommittedHighWatermarkFloor(long highWatermark) throws IOException {
+        if (highWatermark < 0) {
+            throw new IllegalArgumentException("remote committed high watermark must be non-negative");
+        }
+        remoteRecoveryFence.writeLock().lock();
+        try {
+            remoteCommittedHighWatermarkFloor = Math.max(remoteCommittedHighWatermarkFloor, highWatermark);
+            return super.updateHighWatermark(remoteCommittedHighWatermarkFloor);
+        } finally {
+            remoteRecoveryFence.writeLock().unlock();
+        }
+    }
+
+    long applyRemoteCommittedHighWatermarkFloor(long highWatermark) {
+        return Math.max(highWatermark, remoteCommittedHighWatermarkFloor);
     }
 
     public <T> T withRemoteRecoveryFence(StorageAction<T, IOException> action) throws IOException {
