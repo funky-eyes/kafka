@@ -126,6 +126,11 @@ public final class SharedUnifiedLog extends UnifiedLog {
         return super.maybeUpdateHighWatermark(applyRemoteCommittedHighWatermarkFloor(highWatermark));
     }
 
+    /**
+     * Installs a durable remote lower bound without treating that lower bound as a replacement for Kafka's live high
+     * watermark. The effective value is monotonic with respect to both the current Kafka HW and the remote committed
+     * prefix: metadata replay may raise an older local checkpoint, but it must never lower an already-established HW.
+     */
     public long installRemoteCommittedHighWatermarkFloor(long highWatermark) throws IOException {
         if (highWatermark < 0) {
             throw new IllegalArgumentException("remote committed high watermark must be non-negative");
@@ -133,9 +138,6 @@ public final class SharedUnifiedLog extends UnifiedLog {
         remoteRecoveryFence.writeLock().lock();
         try {
             remoteCommittedHighWatermarkFloor = Math.max(remoteCommittedHighWatermarkFloor, highWatermark);
-            // Installing a remote durability floor must never move Kafka's already-established HW backwards. This is
-            // especially important on first metadata replay, where the remote committed prefix is commonly still zero
-            // while the live replica set has already acknowledged records above zero.
             return super.updateHighWatermark(effectiveInstalledHighWatermark(
                 highWatermark(),
                 remoteCommittedHighWatermarkFloor
