@@ -69,7 +69,7 @@ permissions:
 
 concurrency:
   group: shared-storage-local-state-loss-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   local-state-loss-recovery:
@@ -129,9 +129,18 @@ jobs:
             --tests 'kafka.server.AbstractFetcherThreadTest.testFencedTruncation' \
             --no-scan
 
-      - name: Enable local-state-loss state-machine diagnostics
+      - name: Enable focused local-state-loss state-machine diagnostics
         run: |
-          sed -i 's/level: WARN/level: INFO/g' core/src/test/resources/log4j2.yaml
+          cat >> core/src/test/resources/log4j2.yaml <<'EOF'
+      - name: kafka.server.ReplicaFetcherThread
+        level: INFO
+      - name: kafka.server.AbstractFetcherThread
+        level: INFO
+      - name: state.change.logger
+        level: INFO
+      - name: org.apache.kafka.storage.internals.shared
+        level: INFO
+          EOF
 
       - name: Delete all broker shared state and recover from remote truth
         shell: bash
