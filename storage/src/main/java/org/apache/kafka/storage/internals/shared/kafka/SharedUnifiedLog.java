@@ -136,10 +136,17 @@ public final class SharedUnifiedLog extends UnifiedLog {
             // Installing a remote durability floor must never move Kafka's already-established HW backwards. This is
             // especially important on first metadata replay, where the remote committed prefix is commonly still zero
             // while the live replica set has already acknowledged records above zero.
-            return super.updateHighWatermark(Math.max(highWatermark(), remoteCommittedHighWatermarkFloor));
+            return super.updateHighWatermark(effectiveInstalledHighWatermark(
+                highWatermark(),
+                remoteCommittedHighWatermarkFloor
+            ));
         } finally {
             remoteRecoveryFence.writeLock().unlock();
         }
+    }
+
+    static long effectiveInstalledHighWatermark(long currentHighWatermark, long remoteCommittedFloor) {
+        return Math.max(currentHighWatermark, remoteCommittedFloor);
     }
 
     long applyRemoteCommittedHighWatermarkFloor(long highWatermark) {
