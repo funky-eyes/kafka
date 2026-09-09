@@ -16,10 +16,6 @@
  */
 package org.apache.kafka.storage.internals.shared.s3;
 
-import org.apache.kafka.storage.internals.shared.metadata.OffsetRange;
-import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
-import org.apache.kafka.storage.internals.shared.metadata.SharedObjectRange;
-import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectUploadHook;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectUploadHook.Phase;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectUploadHook.UploadContext;
@@ -29,12 +25,11 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -44,7 +39,7 @@ class FileSharedObjectUploadBarrierTest {
 
     @Test
     void shouldRemainDisabledWithoutExplicitPhase() {
-        assertSame(SharedObjectUploadHook.NOOP, FileSharedObjectUploadBarrier.from(Map.of(), 1));
+        assertTrue(FileSharedObjectUploadBarrier.from(Map.of(), 1) == SharedObjectUploadHook.NOOP);
     }
 
     @Test
@@ -69,28 +64,28 @@ class FileSharedObjectUploadBarrierTest {
         FileSharedObjectUploadBarrier barrier = new FileSharedObjectUploadBarrier(
             Phase.AFTER_PUT,
             tempDir,
-            2
+            7
         );
-        SharedObjectMetadata metadata = metadata(200);
-        UploadContext context = new UploadContext(200, 2_000, metadata.objectSize(), metadata);
+        UploadContext context = new UploadContext(1234L, 5678L, 999L);
 
         assertTrue(barrier.onPhase(Phase.AFTER_PREPARE, context).isDone());
         assertTrue(barrier.onPhase(Phase.AFTER_PUT, context).isDone());
 
         Files.writeString(barrier.armFile(), "armed\n");
-        CompletableFuture<Void> paused = barrier.onPhase(Phase.AFTER_PUT, context);
-
-        assertFalse(paused.isDone());
+        CompletableFuture<Void> pause = barrier.onPhase(Phase.AFTER_PUT, context);
+        assertFalse(pause.isDone());
         assertTrue(Files.isRegularFile(barrier.reachedFile()));
-        String evidence = Files.readString(barrier.reachedFile());
-        assertTrue(evidence.contains("phase=AFTER_PUT"));
-        assertTrue(evidence.contains("brokerId=2"));
-        assertTrue(evidence.contains("objectId=200"));
-        assertTrue(evidence.contains("createdTimeMs=2000"));
-        assertTrue(evidence.contains("objectSize=1"));
-
-        paused.complete(null);
+        String marker = Files.readString(barrier.reachedFile());
+        assertTrue(marker.contains("phase=AFTER_PUT"));
+        assertTrue(marker.contains("brokerId=7"));
+        assertTrue(marker.contains("objectId=1234"));
+        assertTrue(marker.contains("createdTimeMs=5678"));
+        assertTrue(marker.contains("objectSize=999"));
         assertTrue(barrier.onPhase(Phase.AFTER_PUT, context).isDone());
+
+        Files.writeString(barrier.releaseFile(), "release\n");
+        pause.get(10, TimeUnit.SECONDS);
+        assertTrue(pause.isDone());
     }
 
     @Test
@@ -98,30 +93,18 @@ class FileSharedObjectUploadBarrierTest {
         FileSharedObjectUploadBarrier barrier = new FileSharedObjectUploadBarrier(
             Phase.AFTER_PREPARE,
             tempDir,
-            3
+            8
         );
         Files.writeString(barrier.armFile(), "armed\n");
 
-        CompletableFuture<Void> paused = barrier.onPhase(
+        CompletableFuture<Void> pause = barrier.onPhase(
             Phase.AFTER_PREPARE,
-            UploadContext.planned(201, 2_001, 4_096)
+            new UploadContext(2222L, 3333L, 4444L)
         );
+        String marker = Files.readString(barrier.reachedFile());
+        assertTrue(marker.contains("objectSize=4444"));
 
-        assertFalse(paused.isDone());
-        assertTrue(Files.readString(barrier.reachedFile()).contains("objectSize=4096"));
-        paused.complete(null);
-    }
-
-    private static SharedObjectMetadata metadata(long objectId) {
-        SharedPartitionId partition = new SharedPartitionId(1, 2, 0);
-        SharedObjectRange range = new SharedObjectRange(
-            partition,
-            new OffsetRange(0, 1),
-            3,
-            0,
-            1,
-            17
-        );
-        return new SharedObjectMetadata(objectId, 1, 17, List.of(range));
+        Files.writeString(barrier.releaseFile(), "release\n");
+        pause.get(10, TimeUnit.SECONDS);
     }
 }

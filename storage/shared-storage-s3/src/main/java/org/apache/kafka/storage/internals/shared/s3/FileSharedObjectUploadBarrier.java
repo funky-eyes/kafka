@@ -37,6 +37,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 final class FileSharedObjectUploadBarrier implements SharedObjectUploadHook {
     static final String PAUSE_AFTER_CONFIG = "shared.storage.test.upload.pause.after";
     static final String BARRIER_DIR_CONFIG = "shared.storage.test.upload.barrier.dir";
+    private static final long RELEASE_POLL_INTERVAL_MS = 25L;
 
     private final Phase targetPhase;
     private final Path barrierDir;
@@ -95,6 +96,7 @@ final class FileSharedObjectUploadBarrier implements SharedObjectUploadHook {
 
         try {
             writeReachedMarker(context);
+            startReleaseWatcher();
         } catch (IOException e) {
             pause.completeExceptionally(e);
         }
@@ -107,6 +109,30 @@ final class FileSharedObjectUploadBarrier implements SharedObjectUploadHook {
 
     Path reachedFile() {
         return barrierDir.resolve("broker-" + brokerId + "." + targetPhase + ".reached");
+    }
+
+    Path releaseFile() {
+        return barrierDir.resolve("broker-" + brokerId + ".release");
+    }
+
+    private void startReleaseWatcher() {
+        Thread watcher = new Thread(() -> {
+            while (!pause.isDone()) {
+                if (Files.exists(releaseFile())) {
+                    pause.complete(null);
+                    return;
+                }
+                try {
+                    Thread.sleep(RELEASE_POLL_INTERVAL_MS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    pause.completeExceptionally(e);
+                    return;
+                }
+            }
+        }, "shared-upload-barrier-release-" + brokerId);
+        watcher.setDaemon(true);
+        watcher.start();
     }
 
     private void writeReachedMarker(UploadContext context) throws IOException {
