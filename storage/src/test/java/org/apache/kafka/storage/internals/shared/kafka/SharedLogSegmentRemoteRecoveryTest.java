@@ -46,7 +46,6 @@ import java.util.zip.CRC32C;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SharedLogSegmentRemoteRecoveryTest {
@@ -154,8 +153,15 @@ class SharedLogSegmentRemoteRecoveryTest {
                 ""
             );
             assertEquals(tailBatch.lastOffset() + 1, beforeMetadataReplay.readNextOffset());
-            assertNull(beforeMetadataReplay.translateOffset(remoteBatch.firstOffset()));
-            assertNotNull(beforeMetadataReplay.translateOffset(tailBatch.firstOffset()));
+            FetchDataInfo beforeReplayFetch = beforeMetadataReplay.read(
+                remoteBatch.firstOffset(),
+                Integer.MAX_VALUE,
+                Optional.of((long) beforeMetadataReplay.size()),
+                false
+            );
+            assertNotNull(beforeReplayFetch);
+            assertEquals(tailRecords.sizeInBytes(), beforeReplayFetch.records.sizeInBytes(),
+                "Before metadata replay the logical fetch view must contain only the surviving WAL tail");
 
             long revisionBeforeReplay = engine.remoteIndex().revision(PARTITION);
             engine.remoteIndex().restore(List.of(reference));
@@ -165,8 +171,15 @@ class SharedLogSegmentRemoteRecoveryTest {
             ));
             long revisionAfterReplay = engine.remoteIndex().revision(PARTITION);
             assertTrue(revisionAfterReplay > revisionBeforeReplay);
-            assertNull(beforeMetadataReplay.translateOffset(remoteBatch.firstOffset()),
-                "A segment loaded before metadata replay cannot see the newly restored remote prefix until reopened");
+            FetchDataInfo staleFetch = beforeMetadataReplay.read(
+                remoteBatch.firstOffset(),
+                Integer.MAX_VALUE,
+                Optional.of((long) beforeMetadataReplay.size()),
+                false
+            );
+            assertNotNull(staleFetch);
+            assertEquals(tailRecords.sizeInBytes(), staleFetch.records.sizeInBytes(),
+                "A segment loaded before metadata replay must retain its stale WAL-only fetch view until reopened");
             beforeMetadataReplay.close();
 
             SharedLogSegment afterMetadataReplay = SharedLogSegment.open(
@@ -190,7 +203,8 @@ class SharedLogSegmentRemoteRecoveryTest {
                 false
             );
             assertNotNull(fetch);
-            assertEquals(remoteRecords.sizeInBytes() + tailRecords.sizeInBytes(), fetch.records.sizeInBytes());
+            assertEquals(remoteRecords.sizeInBytes() + tailRecords.sizeInBytes(), fetch.records.sizeInBytes(),
+                "Reopening after metadata replay must materialize the remote prefix ahead of the WAL tail");
 
             engine.remoteIndex().restore(List.of(reference));
             assertEquals(revisionAfterReplay, engine.remoteIndex().revision(PARTITION),
