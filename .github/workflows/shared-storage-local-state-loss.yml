@@ -23,6 +23,7 @@ on:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/**'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/log/**'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/kafka/SharedLogSegmentRemoteRecoveryTest.java'
+      - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/kafka/SharedUnifiedLogFactoryTest.java'
       - 'storage/shared-storage-s3/**'
       - 'core/src/main/scala/kafka/cluster/Partition.scala'
       - 'core/src/main/scala/kafka/log/LogManager.scala'
@@ -45,6 +46,7 @@ on:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/**'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/log/**'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/kafka/SharedLogSegmentRemoteRecoveryTest.java'
+      - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/kafka/SharedUnifiedLogFactoryTest.java'
       - 'storage/shared-storage-s3/**'
       - 'core/src/main/scala/kafka/cluster/Partition.scala'
       - 'core/src/main/scala/kafka/log/LogManager.scala'
@@ -120,6 +122,7 @@ jobs:
         run: |
           ./gradlew :storage:test \
             --tests 'org.apache.kafka.storage.internals.shared.kafka.SharedLogSegmentRemoteRecoveryTest' \
+            --tests 'org.apache.kafka.storage.internals.shared.kafka.SharedUnifiedLogFactoryTest' \
             --no-scan
           ./gradlew :core:test \
             --tests 'kafka.server.ReplicaFetcherThreadRecoveryTest' \
