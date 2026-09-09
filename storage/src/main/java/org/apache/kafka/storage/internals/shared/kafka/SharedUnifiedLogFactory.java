@@ -43,6 +43,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Kafka 4.3.x compatibility factory that builds a standard {@link UnifiedLog} over shared-storage physical segments.
@@ -91,6 +92,7 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
             effectiveTopicId.getLeastSignificantBits(),
             topicPartition.partition()
         );
+        long remoteIndexRevisionAtLoad = storage.remoteIndex().revision(sharedPartition);
         LogSegmentFactory segmentFactory = sharedSegmentFactory(storage, sharedPartition);
 
         LogSegments segments = new LogSegments(topicPartition);
@@ -161,7 +163,12 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
         });
         loadedLogs.put(
             dir.getAbsoluteFile(),
-            new LoadedSharedLog(sharedPartition, localLog, log)
+            new LoadedSharedLog(
+                sharedPartition,
+                localLog,
+                log,
+                new AtomicLong(remoteIndexRevisionAtLoad)
+            )
         );
         return log;
     }
@@ -190,8 +197,18 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
                     .contiguousEnd(logStartOffset);
                 long currentEnd = loaded.localLog().logEndOffset();
                 long materializedEnd = loaded.localLog().segments().activeSegment().readNextOffset();
-                if (committedEnd <= currentEnd && committedEnd <= materializedEnd) {
+                long loadedRemoteRevision = loaded.remoteIndexRevision().get();
+                long currentRemoteRevision = storage.remoteIndex().revision(loaded.partition());
+                if (!requiresRemoteReconciliation(
+                    logStartOffset,
+                    loadedRemoteRevision,
+                    currentRemoteRevision,
+                    committedEnd,
+                    currentEnd,
+                    materializedEnd
+                )) {
                     loaded.log().installRemoteCommittedHighWatermarkFloor(committedEnd);
+                    loaded.remoteIndexRevision().set(currentRemoteRevision);
                     return null;
                 }
 
@@ -210,9 +227,29 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
                     Math.max(loaded.localLog().logEndOffset(), recoveredEnd)
                 );
                 loaded.log().installRemoteCommittedHighWatermarkFloor(committedEnd);
+                loaded.remoteIndexRevision().set(currentRemoteRevision);
                 return null;
             });
         }
+    }
+
+    /**
+     * A higher local LEO does not prove that the materialized segment view contains newly discovered remote history.
+     * If authoritative metadata changed after LogLoader built the local view, rematerialize any contiguous remote prefix
+     * even when a surviving WAL tail already makes the local LEO larger than the remote committed end.
+     */
+    static boolean requiresRemoteReconciliation(
+        long logStartOffset,
+        long loadedRemoteRevision,
+        long currentRemoteRevision,
+        long committedEnd,
+        long currentEnd,
+        long materializedEnd
+    ) {
+        if (committedEnd > currentEnd || committedEnd > materializedEnd) {
+            return true;
+        }
+        return committedEnd > logStartOffset && loadedRemoteRevision != currentRemoteRevision;
     }
 
     private long reopenSegmentsFromSharedStorage(LoadedSharedLog loaded) throws IOException {
@@ -336,7 +373,8 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
     private record LoadedSharedLog(
         SharedPartitionId partition,
         SharedLocalLog localLog,
-        SharedUnifiedLog log
+        SharedUnifiedLog log,
+        AtomicLong remoteIndexRevision
     ) {
     }
 }

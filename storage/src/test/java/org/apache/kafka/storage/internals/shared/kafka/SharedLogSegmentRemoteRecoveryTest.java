@@ -46,6 +46,7 @@ import java.util.zip.CRC32C;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SharedLogSegmentRemoteRecoveryTest {
@@ -106,6 +107,95 @@ class SharedLogSegmentRemoteRecoveryTest {
             assertNotNull(fetch);
             assertEquals(records.sizeInBytes(), fetch.records.sizeInBytes());
             segment.close();
+        }
+    }
+
+    @Test
+    void shouldMaterializeNewRemotePrefixWhenWalTailAlreadyRaisesLeo() throws Exception {
+        MemoryRecords remoteRecords = records(0L, 3, 1500L, "remote-prefix-a", "remote-prefix-b");
+        MemoryRecords tailRecords = records(2L, 4, 1600L, "wal-tail-a", "wal-tail-b");
+        KafkaRecordBatchAdapter.SerializedBatch remoteBatch = onlyBatch(remoteRecords);
+        KafkaRecordBatchAdapter.SerializedBatch tailBatch = onlyBatch(tailRecords);
+        long objectId = 1501L;
+        RemoteObjectIndex.RangeReference reference = remoteReference(
+            objectId,
+            remoteBatch,
+            remoteBatch.leaderEpoch(),
+            remoteBatch.bytes().remaining(),
+            crc32c(remoteBatch.bytes())
+        );
+
+        Path walDir = tempDir.resolve("remote-prefix-wal-tail-wal");
+        File logDir = tempDir.resolve("remote-prefix-wal-tail-topic-0").toFile();
+        Files.createDirectories(logDir.toPath());
+
+        try (SharedStorageEngine engine = engine(walDir)) {
+            SharedLogSegment initial = SharedLogSegment.open(
+                logDir,
+                0L,
+                new LogConfig(new Properties()),
+                new MockTime(),
+                engine,
+                PARTITION,
+                false,
+                ""
+            );
+            initial.append(tailBatch.lastOffset(), tailRecords);
+            initial.close();
+
+            SharedLogSegment beforeMetadataReplay = SharedLogSegment.open(
+                logDir,
+                0L,
+                new LogConfig(new Properties()),
+                new MockTime(),
+                engine,
+                PARTITION,
+                true,
+                ""
+            );
+            assertEquals(tailBatch.lastOffset() + 1, beforeMetadataReplay.readNextOffset());
+            assertNull(beforeMetadataReplay.translateOffset(remoteBatch.firstOffset()));
+            assertNotNull(beforeMetadataReplay.translateOffset(tailBatch.firstOffset()));
+
+            long revisionBeforeReplay = engine.remoteIndex().revision(PARTITION);
+            engine.remoteIndex().restore(List.of(reference));
+            engine.installRemoteReader(new SharedObjectReader(
+                new SingleObjectStore(objectId, remoteBatch.bytes()),
+                engine.remoteIndex()
+            ));
+            long revisionAfterReplay = engine.remoteIndex().revision(PARTITION);
+            assertTrue(revisionAfterReplay > revisionBeforeReplay);
+            assertNull(beforeMetadataReplay.translateOffset(remoteBatch.firstOffset()),
+                "A segment loaded before metadata replay cannot see the newly restored remote prefix until reopened");
+            beforeMetadataReplay.close();
+
+            SharedLogSegment afterMetadataReplay = SharedLogSegment.open(
+                logDir,
+                0L,
+                new LogConfig(new Properties()),
+                new MockTime(),
+                engine,
+                PARTITION,
+                true,
+                ""
+            );
+            assertNotNull(afterMetadataReplay.translateOffset(remoteBatch.firstOffset()));
+            assertNotNull(afterMetadataReplay.translateOffset(tailBatch.firstOffset()));
+            assertEquals(tailBatch.lastOffset() + 1, afterMetadataReplay.readNextOffset());
+
+            FetchDataInfo fetch = afterMetadataReplay.read(
+                remoteBatch.firstOffset(),
+                Integer.MAX_VALUE,
+                Optional.of((long) afterMetadataReplay.size()),
+                false
+            );
+            assertNotNull(fetch);
+            assertEquals(remoteRecords.sizeInBytes() + tailRecords.sizeInBytes(), fetch.records.sizeInBytes());
+
+            engine.remoteIndex().restore(List.of(reference));
+            assertEquals(revisionAfterReplay, engine.remoteIndex().revision(PARTITION),
+                "Replaying identical authoritative metadata must not force another rematerialization");
+            afterMetadataReplay.close();
         }
     }
 

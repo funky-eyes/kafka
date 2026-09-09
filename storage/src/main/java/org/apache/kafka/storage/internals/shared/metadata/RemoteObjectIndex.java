@@ -18,15 +18,18 @@ package org.apache.kafka.storage.internals.shared.metadata;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.NavigableMap;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentNavigableMap;
 import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Logical remote index. Physical objects may be duplicated after a leader race, but a logical Kafka offset range
@@ -39,6 +42,7 @@ public final class RemoteObjectIndex {
     private final ConcurrentHashMap<SharedPartitionId, ConcurrentNavigableMap<Long, RangeReference>> byPartition =
         new ConcurrentHashMap<>();
     private final ConcurrentHashMap<SharedPartitionId, PartitionRemoteCoverage> coverage = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<SharedPartitionId, AtomicLong> revisions = new ConcurrentHashMap<>();
 
     /**
      * Validates every range in an object before publishing any of them.
@@ -102,37 +106,21 @@ public final class RemoteObjectIndex {
         }
 
         // No validation below this point can fail for ordinary metadata. Publish only after the whole batch validates.
+        Set<SharedPartitionId> changedPartitions = new HashSet<>();
         for (RangeReference reference : updates) {
             SharedObjectRange range = reference.range();
             byPartition
                 .computeIfAbsent(range.partition(), ignored -> new ConcurrentSkipListMap<>())
                 .put(range.offsets().startOffset(), reference);
+            changedPartitions.add(range.partition());
         }
         for (RangeReference reference : references) {
             SharedObjectRange range = reference.range();
             coverage(range.partition()).add(range.offsets());
         }
-    }
-
-    private static RangeReference mergeEquivalentReference(RangeReference existing, RangeReference incoming) {
-        if (existing.objectId() != incoming.objectId()) {
-            // A physically duplicated object with identical logical content may keep the first durable reference.
-            return existing;
+        for (SharedPartitionId partition : changedPartitions) {
+            revisions.computeIfAbsent(partition, ignored -> new AtomicLong()).incrementAndGet();
         }
-        if (!existing.range().equals(incoming.range())) {
-            throw conflict(existing, incoming);
-        }
-        if (existing.hasObjectDescriptor() && incoming.hasObjectDescriptor()) {
-            if (existing.objectSize() != incoming.objectSize() ||
-                existing.objectChecksum() != incoming.objectChecksum()) {
-                throw conflict(existing, incoming);
-            }
-            return existing;
-        }
-        if (!existing.hasObjectDescriptor() && incoming.hasObjectDescriptor()) {
-            return incoming;
-        }
-        return existing;
     }
 
     public Optional<RangeReference> find(SharedPartitionId partition, long offset) {
@@ -158,6 +146,19 @@ public final class RemoteObjectIndex {
             return List.of();
         }
         return List.copyOf(new ArrayList<>(ranges.values()));
+    }
+
+    /**
+     * Returns a per-partition generation that advances whenever the logical remote read view changes.
+     *
+     * <p>Callers can snapshot this while constructing a local logical view and later determine whether authoritative
+     * metadata replay introduced ranges that must be rematerialized. Replaying an identical checkpoint/reference set
+     * does not advance the generation.</p>
+     */
+    public long revision(SharedPartitionId partition) {
+        Objects.requireNonNull(partition, "partition");
+        AtomicLong revision = revisions.get(partition);
+        return revision == null ? 0L : revision.get();
     }
 
     private NavigableMap<Long, RangeReference> copyExistingRanges(SharedPartitionId partition) {

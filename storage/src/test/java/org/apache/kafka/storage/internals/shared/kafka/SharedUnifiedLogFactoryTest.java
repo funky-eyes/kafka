@@ -35,6 +35,7 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -126,6 +127,42 @@ class SharedUnifiedLogFactoryTest {
             )
         );
         assertTrue(error.getMessage().contains("requires a durable topic ID"));
+    }
+
+    @Test
+    void newlyDiscoveredRemotePrefixForcesReconciliationDespiteHigherWalTail() {
+        assertTrue(SharedUnifiedLogFactory.requiresRemoteReconciliation(
+            0L,
+            7L,
+            8L,
+            160L,
+            180L,
+            180L
+        ));
+        assertFalse(SharedUnifiedLogFactory.requiresRemoteReconciliation(
+            0L,
+            8L,
+            8L,
+            160L,
+            180L,
+            180L
+        ));
+        assertTrue(SharedUnifiedLogFactory.requiresRemoteReconciliation(
+            0L,
+            8L,
+            8L,
+            181L,
+            180L,
+            180L
+        ));
+        assertFalse(SharedUnifiedLogFactory.requiresRemoteReconciliation(
+            160L,
+            7L,
+            8L,
+            160L,
+            180L,
+            180L
+        ));
     }
 
     @Test
