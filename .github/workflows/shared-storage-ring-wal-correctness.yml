@@ -22,10 +22,12 @@ on:
     paths:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/wal/**'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedLogSegment.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedUnifiedLogFactory.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedStorageConfiguration.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedStorageExtension.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedStorageWalFactory.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/kafka/SharedLogSegmentRemoteRecoveryTest.java'
+      - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/kafka/SharedUnifiedLogFactoryTest.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/kafka/SharedStorageWalFactoryTest.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/kafka/SharedStorageExtensionWalRuntimeTest.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/wal/Ring*Test.java'
@@ -36,10 +38,12 @@ on:
     paths:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/wal/**'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedLogSegment.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedUnifiedLogFactory.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedStorageConfiguration.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedStorageExtension.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedStorageWalFactory.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/kafka/SharedLogSegmentRemoteRecoveryTest.java'
+      - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/kafka/SharedUnifiedLogFactoryTest.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/kafka/SharedStorageWalFactoryTest.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/kafka/SharedStorageExtensionWalRuntimeTest.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/wal/Ring*Test.java'
@@ -79,6 +83,7 @@ jobs:
           ./gradlew :storage:test \
             --tests 'org.apache.kafka.storage.internals.shared.wal.Ring*Test' \
             --tests 'org.apache.kafka.storage.internals.shared.kafka.SharedLogSegmentRemoteRecoveryTest' \
+            --tests 'org.apache.kafka.storage.internals.shared.kafka.SharedUnifiedLogFactoryTest' \
             --tests 'org.apache.kafka.storage.internals.shared.kafka.SharedStorageWalFactoryTest' \
             --tests 'org.apache.kafka.storage.internals.shared.kafka.SharedStorageExtensionWalRuntimeTest' \
             --no-scan 2>&1 | tee shared-storage-ring-wal-correctness.log
@@ -93,12 +98,14 @@ jobs:
           test -d "$s3_result_dir"
           test "$(find "$storage_result_dir" -name 'TEST-org.apache.kafka.storage.internals.shared.wal.Ring*Test.xml' | wc -l)" -ge 9
           test -f "$storage_result_dir/TEST-org.apache.kafka.storage.internals.shared.kafka.SharedLogSegmentRemoteRecoveryTest.xml"
+          test -f "$storage_result_dir/TEST-org.apache.kafka.storage.internals.shared.kafka.SharedUnifiedLogFactoryTest.xml"
           test -f "$storage_result_dir/TEST-org.apache.kafka.storage.internals.shared.kafka.SharedStorageWalFactoryTest.xml"
           test -f "$storage_result_dir/TEST-org.apache.kafka.storage.internals.shared.kafka.SharedStorageExtensionWalRuntimeTest.xml"
           test -f "$s3_result_dir/TEST-org.apache.kafka.storage.internals.shared.s3.S3SharedStorageWalFactoryTest.xml"
           if grep -R -E 'failures="[1-9]|errors="[1-9]|skipped="[1-9]' \
               "$storage_result_dir"/TEST-org.apache.kafka.storage.internals.shared.wal.Ring*Test.xml \
               "$storage_result_dir/TEST-org.apache.kafka.storage.internals.shared.kafka.SharedLogSegmentRemoteRecoveryTest.xml" \
+              "$storage_result_dir/TEST-org.apache.kafka.storage.internals.shared.kafka.SharedUnifiedLogFactoryTest.xml" \
               "$storage_result_dir/TEST-org.apache.kafka.storage.internals.shared.kafka.SharedStorageWalFactoryTest.xml" \
               "$storage_result_dir/TEST-org.apache.kafka.storage.internals.shared.kafka.SharedStorageExtensionWalRuntimeTest.xml" \
               "$s3_result_dir/TEST-org.apache.kafka.storage.internals.shared.s3.S3SharedStorageWalFactoryTest.xml"; then
