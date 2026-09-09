@@ -19,6 +19,8 @@ package org.apache.kafka.storage.internals.shared.kafka;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.errors.InconsistentTopicIdException;
+import org.apache.kafka.server.util.Scheduler;
+import org.apache.kafka.storage.internals.checkpoint.LeaderEpochCheckpointFile;
 import org.apache.kafka.storage.internals.checkpoint.PartitionMetadataFile;
 import org.apache.kafka.storage.internals.epoch.LeaderEpochFileCache;
 import org.apache.kafka.storage.internals.log.LogDirFailureChannel;
@@ -29,6 +31,7 @@ import org.mockito.Mockito;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -145,6 +148,58 @@ class SharedUnifiedLogFactoryTest {
         );
 
         Mockito.verify(leaderEpochCache).assign(4, 160L);
+    }
+
+    @Test
+    void persistsLeaderEpochResetAndReanchorAcrossCheckpointRestart() throws IOException {
+        File dir = TestUtils.tempDirectory();
+        TopicPartition topicPartition = new TopicPartition("shared-topic", 4);
+        LogDirFailureChannel channel = Mockito.mock(LogDirFailureChannel.class);
+        Scheduler scheduler = Mockito.mock(Scheduler.class);
+        LeaderEpochCheckpointFile checkpoint = new LeaderEpochCheckpointFile(
+            LeaderEpochCheckpointFile.newFile(dir),
+            channel
+        );
+        LeaderEpochFileCache leaderEpochCache = new LeaderEpochFileCache(
+            topicPartition,
+            checkpoint,
+            scheduler
+        );
+
+        // Model startup assigning the current epoch while the shared log still appears empty.
+        leaderEpochCache.assign(4, 0L);
+        Optional<Integer> liveLeaderEpoch =
+            SharedUnifiedLogFactory.resetLeaderEpochCacheForRemoteReplay(leaderEpochCache);
+
+        assertEquals(Optional.of(4), liveLeaderEpoch);
+        assertTrue(leaderEpochCache.epochWithOffsets().isEmpty());
+        LeaderEpochFileCache clearedCheckpoint = new LeaderEpochFileCache(
+            topicPartition,
+            new LeaderEpochCheckpointFile(LeaderEpochCheckpointFile.newFile(dir), channel),
+            scheduler
+        );
+        assertTrue(clearedCheckpoint.epochWithOffsets().isEmpty(),
+            "The stale live epoch must be removed from the durable checkpoint before remote replay");
+
+        // Model remote replay reconstructing the historical epoch and then re-anchor the live epoch at the recovered LEO.
+        leaderEpochCache.assign(0, 0L);
+        SharedUnifiedLogFactory.restoreLiveLeaderEpochAfterRemoteReplay(
+            leaderEpochCache,
+            liveLeaderEpoch,
+            160L
+        );
+
+        Map<Integer, Long> expectedEpochs = Map.of(0, 0L, 4, 160L);
+        assertEquals(expectedEpochs, leaderEpochCache.epochWithOffsets());
+
+        LeaderEpochFileCache reopened = new LeaderEpochFileCache(
+            topicPartition,
+            new LeaderEpochCheckpointFile(LeaderEpochCheckpointFile.newFile(dir), channel),
+            scheduler
+        );
+        assertEquals(expectedEpochs, reopened.epochWithOffsets());
+        assertEquals(Map.entry(0, 160L), reopened.endOffsetFor(0, 160L),
+            "Recovered history must not regress to the startup epoch boundary at offset zero");
     }
 
     @Test
