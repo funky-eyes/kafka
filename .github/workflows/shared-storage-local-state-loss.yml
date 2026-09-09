@@ -192,7 +192,7 @@ jobs:
           grep -q 'skipped="0"' "$result_xml"
           grep -q 'clusterRecoversRemotePrefixWhenCheckpointIsLostButWalTailSurvives' "$result_xml"
 
-          grep -R -h 'REMOTE_CHECKPOINT_LOSS_' core/build/reports/testOutput \
+          grep 'REMOTE_CHECKPOINT_LOSS_' "$result_xml" \
             | tee shared-storage-remote-checkpoint-loss-proof.txt
           grep -q 'REMOTE_CHECKPOINT_LOSS_WAL_TAIL_ACKED' shared-storage-remote-checkpoint-loss-proof.txt
           grep -q 'REMOTE_CHECKPOINT_LOSS_WAL_PRESERVED' shared-storage-remote-checkpoint-loss-proof.txt
