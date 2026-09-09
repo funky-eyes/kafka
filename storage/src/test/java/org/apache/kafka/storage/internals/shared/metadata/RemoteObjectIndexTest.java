@@ -42,6 +42,41 @@ class RemoteObjectIndexTest {
     }
 
     @Test
+    void revisionAdvancesOnlyWhenPartitionReadViewChanges() {
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        assertEquals(0L, index.revision(PARTITION));
+        assertEquals(0L, index.revision(OTHER_PARTITION));
+
+        index.add(object(10, 0, 100, 777));
+        assertEquals(1L, index.revision(PARTITION));
+
+        // A physical duplicate with identical logical content keeps the existing read reference.
+        index.add(object(11, 0, 100, 777));
+        assertEquals(1L, index.revision(PARTITION));
+
+        // Replaying the exact same authoritative object is also idempotent.
+        index.add(object(10, 0, 100, 777));
+        assertEquals(1L, index.revision(PARTITION));
+
+        index.add(object(12, 100, 200, 888));
+        assertEquals(2L, index.revision(PARTITION));
+
+        index.add(object(13, OTHER_PARTITION, 0, 100, 999));
+        assertEquals(2L, index.revision(PARTITION));
+        assertEquals(1L, index.revision(OTHER_PARTITION));
+
+        RemoteObjectIndex legacy = new RemoteObjectIndex();
+        SharedObjectRange legacyRange = range(PARTITION, 0, 100, 777);
+        legacy.restore(List.of(new RemoteObjectIndex.RangeReference(10, legacyRange)));
+        assertEquals(1L, legacy.revision(PARTITION));
+        legacy.add(object(10, 0, 100, 777));
+        assertEquals(2L, legacy.revision(PARTITION),
+            "Upgrading an unknown legacy descriptor changes the remote read reference exactly once");
+        legacy.add(object(10, 0, 100, 777));
+        assertEquals(2L, legacy.revision(PARTITION));
+    }
+
+    @Test
     void shouldAcceptPhysicalDuplicateWithIdenticalLogicalContent() {
         RemoteObjectIndex index = new RemoteObjectIndex();
         index.add(object(10, 0, 100, 777));

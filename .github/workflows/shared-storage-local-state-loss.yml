@@ -39,6 +39,7 @@ on:
       - 'core/src/test/scala/unit/kafka/server/ReplicaFetcherThreadTest.scala'
       - 'core/src/test/scala/unit/kafka/server/ReplicaFetcherThreadRecoveryTest.scala'
       - 'core/src/test/java/kafka/server/SharedStorageLocalStateLossE2ETest.java'
+      - 'core/src/test/java/kafka/server/SharedStorageRemoteCheckpointLossE2ETest.java'
       - '.github/workflows/shared-storage-local-state-loss.yml'
       - '.github/workflows/shared-storage-upload-crash.yml'
   pull_request:
@@ -62,6 +63,7 @@ on:
       - 'core/src/test/scala/unit/kafka/server/ReplicaFetcherThreadTest.scala'
       - 'core/src/test/scala/unit/kafka/server/ReplicaFetcherThreadRecoveryTest.scala'
       - 'core/src/test/java/kafka/server/SharedStorageLocalStateLossE2ETest.java'
+      - 'core/src/test/java/kafka/server/SharedStorageRemoteCheckpointLossE2ETest.java'
       - '.github/workflows/shared-storage-local-state-loss.yml'
       - '.github/workflows/shared-storage-upload-crash.yml'
   workflow_dispatch:
@@ -77,7 +79,7 @@ jobs:
   local-state-loss-recovery:
     name: Rebuild all broker shared state from metadata and S3
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -145,7 +147,7 @@ jobs:
             '        level: INFO' \
             >> core/src/test/resources/log4j2.yaml
 
-      - name: Delete all broker shared state and recover from remote truth
+      - name: Recover from complete local loss and checkpoint-only loss
         shell: bash
         env:
           AWS_ACCESS_KEY_ID: minioadmin
@@ -154,6 +156,7 @@ jobs:
           SHARED_STORAGE_S3_ENDPOINT: http://127.0.0.1:9000
           SHARED_STORAGE_S3_REGION: us-east-1
           SHARED_STORAGE_S3_BUCKET: kafka-shared-storage-local-state-loss
+          SHARED_STORAGE_S3_CONTAINER: kafka-shared-local-state-loss-minio
         run: |
           set +e
           set -o pipefail
@@ -164,12 +167,41 @@ jobs:
           if [ "$status" -ne 0 ]; then
             echo '===== SharedStorageLocalStateLossE2ETest stdout ====='
             find core/build/reports/testOutput -type f -name '*.stdout' -print -exec cat {} \; 2>/dev/null || true
+            exit "$status"
           fi
-          exit "$status"
+
+          ./gradlew :core:test \
+            --tests 'kafka.server.SharedStorageRemoteCheckpointLossE2ETest' \
+            --no-scan 2>&1 | tee shared-storage-remote-checkpoint-loss.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            echo '===== SharedStorageRemoteCheckpointLossE2ETest stdout ====='
+            find core/build/reports/testOutput -type f -name '*.stdout' -print -exec cat {} \; 2>/dev/null || true
+            exit "$status"
+          fi
+          set -e
+
+          result_xml="$(find core/build/test-results build/junit-xml \
+            -type f \
+            -name 'TEST-kafka.server.SharedStorageRemoteCheckpointLossE2ETest.xml' \
+            -print -quit 2>/dev/null || true)"
+          test -n "$result_xml"
+          grep -q '<testsuite ' "$result_xml"
+          grep -q 'failures="0"' "$result_xml"
+          grep -q 'errors="0"' "$result_xml"
+          grep -q 'skipped="0"' "$result_xml"
+          grep -q 'clusterRecoversRemotePrefixWhenCheckpointIsLostButWalTailSurvives' "$result_xml"
+
+          grep -R -h 'REMOTE_CHECKPOINT_LOSS_' core/build/reports/testOutput \
+            | tee shared-storage-remote-checkpoint-loss-proof.txt
+          grep -q 'REMOTE_CHECKPOINT_LOSS_WAL_TAIL_ACKED' shared-storage-remote-checkpoint-loss-proof.txt
+          grep -q 'REMOTE_CHECKPOINT_LOSS_WAL_PRESERVED' shared-storage-remote-checkpoint-loss-proof.txt
+          grep -q 'REMOTE_CHECKPOINT_LOSS_RECOVERED' shared-storage-remote-checkpoint-loss-proof.txt
 
       - name: Show recovered S3 objects
         if: always()
         run: |
+          docker start kafka-shared-local-state-loss-minio >/dev/null 2>&1 || true
           docker run --rm --network host --entrypoint /bin/sh minio/mc:latest -c '
             mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
             mc ls --recursive local/kafka-shared-storage-local-state-loss || true
@@ -182,6 +214,8 @@ jobs:
           name: shared-storage-local-state-loss
           path: |
             shared-storage-local-state-loss.log
+            shared-storage-remote-checkpoint-loss.log
+            shared-storage-remote-checkpoint-loss-proof.txt
             shared-storage-local-state-loss-objects.log
             core/build/reports/testOutput
             core/build/reports/tests/test
