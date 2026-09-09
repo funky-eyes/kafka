@@ -29,6 +29,10 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -144,6 +148,49 @@ class SharedStorageEngineTest {
             assertEquals(10L, restarted.remoteIndex().find(PARTITION, 105).orElseThrow().objectId());
             assertEquals(11L, restarted.remoteIndex().find(PARTITION, 115).orElseThrow().objectId());
         }
+    }
+
+    @Test
+    void concurrentDuplicateRemotePublicationQueuesCheckpointOnce() throws Exception {
+        Path directory = tempDir.resolve("concurrent-remote-checkpoint-engine");
+        SharedObjectMetadata committed = object(20, 200, 210, 333);
+        LocalRemoteObjectCheckpoint checkpoint = new LocalRemoteObjectCheckpoint(directory);
+
+        try (SharedStorageEngine engine = new SharedStorageEngine(
+            new FileSharedWal(directory, 1024 * 1024, 4096),
+            checkpoint
+        )) {
+            int publishers = 16;
+            CountDownLatch ready = new CountDownLatch(publishers);
+            CountDownLatch start = new CountDownLatch(1);
+            ExecutorService executor = Executors.newFixedThreadPool(publishers);
+            try {
+                List<Future<?>> publications = java.util.stream.IntStream.range(0, publishers)
+                    .mapToObj(ignored -> executor.submit(() -> {
+                        ready.countDown();
+                        assertTrue(start.await(10, TimeUnit.SECONDS));
+                        engine.commitRemoteObject(committed);
+                        return null;
+                    }))
+                    .toList();
+                assertTrue(ready.await(10, TimeUnit.SECONDS));
+                start.countDown();
+                for (Future<?> publication : publications) {
+                    publication.get(10, TimeUnit.SECONDS);
+                }
+            } finally {
+                executor.shutdownNow();
+                assertTrue(executor.awaitTermination(10, TimeUnit.SECONDS));
+            }
+
+            assertEquals(1, engine.pendingRemoteCheckpointCount(),
+                "concurrent duplicate COMMIT publication must enqueue exactly one checkpoint update");
+            assertEquals(1, engine.checkpointCommittedRemoteObjects());
+            assertEquals(0, engine.pendingRemoteCheckpointCount());
+        }
+
+        assertEquals(1, new LocalRemoteObjectCheckpoint(directory).references().size(),
+            "concurrent duplicate publication must persist one logical remote reference");
     }
 
     @Test
