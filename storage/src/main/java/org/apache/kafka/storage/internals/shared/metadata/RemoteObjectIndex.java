@@ -123,6 +123,27 @@ public final class RemoteObjectIndex {
         }
     }
 
+    private static RangeReference mergeEquivalentReference(RangeReference existing, RangeReference incoming) {
+        if (existing.objectId() != incoming.objectId()) {
+            // A physically duplicated object with identical logical content may keep the first durable reference.
+            return existing;
+        }
+        if (!existing.range().equals(incoming.range())) {
+            throw conflict(existing, incoming);
+        }
+        if (existing.hasObjectDescriptor() && incoming.hasObjectDescriptor()) {
+            if (existing.objectSize() != incoming.objectSize() ||
+                existing.objectChecksum() != incoming.objectChecksum()) {
+                throw conflict(existing, incoming);
+            }
+            return existing;
+        }
+        if (!existing.hasObjectDescriptor() && incoming.hasObjectDescriptor()) {
+            return incoming;
+        }
+        return existing;
+    }
+
     public Optional<RangeReference> find(SharedPartitionId partition, long offset) {
         NavigableMap<Long, RangeReference> ranges = byPartition.get(partition);
         if (ranges == null) {
