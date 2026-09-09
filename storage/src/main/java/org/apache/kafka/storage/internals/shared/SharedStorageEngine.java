@@ -455,7 +455,7 @@ public final class SharedStorageEngine implements AutoCloseable {
         }
     }
 
-    public void commitRemoteObject(SharedObjectMetadata object) {
+    public synchronized void commitRemoteObject(SharedObjectMetadata object) {
         SharedObjectMetadata committed = Objects.requireNonNull(object, "object");
         List<PartitionRevision> revisionsBefore = committed.ranges().stream()
             .map(range -> range.partition())
