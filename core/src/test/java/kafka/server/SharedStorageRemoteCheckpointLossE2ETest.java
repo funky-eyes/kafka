@@ -26,6 +26,7 @@ import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.clients.producer.RecordMetadata;
+import org.apache.kafka.common.ElectionType;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.config.TopicConfig;
@@ -56,13 +57,16 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -73,12 +77,13 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * Proves recovery when the authoritative remote prefix must be rediscovered from Kafka metadata while a newer
  * acknowledged WAL tail survives locally.
  *
- * <p>The prefix is deliberately larger than the fixed ring WAL, and every prefix chunk is remotely committed before
- * the next chunk is produced. Successful production beyond ring capacity therefore proves that old physical slots have
- * been reclaimed/reused. MinIO is then stopped and an {@code acks=all} tail is appended, making that tail WAL-only.
- * After every broker is stopped, only {@code remote-object-ranges.checkpoint} is deleted; {@code shared-ring.wal} is
- * preserved byte-for-byte. On restart, metadata replay must rematerialize the remote prefix even though the surviving
- * WAL tail already raises the local LEO beyond the remote committed end.</p>
+ * <p>The aggregate prefix replicated by every broker is deliberately larger than the fixed ring WAL, and every prefix
+ * chunk is remotely committed before the next chunk is produced. Successful production beyond ring capacity therefore
+ * proves that old physical slots have been reclaimed/reused. MinIO is then stopped and an {@code acks=all} tail is
+ * appended, making that tail WAL-only. After every broker is stopped, only {@code remote-object-ranges.checkpoint} is
+ * deleted; {@code shared-ring.wal} is preserved byte-for-byte. On restart, metadata replay must rematerialize the
+ * remote prefix even though the surviving WAL tail already raises the local LEO beyond the remote committed end.
+ * Preferred leader election then makes all three recovered brokers serve historical reads.</p>
  */
 @Tag("integration")
 @Timeout(value = 12, unit = TimeUnit.MINUTES)
@@ -89,8 +94,8 @@ public class SharedStorageRemoteCheckpointLossE2ETest {
     private static final String RING_WAL_FILE = "shared-ring.wal";
     private static final String MINIO_CONTAINER_ENV = "SHARED_STORAGE_S3_CONTAINER";
     private static final int BROKERS = 3;
-    private static final int PARTITIONS = 1;
-    private static final int PREFIX_CHUNKS = 6;
+    private static final int PARTITIONS = 3;
+    private static final int PREFIX_CHUNKS = 3;
     private static final int RECORDS_PER_PREFIX_CHUNK = 32;
     private static final int WAL_ONLY_TAIL_RECORDS = 16;
     private static final int VALUE_BYTES = 4 * 1024;
@@ -107,8 +112,8 @@ public class SharedStorageRemoteCheckpointLossE2ETest {
         String bucket = environment("SHARED_STORAGE_S3_BUCKET", "kafka-shared-storage-local-state-loss");
         String region = environment("SHARED_STORAGE_S3_REGION", "us-east-1");
 
-        assertTrue((long) PREFIX_CHUNKS * RECORDS_PER_PREFIX_CHUNK * VALUE_BYTES > WAL_CAPACITY_BYTES,
-            "Remote prefix must exceed ring capacity so old physical WAL slots are necessarily reclaimed/reused");
+        assertTrue((long) PARTITIONS * PREFIX_CHUNKS * RECORDS_PER_PREFIX_CHUNK * VALUE_BYTES > WAL_CAPACITY_BYTES,
+            "Replicated remote prefix must exceed ring capacity so old physical WAL slots are reclaimed/reused");
 
         Path baseDirectory = TestUtils.tempDirectory().toPath();
         Map<Integer, Path> walDirs = new LinkedHashMap<>();
@@ -167,23 +172,27 @@ public class SharedStorageRemoteCheckpointLossE2ETest {
 
                     for (int chunk = 0; chunk < PREFIX_CHUNKS; chunk++) {
                         produce(producer, nextSequence, RECORDS_PER_PREFIX_CHUNK);
-                        waitForRemoteCoverage(bootstrapServers, description, nextSequence[0]);
+                        waitForRemoteCoverage(bootstrapServers, description, nextSequence);
                     }
+                    description = waitForTopicState(admin, BROKERS);
                     waitForLocalCheckpoints(walDirs);
-                    consumeAndAssert(bootstrapServers, nextSequence[0]);
+                    consumeAndAssert(bootstrapServers, nextSequence);
 
-                    int remotePrefixEnd = nextSequence[0];
+                    int[] remotePrefixEnd = nextSequence.clone();
                     stopContainer(minioContainer);
                     minioStopped = true;
                     waitForMinioState(s3Endpoint, false);
 
                     produce(producer, nextSequence, WAL_ONLY_TAIL_RECORDS);
-                    int acknowledgedEnd = nextSequence[0];
+                    description = waitForTopicState(admin, BROKERS);
+                    int[] acknowledgedEnd = nextSequence.clone();
                     Thread.sleep(1_000L);
+                    assertTrue(remoteCoverageCovers(bootstrapServers, description, remotePrefixEnd),
+                        "The already committed remote prefix must remain authoritative while S3 is down");
                     assertFalse(remoteCoverageCovers(bootstrapServers, description, acknowledgedEnd),
                         "The tail acknowledged while S3 is down must remain outside authoritative remote coverage");
-                    System.out.println("REMOTE_CHECKPOINT_LOSS_WAL_TAIL_ACKED prefixEnd=" + remotePrefixEnd +
-                        " acknowledgedEnd=" + acknowledgedEnd);
+                    System.out.println("REMOTE_CHECKPOINT_LOSS_WAL_TAIL_ACKED prefixEnd=" +
+                        Arrays.toString(remotePrefixEnd) + " acknowledgedEnd=" + Arrays.toString(acknowledgedEnd));
                 }
 
                 shutdownAllBrokers(cluster);
@@ -217,11 +226,35 @@ public class SharedStorageRemoteCheckpointLossE2ETest {
 
                 try (Admin admin = cluster.admin()) {
                     description = waitForTopicState(admin, BROKERS);
-                    consumeAndAssert(bootstrapServers, nextSequence[0]);
-                    waitForRemoteCoverage(bootstrapServers, description, nextSequence[0]);
-                    consumeAndAssert(bootstrapServers, nextSequence[0]);
+                    Set<TopicPartition> partitions = description.partitions().stream()
+                        .map(partition -> new TopicPartition(TOPIC, partition.partition()))
+                        .collect(Collectors.toSet());
+                    var electionResults = admin.electLeaders(ElectionType.PREFERRED, partitions)
+                        .partitions().get(30, TimeUnit.SECONDS);
+                    for (var entry : electionResults.entrySet()) {
+                        if (entry.getValue().isPresent() &&
+                            !(entry.getValue().get() instanceof org.apache.kafka.common.errors.ElectionNotNeededException)) {
+                            throw new AssertionError(
+                                "Preferred leader election failed for " + entry.getKey(), entry.getValue().get());
+                        }
+                    }
+                    description = waitForPreferredLeaders(admin);
+
+                    Set<Integer> leaders = description.partitions().stream()
+                        .map(partition -> partition.leader().id())
+                        .collect(Collectors.toSet());
+                    assertEquals(BROKERS, leaders.size(),
+                        "Preferred leader election must make every recovered broker serve one partition");
+
+                    consumeAndAssert(bootstrapServers, nextSequence);
+                    System.out.println("REMOTE_CHECKPOINT_LOSS_ALL_BROKERS_SERVED leaders=" + leaders +
+                        " endOffsets=" + Arrays.toString(nextSequence));
+
+                    waitForRemoteCoverage(bootstrapServers, description, nextSequence);
+                    consumeAndAssert(bootstrapServers, nextSequence);
                 }
-                System.out.println("REMOTE_CHECKPOINT_LOSS_RECOVERED records=" + nextSequence[0]);
+                System.out.println("REMOTE_CHECKPOINT_LOSS_RECOVERED recordsPerPartition=" +
+                    Arrays.toString(nextSequence));
             } finally {
                 if (minioStopped) {
                     startContainerIgnoringFailure(minioContainer);
@@ -278,29 +311,31 @@ public class SharedStorageRemoteCheckpointLossE2ETest {
     private static void produce(
         KafkaProducer<String, String> producer,
         int[] nextSequence,
-        int records
+        int recordsPerPartition
     ) throws Exception {
-        List<PendingSend> sends = new ArrayList<>(records);
-        for (int index = 0; index < records; index++) {
-            int sequence = nextSequence[0]++;
-            Future<RecordMetadata> future = producer.send(new ProducerRecord<>(
-                TOPIC,
-                0,
-                key(sequence),
-                value(sequence)
-            ));
-            sends.add(new PendingSend(sequence, future));
+        List<PendingSend> sends = new ArrayList<>(PARTITIONS * recordsPerPartition);
+        for (int partition = 0; partition < PARTITIONS; partition++) {
+            for (int index = 0; index < recordsPerPartition; index++) {
+                int sequence = nextSequence[partition]++;
+                Future<RecordMetadata> future = producer.send(new ProducerRecord<>(
+                    TOPIC,
+                    partition,
+                    key(partition, sequence),
+                    value(partition, sequence)
+                ));
+                sends.add(new PendingSend(partition, sequence, future));
+            }
         }
         producer.flush();
         for (PendingSend send : sends) {
             RecordMetadata metadata = send.future().get(30, TimeUnit.SECONDS);
-            assertEquals(0, metadata.partition());
+            assertEquals(send.partition(), metadata.partition());
             assertEquals(send.sequence(), metadata.offset(),
-                "Acknowledged offsets must remain gap-free across checkpoint-only loss");
+                "Acknowledged partition offsets must remain gap-free across checkpoint-only loss");
         }
     }
 
-    private static void consumeAndAssert(String bootstrapServers, int expectedEndOffset) {
+    private static void consumeAndAssert(String bootstrapServers, int[] expectedEndOffsets) {
         Properties properties = new Properties();
         properties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
         properties.put(ConsumerConfig.CLIENT_ID_CONFIG, "shared-remote-checkpoint-loss-consumer-" + UUID.randomUUID());
@@ -310,29 +345,84 @@ public class SharedStorageRemoteCheckpointLossE2ETest {
         properties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         properties.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
 
-        TopicPartition partition = new TopicPartition(TOPIC, 0);
-        int nextExpected = 0;
+        List<TopicPartition> assignments = new ArrayList<>();
+        int expectedTotal = 0;
+        for (int partition = 0; partition < PARTITIONS; partition++) {
+            assignments.add(new TopicPartition(TOPIC, partition));
+            expectedTotal += expectedEndOffsets[partition];
+        }
+
+        int[] nextExpected = new int[PARTITIONS];
+        int received = 0;
         try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(properties)) {
-            consumer.assign(List.of(partition));
-            consumer.seekToBeginning(List.of(partition));
+            consumer.assign(assignments);
+            consumer.seekToBeginning(assignments);
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(120);
-            while (nextExpected < expectedEndOffset && System.nanoTime() < deadline) {
+            while (received < expectedTotal && System.nanoTime() < deadline) {
                 for (ConsumerRecord<String, String> record : consumer.poll(Duration.ofMillis(250))) {
-                    assertTrue(nextExpected < expectedEndOffset,
+                    int partition = record.partition();
+                    int sequence = nextExpected[partition];
+                    assertTrue(sequence < expectedEndOffsets[partition],
                         "Consumer returned duplicate or unexpected history after checkpoint-only loss");
-                    assertEquals(nextExpected, record.offset(),
+                    assertEquals(sequence, record.offset(),
                         "Remote prefix and surviving WAL tail must form one gap-free logical log");
-                    assertEquals(key(nextExpected), record.key());
-                    assertEquals(value(nextExpected), record.value());
-                    nextExpected++;
+                    assertEquals(key(partition, sequence), record.key());
+                    assertEquals(value(partition, sequence), record.value());
+                    nextExpected[partition]++;
+                    received++;
                 }
             }
         }
-        assertEquals(expectedEndOffset, nextExpected,
-            "Timed out reading the complete remote prefix plus surviving WAL tail");
+        assertEquals(expectedTotal, received,
+            "Timed out reading the complete remote prefix plus surviving WAL tails");
+        for (int partition = 0; partition < PARTITIONS; partition++) {
+            assertEquals(expectedEndOffsets[partition], nextExpected[partition],
+                "Every partition must expose each acknowledged record exactly once");
+        }
     }
 
     private static TopicDescription waitForTopicState(Admin admin, int expectedIsrSize) throws Exception {
+        TopicDescription[] ready = new TopicDescription[1];
+        TopicDescription[] lastObserved = new TopicDescription[1];
+        TestUtils.waitForCondition(() -> {
+            try {
+                TopicDescription description = admin.describeTopics(List.of(TOPIC))
+                    .allTopicNames().get(10, TimeUnit.SECONDS).get(TOPIC);
+                lastObserved[0] = description;
+                if (description == null || description.partitions().size() != PARTITIONS) {
+                    return false;
+                }
+                boolean valid = description.partitions().stream().allMatch(partition ->
+                    partition.leader() != null && partition.leader().id() >= 0 &&
+                        partition.replicas().size() == BROKERS && partition.isr().size() == expectedIsrSize
+                );
+                if (valid) {
+                    ready[0] = description;
+                }
+                return valid;
+            } catch (Exception ignored) {
+                return false;
+            }
+        }, 90_000L, () -> "Checkpoint-loss topic did not converge to ISR=" + expectedIsrSize +
+            "; last observed state: " + topicStateSummary(lastObserved[0]));
+        return ready[0];
+    }
+
+    private static String topicStateSummary(TopicDescription description) {
+        if (description == null) {
+            return "unavailable";
+        }
+        return description.partitions().stream()
+            .map(partition -> "p=" + partition.partition() +
+                " leader=" + (partition.leader() == null ? -1 : partition.leader().id()) +
+                " replicas=" + partition.replicas().stream().map(node -> Integer.toString(node.id()))
+                    .collect(Collectors.joining(",", "[", "]")) +
+                " isr=" + partition.isr().stream().map(node -> Integer.toString(node.id()))
+                    .collect(Collectors.joining(",", "[", "]")))
+            .collect(Collectors.joining("; "));
+    }
+
+    private static TopicDescription waitForPreferredLeaders(Admin admin) throws Exception {
         TopicDescription[] ready = new TopicDescription[1];
         TestUtils.waitForCondition(() -> {
             try {
@@ -341,9 +431,11 @@ public class SharedStorageRemoteCheckpointLossE2ETest {
                 if (description == null || description.partitions().size() != PARTITIONS) {
                     return false;
                 }
-                var partition = description.partitions().get(0);
-                boolean valid = partition.leader() != null && partition.leader().id() >= 0 &&
-                    partition.replicas().size() == BROKERS && partition.isr().size() == expectedIsrSize;
+                boolean valid = description.partitions().stream().allMatch(partition ->
+                    partition.leader() != null && !partition.replicas().isEmpty() &&
+                        partition.leader().id() == partition.replicas().get(0).id() &&
+                        partition.isr().size() == BROKERS
+                );
                 if (valid) {
                     ready[0] = description;
                 }
@@ -351,36 +443,42 @@ public class SharedStorageRemoteCheckpointLossE2ETest {
             } catch (Exception ignored) {
                 return false;
             }
-        }, 90_000L, () -> "Checkpoint-loss topic did not converge to ISR=" + expectedIsrSize);
+        }, 90_000L, () -> "All partitions did not return to their preferred recovered leaders");
         return ready[0];
     }
 
     private static void waitForRemoteCoverage(
         String bootstrapServers,
         TopicDescription description,
-        long expectedEndOffset
+        int[] expectedEndOffsets
     ) throws Exception {
         TestUtils.waitForCondition(
-            () -> remoteCoverageCovers(bootstrapServers, description, expectedEndOffset),
+            () -> remoteCoverageCovers(bootstrapServers, description, expectedEndOffsets),
             120_000L,
-            () -> "Authoritative S3 coverage did not reach offset " + expectedEndOffset
+            () -> "Authoritative S3 coverage did not reach offsets " + Arrays.toString(expectedEndOffsets)
         );
     }
 
     private static boolean remoteCoverageCovers(
         String bootstrapServers,
         TopicDescription description,
-        long expectedEndOffset
+        int[] expectedEndOffsets
     ) {
         try {
-            SharedPartitionId partition = sharedPartitionId(description.topicId(), 0);
-            PartitionRemoteCoverage coverage = new PartitionRemoteCoverage();
-            for (SharedObjectMetadata object : committedObjects(bootstrapServers)) {
-                object.ranges().stream()
-                    .filter(range -> range.partition().equals(partition))
-                    .forEach(range -> coverage.add(range.offsets()));
+            List<SharedObjectMetadata> objects = committedObjects(bootstrapServers);
+            for (int partition = 0; partition < PARTITIONS; partition++) {
+                SharedPartitionId sharedPartition = sharedPartitionId(description.topicId(), partition);
+                PartitionRemoteCoverage coverage = new PartitionRemoteCoverage();
+                for (SharedObjectMetadata object : objects) {
+                    object.ranges().stream()
+                        .filter(range -> range.partition().equals(sharedPartition))
+                        .forEach(range -> coverage.add(range.offsets()));
+                }
+                if (!coverage.covers(new OffsetRange(0L, expectedEndOffsets[partition]))) {
+                    return false;
+                }
             }
-            return coverage.covers(new OffsetRange(0L, expectedEndOffset));
+            return true;
         } catch (RuntimeException ignored) {
             return false;
         }
@@ -502,12 +600,12 @@ public class SharedStorageRemoteCheckpointLossE2ETest {
         }
     }
 
-    private static String key(int sequence) {
-        return "checkpoint-loss-key-" + sequence;
+    private static String key(int partition, int sequence) {
+        return "checkpoint-loss-key-" + partition + "-" + sequence;
     }
 
-    private static String value(int sequence) {
-        String prefix = "checkpoint-loss-value-" + sequence + "-";
+    private static String value(int partition, int sequence) {
+        String prefix = "checkpoint-loss-value-" + partition + "-" + sequence + "-";
         return prefix + "R".repeat(VALUE_BYTES - prefix.length());
     }
 
@@ -516,6 +614,6 @@ public class SharedStorageRemoteCheckpointLossE2ETest {
         return value == null || value.isBlank() ? defaultValue : value;
     }
 
-    private record PendingSend(int sequence, Future<RecordMetadata> future) {
+    private record PendingSend(int partition, int sequence, Future<RecordMetadata> future) {
     }
 }

@@ -196,6 +196,7 @@ jobs:
             | tee shared-storage-remote-checkpoint-loss-proof.txt
           grep -q 'REMOTE_CHECKPOINT_LOSS_WAL_TAIL_ACKED' shared-storage-remote-checkpoint-loss-proof.txt
           grep -q 'REMOTE_CHECKPOINT_LOSS_WAL_PRESERVED' shared-storage-remote-checkpoint-loss-proof.txt
+          grep -q 'REMOTE_CHECKPOINT_LOSS_ALL_BROKERS_SERVED' shared-storage-remote-checkpoint-loss-proof.txt
           grep -q 'REMOTE_CHECKPOINT_LOSS_RECOVERED' shared-storage-remote-checkpoint-loss-proof.txt
 
       - name: Show recovered S3 objects
