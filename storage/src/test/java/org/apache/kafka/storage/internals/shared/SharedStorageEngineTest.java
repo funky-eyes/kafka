@@ -106,6 +106,7 @@ class SharedStorageEngineTest {
     void committedRemoteObjectsShouldCheckpointOffCallbackAndRestoreBeforeWalReplay() throws Exception {
         Path directory = tempDir.resolve("remote-checkpoint-engine");
         SharedObjectMetadata first = object(10, 100, 110, 111);
+        SharedObjectMetadata physicalDuplicate = object(12, 100, 110, 111);
         SharedObjectMetadata second = object(11, 110, 120, 222);
 
         LocalRemoteObjectCheckpoint checkpoint = new LocalRemoteObjectCheckpoint(directory);
@@ -114,12 +115,16 @@ class SharedStorageEngineTest {
             checkpoint
         )) {
             engine.commitRemoteObject(first);
+            engine.commitRemoteObject(first);
+            engine.commitRemoteObject(physicalDuplicate);
             engine.commitRemoteObject(second);
 
             assertTrue(engine.remoteIndex().coverage(PARTITION).covers(new OffsetRange(100, 120)),
                 "metadata callback must publish authoritative remote coverage immediately");
+            assertEquals(10L, engine.remoteIndex().find(PARTITION, 105).orElseThrow().objectId(),
+                "an equivalent physical duplicate must keep the first published remote reference");
             assertEquals(2, engine.pendingRemoteCheckpointCount(),
-                "metadata callback must queue rather than synchronously fsync the local checkpoint");
+                "duplicate COMMIT publication must not enqueue duplicate local checkpoint work");
             assertTrue(new LocalRemoteObjectCheckpoint(directory).references().isEmpty(),
                 "queued COMMITs must not be mistaken for durable local checkpoint state");
 

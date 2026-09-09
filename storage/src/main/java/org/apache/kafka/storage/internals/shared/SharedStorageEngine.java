@@ -457,8 +457,15 @@ public final class SharedStorageEngine implements AutoCloseable {
 
     public void commitRemoteObject(SharedObjectMetadata object) {
         SharedObjectMetadata committed = Objects.requireNonNull(object, "object");
+        List<PartitionRevision> revisionsBefore = committed.ranges().stream()
+            .map(range -> range.partition())
+            .distinct()
+            .map(partition -> new PartitionRevision(partition, remoteIndex.revision(partition)))
+            .toList();
         remoteIndex.add(committed);
-        if (remoteCheckpoint != null) {
+        boolean changed = revisionsBefore.stream().anyMatch(snapshot ->
+            remoteIndex.revision(snapshot.partition()) != snapshot.revision());
+        if (remoteCheckpoint != null && changed) {
             pendingRemoteCheckpoints.add(committed);
         }
     }
@@ -621,6 +628,9 @@ public final class SharedStorageEngine implements AutoCloseable {
         public BatchReadResult {
             batches = batches.stream().map(ByteBuffer::asReadOnlyBuffer).toList();
         }
+    }
+
+    private record PartitionRevision(SharedPartitionId partition, long revision) {
     }
 
     private record ReadSelection(
