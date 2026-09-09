@@ -165,7 +165,7 @@ class SharedStorageEngineTest {
             CountDownLatch start = new CountDownLatch(1);
             ExecutorService executor = Executors.newFixedThreadPool(publishers);
             try {
-                List<Future<?>> publications = java.util.stream.IntStream.range(0, publishers)
+                List<Future<Object>> publications = java.util.stream.IntStream.range(0, publishers)
                     .mapToObj(ignored -> executor.submit(() -> {
                         ready.countDown();
                         assertTrue(start.await(10, TimeUnit.SECONDS));
