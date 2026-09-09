@@ -20,6 +20,7 @@ import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.errors.InconsistentTopicIdException;
 import org.apache.kafka.storage.internals.checkpoint.PartitionMetadataFile;
+import org.apache.kafka.storage.internals.epoch.LeaderEpochFileCache;
 import org.apache.kafka.storage.internals.log.LogDirFailureChannel;
 import org.apache.kafka.test.TestUtils;
 
@@ -122,5 +123,46 @@ class SharedUnifiedLogFactoryTest {
             )
         );
         assertTrue(error.getMessage().contains("requires a durable topic ID"));
+    }
+
+    @Test
+    void resetsAndRestoresLiveLeaderEpochAroundRemoteReplay() {
+        LeaderEpochFileCache leaderEpochCache = Mockito.mock(LeaderEpochFileCache.class);
+        Mockito.when(leaderEpochCache.latestEpoch())
+            .thenReturn(Optional.of(4))
+            .thenReturn(Optional.of(0));
+
+        Optional<Integer> liveLeaderEpoch =
+            SharedUnifiedLogFactory.resetLeaderEpochCacheForRemoteReplay(leaderEpochCache);
+
+        assertEquals(Optional.of(4), liveLeaderEpoch);
+        Mockito.verify(leaderEpochCache).clearAndFlush();
+
+        SharedUnifiedLogFactory.restoreLiveLeaderEpochAfterRemoteReplay(
+            leaderEpochCache,
+            liveLeaderEpoch,
+            160L
+        );
+
+        Mockito.verify(leaderEpochCache).assign(4, 160L);
+    }
+
+    @Test
+    void doesNotReanchorLiveLeaderEpochWhenRemoteReplayAlreadyContainsIt() {
+        LeaderEpochFileCache leaderEpochCache = Mockito.mock(LeaderEpochFileCache.class);
+        Mockito.when(leaderEpochCache.latestEpoch())
+            .thenReturn(Optional.of(4))
+            .thenReturn(Optional.of(4));
+
+        Optional<Integer> liveLeaderEpoch =
+            SharedUnifiedLogFactory.resetLeaderEpochCacheForRemoteReplay(leaderEpochCache);
+        SharedUnifiedLogFactory.restoreLiveLeaderEpochAfterRemoteReplay(
+            leaderEpochCache,
+            liveLeaderEpoch,
+            160L
+        );
+
+        Mockito.verify(leaderEpochCache).clearAndFlush();
+        Mockito.verify(leaderEpochCache, Mockito.never()).assign(Mockito.anyInt(), Mockito.anyLong());
     }
 }
