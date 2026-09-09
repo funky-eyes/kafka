@@ -203,7 +203,7 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
                             " ends at " + recoveredEnd);
                 }
 
-                rebuildKafkaCompatibilityState(loaded, logStartOffset);
+                rebuildKafkaCompatibilityState(loaded, logStartOffset, recoveredEnd);
                 // Reopening reads both remote objects and any surviving WAL. Publish the Kafka-visible LEO only after
                 // the complete shared read view and compatibility state are rebuilt while appends remain fenced out.
                 loaded.localLog().updateLogEndOffset(
@@ -239,12 +239,48 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
 
     private static void rebuildKafkaCompatibilityState(
         LoadedSharedLog loaded,
-        long logStartOffset
+        long logStartOffset,
+        long recoveredEnd
     ) throws IOException {
         ProducerStateManager producerStateManager = loaded.log().producerStateManager();
+        LeaderEpochFileCache leaderEpochCache = loaded.log().leaderEpochCache();
+        Optional<Integer> liveLeaderEpoch = resetLeaderEpochCacheForRemoteReplay(leaderEpochCache);
+
         producerStateManager.truncateFullyAndStartAt(logStartOffset);
         for (LogSegment segment : loaded.localLog().segments().values()) {
-            segment.recover(producerStateManager, loaded.log().leaderEpochCache());
+            segment.recover(producerStateManager, leaderEpochCache);
+        }
+        restoreLiveLeaderEpochAfterRemoteReplay(leaderEpochCache, liveLeaderEpoch, recoveredEnd);
+    }
+
+    /**
+     * Startup can assign the current leader epoch while the shared log still looks empty. Those entries are anchored at
+     * offset zero and would make historical remote batches look divergent after metadata replay. Preserve the newest
+     * live epoch, but clear and persist the stale cache so {@link SharedLogSegment#recover} can reconstruct historical
+     * epoch boundaries from the authoritative shared batches.
+     */
+    static Optional<Integer> resetLeaderEpochCacheForRemoteReplay(LeaderEpochFileCache leaderEpochCache) {
+        Optional<Integer> liveLeaderEpoch = leaderEpochCache.latestEpoch();
+        leaderEpochCache.clearAndFlush();
+        return liveLeaderEpoch;
+    }
+
+    /**
+     * If startup already advanced the partition epoch beyond the epochs carried by the recovered batches, re-anchor
+     * that live epoch at the recovered LEO. This keeps the remote history intact while preserving Kafka's current-epoch
+     * boundary for subsequent fetch/divergence checks.
+     */
+    static void restoreLiveLeaderEpochAfterRemoteReplay(
+        LeaderEpochFileCache leaderEpochCache,
+        Optional<Integer> liveLeaderEpoch,
+        long recoveredEnd
+    ) {
+        if (liveLeaderEpoch.isEmpty()) {
+            return;
+        }
+        Optional<Integer> recoveredLatestEpoch = leaderEpochCache.latestEpoch();
+        if (recoveredLatestEpoch.isEmpty() || liveLeaderEpoch.get() > recoveredLatestEpoch.get()) {
+            leaderEpochCache.assign(liveLeaderEpoch.get(), recoveredEnd);
         }
     }
 
