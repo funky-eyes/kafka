@@ -22,6 +22,7 @@ on:
     paths:
       - 'core/src/test/java/kafka/server/SharedStorageAcksOneIndependentProcessTest.java'
       - 'core/src/test/java/kafka/server/SharedStorageAcksOneKRaftIntegrationTest.java'
+      - 'core/src/test/java/kafka/server/SharedStorageAcksOneReplicatedSigkillTest.java'
       - 'storage/src/main/**'
       - 'storage/shared-storage-s3/**'
       - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
@@ -30,6 +31,7 @@ on:
     paths:
       - 'core/src/test/java/kafka/server/SharedStorageAcksOneIndependentProcessTest.java'
       - 'core/src/test/java/kafka/server/SharedStorageAcksOneKRaftIntegrationTest.java'
+      - 'core/src/test/java/kafka/server/SharedStorageAcksOneReplicatedSigkillTest.java'
       - 'storage/src/main/**'
       - 'storage/shared-storage-s3/**'
       - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
@@ -198,3 +200,152 @@ jobs:
       - name: MinIO logs
         if: always()
         run: docker logs kafka-shared-minio-acks-one || true
+
+  acks-one-dual-role-sigkill-matrix:
+    name: acks=1 RF${{ matrix.rf }} broker+controller SIGKILL
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        rf:
+          - 1
+          - 2
+          - 3
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Start MinIO
+        run: |
+          docker run --detach \
+            --name kafka-shared-minio-acks-one-dual-role \
+            --publish 9000:9000 \
+            --env MINIO_ROOT_USER=minioadmin \
+            --env MINIO_ROOT_PASSWORD=minioadmin123 \
+            minio/minio:latest \
+            server /data --address :9000
+
+      - name: Wait for MinIO readiness
+        run: |
+          for i in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs kafka-shared-minio-acks-one-dual-role
+          exit 1
+
+      - name: Ensure MinIO bucket exists
+        run: |
+          docker run --rm --network host --entrypoint /bin/sh minio/mc:latest -c '
+            mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
+            mc mb --ignore-existing local/kafka-shared-storage-acks-one-dual-role >/dev/null
+          '
+
+      - name: Setup Gradle
+        uses: ./.github/actions/setup-gradle
+        with:
+          java-version: 25
+          gradle-cache-read-only: true
+
+      - name: Stage dual-role broker runtime
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew \
+            :core:jar \
+            :core:copyDependantLibs \
+            :tools:jar \
+            :tools:copyDependantLibs \
+            :storage:shared-storage-s3:stageProcessRuntime \
+            :core:compileTestJava \
+            --no-scan 2>&1 | tee shared-storage-acks-one-dual-role-build.log
+          test -d storage/shared-storage-s3/build/process-runtime
+          find storage/shared-storage-s3/build/process-runtime -maxdepth 1 -type f -printf '%f\n' | sort \
+            > shared-storage-acks-one-dual-role-runtime.txt
+          grep -q '^kafka-shared-storage-s3-' shared-storage-acks-one-dual-role-runtime.txt
+          grep -q '^s3-' shared-storage-acks-one-dual-role-runtime.txt
+
+      - name: Run RF${{ matrix.rf }} broker+controller SIGKILL gate
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin123
+          AWS_REGION: us-east-1
+          SHARED_STORAGE_S3_ENDPOINT: http://127.0.0.1:9000
+          SHARED_STORAGE_S3_REGION: us-east-1
+          SHARED_STORAGE_S3_BUCKET: kafka-shared-storage-acks-one-dual-role
+          SHARED_STORAGE_ACKS_ONE_REPLICATION_FACTOR: ${{ matrix.rf }}
+        run: |
+          set -o pipefail
+          ./gradlew :core:test \
+            --tests 'kafka.server.SharedStorageAcksOneReplicatedSigkillTest' \
+            --no-scan 2>&1 | tee shared-storage-acks-one-dual-role-e2e.log
+
+          result_xml="$(find core/build/test-results build/junit-xml \
+            -type f \
+            -name 'TEST-kafka.server.SharedStorageAcksOneReplicatedSigkillTest.xml' \
+            -print -quit 2>/dev/null || true)"
+          test -n "$result_xml"
+          grep -q '<testsuite ' "$result_xml"
+          grep -q 'failures="0"' "$result_xml"
+          grep -q 'errors="0"' "$result_xml"
+          grep -q 'skipped="0"' "$result_xml"
+          grep -q 'ACKS1_REPLICATED_SCENARIO rf=${{ matrix.rf }} minIsr=${{ matrix.rf }}' "$result_xml"
+          grep -q 'ACKS1_REPLICATED_COMMITTED rf=${{ matrix.rf }} leader=' "$result_xml"
+          grep -q 'ACKS1_REPLICATED_SIGKILL rf=${{ matrix.rf }} oldLeader=' "$result_xml"
+          grep -q 'ACKS1_REPLICATED_MATRIX_SUCCESS rf=${{ matrix.rf }} records=1' "$result_xml"
+
+          if [ '${{ matrix.rf }}' = '1' ]; then
+            grep -q 'ACKS1_REPLICATED_RF1_RESTART leader=' "$result_xml"
+          else
+            grep -q 'ACKS1_REPLICATED_FAILOVER rf=${{ matrix.rf }} oldLeader=' "$result_xml"
+          fi
+
+          {
+            grep 'ACKS1_REPLICATED_SCENARIO rf=${{ matrix.rf }} minIsr=' "$result_xml"
+            grep 'ACKS1_REPLICATED_COMMITTED rf=${{ matrix.rf }} leader=' "$result_xml"
+            grep 'ACKS1_REPLICATED_SIGKILL rf=${{ matrix.rf }} oldLeader=' "$result_xml"
+            if [ '${{ matrix.rf }}' = '1' ]; then
+              grep 'ACKS1_REPLICATED_RF1_RESTART leader=' "$result_xml"
+            else
+              grep 'ACKS1_REPLICATED_FAILOVER rf=${{ matrix.rf }} oldLeader=' "$result_xml"
+            fi
+            grep 'ACKS1_REPLICATED_MATRIX_SUCCESS rf=${{ matrix.rf }} records=1' "$result_xml"
+            printf 'ACKS1_DUAL_ROLE_SUCCESS rf=%s commit=%s\n' '${{ matrix.rf }}' "$GITHUB_SHA"
+          } > shared-storage-acks-one-dual-role-proof.txt
+          cat shared-storage-acks-one-dual-role-proof.txt
+
+      - name: Show committed S3 objects
+        if: always()
+        run: |
+          docker run --rm --network host --entrypoint /bin/sh minio/mc:latest -c '
+            mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
+            mc ls --recursive local/kafka-shared-storage-acks-one-dual-role || true
+          ' | tee shared-storage-acks-one-dual-role-objects.log
+
+      - name: Upload RF${{ matrix.rf }} dual-role diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shared-storage-acks-one-dual-role-rf${{ matrix.rf }}
+          path: |
+            shared-storage-acks-one-dual-role-build.log
+            shared-storage-acks-one-dual-role-runtime.txt
+            shared-storage-acks-one-dual-role-e2e.log
+            shared-storage-acks-one-dual-role-proof.txt
+            shared-storage-acks-one-dual-role-objects.log
+            core/build/shared-storage-acks-one-replicated-diagnostics
+            core/build/reports/tests/test
+            core/build/test-results/test
+            build/junit-xml/core
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: MinIO logs
+        if: always()
+        run: docker logs kafka-shared-minio-acks-one-dual-role || true
