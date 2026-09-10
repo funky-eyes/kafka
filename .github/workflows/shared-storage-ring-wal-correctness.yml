@@ -21,6 +21,7 @@ on:
       - shared-wal-s3-4.3.1
     paths:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/wal/**'
+      - 'storage/src/test/**'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/metadata/RemoteObjectIndex.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedLogSegment.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedUnifiedLogFactory.java'
@@ -34,11 +35,13 @@ on:
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/kafka/SharedStorageExtensionWalRuntimeTest.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/wal/Ring*Test.java'
       - 'storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3/S3SharedStorageExtension.java'
+      - 'storage/shared-storage-s3/src/test/**'
       - 'storage/shared-storage-s3/src/test/java/org/apache/kafka/storage/internals/shared/s3/S3SharedStorageWalFactoryTest.java'
       - '.github/workflows/shared-storage-ring-wal-correctness.yml'
   pull_request:
     paths:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/wal/**'
+      - 'storage/src/test/**'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/metadata/RemoteObjectIndex.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedLogSegment.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedUnifiedLogFactory.java'
@@ -52,6 +55,7 @@ on:
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/kafka/SharedStorageExtensionWalRuntimeTest.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/wal/Ring*Test.java'
       - 'storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3/S3SharedStorageExtension.java'
+      - 'storage/shared-storage-s3/src/test/**'
       - 'storage/shared-storage-s3/src/test/java/org/apache/kafka/storage/internals/shared/s3/S3SharedStorageWalFactoryTest.java'
       - '.github/workflows/shared-storage-ring-wal-correctness.yml'
   workflow_dispatch:

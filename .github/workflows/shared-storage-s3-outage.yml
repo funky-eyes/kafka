@@ -20,6 +20,7 @@ on:
     branches:
       - shared-wal-s3-4.3.1
     paths:
+      - 'core/src/test/**'
       - 'core/src/test/java/kafka/server/SharedStorageS3OutageKRaftIntegrationTest.java'
       - 'storage/src/main/**'
       - 'storage/shared-storage-s3/src/main/**'
@@ -27,6 +28,7 @@ on:
       - '.github/workflows/shared-storage-s3-outage.yml'
   pull_request:
     paths:
+      - 'core/src/test/**'
       - 'core/src/test/java/kafka/server/SharedStorageS3OutageKRaftIntegrationTest.java'
       - 'storage/src/main/**'
       - 'storage/shared-storage-s3/src/main/**'
