@@ -66,7 +66,7 @@ class FileSharedObjectUploadBarrierTest {
             tempDir,
             7
         );
-        UploadContext context = new UploadContext(1234L, 5678L, 999L);
+        UploadContext context = UploadContext.planned(1234L, 5678L, 999L);
 
         assertTrue(barrier.onPhase(Phase.AFTER_PREPARE, context).isDone());
         assertTrue(barrier.onPhase(Phase.AFTER_PUT, context).isDone());
@@ -99,7 +99,7 @@ class FileSharedObjectUploadBarrierTest {
 
         CompletableFuture<Void> pause = barrier.onPhase(
             Phase.AFTER_PREPARE,
-            new UploadContext(2222L, 3333L, 4444L)
+            UploadContext.planned(2222L, 3333L, 4444L)
         );
         String marker = Files.readString(barrier.reachedFile());
         assertTrue(marker.contains("objectSize=4444"));
