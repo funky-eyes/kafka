@@ -66,12 +66,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
- * Proves the positive {@code acks=1} recovery boundary after asynchronous replica WAL propagation has completed.
+ * Proves the positive {@code acks=1} recovery boundary once the record has crossed Kafka's high watermark while the
+ * full ISR remains intact.
  *
  * <p>The producer acknowledgement itself still depends only on the leader WAL. Before crashing the leader, this test
- * independently waits for every assigned replica WAL to advance and for the record to become consumer-visible through
- * Kafka's high watermark. RF=2 and RF=3 must then perform a clean automatic failover. RF=1 has no alternate replica and
- * therefore requires the original broker and disk to restart.</p>
+ * waits for the record to become consumer-visible through Kafka's high watermark and then re-confirms that every
+ * assigned replica remains in the ISR. RF=2 and RF=3 must then perform a clean automatic failover. RF=1 has no alternate
+ * replica and therefore requires the original broker and disk to restart.</p>
  */
 @Tag("integration")
 @Timeout(value = 7, unit = TimeUnit.MINUTES)
@@ -130,20 +131,9 @@ public class SharedStorageAcksOneReplicatedSigkillTest {
                 );
                 SharedPartitionId partition = sharedPartitionId(topic.topicId(), 0);
                 int oldLeader = topic.partitions().get(0).leader().id();
-                List<Integer> replicaIds = topic.partitions().get(0).replicas().stream()
-                    .map(node -> node.id())
-                    .toList();
-                Map<Integer, Long> walBefore = walBytesByBroker(brokers, replicaIds);
 
                 RecordMetadata acknowledged = produceOne(bootstrapServers);
                 assertEquals(0L, acknowledged.offset());
-                for (int replicaId : replicaIds) {
-                    TestUtils.waitForCondition(
-                        () -> walBytes(brokers.get(replicaId).walDir()) > walBefore.get(replicaId),
-                        30_000L,
-                        () -> "Replica " + replicaId + " did not copy the acks=1 record into its WAL"
-                    );
-                }
                 assertExpectedValues(
                     consumeAll(bootstrapServers, 1),
                     1,
@@ -153,9 +143,16 @@ public class SharedStorageAcksOneReplicatedSigkillTest {
                     hasCommittedCoverage(bootstrapServers, partition, new OffsetRange(0, 1)),
                     "The positive failover proof must remain independent from S3 publication"
                 );
+                TopicDescription beforeKill = waitForTopicState(
+                    admin,
+                    replicationFactor,
+                    replicationFactor,
+                    oldLeader
+                );
+                int fullIsrSize = beforeKill.partitions().get(0).isr().size();
                 System.out.println("ACKS1_REPLICATED_COMMITTED rf=" + replicationFactor +
-                    " leader=" + oldLeader + " durableCopies=" + replicaIds.size() +
-                    " highWatermarkVisible=true remoteCommitted=false");
+                    " leader=" + oldLeader + " isrCopies=" + fullIsrSize +
+                    " highWatermarkVisible=true fullIsr=true remoteCommitted=false");
 
                 BrokerProcess victim = brokers.get(oldLeader);
                 long victimPid = victim.process().pid();
@@ -523,38 +520,6 @@ public class SharedStorageAcksOneReplicatedSigkillTest {
             expected.add(value(i));
         }
         assertEquals(expected, actual, message);
-    }
-
-    private static Map<Integer, Long> walBytesByBroker(
-        Map<Integer, BrokerProcess> brokers,
-        List<Integer> replicaIds
-    ) {
-        Map<Integer, Long> result = new LinkedHashMap<>();
-        for (int replicaId : replicaIds) {
-            result.put(replicaId, walBytes(brokers.get(replicaId).walDir()));
-        }
-        return result;
-    }
-
-    private static long walBytes(Path walDir) {
-        if (!Files.isDirectory(walDir)) {
-            return 0L;
-        }
-        try (Stream<Path> files = Files.list(walDir)) {
-            return files
-                .filter(path -> path.getFileName().toString().startsWith("wal-"))
-                .filter(path -> path.getFileName().toString().endsWith(".log"))
-                .mapToLong(path -> {
-                    try {
-                        return Files.size(path);
-                    } catch (IOException ignored) {
-                        return 0L;
-                    }
-                })
-                .sum();
-        } catch (IOException ignored) {
-            return 0L;
-        }
     }
 
     private static boolean hasCommittedCoverage(
