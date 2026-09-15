@@ -33,7 +33,8 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Logical remote index. Physical objects may be duplicated after a leader race, but a logical Kafka offset range
- * has one content identity. Overlapping ranges are accepted only when the range and checksum are identical.
+ * has one content identity. Overlapping ranges are accepted only when the offset range, leader epoch and checksum
+ * are identical.
  *
  * <p>Uploaders are expected to emit metadata at Kafka RecordBatch boundaries. This makes conflict detection
  * deterministic even when multiple partitions are packed into different physical S3 objects.</p>
@@ -211,7 +212,9 @@ public final class RemoteObjectIndex {
     }
 
     private static boolean sameLogicalRange(SharedObjectRange left, SharedObjectRange right) {
-        return left.offsets().equals(right.offsets()) && left.checksum() == right.checksum();
+        return left.offsets().equals(right.offsets()) &&
+            left.leaderEpoch() == right.leaderEpoch() &&
+            left.checksum() == right.checksum();
     }
 
     private static RemoteMetadataConflictException conflict(RangeReference existing, RangeReference incoming) {

@@ -88,6 +88,30 @@ class RemoteObjectIndexTest {
     }
 
     @Test
+    void shouldRejectPhysicalDuplicateWithDifferentLeaderEpoch() {
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(object(10, 0, 100, 777));
+
+        SharedObjectRange conflictingRange = new SharedObjectRange(
+            PARTITION,
+            new OffsetRange(0, 100),
+            4,
+            0,
+            100,
+            777
+        );
+        SharedObjectMetadata conflicting = new SharedObjectMetadata(
+            11,
+            100,
+            777,
+            List.of(conflictingRange)
+        );
+
+        assertThrows(RemoteMetadataConflictException.class, () -> index.add(conflicting));
+        assertEquals(10, index.find(PARTITION, 50).orElseThrow().objectId());
+    }
+
+    @Test
     void shouldRestoreDurableLocalReferencesBeforeAuthoritativeReplay() {
         RemoteObjectIndex index = new RemoteObjectIndex();
         SharedObjectRange first = range(PARTITION, 0, 100, 777);
