@@ -66,12 +66,17 @@ public final class SharedMetadataImage {
         if (state == State.FAILED) {
             throw failedState();
         }
-        MetadataKey key = SharedMetadataRecordCodec.decodeKey(keyBytes);
-        MetadataValue value = SharedMetadataRecordCodec.decodeValue(key, valueBytes);
-        switch (key.type()) {
-            case OBJECT -> applyObject(key.id(), value);
-            case OBJECT_CLEANUP -> applyCleanup(key.id(), value);
-            case BROKER_SEQUENCE -> applyBrokerSequence(Math.toIntExact(key.id()), value);
+        try {
+            MetadataKey key = SharedMetadataRecordCodec.decodeKey(keyBytes);
+            MetadataValue value = SharedMetadataRecordCodec.decodeValue(key, valueBytes);
+            switch (key.type()) {
+                case OBJECT -> applyObject(key.id(), value);
+                case OBJECT_CLEANUP -> applyCleanup(key.id(), value);
+                case BROKER_SEQUENCE -> applyBrokerSequence(Math.toIntExact(key.id()), value);
+            }
+        } catch (RuntimeException | Error replayFailure) {
+            markFailed(replayFailure);
+            throw replayFailure;
         }
     }
 

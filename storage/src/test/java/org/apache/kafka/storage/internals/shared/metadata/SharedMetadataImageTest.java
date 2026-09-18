@@ -92,7 +92,7 @@ class SharedMetadataImageTest {
     }
 
     @Test
-    void committedObjectListenerFailurePropagatesSoCallerCanFailImageClosed() {
+    void committedObjectListenerFailurePermanentlyFailsImageClosed() {
         RuntimeException observerFailure = new RuntimeException("remote index rejected metadata");
         SharedMetadataImage image = new SharedMetadataImage(metadata -> {
             throw observerFailure;
@@ -107,6 +107,48 @@ class SharedMetadataImageTest {
             )
         );
         assertSame(observerFailure, error);
+        assertEquals(SharedMetadataImage.State.FAILED, image.state());
+        assertSame(observerFailure, image.failure().orElseThrow());
+        IllegalStateException readFailure = assertThrows(IllegalStateException.class, image::committedObjects);
+        assertSame(observerFailure, readFailure.getCause());
+    }
+
+    @Test
+    void replayCorruptionPermanentlyFailsImageClosed() {
+        SharedMetadataImage image = new SharedMetadataImage();
+        long objectId = BrokerObjectId.compose(1, 14L);
+        byte[] key = SharedMetadataRecordCodec.objectKey(objectId);
+        image.apply(key, SharedMetadataRecordCodec.committedObjectValue(metadata(objectId, 114L)));
+        image.markReady();
+
+        IllegalStateException corruption = assertThrows(
+            IllegalStateException.class,
+            () -> image.apply(key, SharedMetadataRecordCodec.preparedObjectValue(1_014L))
+        );
+
+        assertEquals(SharedMetadataImage.State.FAILED, image.state());
+        assertSame(corruption, image.failure().orElseThrow());
+        IllegalStateException readFailure = assertThrows(IllegalStateException.class, image::committedObjects);
+        assertSame(corruption, readFailure.getCause());
+    }
+
+    @Test
+    void decodeFailurePermanentlyFailsImageClosed() {
+        SharedMetadataImage image = new SharedMetadataImage();
+        byte[] corruptKey = new byte[] {0x7f};
+
+        RuntimeException decodeFailure = assertThrows(
+            RuntimeException.class,
+            () -> image.apply(corruptKey, null)
+        );
+
+        assertEquals(SharedMetadataImage.State.FAILED, image.state());
+        assertSame(decodeFailure, image.failure().orElseThrow());
+        IllegalStateException nextApplyFailure = assertThrows(
+            IllegalStateException.class,
+            () -> image.apply(corruptKey, null)
+        );
+        assertSame(decodeFailure, nextApplyFailure.getCause());
     }
 
     @Test
