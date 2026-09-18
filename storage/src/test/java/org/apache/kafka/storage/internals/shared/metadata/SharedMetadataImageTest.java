@@ -300,36 +300,44 @@ class SharedMetadataImageTest {
 
     @Test
     void brokerSequenceWatermarkIsMonotonicAndNeverTombstoned() {
-        SharedMetadataImage image = new SharedMetadataImage();
         byte[] key = SharedMetadataRecordCodec.brokerSequenceKey(7);
-        image.apply(key, SharedMetadataRecordCodec.brokerSequenceValue(100L));
-        image.apply(key, SharedMetadataRecordCodec.brokerSequenceValue(200L));
-        image.markReady();
 
-        assertEquals(200L, image.brokerReservedExclusiveSequence(7));
-        assertEquals(1L, image.brokerReservedExclusiveSequence(8));
+        SharedMetadataImage monotonicImage = new SharedMetadataImage();
+        monotonicImage.apply(key, SharedMetadataRecordCodec.brokerSequenceValue(100L));
+        monotonicImage.apply(key, SharedMetadataRecordCodec.brokerSequenceValue(200L));
+        monotonicImage.markReady();
+
+        assertEquals(200L, monotonicImage.brokerReservedExclusiveSequence(7));
+        assertEquals(1L, monotonicImage.brokerReservedExclusiveSequence(8));
         assertThrows(
             IllegalStateException.class,
-            () -> image.apply(key, SharedMetadataRecordCodec.brokerSequenceValue(150L))
+            () -> monotonicImage.apply(key, SharedMetadataRecordCodec.brokerSequenceValue(150L))
         );
-        assertThrows(IllegalStateException.class, () -> image.apply(key, null));
+
+        SharedMetadataImage tombstoneImage = new SharedMetadataImage();
+        tombstoneImage.apply(key, SharedMetadataRecordCodec.brokerSequenceValue(200L));
+        tombstoneImage.markReady();
+        assertThrows(IllegalStateException.class, () -> tombstoneImage.apply(key, null));
     }
 
     @Test
     void rejectsMetadataRegressionOrConflictingObjectReuse() {
-        SharedMetadataImage image = new SharedMetadataImage();
         long objectId = BrokerObjectId.compose(5, 40L);
         byte[] key = SharedMetadataRecordCodec.objectKey(objectId);
         SharedObjectMetadata committed = metadata(objectId, 404L);
-        image.apply(key, SharedMetadataRecordCodec.committedObjectValue(committed));
 
+        SharedMetadataImage regressionImage = new SharedMetadataImage();
+        regressionImage.apply(key, SharedMetadataRecordCodec.committedObjectValue(committed));
         assertThrows(
             IllegalStateException.class,
-            () -> image.apply(key, SharedMetadataRecordCodec.preparedObjectValue(1_000L))
+            () -> regressionImage.apply(key, SharedMetadataRecordCodec.preparedObjectValue(1_000L))
         );
+
+        SharedMetadataImage conflictingReuseImage = new SharedMetadataImage();
+        conflictingReuseImage.apply(key, SharedMetadataRecordCodec.committedObjectValue(committed));
         assertThrows(
             IllegalStateException.class,
-            () -> image.apply(
+            () -> conflictingReuseImage.apply(
                 key,
                 SharedMetadataRecordCodec.committedObjectValue(metadata(objectId, 405L))
             )
