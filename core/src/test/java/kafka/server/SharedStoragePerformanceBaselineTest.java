@@ -95,12 +95,12 @@ public class SharedStoragePerformanceBaselineTest {
             String order;
             if ((repetition & 1) == 0) {
                 order = "classic-shared";
-                classic = benchmark(false, endpoint, region, bucket, records);
-                shared = benchmark(true, endpoint, region, bucket, records);
+                classic = benchmark(false, endpoint, region, bucket, warmupRecords, records);
+                shared = benchmark(true, endpoint, region, bucket, warmupRecords, records);
             } else {
                 order = "shared-classic";
-                shared = benchmark(true, endpoint, region, bucket, records);
-                classic = benchmark(false, endpoint, region, bucket, records);
+                shared = benchmark(true, endpoint, region, bucket, warmupRecords, records);
+                classic = benchmark(false, endpoint, region, bucket, warmupRecords, records);
             }
 
             double produceRatio = shared.produceRecordsPerSecond() / classic.produceRecordsPerSecond();
