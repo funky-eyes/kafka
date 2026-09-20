@@ -46,7 +46,32 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  acks-one-preflight:
+    name: acks=1 release-gate preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Setup Gradle
+        uses: ./.github/actions/setup-gradle
+        with:
+          java-version: 25
+          gradle-cache-read-only: true
+
+      - name: Run shared storage static checks once
+        run: |
+          ./gradlew \
+            :core:checkstyleTest \
+            :storage:checkstyleMain \
+            :storage:shared-storage-s3:checkstyleMain \
+            --no-scan
+
   acks-one-replication-matrix:
+    needs: acks-one-preflight
     name: acks=1 RF${{ matrix.rf }} leader-only and replicated crash
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -202,6 +227,7 @@ jobs:
         run: docker logs kafka-shared-minio-acks-one || true
 
   acks-one-dual-role-sigkill-matrix:
+    needs: acks-one-preflight
     name: acks=1 RF${{ matrix.rf }} broker+controller SIGKILL
     runs-on: ubuntu-latest
     timeout-minutes: 30
