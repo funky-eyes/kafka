@@ -16,6 +16,11 @@
 name: Shared Storage Soak and Chaos
 
 on:
+  push:
+    branches:
+      - shared-wal-s3-4.3.1
+    paths:
+      - '.github/workflows/shared-storage-soak-chaos.yml'
   workflow_dispatch:
     inputs:
       iterations:
@@ -74,7 +79,7 @@ jobs:
           SHARED_STORAGE_S3_ENDPOINT: http://127.0.0.1:9000
           SHARED_STORAGE_S3_BUCKET: kafka-shared-storage-soak
           SHARED_STORAGE_S3_CONTAINER: kafka-shared-soak-minio
-          SOAK_ITERATIONS: ${{ inputs.iterations }}
+          SOAK_ITERATIONS: ${{ inputs.iterations || '3' }}
         run: |
           set -euo pipefail
           if ! [[ "${SOAK_ITERATIONS}" =~ ^[1-9][0-9]*$ ]]; then

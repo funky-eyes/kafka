@@ -16,6 +16,12 @@
 name: Shared Storage Performance Baseline
 
 on:
+  push:
+    branches:
+      - shared-wal-s3-4.3.1
+    paths:
+      - 'core/src/test/java/kafka/server/SharedStoragePerformanceBaselineTest.java'
+      - '.github/workflows/shared-storage-performance.yml'
   workflow_dispatch:
     inputs:
       records:
@@ -83,9 +89,9 @@ jobs:
           AWS_REGION: us-east-1
           SHARED_STORAGE_S3_ENDPOINT: http://127.0.0.1:9000
           SHARED_STORAGE_S3_BUCKET: kafka-shared-storage-performance
-          SHARED_STORAGE_PERF_RECORDS: ${{ inputs.records }}
-          SHARED_STORAGE_MIN_PRODUCE_RATIO: ${{ inputs.min_produce_ratio }}
-          SHARED_STORAGE_MIN_CONSUME_RATIO: ${{ inputs.min_consume_ratio }}
+          SHARED_STORAGE_PERF_RECORDS: ${{ inputs.records || '10000' }}
+          SHARED_STORAGE_MIN_PRODUCE_RATIO: ${{ inputs.min_produce_ratio || '0.60' }}
+          SHARED_STORAGE_MIN_CONSUME_RATIO: ${{ inputs.min_consume_ratio || '0.50' }}
         run: |
           set -o pipefail
           ./gradlew :core:test \
