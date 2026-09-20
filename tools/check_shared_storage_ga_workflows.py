@@ -19,6 +19,7 @@
 import ast
 import re
 import sys
+from fnmatch import fnmatch
 from pathlib import Path
 
 
@@ -93,6 +94,41 @@ def concrete_production_paths(text):
     }
 
 
+def workflow_path_patterns(text):
+    return set(re.findall(r"(?m)^\\s+- '([^']+)'\\s*$", text))
+
+
+def exact_test_selectors(text):
+    return {
+        selector
+        for selector in re.findall(r"--tests\\s+'([^']+)'", text)
+        if "*" not in selector and "?" not in selector
+    }
+
+
+def test_sources(selector):
+    parts = selector.split(".")
+    for index in range(len(parts) - 1, -1, -1):
+        simple_name = parts[index]
+        candidates = []
+        for extension in ("java", "scala"):
+            candidates.extend(
+                path
+                for path in ROOT.glob(f"**/{simple_name}.{extension}")
+                if "/src/test/" in path.as_posix()
+            )
+        if candidates:
+            return {
+                path.relative_to(ROOT).as_posix()
+                for path in candidates
+            }
+    return set()
+
+
+def path_is_triggered(path, patterns):
+    return any(fnmatch(path, pattern) for pattern in patterns)
+
+
 def focused_core_test_blocks(text):
     lines = text.splitlines()
     blocks = []
@@ -153,6 +189,22 @@ def main():
     missing_prefixes = expected_prefixes - set(constants["PRODUCTION_PREFIXES"])
     for prefix in sorted(missing_prefixes):
         errors.append(f"GA production fingerprint is missing required production prefix: {prefix}")
+
+    for name, path in workflows.items():
+        text = texts[name]
+        if re.search(r"(?m)^  push:\\s*$", text) is None:
+            continue
+        patterns = workflow_path_patterns(text)
+        for selector in sorted(exact_test_selectors(text)):
+            sources = test_sources(selector)
+            if not sources:
+                errors.append(f"{path}: cannot resolve test selector to a test source: {selector}")
+                continue
+            if not any(path_is_triggered(source, patterns) for source in sources):
+                errors.append(
+                    f"{path}: test selector {selector} is not covered by push.paths; "
+                    f"resolved source(s): {', '.join(sorted(sources))}"
+                )
 
     for name, path in workflows.items():
         if name == MAIN_WORKFLOW_NAME:
