@@ -40,10 +40,13 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Check out release ref
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ inputs.release_ref }}
           persist-credentials: false
+
+      - name: Validate GA workflow consistency
+        run: python3 tools/check_shared_storage_ga_workflows.py
 
       - name: Evaluate release criteria
         env:
