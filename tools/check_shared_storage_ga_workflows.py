@@ -227,6 +227,8 @@ def main():
         errors.append(f"{GA_RELEASE_WORKFLOW_NAME}: actions: read permission is required")
     if "tools/check_shared_storage_ga_workflows.py" not in ga_release:
         errors.append(f"{GA_RELEASE_WORKFLOW_NAME}: workflow consistency check must run before manifest evaluation")
+    if "--evidence-branch" not in ga_release:
+        errors.append(f"{GA_RELEASE_WORKFLOW_NAME}: release evidence must be explicitly branch-scoped")
 
     if errors:
         print("Shared Storage GA workflow consistency: FAILED", file=sys.stderr)
