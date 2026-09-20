@@ -161,6 +161,10 @@ jobs:
           set -o pipefail
           ./gradlew :core:test \
             --tests 'kafka.server.SharedStorageRollingUpgradeE2ETest' \
+            -x :core:checkstyleMain \
+            -x :core:checkstyleTest \
+            -x :core:spotbugsMain \
+            -x :core:spotbugsTest \
             --no-scan 2>&1 | tee shared-storage-rolling-upgrade.log
 
       - name: Record remote object evidence

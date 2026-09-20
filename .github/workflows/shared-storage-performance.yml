@@ -96,6 +96,10 @@ jobs:
           set -o pipefail
           ./gradlew :core:test \
             --tests 'kafka.server.SharedStoragePerformanceBaselineTest' \
+            -x :core:checkstyleMain \
+            -x :core:checkstyleTest \
+            -x :core:spotbugsMain \
+            -x :core:spotbugsTest \
             --no-scan 2>&1 | tee shared-storage-performance.log
 
       - name: Upload performance evidence

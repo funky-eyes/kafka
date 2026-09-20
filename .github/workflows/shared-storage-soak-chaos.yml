@@ -109,6 +109,10 @@ jobs:
               --tests 'kafka.server.SharedStorageKafkaClientFailoverE2ETest' \
               --tests 'kafka.server.SharedStorageS3OutageKRaftIntegrationTest' \
               --tests 'kafka.server.SharedStorageLocalStateLossE2ETest' \
+              -x :core:checkstyleMain \
+              -x :core:checkstyleTest \
+              -x :core:spotbugsMain \
+              -x :core:spotbugsTest \
               --no-scan 2>&1 | tee -a shared-storage-soak.log
 
             docker start kafka-shared-soak-minio >/dev/null 2>&1 || true

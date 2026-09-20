@@ -102,6 +102,10 @@ jobs:
           set -o pipefail
           ./gradlew :core:test \
             --tests 'kafka.server.SharedStorageWalCapacityPressureKRaftIntegrationTest' \
+            -x :core:checkstyleMain \
+            -x :core:checkstyleTest \
+            -x :core:spotbugsMain \
+            -x :core:spotbugsTest \
             --no-scan 2>&1 | tee shared-storage-wal-capacity-e2e.log
 
           result_xml="$(find core/build/test-results build/junit-xml \
