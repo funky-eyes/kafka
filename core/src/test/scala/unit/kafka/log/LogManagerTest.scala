@@ -43,7 +43,7 @@ import java.util.{Collections, Optional, OptionalLong, Properties}
 import org.apache.kafka.server.metrics.KafkaYammerMetrics
 import org.apache.kafka.server.storage.log.FetchIsolation
 import org.apache.kafka.server.util.{FileLock, KafkaScheduler, MockTime, Scheduler}
-import org.apache.kafka.storage.internals.log.{CleanerConfig, FetchDataInfo, LogConfig, LogDirFailureChannel, LogFileUtils, LogMetricNames, LogManager => JLogManager, LogOffsetsListener, LogStartOffsetIncrementReason, ProducerStateManagerConfig, RemoteIndexCache, UnifiedLog}
+import org.apache.kafka.storage.internals.log.{CleanerConfig, FetchDataInfo, IncompleteLogInitializationException, LogConfig, LogDirFailureChannel, LogFileUtils, LogMetricNames, LogManager => JLogManager, LogOffsetsListener, LogStartOffsetIncrementReason, ProducerStateManagerConfig, RemoteIndexCache, UnifiedLog, UnifiedLogCreationContext, UnifiedLogFactory}
 import org.apache.kafka.storage.internals.checkpoint.{CleanShutdownFileHandler, OffsetCheckpointFile}
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats
 import org.junit.jupiter.api.function.Executable
@@ -521,6 +521,31 @@ class LogManagerTest {
     remoteIndexCache.mkdir()
     logManager = createLogManager(Seq(logDir))
     logManager.loadLogs(logConfig, Map.empty, _ => false)
+  }
+
+  @Test
+  def testLoadLogsSkipsIncompleteInitializationWithoutOffliningParentDir(): Unit = {
+    logManager.shutdown()
+    val parentDir = TestUtils.tempDir()
+    val partialDir = new File(parentDir, "partial-shared-topic-0")
+    assertTrue(partialDir.mkdir())
+
+    logManager = createLogManager(Seq(parentDir))
+    logManager.setUnifiedLogFactory(new UnifiedLogFactory {
+      override def create(context: UnifiedLogCreationContext): UnifiedLog = {
+        assertEquals(partialDir.getAbsoluteFile, context.dir().getAbsoluteFile)
+        assertTrue(context.dir().delete(), "Simulated factory must remove the proven-empty partial directory")
+        throw new IncompleteLogInitializationException("simulated crash-interrupted initialization")
+      }
+    })
+
+    logManager.loadLogs(logConfig, Map.empty, _ => false)
+
+    assertFalse(partialDir.exists())
+    assertTrue(
+      logManager.isLogDirOnline(parentDir.getAbsolutePath),
+      "A removed crash-interrupted partition directory must not offline its parent log directory"
+    )
   }
 
   @Test
