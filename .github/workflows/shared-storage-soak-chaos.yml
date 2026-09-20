@@ -20,6 +20,10 @@ on:
     branches:
       - shared-wal-s3-4.3.1
     paths:
+      - 'core/src/test/java/kafka/server/SharedStorageHighAvailabilityE2ETest.java'
+      - 'core/src/test/java/kafka/server/SharedStorageKafkaClientFailoverE2ETest.java'
+      - 'core/src/test/java/kafka/server/SharedStorageS3OutageKRaftIntegrationTest.java'
+      - 'core/src/test/java/kafka/server/SharedStorageLocalStateLossE2ETest.java'
       - '.github/workflows/shared-storage-soak-chaos.yml'
   workflow_dispatch:
     inputs:
@@ -38,7 +42,9 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - name: Start MinIO
         run: |
@@ -69,7 +75,10 @@ jobs:
             '
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: ./.github/actions/setup-gradle
+        with:
+          java-version: 25
+          gradle-cache-read-only: true
 
       - name: Run repeated HA and failure cycles
         env:

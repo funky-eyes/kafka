@@ -136,9 +136,15 @@ jobs:
             echo "SHARED_STORAGE_NEW_PROCESS_RUNTIME=$PWD/storage/shared-storage-s3/build/process-runtime"
           } >> "$GITHUB_ENV"
 
+          old_commit="$(git -C old-src rev-parse HEAD)"
+          new_commit="$(git rev-parse HEAD)"
+          sha256sum "$old_tar" "$new_tar" | tee shared-storage-rolling-tar-sha256.txt
+
           {
-            echo "old_ref=${{ inputs.old_ref || 'd6168e9ffc2340c3c824c0c1d48d08a318b504bb' }}"
-            echo "new_ref=${{ github.sha }}"
+            echo "requested_old_ref=${{ inputs.old_ref || 'd6168e9ffc2340c3c824c0c1d48d08a318b504bb' }}"
+            echo "resolved_old_commit=$old_commit"
+            echo "resolved_new_commit=$new_commit"
+            echo "workflow_head=${{ github.sha }}"
             echo "old_tar=$old_tar"
             echo "new_tar=$new_tar"
           } | tee shared-storage-rolling-runtime.txt
@@ -175,6 +181,7 @@ jobs:
             shared-storage-rolling-old-build.log
             shared-storage-rolling-new-build.log
             shared-storage-rolling-runtime.txt
+            shared-storage-rolling-tar-sha256.txt
             shared-storage-rolling-upgrade.log
             shared-storage-rolling-objects.log
             core/build/shared-storage-rolling-upgrade-diagnostics
