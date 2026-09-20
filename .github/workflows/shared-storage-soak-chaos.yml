@@ -1,0 +1,134 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements. See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License. You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Shared Storage Soak and Chaos
+
+on:
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: Number of complete HA/failure cycles
+        required: true
+        default: "3"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  repeated-failure-cycles:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Start MinIO
+        run: |
+          docker run -d --rm --network host \
+            --name kafka-shared-soak-minio \
+            --env MINIO_ROOT_USER=minioadmin \
+            --env MINIO_ROOT_PASSWORD=minioadmin123 \
+            quay.io/minio/minio:RELEASE.2025-07-23T15-54-02Z \
+            server /data --address :9000
+
+      - name: Wait for MinIO readiness
+        run: |
+          for i in {1..60}; do
+            if curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs kafka-shared-soak-minio
+          exit 1
+
+      - name: Ensure MinIO bucket exists
+        run: |
+          docker run --rm --network host --entrypoint /bin/sh \
+            quay.io/minio/mc:RELEASE.2025-07-21T05-28-08Z -c '
+              mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
+              mc mb --ignore-existing local/kafka-shared-storage-soak
+            '
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Run repeated HA and failure cycles
+        env:
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin123
+          AWS_REGION: us-east-1
+          SHARED_STORAGE_S3_ENDPOINT: http://127.0.0.1:9000
+          SHARED_STORAGE_S3_BUCKET: kafka-shared-storage-soak
+          SHARED_STORAGE_S3_CONTAINER: kafka-shared-soak-minio
+          SOAK_ITERATIONS: ${{ inputs.iterations }}
+        run: |
+          set -euo pipefail
+          if ! [[ "${SOAK_ITERATIONS}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "iterations must be a positive integer" >&2
+            exit 2
+          fi
+
+          : > shared-storage-soak.log
+          for iteration in $(seq 1 "${SOAK_ITERATIONS}"); do
+            echo "=== shared storage soak iteration ${iteration}/${SOAK_ITERATIONS} ===" \
+              | tee -a shared-storage-soak.log
+
+            # The S3 outage test intentionally stops and restarts this container.
+            docker start kafka-shared-soak-minio >/dev/null 2>&1 || true
+
+            ./gradlew :core:test \
+              --tests 'kafka.server.SharedStorageHighAvailabilityE2ETest' \
+              --tests 'kafka.server.SharedStorageKafkaClientFailoverE2ETest' \
+              --tests 'kafka.server.SharedStorageS3OutageKRaftIntegrationTest' \
+              --tests 'kafka.server.SharedStorageLocalStateLossE2ETest' \
+              --no-scan 2>&1 | tee -a shared-storage-soak.log
+
+            docker start kafka-shared-soak-minio >/dev/null 2>&1 || true
+            for i in {1..60}; do
+              if curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null; then
+                break
+              fi
+              sleep 1
+            done
+          done
+
+      - name: Record object-store convergence evidence
+        if: always()
+        run: |
+          docker start kafka-shared-soak-minio >/dev/null 2>&1 || true
+          sleep 2
+          docker run --rm --network host --entrypoint /bin/sh \
+            quay.io/minio/mc:RELEASE.2025-07-21T05-28-08Z -c '
+              mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
+              mc du --recursive local/kafka-shared-storage-soak &&
+              mc find local/kafka-shared-storage-soak
+            ' | tee shared-storage-soak-objects.log || true
+
+      - name: Upload soak evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shared-storage-soak-evidence
+          path: |
+            shared-storage-soak.log
+            shared-storage-soak-objects.log
+            core/build/test-results/test/**
+          if-no-files-found: warn
+
+      - name: MinIO logs
+        if: failure()
+        run: docker logs kafka-shared-soak-minio || true
