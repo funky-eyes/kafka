@@ -132,6 +132,10 @@ jobs:
             --tests 'kafka.server.ReplicaFetcherManagerShutdownTest' \
             --tests 'kafka.server.AbstractFetcherThreadTest.testFencedFetch' \
             --tests 'kafka.server.AbstractFetcherThreadTest.testFencedTruncation' \
+            -x :core:checkstyleMain \
+            -x :core:checkstyleTest \
+            -x :core:spotbugsMain \
+            -x :core:spotbugsTest \
             --no-scan
 
       - name: Enable focused local-state-loss state-machine diagnostics
@@ -162,6 +166,10 @@ jobs:
           set -o pipefail
           ./gradlew :core:test \
             --tests 'kafka.server.SharedStorageLocalStateLossE2ETest' \
+            -x :core:checkstyleMain \
+            -x :core:checkstyleTest \
+            -x :core:spotbugsMain \
+            -x :core:spotbugsTest \
             --no-scan 2>&1 | tee shared-storage-local-state-loss.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
