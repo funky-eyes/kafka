@@ -23,11 +23,13 @@ on:
       - '.github/workflows/shared-storage*.yml'
       - 'tools/shared_storage_ga_manifest.py'
       - 'tools/check_shared_storage_ga_workflows.py'
+      - 'tools/test_shared_storage_ga_manifest.py'
   pull_request:
     paths:
       - '.github/workflows/shared-storage*.yml'
       - 'tools/shared_storage_ga_manifest.py'
       - 'tools/check_shared_storage_ga_workflows.py'
+      - 'tools/test_shared_storage_ga_manifest.py'
   workflow_dispatch:
 
 permissions:
@@ -42,6 +44,9 @@ jobs:
         uses: actions/checkout@v5
         with:
           persist-credentials: false
+
+      - name: Test GA manifest evidence rules
+        run: python3 tools/test_shared_storage_ga_manifest.py
 
       - name: Validate Shared Storage GA workflow graph
         run: python3 tools/check_shared_storage_ga_workflows.py

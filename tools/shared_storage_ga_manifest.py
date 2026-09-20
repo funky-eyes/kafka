@@ -57,6 +57,8 @@ GA_HARDENING_REQUIRED = [
 
 REAL_S3_REQUIRED = "Shared Storage Real S3 Compatibility"
 
+EVIDENCE_EVENTS = {"push", "workflow_dispatch"}
+
 PRODUCTION_PREFIXES = (
     "storage/src/main/java/org/apache/kafka/storage/internals/shared/",
     "storage/shared-storage-s3/src/main/",
@@ -127,6 +129,11 @@ class GitHub:
         commit = self.get("git/commits/" + urllib.parse.quote(ref, safe=""))
         tree_sha = commit["tree"]["sha"]
         tree = self.get("git/trees/" + tree_sha, {"recursive": "1"})
+        if tree.get("truncated"):
+            raise RuntimeError(
+                f"GitHub returned a truncated recursive tree for {ref} ({tree_sha}); "
+                "refusing to compute an incomplete production fingerprint"
+            )
         rows = []
         for entry in tree.get("tree", []):
             if entry.get("type") != "blob":
@@ -150,6 +157,15 @@ class GitHub:
             if len(page_runs) < 100:
                 break
         return runs
+
+
+def is_branch_evidence_run(run, repo, branch):
+    head_repository = run.get("head_repository") or {}
+    return (
+        run.get("event") in EVIDENCE_EVENTS
+        and head_repository.get("full_name") == repo
+        and run.get("head_branch") == branch
+    )
 
 
 def run_url(repo, run):
@@ -196,10 +212,7 @@ def main():
     runs = github.recent_runs(args.evidence_branch)
     by_name = {}
     for run in runs:
-        head_repository = run.get("head_repository") or {}
-        if head_repository.get("full_name") != args.repo:
-            continue
-        if run.get("head_branch") != args.evidence_branch:
+        if not is_branch_evidence_run(run, args.repo, args.evidence_branch):
             continue
         by_name.setdefault(run.get("name"), []).append(run)
 

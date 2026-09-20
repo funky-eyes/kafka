@@ -55,6 +55,8 @@ substitute for this workflow when AWS S3 support is claimed.
 ### Evidence branch isolation
 
 Evidence is branch-scoped. The GA release workflow requires an `evidence_branch` and only accepts GitHub Actions runs
-whose `head_branch` and `head_repository` match that branch in this repository. Production-tree equivalence still
-handles author normalization and later documentation-only commits, but a green run from a pull request, fork, or
-different development branch cannot satisfy a release gate.
+whose event is `push` or `workflow_dispatch` and whose `head_branch` and `head_repository` match that branch in
+this repository. Production-tree equivalence still handles author normalization and later documentation-only commits,
+but a green run from a pull request, fork, or different development branch cannot satisfy a release gate. Recursive
+GitHub tree responses must also be complete; a truncated tree is rejected rather than producing a partial production
+fingerprint.

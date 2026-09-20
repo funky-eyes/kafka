@@ -50,6 +50,9 @@ jobs:
           ref: ${{ inputs.release_ref }}
           persist-credentials: false
 
+      - name: Test GA manifest evidence rules
+        run: python3 tools/test_shared_storage_ga_manifest.py
+
       - name: Validate GA workflow consistency
         run: python3 tools/check_shared_storage_ga_workflows.py
 
