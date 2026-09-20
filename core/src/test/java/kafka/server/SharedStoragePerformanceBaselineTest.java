@@ -18,6 +18,7 @@ package kafka.server;
 
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.clients.admin.TopicDescription;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.producer.KafkaProducer;
@@ -30,6 +31,7 @@ import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.test.KafkaClusterTestKit;
 import org.apache.kafka.common.test.TestKitNodes;
+import org.apache.kafka.test.TestUtils;
 
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
@@ -189,10 +191,12 @@ public class SharedStoragePerformanceBaselineTest {
             String bootstrapServers = cluster.bootstrapServers();
             try (Admin admin = cluster.admin()) {
                 Map<String, String> topicConfigs = Map.of(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2");
+                List<String> benchmarkTopics = List.of(warmupTopic, topic);
                 admin.createTopics(List.of(
                     new NewTopic(warmupTopic, PARTITIONS, (short) 3).configs(topicConfigs),
                     new NewTopic(topic, PARTITIONS, (short) 3).configs(topicConfigs)
                 )).all().get(30, TimeUnit.SECONDS);
+                waitForTopicReady(admin, benchmarkTopics);
             }
 
             produce(bootstrapServers, warmupTopic, warmupRecords);
@@ -202,6 +206,27 @@ public class SharedStoragePerformanceBaselineTest {
             double consumeRate = consume(bootstrapServers, topic, records);
             return new BenchmarkResult(produceRate, consumeRate);
         }
+    }
+
+    private static void waitForTopicReady(Admin admin, List<String> topics) throws Exception {
+        TestUtils.waitForCondition(() -> {
+            try {
+                Map<String, TopicDescription> descriptions = admin.describeTopics(topics)
+                    .allTopicNames()
+                    .get(5, TimeUnit.SECONDS);
+                return descriptions.size() == topics.size() && descriptions.values().stream().allMatch(description ->
+                    description.partitions().size() == PARTITIONS &&
+                        description.partitions().stream().allMatch(partition ->
+                            partition.leader() != null &&
+                                partition.leader().id() >= 0 &&
+                                partition.replicas().size() == 3 &&
+                                partition.isr().size() == 3
+                        )
+                );
+            } catch (Exception ignored) {
+                return false;
+            }
+        }, 60_000L, () -> "Benchmark topics did not converge to RF3/ISR3: " + topics);
     }
 
     private static double produce(String bootstrapServers, String topic, int records) throws Exception {

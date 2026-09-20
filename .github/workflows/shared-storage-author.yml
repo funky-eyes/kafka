@@ -86,7 +86,7 @@ jobs:
              [ "${current_committer}" != "${TARGET_EMAIL}" ]; then
             GIT_COMMITTER_NAME="${TARGET_NAME}" \
             GIT_COMMITTER_EMAIL="${TARGET_EMAIL}" \
-              git commit --amend --no-edit \
+              git commit --amend --no-edit --allow-empty \
                 --author="${TARGET_NAME} <${TARGET_EMAIL}>"
           fi
           SCRIPT

@@ -42,8 +42,9 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  * a recovered offset index and fail with an out-of-order index offset.</p>
  *
  * <p>All production leader/follower appends acquire the read side of this fence before entering UnifiedLog's own log
- * lock. Remote recovery acquires the write side. This gives a single lock order (shared recovery fence, then Kafka log
- * lock) and makes recovery atomic with respect to the full append validation/state-update critical section.</p>
+ * lock. Remote recovery and Kafka truncation acquire the write side. This gives a single lock order (shared recovery
+ * fence, then Kafka log lock) and keeps segment, LEO, producer-state and leader-epoch reconstruction atomic with
+ * respect to both append validation and replica divergence truncation.</p>
  */
 public final class SharedUnifiedLog extends UnifiedLog {
     private final ReentrantReadWriteLock remoteRecoveryFence = new ReentrantReadWriteLock();
@@ -104,6 +105,35 @@ public final class SharedUnifiedLog extends UnifiedLog {
             );
         } finally {
             remoteRecoveryFence.readLock().unlock();
+        }
+    }
+
+    /**
+     * Replica divergence truncation rebuilds Kafka's producer and leader-epoch state from the retained shared log.
+     * Serialize it with metadata replay recovery so one path cannot publish a shorter LEO while the other still exposes
+     * producer state reconstructed from a longer view.
+     */
+    @Override
+    public boolean truncateTo(long targetOffset) {
+        remoteRecoveryFence.writeLock().lock();
+        try {
+            return super.truncateTo(targetOffset);
+        } finally {
+            remoteRecoveryFence.writeLock().unlock();
+        }
+    }
+
+    /**
+     * Full truncation has the same compatibility-state mutation surface as partial truncation and therefore shares the
+     * remote recovery write fence. The lock is reentrant because UnifiedLog.truncateTo may delegate to this method.
+     */
+    @Override
+    public void truncateFullyAndStartAt(long newOffset, Optional<Long> logStartOffsetOpt) {
+        remoteRecoveryFence.writeLock().lock();
+        try {
+            super.truncateFullyAndStartAt(newOffset, logStartOffsetOpt);
+        } finally {
+            remoteRecoveryFence.writeLock().unlock();
         }
     }
 
