@@ -23,6 +23,7 @@ import org.apache.kafka.server.util.Scheduler;
 import org.apache.kafka.storage.internals.checkpoint.LeaderEpochCheckpointFile;
 import org.apache.kafka.storage.internals.checkpoint.PartitionMetadataFile;
 import org.apache.kafka.storage.internals.epoch.LeaderEpochFileCache;
+import org.apache.kafka.storage.internals.log.IncompleteLogInitializationException;
 import org.apache.kafka.storage.internals.log.LogDirFailureChannel;
 import org.apache.kafka.test.TestUtils;
 
@@ -31,6 +32,7 @@ import org.mockito.Mockito;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.util.Map;
 import java.util.Optional;
 
@@ -112,10 +114,49 @@ class SharedUnifiedLogFactoryTest {
     }
 
     @Test
-    void rejectsExistingSharedLogWithoutDurableTopicId() {
+    void removesEmptyDirectoryLeftByInterruptedInitialization() {
         File dir = TestUtils.tempDirectory();
         TopicPartition topicPartition = new TopicPartition("shared-topic", 3);
         LogDirFailureChannel channel = Mockito.mock(LogDirFailureChannel.class);
+
+        assertThrows(
+            IncompleteLogInitializationException.class,
+            () -> SharedUnifiedLogFactory.resolveAndPersistTopicId(
+                dir,
+                topicPartition,
+                Optional.empty(),
+                channel
+            )
+        );
+        assertFalse(dir.exists(), "Interrupted initialization directory should be removed for metadata replay");
+    }
+
+    @Test
+    void removesPartitionMetadataTempLeftByInterruptedInitialization() throws IOException {
+        File dir = TestUtils.tempDirectory();
+        TopicPartition topicPartition = new TopicPartition("shared-topic", 4);
+        LogDirFailureChannel channel = Mockito.mock(LogDirFailureChannel.class);
+        File temporaryMetadata = new File(PartitionMetadataFile.newFile(dir).getAbsolutePath() + ".tmp");
+        Files.writeString(temporaryMetadata.toPath(), "partial");
+
+        assertThrows(
+            IncompleteLogInitializationException.class,
+            () -> SharedUnifiedLogFactory.resolveAndPersistTopicId(
+                dir,
+                topicPartition,
+                Optional.empty(),
+                channel
+            )
+        );
+        assertFalse(dir.exists(), "Metadata temp-only directory should be removed for metadata replay");
+    }
+
+    @Test
+    void rejectsNonEmptySharedLogWithoutDurableTopicId() throws IOException {
+        File dir = TestUtils.tempDirectory();
+        TopicPartition topicPartition = new TopicPartition("shared-topic", 5);
+        LogDirFailureChannel channel = Mockito.mock(LogDirFailureChannel.class);
+        Files.createFile(dir.toPath().resolve("00000000000000000000.log"));
 
         IOException error = assertThrows(
             IOException.class,
@@ -127,6 +168,7 @@ class SharedUnifiedLogFactoryTest {
             )
         );
         assertTrue(error.getMessage().contains("requires a durable topic ID"));
+        assertTrue(dir.exists(), "Data-bearing directory must be preserved for fail-closed recovery");
     }
 
     @Test

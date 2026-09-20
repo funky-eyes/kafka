@@ -40,7 +40,7 @@ import org.apache.kafka.metadata.properties.{MetaProperties, MetaPropertiesEnsem
 import java.util.{Collections, Optional, OptionalLong, Properties}
 import org.apache.kafka.server.metrics.KafkaMetricsGroup
 import org.apache.kafka.server.util.{FileLock, Scheduler}
-import org.apache.kafka.storage.internals.log.{CleanerConfig, LogCleaner, LogConfig, LogDirFailureChannel, LogManager => JLogManager, LogOffsetsListener, ProducerStateManagerConfig, RemoteIndexCache, StoragePartitionRoleListener, UnifiedLog, UnifiedLogCreationContext, UnifiedLogFactory}
+import org.apache.kafka.storage.internals.log.{CleanerConfig, IncompleteLogInitializationException, LogCleaner, LogConfig, LogDirFailureChannel, LogManager => JLogManager, LogOffsetsListener, ProducerStateManagerConfig, RemoteIndexCache, StoragePartitionRoleListener, UnifiedLog, UnifiedLogCreationContext, UnifiedLogFactory}
 import org.apache.kafka.storage.internals.checkpoint.{CleanShutdownFileHandler, OffsetCheckpointFile}
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats
 
@@ -548,6 +548,8 @@ class LogManager(logDirs: Seq[File],
               log = Some(loadLog(logDir, hadCleanShutdown, recoveryPoints, logStartOffsets,
                 defaultConfig, topicConfigOverrides, numRemainingSegments, isStray))
             } catch {
+              case e: IncompleteLogInitializationException =>
+                warn(s"Skipping crash-interrupted log initialization in $logDir: ${e.getMessage}")
               case e: IOException =>
                 handleIOException(logDirAbsolutePath, e)
               case e: KafkaStorageException if e.getCause.isInstanceOf[IOException] =>

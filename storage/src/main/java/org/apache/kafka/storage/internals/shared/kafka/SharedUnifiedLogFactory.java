@@ -21,6 +21,7 @@ import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.errors.InconsistentTopicIdException;
 import org.apache.kafka.storage.internals.checkpoint.PartitionMetadataFile;
 import org.apache.kafka.storage.internals.epoch.LeaderEpochFileCache;
+import org.apache.kafka.storage.internals.log.IncompleteLogInitializationException;
 import org.apache.kafka.storage.internals.log.LoadedLogOffsets;
 import org.apache.kafka.storage.internals.log.LogDirFailureChannel;
 import org.apache.kafka.storage.internals.log.LogLoader;
@@ -37,13 +38,16 @@ import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.DirectoryNotEmptyException;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Stream;
 
 /**
  * Kafka 4.3.x compatibility factory that builds a standard {@link UnifiedLog} over shared-storage physical segments.
@@ -362,12 +366,50 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
             return persistedTopicId;
         }
 
-        Uuid newTopicId = requestedTopicId.orElseThrow(() -> new IOException(
-            "Shared storage requires a durable topic ID before loading " + topicPartition +
-                "; partition.metadata is missing and no topic ID was supplied"));
+        if (requestedTopicId.isEmpty()) {
+            if (removeIncompleteInitializationDirectory(dir)) {
+                throw new IncompleteLogInitializationException(
+                    "Removed incomplete shared log initialization for " + topicPartition + " in " + dir);
+            }
+            throw new IOException(
+                "Shared storage requires a durable topic ID before loading " + topicPartition +
+                    "; partition.metadata is missing and no topic ID was supplied");
+        }
+
+        Uuid newTopicId = requestedTopicId.get();
         metadataFile.record(newTopicId);
         metadataFile.maybeFlush();
         return newTopicId;
+    }
+
+    /**
+     * Removes only a crash-interrupted directory that never crossed the durable topic-ID boundary.
+     *
+     * <p>{@link #resolveAndPersistTopicId} runs before any shared segment or WAL access. Therefore an empty directory,
+     * or one containing only the temporary partition-metadata file, can only represent a crash between mkdir and the
+     * atomic partition.metadata publication. Any other entry is treated as durable-state evidence and must fail closed
+     * rather than guessing a topic ID.</p>
+     */
+    private static boolean removeIncompleteInitializationDirectory(File dir) throws IOException {
+        Path directory = dir.toPath().toAbsolutePath().normalize();
+        Path metadataPath = PartitionMetadataFile.newFile(dir).toPath().toAbsolutePath().normalize();
+        Path temporaryMetadataPath = Path.of(metadataPath + ".tmp");
+
+        try (Stream<Path> entries = Files.list(directory)) {
+            if (entries.anyMatch(entry ->
+                !entry.toAbsolutePath().normalize().equals(temporaryMetadataPath))) {
+                return false;
+            }
+        }
+
+        Files.deleteIfExists(temporaryMetadataPath);
+        try {
+            Files.delete(directory);
+            return true;
+        } catch (DirectoryNotEmptyException e) {
+            // Another writer made the directory non-empty after validation. Preserve it and fail closed.
+            return false;
+        }
     }
 
     private record LoadedSharedLog(
