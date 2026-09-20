@@ -1,0 +1,186 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements. See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License. You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Shared Storage Rolling Upgrade
+
+on:
+  push:
+    branches:
+      - shared-wal-s3-4.3.1
+    paths:
+      - 'core/src/test/java/kafka/server/SharedStorageRollingUpgradeE2ETest.java'
+      - '.github/workflows/shared-storage-rolling-upgrade.yml'
+  workflow_dispatch:
+    inputs:
+      old_ref:
+        description: Previous compatible Shared Storage release/RC ref
+        required: true
+        default: d6168e9ffc2340c3c824c0c1d48d08a318b504bb
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shared-storage-rolling-upgrade-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mixed-version-rolling-upgrade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout new candidate
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Checkout old compatible ref
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.old_ref || 'd6168e9ffc2340c3c824c0c1d48d08a318b504bb' }}
+          path: old-src
+          persist-credentials: false
+
+      - name: Start MinIO
+        run: |
+          docker run --detach \
+            --name kafka-shared-minio-rolling-upgrade \
+            --publish 9000:9000 \
+            --env MINIO_ROOT_USER=minioadmin \
+            --env MINIO_ROOT_PASSWORD=minioadmin123 \
+            quay.io/minio/minio:RELEASE.2025-07-23T15-54-02Z \
+            server /data --address :9000
+
+      - name: Wait for MinIO readiness
+        run: |
+          for i in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs kafka-shared-minio-rolling-upgrade
+          exit 1
+
+      - name: Ensure MinIO bucket exists
+        run: |
+          docker run --rm --network host --entrypoint /bin/sh \
+            quay.io/minio/mc:RELEASE.2025-07-21T05-28-08Z -c '
+              mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
+              mc mb --ignore-existing local/kafka-shared-storage-rolling-upgrade >/dev/null
+            '
+
+      - name: Setup Gradle
+        uses: ./.github/actions/setup-gradle
+        with:
+          java-version: 25
+          gradle-cache-read-only: true
+
+      - name: Build old Kafka distribution and shared-storage runtime
+        shell: bash
+        run: |
+          set -o pipefail
+          (
+            cd old-src
+            ./gradlew \
+              :core:releaseTarGz \
+              :storage:shared-storage-s3:stageProcessRuntime \
+              --no-scan
+          ) 2>&1 | tee shared-storage-rolling-old-build.log
+
+      - name: Build new Kafka distribution and shared-storage runtime
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew \
+            :core:releaseTarGz \
+            :storage:shared-storage-s3:stageProcessRuntime \
+            :core:compileTestJava \
+            --no-scan 2>&1 | tee shared-storage-rolling-new-build.log
+
+      - name: Extract independent old and new runtimes
+        shell: bash
+        run: |
+          set -euo pipefail
+          old_tar="$(find old-src/core/build -type f \( -name 'kafka_*.tgz' -o -name 'kafka_*.tar.gz' \) | head -1)"
+          new_tar="$(find core/build -type f \( -name 'kafka_*.tgz' -o -name 'kafka_*.tar.gz' \) | head -1)"
+          test -n "$old_tar"
+          test -n "$new_tar"
+
+          mkdir -p build/rolling-old build/rolling-new
+          tar -xzf "$old_tar" -C build/rolling-old --strip-components=1
+          tar -xzf "$new_tar" -C build/rolling-new --strip-components=1
+
+          test -x build/rolling-old/bin/kafka-server-start.sh
+          test -x build/rolling-new/bin/kafka-server-start.sh
+          test -d old-src/storage/shared-storage-s3/build/process-runtime
+          test -d storage/shared-storage-s3/build/process-runtime
+
+          {
+            echo "SHARED_STORAGE_OLD_KAFKA_HOME=$PWD/build/rolling-old"
+            echo "SHARED_STORAGE_NEW_KAFKA_HOME=$PWD/build/rolling-new"
+            echo "SHARED_STORAGE_OLD_PROCESS_RUNTIME=$PWD/old-src/storage/shared-storage-s3/build/process-runtime"
+            echo "SHARED_STORAGE_NEW_PROCESS_RUNTIME=$PWD/storage/shared-storage-s3/build/process-runtime"
+          } >> "$GITHUB_ENV"
+
+          {
+            echo "old_ref=${{ inputs.old_ref || 'd6168e9ffc2340c3c824c0c1d48d08a318b504bb' }}"
+            echo "new_ref=${{ github.sha }}"
+            echo "old_tar=$old_tar"
+            echo "new_tar=$new_tar"
+          } | tee shared-storage-rolling-runtime.txt
+
+      - name: Run true mixed-version rolling upgrade and rollback gate
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin123
+          AWS_REGION: us-east-1
+          SHARED_STORAGE_S3_ENDPOINT: http://127.0.0.1:9000
+          SHARED_STORAGE_S3_BUCKET: kafka-shared-storage-rolling-upgrade
+        run: |
+          set -o pipefail
+          ./gradlew :core:test \
+            --tests 'kafka.server.SharedStorageRollingUpgradeE2ETest' \
+            --no-scan 2>&1 | tee shared-storage-rolling-upgrade.log
+
+      - name: Record remote object evidence
+        if: always()
+        run: |
+          docker run --rm --network host --entrypoint /bin/sh \
+            quay.io/minio/mc:RELEASE.2025-07-21T05-28-08Z -c '
+              mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
+              mc ls --recursive local/kafka-shared-storage-rolling-upgrade
+            ' | tee shared-storage-rolling-objects.log || true
+
+      - name: Upload rolling-upgrade evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shared-storage-rolling-upgrade-evidence
+          path: |
+            shared-storage-rolling-old-build.log
+            shared-storage-rolling-new-build.log
+            shared-storage-rolling-runtime.txt
+            shared-storage-rolling-upgrade.log
+            shared-storage-rolling-objects.log
+            core/build/shared-storage-rolling-upgrade-diagnostics
+            core/build/test-results/test/**
+          if-no-files-found: warn
+
+      - name: MinIO logs
+        if: failure()
+        run: docker logs kafka-shared-minio-rolling-upgrade || true
