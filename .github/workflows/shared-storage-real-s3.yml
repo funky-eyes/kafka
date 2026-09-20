@@ -1,0 +1,82 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements. See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License. You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Shared Storage Real S3 Compatibility
+
+on:
+  workflow_dispatch:
+    inputs:
+      bucket:
+        description: Existing AWS S3 bucket dedicated to Shared Storage compatibility testing
+        required: true
+        type: string
+      region:
+        description: AWS region containing the bucket
+        required: true
+        default: us-east-1
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  aws-s3-compatibility:
+    name: AWS S3 single-put, range-read, multipart, and delete
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: shared-storage-aws-s3
+    steps:
+      - name: Checkout release candidate
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Configure AWS workload credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.SHARED_STORAGE_AWS_ROLE_ARN }}
+          aws-region: ${{ inputs.region }}
+          role-session-name: kafka-shared-storage-ga
+
+      - name: Setup Gradle
+        uses: ./.github/actions/setup-gradle
+        with:
+          java-version: 25
+          gradle-cache-read-only: true
+
+      - name: Run real AWS S3 compatibility proof
+        env:
+          SHARED_STORAGE_REAL_S3_BUCKET: ${{ inputs.bucket }}
+          SHARED_STORAGE_REAL_S3_REGION: ${{ inputs.region }}
+        run: |
+          set -o pipefail
+          ./gradlew :storage:shared-storage-s3:test \
+            --tests 'org.apache.kafka.storage.internals.shared.s3.S3RealCompatibilityTest' \
+            -x :storage:shared-storage-s3:checkstyleMain \
+            -x :storage:shared-storage-s3:checkstyleTest \
+            -x :storage:shared-storage-s3:spotbugsMain \
+            -x :storage:shared-storage-s3:spotbugsTest \
+            --no-scan 2>&1 | tee shared-storage-real-s3.log
+
+      - name: Upload real-S3 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shared-storage-real-s3-evidence
+          path: |
+            shared-storage-real-s3.log
+            storage/shared-storage-s3/build/test-results/test/**
+          if-no-files-found: warn

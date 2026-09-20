@@ -36,3 +36,17 @@ exclude the global Core Checkstyle and SpotBugs tasks.
 This separation prevents an unrelated Core test/style violation from turning a durability gate red when that workflow
 does not trigger on the offending file. It does not waive static analysis: the GA manifest still requires the main
 `Shared Storage` workflow to pass for the same production-tree fingerprint.
+
+
+### Real AWS S3 evidence
+
+Releases that claim AWS S3 as a supported production object store must run `Shared Storage Real S3 Compatibility`
+on the exact release ref and enable `require_real_s3` in the GA release gate.
+
+Configure a protected GitHub Environment named `shared-storage-aws-s3` with secret
+`SHARED_STORAGE_AWS_ROLE_ARN`. The role should use GitHub OIDC and receive only the bucket permissions needed for the
+dedicated compatibility bucket. The workflow uses a random object prefix and deletes the objects it creates.
+
+The proof intentionally uses the AWS SDK default endpoint, TLS and virtual-hosted addressing. It verifies a normal PUT,
+Range GET, native multipart completion across the five-MiB S3 part boundary, and DELETE. MinIO evidence does not
+substitute for this workflow when AWS S3 support is claimed.
