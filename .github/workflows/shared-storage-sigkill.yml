@@ -20,6 +20,17 @@ on:
     branches:
       - shared-wal-s3-4.3.1
     paths:
+      # Every production-fingerprint change invalidates this gate's GA evidence.
+      - 'build.gradle'
+      - 'settings.gradle'
+      - 'storage/shared-storage-s3/build.gradle'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/**'
+      - 'storage/shared-storage-s3/src/main/**'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/log/**'
+      - 'core/src/main/scala/kafka/cluster/Partition.scala'
+      - 'core/src/main/scala/kafka/log/LogManager.scala'
+      - 'core/src/main/scala/kafka/server/**'
+      - 'core/src/main/java/kafka/server/builders/LogManagerBuilder.java'
       - 'core/src/test/java/kafka/server/SharedStorageIndependentProcessSigkillTest.java'
       - 'storage/src/main/**'
       - 'storage/shared-storage-s3/**'

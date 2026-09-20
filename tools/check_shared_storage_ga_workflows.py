@@ -80,7 +80,7 @@ def fingerprint_covers(path, constants):
 
 
 def concrete_production_paths(text):
-    paths = set(re.findall(r"(?m)^\\s+- '([^']+)'\\s*$", text))
+    paths = set(re.findall(r"(?m)^\s+- '([^']+)'\s*$", text))
     return {
         path
         for path in paths
@@ -95,13 +95,25 @@ def concrete_production_paths(text):
 
 
 def workflow_path_patterns(text):
-    return set(re.findall(r"(?m)^\\s+- '([^']+)'\\s*$", text))
+    return set(re.findall(r"(?m)^\s+- '([^']+)'\s*$", text))
+
+
+def event_block(text, event):
+    match = re.search(
+        rf"(?ms)^  {re.escape(event)}:\s*\n(.*?)(?=^  [A-Za-z_][A-Za-z0-9_-]*:\s*(?:\n|$)|\Z)",
+        text,
+    )
+    return "" if match is None else match.group(1)
+
+
+def event_path_patterns(text, event):
+    return workflow_path_patterns(event_block(text, event))
 
 
 def exact_test_selectors(text):
     return {
         selector
-        for selector in re.findall(r"--tests\\s+'([^']+)'", text)
+        for selector in re.findall(r"--tests\s+'([^']+)'", text)
         if "*" not in selector and "?" not in selector
     }
 
@@ -172,6 +184,33 @@ def main():
         if name not in workflows:
             errors.append(f"required workflow is missing: {name}")
 
+    # The GA manifest compares one global production fingerprint for every required gate.
+    # A production-tree change therefore invalidates every core/hardening gate's evidence.
+    # Verify the release-branch push wiring against that same contract so a production change
+    # cannot silently leave the manifest BLOCKED because a required workflow did not run.
+    automatic_evidence_names = (
+        list(constants["CORE_REQUIRED"])
+        + list(constants["GA_HARDENING_REQUIRED"])
+    )
+    for name in automatic_evidence_names:
+        if name not in workflows:
+            continue
+        patterns = event_path_patterns(texts[name], "push")
+        if not patterns:
+            errors.append(f"{workflows[name]}: GA-required evidence workflow must define push.paths")
+            continue
+        for production_path in sorted(constants["PRODUCTION_PATHS"]):
+            if not path_is_triggered(production_path, patterns):
+                errors.append(
+                    f"{workflows[name]}: push.paths does not cover GA production path: {production_path}"
+                )
+        for prefix in sorted(constants["PRODUCTION_PREFIXES"]):
+            probe = prefix + "__ga_trigger_probe__.java"
+            if not path_is_triggered(probe, patterns):
+                errors.append(
+                    f"{workflows[name]}: push.paths does not cover GA production prefix: {prefix}"
+                )
+
     production_paths = set()
     for text in texts.values():
         production_paths.update(concrete_production_paths(text))
@@ -192,9 +231,9 @@ def main():
 
     for name, path in workflows.items():
         text = texts[name]
-        if re.search(r"(?m)^  push:\\s*$", text) is None:
+        if re.search(r"(?m)^  push:\s*$", text) is None:
             continue
-        patterns = workflow_path_patterns(text)
+        patterns = event_path_patterns(text, "push")
         for selector in sorted(exact_test_selectors(text)):
             sources = test_sources(selector)
             if not sources:
