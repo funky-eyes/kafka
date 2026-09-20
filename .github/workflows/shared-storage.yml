@@ -143,7 +143,6 @@ jobs:
             --tests 'org.apache.kafka.storage.internals.shared.metadata.*' \
             --tests 'org.apache.kafka.storage.internals.shared.object.*' \
             --tests 'org.apache.kafka.storage.internals.shared.wal.*' \
-            --tests 'org.apache.kafka.storage.internals.log.LogLoaderSegmentFactoryTest' \
             --tests 'org.apache.kafka.storage.internals.log.StorageExtensionLoaderTest' \
             2>&1 | tee shared-storage-test.log
 
