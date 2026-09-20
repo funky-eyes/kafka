@@ -55,10 +55,11 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * ratios instead of absolute throughput so release evidence is less sensitive to runner hardware variance.</p>
  */
 @Tag("integration")
-@Timeout(value = 15, unit = TimeUnit.MINUTES)
+@Timeout(value = 20, unit = TimeUnit.MINUTES)
 public class SharedStoragePerformanceBaselineTest {
     private static final int PARTITIONS = 3;
     private static final int DEFAULT_RECORDS = 10_000;
+    private static final int DEFAULT_REPETITIONS = 3;
     private static final int PAYLOAD_BYTES = 1024;
     private static final double DEFAULT_MIN_PRODUCE_RATIO = 0.60d;
     private static final double DEFAULT_MIN_CONSUME_RATIO = 0.50d;
@@ -69,6 +70,7 @@ public class SharedStoragePerformanceBaselineTest {
         assumeTrue(endpoint != null && !endpoint.isBlank(), "S3/MinIO integration endpoint is not configured");
 
         int records = positiveIntEnvironment("SHARED_STORAGE_PERF_RECORDS", DEFAULT_RECORDS);
+        int repetitions = positiveIntEnvironment("SHARED_STORAGE_PERF_REPETITIONS", DEFAULT_REPETITIONS);
         double minProduceRatio = ratioEnvironment(
             "SHARED_STORAGE_MIN_PRODUCE_RATIO",
             DEFAULT_MIN_PRODUCE_RATIO
@@ -80,31 +82,59 @@ public class SharedStoragePerformanceBaselineTest {
         String bucket = environment("SHARED_STORAGE_S3_BUCKET", "kafka-shared-storage-performance");
         String region = environment("SHARED_STORAGE_S3_REGION", "us-east-1");
 
-        BenchmarkResult classic = benchmark(false, endpoint, region, bucket, records);
-        BenchmarkResult shared = benchmark(true, endpoint, region, bucket, records);
+        List<Double> produceRatios = new ArrayList<>(repetitions);
+        List<Double> consumeRatios = new ArrayList<>(repetitions);
+        for (int repetition = 0; repetition < repetitions; repetition++) {
+            BenchmarkResult classic;
+            BenchmarkResult shared;
+            String order;
+            if ((repetition & 1) == 0) {
+                order = "classic-shared";
+                classic = benchmark(false, endpoint, region, bucket, records);
+                shared = benchmark(true, endpoint, region, bucket, records);
+            } else {
+                order = "shared-classic";
+                shared = benchmark(true, endpoint, region, bucket, records);
+                classic = benchmark(false, endpoint, region, bucket, records);
+            }
 
-        double produceRatio = shared.produceRecordsPerSecond() / classic.produceRecordsPerSecond();
-        double consumeRatio = shared.consumeRecordsPerSecond() / classic.consumeRecordsPerSecond();
+            double produceRatio = shared.produceRecordsPerSecond() / classic.produceRecordsPerSecond();
+            double consumeRatio = shared.consumeRecordsPerSecond() / classic.consumeRecordsPerSecond();
+            produceRatios.add(produceRatio);
+            consumeRatios.add(consumeRatio);
 
+            System.out.printf(
+                "SHARED_STORAGE_PERF_SAMPLE repetition=%d order=%s classicProduce=%.2f sharedProduce=%.2f " +
+                    "produceRatio=%.4f classicConsume=%.2f sharedConsume=%.2f consumeRatio=%.4f records=%d%n",
+                repetition + 1,
+                order,
+                classic.produceRecordsPerSecond(),
+                shared.produceRecordsPerSecond(),
+                produceRatio,
+                classic.consumeRecordsPerSecond(),
+                shared.consumeRecordsPerSecond(),
+                consumeRatio,
+                records
+            );
+        }
+
+        double medianProduceRatio = median(produceRatios);
+        double medianConsumeRatio = median(consumeRatios);
         System.out.printf(
-            "SHARED_STORAGE_PERF classicProduce=%.2f sharedProduce=%.2f produceRatio=%.4f " +
-                "classicConsume=%.2f sharedConsume=%.2f consumeRatio=%.4f records=%d%n",
-            classic.produceRecordsPerSecond(),
-            shared.produceRecordsPerSecond(),
-            produceRatio,
-            classic.consumeRecordsPerSecond(),
-            shared.consumeRecordsPerSecond(),
-            consumeRatio,
-            records
+            "SHARED_STORAGE_PERF medianProduceRatio=%.4f medianConsumeRatio=%.4f records=%d repetitions=%d%n",
+            medianProduceRatio,
+            medianConsumeRatio,
+            records,
+            repetitions
         );
 
         assertTrue(
-            produceRatio >= minProduceRatio,
-            () -> "Shared produce throughput ratio " + produceRatio + " is below " + minProduceRatio
+            medianProduceRatio >= minProduceRatio,
+            () -> "Median shared produce throughput ratio " + medianProduceRatio + " is below " + minProduceRatio
         );
         assertTrue(
-            consumeRatio >= minConsumeRatio,
-            () -> "Shared consume throughput ratio " + consumeRatio + " is below " + minConsumeRatio
+            medianConsumeRatio >= minConsumeRatio,
+            () -> "Median shared consume throughput ratio " + medianConsumeRatio + " is below " + minConsumeRatio
         );
     }
 
@@ -225,6 +255,19 @@ public class SharedStoragePerformanceBaselineTest {
 
     private static double recordsPerSecond(int records, long elapsedNanos) {
         return records * 1_000_000_000.0d / Math.max(1L, elapsedNanos);
+    }
+
+    private static double median(List<Double> values) {
+        if (values.isEmpty()) {
+            throw new IllegalArgumentException("values must not be empty");
+        }
+        List<Double> sorted = new ArrayList<>(values);
+        sorted.sort(Double::compare);
+        int middle = sorted.size() / 2;
+        if ((sorted.size() & 1) == 1) {
+            return sorted.get(middle);
+        }
+        return (sorted.get(middle - 1) + sorted.get(middle)) / 2.0d;
     }
 
     private static int positiveIntEnvironment(String name, int defaultValue) {

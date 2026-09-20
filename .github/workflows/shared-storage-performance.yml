@@ -29,6 +29,11 @@ on:
         required: true
         default: "10000"
         type: string
+      repetitions:
+        description: Paired classic/shared benchmark repetitions; execution order alternates
+        required: true
+        default: "3"
+        type: string
       min_produce_ratio:
         description: Minimum shared/classic acks=all produce throughput ratio
         required: true
@@ -90,6 +95,7 @@ jobs:
           SHARED_STORAGE_S3_ENDPOINT: http://127.0.0.1:9000
           SHARED_STORAGE_S3_BUCKET: kafka-shared-storage-performance
           SHARED_STORAGE_PERF_RECORDS: ${{ inputs.records || '10000' }}
+          SHARED_STORAGE_PERF_REPETITIONS: ${{ inputs.repetitions || '3' }}
           SHARED_STORAGE_MIN_PRODUCE_RATIO: ${{ inputs.min_produce_ratio || '0.60' }}
           SHARED_STORAGE_MIN_CONSUME_RATIO: ${{ inputs.min_consume_ratio || '0.50' }}
         run: |
