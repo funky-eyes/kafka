@@ -141,10 +141,10 @@ class GitHub:
             digest.update(b"\n")
         return digest.hexdigest(), len(rows)
 
-    def recent_runs(self, max_pages=10):
+    def recent_runs(self, branch, max_pages=10):
         runs = []
         for page in range(1, max_pages + 1):
-            payload = self.get("actions/runs", {"per_page": 100, "page": page})
+            payload = self.get("actions/runs", {"branch": branch, "per_page": 100, "page": page})
             page_runs = payload.get("workflow_runs", [])
             runs.extend(page_runs)
             if len(page_runs) < 100:
@@ -175,6 +175,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", required=True)
     parser.add_argument("--ref", required=True)
+    parser.add_argument("--evidence-branch", required=True)
     parser.add_argument("--token", default=os.environ.get("GITHUB_TOKEN"))
     parser.add_argument("--output", default="shared-storage-ga-manifest.md")
     parser.add_argument("--require-real-s3", action="store_true")
@@ -192,9 +193,14 @@ def main():
     if args.require_real_s3:
         required.append(REAL_S3_REQUIRED)
 
-    runs = github.recent_runs()
+    runs = github.recent_runs(args.evidence_branch)
     by_name = {}
     for run in runs:
+        head_repository = run.get("head_repository") or {}
+        if head_repository.get("full_name") != args.repo:
+            continue
+        if run.get("head_branch") != args.evidence_branch:
+            continue
         by_name.setdefault(run.get("name"), []).append(run)
 
     fingerprint_cache = {target_sha: target_fingerprint}
@@ -243,6 +249,7 @@ def main():
         f"- Repository: `{args.repo}`",
         f"- Release ref: `{args.ref}`",
         f"- Release commit: `{target_sha}`",
+        f"- Evidence branch: `{args.evidence_branch}`",
         f"- Production fingerprint: `{target_fingerprint}`",
         f"- Production files fingerprinted: {production_files}",
         f"- Result: **{'PASS' if not failures else 'BLOCKED'}**",

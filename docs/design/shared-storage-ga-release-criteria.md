@@ -50,3 +50,11 @@ dedicated compatibility bucket. The workflow uses a random object prefix and del
 The proof intentionally uses the AWS SDK default endpoint, TLS and virtual-hosted addressing. It verifies a normal PUT,
 Range GET, native multipart completion across the five-MiB S3 part boundary, and DELETE. MinIO evidence does not
 substitute for this workflow when AWS S3 support is claimed.
+
+
+### Evidence branch isolation
+
+Evidence is branch-scoped. The GA release workflow requires an `evidence_branch` and only accepts GitHub Actions runs
+whose `head_branch` and `head_repository` match that branch in this repository. Production-tree equivalence still
+handles author normalization and later documentation-only commits, but a green run from a pull request, fork, or
+different development branch cannot satisfy a release gate.

@@ -23,6 +23,11 @@ on:
         required: true
         default: shared-wal-s3-4.3.1
         type: string
+      evidence_branch:
+        description: Branch whose GitHub Actions runs are allowed as GA evidence
+        required: true
+        default: shared-wal-s3-4.3.1
+        type: string
       require_real_s3:
         description: Require real AWS S3 compatibility evidence
         required: true
@@ -56,6 +61,7 @@ jobs:
           args=(
             --repo "${{ github.repository }}"
             --ref "${{ inputs.release_ref }}"
+            --evidence-branch "${{ inputs.evidence_branch }}"
             --output shared-storage-ga-manifest.md
           )
           if [[ "${{ inputs.require_real_s3 }}" == "true" ]]; then
