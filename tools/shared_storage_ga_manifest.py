@@ -64,6 +64,14 @@ PRODUCTION_PREFIXES = (
 
 PRODUCTION_PATHS = {
     "build.gradle",
+    "settings.gradle",
+    "storage/shared-storage-s3/build.gradle",
+    "storage/src/main/java/org/apache/kafka/storage/internals/log/LogLoader.java",
+    "storage/src/main/java/org/apache/kafka/storage/internals/log/LocalLog.java",
+    "storage/src/main/java/org/apache/kafka/storage/internals/log/LogOffsetsListener.java",
+    "storage/src/main/java/org/apache/kafka/storage/internals/log/LogSegmentFactory.java",
+    "storage/src/main/java/org/apache/kafka/storage/internals/log/UnifiedLog.java",
+    "storage/src/main/java/org/apache/kafka/storage/internals/log/UnifiedLogCreationContext.java",
     "storage/src/main/java/org/apache/kafka/storage/internals/log/KafkaStorageExtension.java",
     "storage/src/main/java/org/apache/kafka/storage/internals/log/StorageExtensionBrokerContext.java",
     "storage/src/main/java/org/apache/kafka/storage/internals/log/StorageExtensionContext.java",
@@ -74,6 +82,7 @@ PRODUCTION_PATHS = {
     "core/src/main/scala/kafka/log/LogManager.scala",
     "core/src/main/java/kafka/server/builders/LogManagerBuilder.java",
     "core/src/main/scala/kafka/server/BrokerServer.scala",
+    "core/src/main/scala/kafka/server/ControllerServer.scala",
     "core/src/main/scala/kafka/server/ReplicaManager.scala",
     "core/src/main/scala/kafka/server/ReplicaFetcherManager.scala",
     "core/src/main/scala/kafka/server/ReplicaFetcherThread.scala",

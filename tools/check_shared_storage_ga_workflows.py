@@ -45,9 +45,21 @@ def manifest_constants():
         target = node.targets[0]
         if not isinstance(target, ast.Name):
             continue
-        if target.id in {"CORE_REQUIRED", "GA_HARDENING_REQUIRED", "REAL_S3_REQUIRED"}:
+        if target.id in {
+            "CORE_REQUIRED",
+            "GA_HARDENING_REQUIRED",
+            "REAL_S3_REQUIRED",
+            "PRODUCTION_PREFIXES",
+            "PRODUCTION_PATHS",
+        }:
             values[target.id] = ast.literal_eval(node.value)
-    missing = {"CORE_REQUIRED", "GA_HARDENING_REQUIRED", "REAL_S3_REQUIRED"} - values.keys()
+    missing = {
+        "CORE_REQUIRED",
+        "GA_HARDENING_REQUIRED",
+        "REAL_S3_REQUIRED",
+        "PRODUCTION_PREFIXES",
+        "PRODUCTION_PATHS",
+    } - values.keys()
     if missing:
         raise AssertionError("GA manifest is missing constants: " + ", ".join(sorted(missing)))
     return values
@@ -58,6 +70,27 @@ def workflow_name(text, path):
     if match is None:
         raise AssertionError(f"{path} has no top-level workflow name")
     return match.group(1).strip().strip("'\"")
+
+
+def fingerprint_covers(path, constants):
+    if path in constants["PRODUCTION_PATHS"]:
+        return True
+    return any(path.startswith(prefix) for prefix in constants["PRODUCTION_PREFIXES"])
+
+
+def concrete_production_paths(text):
+    paths = set(re.findall(r"(?m)^\\s+- '([^']+)'\\s*$", text))
+    return {
+        path
+        for path in paths
+        if "*" not in path
+        and "?" not in path
+        and (
+            path in {"build.gradle", "settings.gradle", "storage/shared-storage-s3/build.gradle"}
+            or path.startswith("core/src/main/")
+            or path.startswith("storage/src/main/")
+        )
+    }
 
 
 def focused_core_test_blocks(text):
@@ -102,6 +135,24 @@ def main():
     for name in required_names:
         if name not in workflows:
             errors.append(f"required workflow is missing: {name}")
+
+    production_paths = set()
+    for text in texts.values():
+        production_paths.update(concrete_production_paths(text))
+    if any("storage/shared-storage-s3/**" in text for text in texts.values()):
+        production_paths.add("storage/shared-storage-s3/build.gradle")
+
+    for path in sorted(production_paths):
+        if not fingerprint_covers(path, constants):
+            errors.append(f"GA production fingerprint does not cover workflow production path: {path}")
+
+    expected_prefixes = {
+        "storage/src/main/java/org/apache/kafka/storage/internals/shared/",
+        "storage/shared-storage-s3/src/main/",
+    }
+    missing_prefixes = expected_prefixes - set(constants["PRODUCTION_PREFIXES"])
+    for prefix in sorted(missing_prefixes):
+        errors.append(f"GA production fingerprint is missing required production prefix: {prefix}")
 
     for name, path in workflows.items():
         if name == MAIN_WORKFLOW_NAME:
