@@ -24,3 +24,15 @@ Until those workflows exist and pass for the candidate production tree, the GA m
 
 Real AWS S3 compatibility is selectable with `require_real_s3=true`. Keep it optional for MinIO-only deployments;
 enable it for a release that claims AWS S3 as a supported production object store.
+
+
+## Evidence ownership
+
+The `Shared Storage` workflow owns compile-time and static-analysis evidence for the Shared Storage production surface
+and the shared Kafka server tests selected by its path filters. Specialized durability, failover, performance, soak,
+and rolling-upgrade workflows are runtime correctness gates; their focused `:core:test` invocations deliberately
+exclude the global Core Checkstyle and SpotBugs tasks.
+
+This separation prevents an unrelated Core test/style violation from turning a durability gate red when that workflow
+does not trigger on the offending file. It does not waive static analysis: the GA manifest still requires the main
+`Shared Storage` workflow to pass for the same production-tree fingerprint.
