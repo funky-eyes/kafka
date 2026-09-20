@@ -82,7 +82,10 @@ public class SharedStorageRollingUpgradeE2ETest {
     private static final String TOPIC = "shared-rolling-upgrade";
     private static final String METADATA_TOPIC = "__shared_storage_metadata";
     private static final int PARTITIONS = 3;
-    private static final int RECORDS_PER_PARTITION_PER_STAGE = 5;
+    private static final int RECORDS_PER_PARTITION_PER_STAGE = 24;
+    private static final int VALUE_BYTES = 4 * 1024;
+    private static final long WAL_CAPACITY_BYTES = 512L * 1024;
+    private static final long OBJECT_TARGET_BYTES = 64L * 1024;
     private static final int[] BROKER_PORTS = {29092, 29192, 29292};
     private static final int[] CONTROLLER_PORTS = {29093, 29193, 29293};
 
@@ -126,12 +129,26 @@ public class SharedStorageRollingUpgradeE2ETest {
                 electPreferredLeader(admin, 0, 1);
                 Map<Integer, OffsetRange> newRanges = produceStage(bootstrapServers, 1, expected);
                 assertReadableExactlyOnce(bootstrapServers, expected);
-                waitForRemoteCoverage(
-                    bootstrapServers,
-                    sharedPartitions.get(0),
-                    newRanges.get(0)
+
+                long rollbackEndOffset = 2L * RECORDS_PER_PARTITION_PER_STAGE;
+                long acknowledgedPayloadBytes =
+                    rollbackEndOffset * PARTITIONS * VALUE_BYTES;
+                assertTrue(
+                    acknowledgedPayloadBytes > WAL_CAPACITY_BYTES,
+                    "The pre-rollback workload must exceed one broker-wide Ring WAL capacity"
                 );
-                System.out.println("ROLLING_UPGRADE_NEW_REMOTE_COMMIT brokerId=1 range=" + newRanges.get(0));
+                for (int partition = 0; partition < PARTITIONS; partition++) {
+                    waitForRemoteCoverage(
+                        bootstrapServers,
+                        sharedPartitions.get(partition),
+                        new OffsetRange(0L, rollbackEndOffset)
+                    );
+                }
+                System.out.println(
+                    "ROLLING_UPGRADE_NEW_REMOTE_COMMIT brokerId=1 range=" + newRanges.get(0) +
+                        " acknowledgedPayloadBytes=" + acknowledgedPayloadBytes +
+                        " walCapacityBytes=" + WAL_CAPACITY_BYTES
+                );
 
                 replaceBroker(brokers, 1, oldRuntime);
                 waitForCluster(brokers, bootstrapServers);
@@ -233,10 +250,12 @@ public class SharedStorageRollingUpgradeE2ETest {
             "shared.storage.topics=" + TOPIC,
             "shared.storage.wal.dir=" + walDir.toAbsolutePath(),
             "shared.storage.wal.engine=ring",
-            "shared.storage.wal.capacity.bytes=" + (64L * 1024 * 1024),
-            "shared.storage.object.target.bytes=" + (16L * 1024),
-            "shared.storage.upload.interval.ms=100",
+            "shared.storage.wal.capacity.bytes=" + WAL_CAPACITY_BYTES,
+            "shared.storage.object.target.bytes=" + OBJECT_TARGET_BYTES,
+            "shared.storage.upload.interval.ms=50",
             "shared.storage.upload.max.linger.ms=100",
+            "shared.storage.upload.wal.pressure.percent=60",
+            "shared.storage.upload.max.inflight=4",
             "shared.storage.orphan.cleanup.interval.ms=60000",
             "shared.storage.orphan.grace.ms=600000",
             "shared.storage.metadata.listener.name=PLAINTEXT",
@@ -627,7 +646,11 @@ public class SharedStorageRollingUpgradeE2ETest {
     }
 
     private static String value(int stage, int partition, int index) {
-        return "stage-" + stage + "-partition-" + partition + "-record-" + index;
+        String prefix = "stage-" + stage + "-partition-" + partition + "-record-" + index + "-";
+        if (prefix.length() >= VALUE_BYTES) {
+            throw new IllegalStateException("Rolling-upgrade record prefix exceeds configured payload size");
+        }
+        return prefix + "x".repeat(VALUE_BYTES - prefix.length());
     }
 
     private record KafkaRuntime(String label, Path kafkaHome, Path processRuntime) {
