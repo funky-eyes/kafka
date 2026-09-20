@@ -115,10 +115,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          old_tar="$(find old-src/core/build -type f \( -name 'kafka_*.tgz' -o -name 'kafka_*.tar.gz' \) | head -1)"
-          new_tar="$(find core/build -type f \( -name 'kafka_*.tgz' -o -name 'kafka_*.tar.gz' \) | head -1)"
+          find old-src/core/build -maxdepth 4 -type f -print | sort \
+            | tee shared-storage-rolling-old-build-files.txt
+          find core/build -maxdepth 4 -type f -print | sort \
+            | tee shared-storage-rolling-new-build-files.txt
+
+          old_tar="$(find old-src/core/build -type f \( -name '*.tgz' -o -name '*.tar.gz' \) ! -name '*site-docs*' | sort | head -1)"
+          new_tar="$(find core/build -type f \( -name '*.tgz' -o -name '*.tar.gz' \) ! -name '*site-docs*' | sort | head -1)"
           test -n "$old_tar"
           test -n "$new_tar"
+          echo "Resolved old Kafka distribution: $old_tar"
+          echo "Resolved new Kafka distribution: $new_tar"
 
           mkdir -p build/rolling-old build/rolling-new
           tar -xzf "$old_tar" -C build/rolling-old --strip-components=1
@@ -185,6 +192,8 @@ jobs:
             shared-storage-rolling-old-build.log
             shared-storage-rolling-new-build.log
             shared-storage-rolling-runtime.txt
+            shared-storage-rolling-old-build-files.txt
+            shared-storage-rolling-new-build-files.txt
             shared-storage-rolling-tar-sha256.txt
             shared-storage-rolling-upgrade.log
             shared-storage-rolling-objects.log
