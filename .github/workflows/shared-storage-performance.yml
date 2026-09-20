@@ -27,7 +27,12 @@ on:
       records:
         description: Records per classic/shared benchmark run
         required: true
-        default: "10000"
+        default: "50000"
+        type: string
+      warmup_records:
+        description: Untimed records used to warm each classic/shared cluster before measurement
+        required: true
+        default: "5000"
         type: string
       repetitions:
         description: Paired classic/shared benchmark repetitions; execution order alternates
@@ -54,7 +59,9 @@ jobs:
     timeout-minutes: 25
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - name: Start MinIO
         run: |
@@ -85,7 +92,10 @@ jobs:
             '
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: ./.github/actions/setup-gradle
+        with:
+          java-version: 25
+          gradle-cache-read-only: true
 
       - name: Run classic/shared relative throughput baseline
         env:
@@ -94,7 +104,8 @@ jobs:
           AWS_REGION: us-east-1
           SHARED_STORAGE_S3_ENDPOINT: http://127.0.0.1:9000
           SHARED_STORAGE_S3_BUCKET: kafka-shared-storage-performance
-          SHARED_STORAGE_PERF_RECORDS: ${{ inputs.records || '10000' }}
+          SHARED_STORAGE_PERF_RECORDS: ${{ inputs.records || '50000' }}
+          SHARED_STORAGE_PERF_WARMUP_RECORDS: ${{ inputs.warmup_records || '5000' }}
           SHARED_STORAGE_PERF_REPETITIONS: ${{ inputs.repetitions || '3' }}
           SHARED_STORAGE_MIN_PRODUCE_RATIO: ${{ inputs.min_produce_ratio || '0.60' }}
           SHARED_STORAGE_MIN_CONSUME_RATIO: ${{ inputs.min_consume_ratio || '0.50' }}

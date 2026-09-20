@@ -58,7 +58,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 @Timeout(value = 20, unit = TimeUnit.MINUTES)
 public class SharedStoragePerformanceBaselineTest {
     private static final int PARTITIONS = 3;
-    private static final int DEFAULT_RECORDS = 10_000;
+    private static final int DEFAULT_RECORDS = 50_000;
+    private static final int DEFAULT_WARMUP_RECORDS = 5_000;
     private static final int DEFAULT_REPETITIONS = 3;
     private static final int PAYLOAD_BYTES = 1024;
     private static final double DEFAULT_MIN_PRODUCE_RATIO = 0.60d;
@@ -70,6 +71,10 @@ public class SharedStoragePerformanceBaselineTest {
         assumeTrue(endpoint != null && !endpoint.isBlank(), "S3/MinIO integration endpoint is not configured");
 
         int records = positiveIntEnvironment("SHARED_STORAGE_PERF_RECORDS", DEFAULT_RECORDS);
+        int warmupRecords = positiveIntEnvironment(
+            "SHARED_STORAGE_PERF_WARMUP_RECORDS",
+            DEFAULT_WARMUP_RECORDS
+        );
         int repetitions = positiveIntEnvironment("SHARED_STORAGE_PERF_REPETITIONS", DEFAULT_REPETITIONS);
         double minProduceRatio = ratioEnvironment(
             "SHARED_STORAGE_MIN_PRODUCE_RATIO",
@@ -121,10 +126,12 @@ public class SharedStoragePerformanceBaselineTest {
         double medianProduceRatio = median(produceRatios);
         double medianConsumeRatio = median(consumeRatios);
         System.out.printf(
-            "SHARED_STORAGE_PERF medianProduceRatio=%.4f medianConsumeRatio=%.4f records=%d repetitions=%d%n",
+            "SHARED_STORAGE_PERF medianProduceRatio=%.4f medianConsumeRatio=%.4f " +
+                "records=%d warmupRecords=%d repetitions=%d%n",
             medianProduceRatio,
             medianConsumeRatio,
             records,
+            warmupRecords,
             repetitions
         );
 
@@ -143,6 +150,7 @@ public class SharedStoragePerformanceBaselineTest {
         String endpoint,
         String region,
         String bucket,
+        int warmupRecords,
         int records
     ) throws Exception {
         TestKitNodes nodes = new TestKitNodes.Builder()
@@ -152,14 +160,15 @@ public class SharedStoragePerformanceBaselineTest {
             .build();
         KafkaClusterTestKit.Builder builder = new KafkaClusterTestKit.Builder(nodes);
         String topic = "shared-performance-" + (sharedStorage ? "shared" : "classic");
+        String warmupTopic = topic + "-warmup";
 
         if (sharedStorage) {
             builder
                 .setConfigProp("storage.extension.class",
                     "org.apache.kafka.storage.internals.shared.s3.S3SharedStorageExtension")
-                .setConfigProp("shared.storage.topics", topic)
+                .setConfigProp("shared.storage.topic.pattern", "shared-performance-.*")
                 .setConfigProp("shared.storage.wal.engine", "ring")
-                .setConfigProp("shared.storage.wal.capacity.bytes", 64L * 1024 * 1024)
+                .setConfigProp("shared.storage.wal.capacity.bytes", 128L * 1024 * 1024)
                 .setConfigProp("shared.storage.object.target.bytes", 4L * 1024 * 1024)
                 .setConfigProp("shared.storage.upload.interval.ms", 100L)
                 .setConfigProp("shared.storage.upload.max.linger.ms", 1_000L)
@@ -179,10 +188,15 @@ public class SharedStoragePerformanceBaselineTest {
             cluster.waitForReadyBrokers();
             String bootstrapServers = cluster.bootstrapServers();
             try (Admin admin = cluster.admin()) {
-                admin.createTopics(List.of(new NewTopic(topic, PARTITIONS, (short) 3)
-                    .configs(Map.of(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2"))))
-                    .all().get(30, TimeUnit.SECONDS);
+                Map<String, String> topicConfigs = Map.of(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2");
+                admin.createTopics(List.of(
+                    new NewTopic(warmupTopic, PARTITIONS, (short) 3).configs(topicConfigs),
+                    new NewTopic(topic, PARTITIONS, (short) 3).configs(topicConfigs)
+                )).all().get(30, TimeUnit.SECONDS);
             }
+
+            produce(bootstrapServers, warmupTopic, warmupRecords);
+            consume(bootstrapServers, warmupTopic, warmupRecords);
 
             double produceRate = produce(bootstrapServers, topic, records);
             double consumeRate = consume(bootstrapServers, topic, records);
