@@ -121,6 +121,14 @@ jobs:
             :core:compileTestJava \
             --no-scan 2>&1 | tee shared-storage-compile.log
 
+      - name: Run shared storage LogManager startup regression
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew :core:test \
+            --tests 'kafka.log.LogManagerTest.testLoadLogsSkipsIncompleteInitializationWithoutOffliningParentDir' \
+            --no-scan 2>&1 | tee shared-storage-logmanager-regression.log
+
       - name: Run shared storage tests
         shell: bash
         run: |
@@ -147,6 +155,7 @@ jobs:
           name: shared-storage-ci-logs
           path: |
             shared-storage-compile.log
+            shared-storage-logmanager-regression.log
             shared-storage-test.log
             shared-storage-s3-test.log
           if-no-files-found: ignore
