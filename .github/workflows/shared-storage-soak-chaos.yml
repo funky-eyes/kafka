@@ -48,7 +48,7 @@ jobs:
 
       - name: Start MinIO
         run: |
-          docker run -d --rm --network host \
+          docker run -d --network host \
             --name kafka-shared-soak-minio \
             --env MINIO_ROOT_USER=minioadmin \
             --env MINIO_ROOT_PASSWORD=minioadmin123 \
@@ -109,6 +109,8 @@ jobs:
               --tests 'kafka.server.SharedStorageKafkaClientFailoverE2ETest' \
               --tests 'kafka.server.SharedStorageS3OutageKRaftIntegrationTest' \
               --tests 'kafka.server.SharedStorageLocalStateLossE2ETest' \
+              -PmaxParallelForks=1 \
+              --rerun-tasks \
               -x :core:checkstyleMain \
               -x :core:checkstyleTest \
               -x :core:spotbugsMain \
@@ -135,6 +137,11 @@ jobs:
               mc du --recursive local/kafka-shared-storage-soak &&
               mc find local/kafka-shared-storage-soak
             ' | tee shared-storage-soak-objects.log || true
+
+      - name: Restore MinIO for diagnostics
+        if: always()
+        run: |
+          docker start kafka-shared-soak-minio >/dev/null 2>&1 || true
 
       - name: Upload soak evidence
         if: always()
