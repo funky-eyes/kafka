@@ -208,16 +208,14 @@ public class SharedStoragePerformanceBaselineTest {
             partitions.add(new TopicPartition(topic, partition));
         }
 
-        int consumed = 0;
+        long consumed = 0L;
         long started = System.nanoTime();
         long deadline = started + TimeUnit.SECONDS.toNanos(120);
         try (KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<>(properties)) {
             consumer.assign(partitions);
             consumer.seekToBeginning(partitions);
             while (consumed < records && System.nanoTime() < deadline) {
-                for (ConsumerRecord<byte[], byte[]> ignored : consumer.poll(Duration.ofMillis(250))) {
-                    consumed++;
-                }
+                consumed = Math.addExact(consumed, consumer.poll(Duration.ofMillis(250)).count());
             }
         }
         if (consumed != records) {

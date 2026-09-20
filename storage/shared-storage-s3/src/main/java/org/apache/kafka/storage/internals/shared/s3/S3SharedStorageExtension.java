@@ -182,8 +182,11 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
     @Override
     public synchronized CompletableFuture<Void> onBrokerReady(StorageExtensionBrokerContext context) {
         Objects.requireNonNull(context, "context");
-        if (storage == null || metrics == null || bootstrapExecutor == null || storageConfiguration == null ||
-            commitProgress == null || sharedUnifiedLogFactory == null || objectStore == null) {
+        boolean localStateMissing =
+            storage == null || metrics == null || bootstrapExecutor == null || storageConfiguration == null;
+        boolean remoteStateMissing =
+            commitProgress == null || sharedUnifiedLogFactory == null || objectStore == null;
+        if (localStateMissing || remoteStateMissing) {
             return CompletableFuture.failedFuture(
                 new IllegalStateException("S3 shared storage extension has not been started"));
         }

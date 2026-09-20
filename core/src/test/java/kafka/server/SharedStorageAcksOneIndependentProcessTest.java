@@ -30,6 +30,7 @@ import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.config.TopicConfig;
+import org.apache.kafka.common.errors.UnknownTopicIdException;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
@@ -619,16 +620,38 @@ public class SharedStorageAcksOneIndependentProcessTest {
     }
 
     private static RecordMetadata produceOne(String bootstrapServers, int sequence) throws Exception {
-        KafkaProducer<String, String> producer = producer(bootstrapServers);
-        try {
-            RecordMetadata metadata = producer.send(
-                new ProducerRecord<>(TOPIC, 0, Integer.toString(sequence), value(sequence))
-            ).get(30, TimeUnit.SECONDS);
-            producer.flush();
-            return metadata;
-        } finally {
-            producer.close(Duration.ofSeconds(5));
+        for (int attempt = 1; attempt <= 5; attempt++) {
+            KafkaProducer<String, String> producer = producer(bootstrapServers);
+            try {
+                RecordMetadata metadata = producer.send(
+                    new ProducerRecord<>(TOPIC, 0, Integer.toString(sequence), value(sequence))
+                ).get(30, TimeUnit.SECONDS);
+                producer.flush();
+                return metadata;
+            } catch (Exception e) {
+                if (attempt == 5 || !hasCause(e, UnknownTopicIdException.class)) {
+                    throw e;
+                }
+                Thread.sleep(250L);
+            } finally {
+                producer.close(Duration.ofSeconds(5));
+            }
         }
+        throw new AssertionError("unreachable");
+    }
+
+    private static boolean hasCause(Throwable failure, Class<? extends Throwable> expectedType) {
+        Throwable current = failure;
+        while (current != null) {
+            if (expectedType.isInstance(current)) {
+                return true;
+            }
+            if (current.getCause() == current) {
+                break;
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 
     private static KafkaProducer<String, String> producer(String bootstrapServers) {
