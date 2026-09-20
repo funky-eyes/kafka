@@ -111,6 +111,10 @@ jobs:
           set -o pipefail
           ./gradlew :core:test \
             --tests 'kafka.server.SharedStorageKafkaClientFailoverE2ETest' \
+            -x :core:checkstyleMain \
+            -x :core:checkstyleTest \
+            -x :core:spotbugsMain \
+            -x :core:spotbugsTest \
             --no-scan 2>&1 | tee shared-storage-client-failover.log
 
       - name: Show client-failover S3 objects
