@@ -381,6 +381,32 @@ public final class SharedUploadScheduler implements AutoCloseable {
         return Optional.ofNullable(maintenance != null ? maintenance : lastUploadFailure.get());
     }
 
+    int uploadsInProgress() {
+        return uploadsInProgress.get();
+    }
+
+    int reservedCandidateCount() {
+        return reservedCandidates.size();
+    }
+
+    int uploadCandidateCount() {
+        SelectionSummary summary = lastSelectionSummary.get();
+        return summary == null ? 0 : summary.candidateCount();
+    }
+
+    long eligibleUploadBytes() {
+        SelectionSummary summary = lastSelectionSummary.get();
+        return summary == null ? 0L : summary.eligibleBytes();
+    }
+
+    boolean uploadFailurePresent() {
+        return lastUploadFailure.get() != null;
+    }
+
+    boolean maintenanceFailurePresent() {
+        return lastMaintenanceFailure.get() != null;
+    }
+
     /**
      * Persists queued authoritative remote COMMITs on the maintenance thread.
      *

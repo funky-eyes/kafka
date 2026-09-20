@@ -523,7 +523,11 @@ public final class SharedStorageEngine implements AutoCloseable {
         }
     }
 
-    int pendingRemoteCheckpointCount() {
+    /**
+     * Returns the number of authoritative remote COMMITs waiting to cross the broker-local checkpoint durability
+     * barrier. A growing value indicates that remote metadata is advancing faster than local reclaim eligibility.
+     */
+    public int pendingRemoteCheckpointCount() {
         return pendingRemoteCheckpoints.size();
     }
 

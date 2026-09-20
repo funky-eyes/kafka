@@ -27,6 +27,7 @@ import org.apache.kafka.storage.internals.shared.kafka.RoutingUnifiedLogFactory;
 import org.apache.kafka.storage.internals.shared.kafka.SharedCommitProgress;
 import org.apache.kafka.storage.internals.shared.kafka.SharedPartitionRoleListener;
 import org.apache.kafka.storage.internals.shared.kafka.SharedStorageConfiguration;
+import org.apache.kafka.storage.internals.shared.kafka.SharedStorageMetrics;
 import org.apache.kafka.storage.internals.shared.kafka.SharedStorageWalFactory;
 import org.apache.kafka.storage.internals.shared.kafka.SharedUnifiedLogFactory;
 import org.apache.kafka.storage.internals.shared.kafka.SharedUploadScheduler;
@@ -83,6 +84,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
 
     private SharedStorageConfiguration storageConfiguration;
     private SharedStorageEngine storage;
+    private SharedStorageMetrics metrics;
     private SharedCommitProgress commitProgress;
     private SharedUnifiedLogFactory sharedUnifiedLogFactory;
     private UnifiedLogFactory unifiedLogFactory;
@@ -105,10 +107,12 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         SharedStorageConfiguration configuration = SharedStorageConfiguration.from(context);
         SharedWal wal = createWal(configuration);
         S3ObjectStore newObjectStore = null;
+        SharedStorageMetrics newMetrics = null;
         try {
             LocalRemoteObjectCheckpoint remoteCheckpoint =
                 new LocalRemoteObjectCheckpoint(configuration.walDir());
             SharedStorageEngine newStorage = new SharedStorageEngine(wal, remoteCheckpoint);
+            newMetrics = new SharedStorageMetrics(newStorage, context.brokerId());
             newObjectStore = new S3ObjectStore(objectStoreConfiguration(context));
             newStorage.installRemoteReader(new SharedObjectReader(
                 newObjectStore,
@@ -134,6 +138,8 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
 
             storageConfiguration = configuration;
             storage = newStorage;
+            metrics = newMetrics;
+            newMetrics = null;
             commitProgress = newCommitProgress;
             sharedUnifiedLogFactory = newSharedUnifiedLogFactory;
             unifiedLogFactory = newFactory;
@@ -142,6 +148,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             objectStore = newObjectStore;
             newObjectStore = null;
         } catch (Throwable t) {
+            closeIgnoringFailure(newMetrics);
             closeIgnoringFailure(newObjectStore);
             try {
                 wal.close();
@@ -175,7 +182,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
     @Override
     public synchronized CompletableFuture<Void> onBrokerReady(StorageExtensionBrokerContext context) {
         Objects.requireNonNull(context, "context");
-        if (storage == null || bootstrapExecutor == null || storageConfiguration == null ||
+        if (storage == null || metrics == null || bootstrapExecutor == null || storageConfiguration == null ||
             commitProgress == null || sharedUnifiedLogFactory == null || objectStore == null) {
             return CompletableFuture.failedFuture(
                 new IllegalStateException("S3 shared storage extension has not been started"));
@@ -186,11 +193,20 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         if (brokerReadyFuture == null) {
             SharedStorageConfiguration configuration = storageConfiguration;
             SharedStorageEngine engine = storage;
+            SharedStorageMetrics sharedMetrics = metrics;
             SharedCommitProgress progress = commitProgress;
             S3ObjectStore objects = objectStore;
             ExecutorService executor = bootstrapExecutor;
             brokerReadyFuture = CompletableFuture.runAsync(() ->
-                initializeRemotePlaneUntilAvailable(context, configuration, engine, progress, objects), executor
+                initializeRemotePlaneUntilAvailable(
+                    context,
+                    configuration,
+                    engine,
+                    sharedMetrics,
+                    progress,
+                    objects
+                ),
+                executor
             ).whenComplete((ignored, error) -> {
                 if (error != null && !closed) {
                     LOG.error(
@@ -211,15 +227,19 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         StorageExtensionBrokerContext context,
         SharedStorageConfiguration configuration,
         SharedStorageEngine engine,
+        SharedStorageMetrics sharedMetrics,
         SharedCommitProgress progress,
         S3ObjectStore sharedObjectStore
     ) {
         while (true) {
             try {
-                initializeRemotePlane(context, configuration, engine, progress, sharedObjectStore);
+                initializeRemotePlane(context, configuration, engine, sharedMetrics, progress, sharedObjectStore);
+                sharedMetrics.markRemoteControlPlaneReady();
                 LOG.info("Shared storage metadata control plane is ready on broker {}", context.brokerId());
                 return;
             } catch (IOException | RuntimeException e) {
+                sharedMetrics.markRemoteControlPlaneUnavailable();
+                sharedMetrics.recordMetadataBootstrapFailure();
                 if (closedOrReplaced(engine, sharedObjectStore)) {
                     return;
                 }
@@ -257,6 +277,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         StorageExtensionBrokerContext context,
         SharedStorageConfiguration configuration,
         SharedStorageEngine engine,
+        SharedStorageMetrics sharedMetrics,
         SharedCommitProgress progress,
         S3ObjectStore sharedObjectStore
     ) throws IOException {
@@ -316,6 +337,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
                 orphanCleanupScheduler = newOrphanCleanupScheduler;
                 newUploadScheduler.start(configuration.uploadIntervalMs());
                 newOrphanCleanupScheduler.start(configuration.orphanCleanupIntervalMs());
+                sharedMetrics.attachUploadScheduler(newUploadScheduler);
                 installed = true;
             }
         } finally {
@@ -440,6 +462,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         CompletableFuture<Void> readyFuture;
         ExecutorService executor;
         SharedUploadScheduler scheduler;
+        SharedStorageMetrics sharedMetrics;
         OrphanCleanupScheduler cleanupScheduler;
         KafkaObjectMetadataStore metadata;
         S3ObjectStore objects;
@@ -452,6 +475,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             readyFuture = brokerReadyFuture;
             executor = bootstrapExecutor;
             scheduler = uploadScheduler;
+            sharedMetrics = metrics;
             cleanupScheduler = orphanCleanupScheduler;
             metadata = metadataStore;
             objects = objectStore;
@@ -459,6 +483,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             brokerReadyFuture = null;
             bootstrapExecutor = null;
             uploadScheduler = null;
+            metrics = null;
             orphanCleanupScheduler = null;
             metadataStore = null;
             objectStore = null;
@@ -480,6 +505,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
 
         IOException failure = null;
         failure = close(failure, cleanupScheduler);
+        failure = close(failure, sharedMetrics);
         failure = close(failure, scheduler);
         failure = close(failure, metadata);
         failure = close(failure, objects);
