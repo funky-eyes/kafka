@@ -16,7 +16,12 @@
 
 import unittest
 
-from shared_storage_ga_manifest import GitHub, is_branch_evidence_run
+from shared_storage_ga_manifest import (
+    GitHub,
+    is_branch_evidence_run,
+    path_is_selected,
+    push_path_patterns,
+)
 
 
 class StubGitHub(GitHub):
@@ -28,42 +33,74 @@ class StubGitHub(GitHub):
 
 
 class EvidenceRunTest(unittest.TestCase):
-    def test_accepts_push_and_workflow_dispatch_from_evidence_branch(self):
-        base = {
+    def test_accepts_exact_workflow_event_repository_and_branch(self):
+        run = {
+            "event": "push",
+            "name": "Shared Storage",
+            "path": ".github/workflows/shared-storage.yml",
             "head_repository": {"full_name": "apache/kafka"},
             "head_branch": "release",
         }
-        self.assertTrue(is_branch_evidence_run({**base, "event": "push"}, "apache/kafka", "release"))
         self.assertTrue(
-            is_branch_evidence_run({**base, "event": "workflow_dispatch"}, "apache/kafka", "release")
+            is_branch_evidence_run(
+                run,
+                "apache/kafka",
+                "release",
+                "Shared Storage",
+                ".github/workflows/shared-storage.yml",
+                "push",
+            )
         )
 
-    def test_rejects_pull_request_fork_and_wrong_branch(self):
+    def test_rejects_wrong_event_name_path_fork_and_branch(self):
         base = {
+            "event": "push",
+            "name": "Shared Storage",
+            "path": ".github/workflows/shared-storage.yml",
             "head_repository": {"full_name": "apache/kafka"},
             "head_branch": "release",
         }
-        self.assertFalse(
-            is_branch_evidence_run({**base, "event": "pull_request"}, "apache/kafka", "release")
-        )
-        self.assertFalse(
-            is_branch_evidence_run(
-                {
-                    **base,
-                    "event": "push",
-                    "head_repository": {"full_name": "fork/kafka"},
-                },
-                "apache/kafka",
-                "release",
+        cases = [
+            {**base, "event": "workflow_dispatch"},
+            {**base, "name": "Shared Storage Performance Baseline"},
+            {**base, "path": ".github/workflows/other.yml"},
+            {**base, "head_repository": {"full_name": "fork/kafka"}},
+            {**base, "head_branch": "other"},
+        ]
+        for run in cases:
+            self.assertFalse(
+                is_branch_evidence_run(
+                    run,
+                    "apache/kafka",
+                    "release",
+                    "Shared Storage",
+                    ".github/workflows/shared-storage.yml",
+                    "push",
+                )
             )
+
+
+class GateContractTest(unittest.TestCase):
+    def test_push_path_patterns_only_reads_paths_block(self):
+        workflow = """on:
+  push:
+    branches:
+      - release
+    paths:
+      - 'storage/src/main/**'
+      - '!storage/src/main/**/README.md'
+  workflow_dispatch:
+"""
+        self.assertEqual(
+            ["storage/src/main/**", "!storage/src/main/**/README.md"],
+            push_path_patterns(workflow),
         )
-        self.assertFalse(
-            is_branch_evidence_run(
-                {**base, "event": "push", "head_branch": "other"},
-                "apache/kafka",
-                "release",
-            )
-        )
+
+    def test_path_selection_honors_ordered_negation(self):
+        patterns = ["storage/**", "!storage/**/README.md", "storage/special/README.md"]
+        self.assertTrue(path_is_selected("storage/a/File.java", patterns))
+        self.assertFalse(path_is_selected("storage/a/README.md", patterns))
+        self.assertTrue(path_is_selected("storage/special/README.md", patterns))
 
 
 class ProductionFingerprintTest(unittest.TestCase):
@@ -129,6 +166,38 @@ class ProductionFingerprintTest(unittest.TestCase):
         self.assertEqual(1, first_count)
         self.assertEqual(1, second_count)
         self.assertNotEqual(first_fingerprint, second_fingerprint)
+
+    def test_workflow_contract_changes_when_selected_test_or_workflow_changes(self):
+        workflow_path = ".github/workflows/shared-storage.yml"
+        test_path = "storage/src/test/java/example/SharedStorageTest.java"
+        patterns = ["storage/src/test/**"]
+        first = StubGitHub({
+            "git/commits/candidate": {"tree": {"sha": "tree-a"}},
+            "git/trees/tree-a": {
+                "truncated": False,
+                "tree": [
+                    {"type": "blob", "path": workflow_path, "sha": "workflow-a"},
+                    {"type": "blob", "path": test_path, "sha": "test-a"},
+                ],
+            },
+        })
+        second = StubGitHub({
+            "git/commits/candidate": {"tree": {"sha": "tree-b"}},
+            "git/trees/tree-b": {
+                "truncated": False,
+                "tree": [
+                    {"type": "blob", "path": workflow_path, "sha": "workflow-b"},
+                    {"type": "blob", "path": test_path, "sha": "test-b"},
+                ],
+            },
+        })
+
+        first_fp, first_count = first.workflow_contract_fingerprint("candidate", workflow_path, patterns)
+        second_fp, second_count = second.workflow_contract_fingerprint("candidate", workflow_path, patterns)
+
+        self.assertEqual(2, first_count)
+        self.assertEqual(2, second_count)
+        self.assertNotEqual(first_fp, second_fp)
 
 
 if __name__ == "__main__":
