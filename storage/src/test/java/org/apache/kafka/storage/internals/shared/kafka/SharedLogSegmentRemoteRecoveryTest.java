@@ -21,7 +21,9 @@ import org.apache.kafka.common.record.internal.MemoryRecords;
 import org.apache.kafka.common.record.internal.SimpleRecord;
 import org.apache.kafka.common.utils.MockTime;
 import org.apache.kafka.storage.internals.log.FetchDataInfo;
+import org.apache.kafka.storage.internals.epoch.LeaderEpochFileCache;
 import org.apache.kafka.storage.internals.log.LogConfig;
+import org.apache.kafka.storage.internals.log.ProducerStateManager;
 import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
 import org.apache.kafka.storage.internals.shared.metadata.OffsetRange;
 import org.apache.kafka.storage.internals.shared.metadata.RemoteObjectIndex;
@@ -32,6 +34,7 @@ import org.apache.kafka.storage.internals.shared.object.SharedObjectReader;
 import org.apache.kafka.storage.internals.shared.wal.FileSharedWal;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.mockito.Mockito;
 
 import java.io.File;
 import java.nio.ByteBuffer;
@@ -44,6 +47,7 @@ import java.util.Properties;
 import java.util.concurrent.CompletableFuture;
 import java.util.zip.CRC32C;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -210,6 +214,56 @@ class SharedLogSegmentRemoteRecoveryTest {
             assertEquals(revisionAfterReplay, engine.remoteIndex().revision(PARTITION),
                 "Replaying identical authoritative metadata must not force another rematerialization");
             afterMetadataReplay.close();
+        }
+    }
+
+    @Test
+    void shouldKeepRecoveredTimeIndexOffsetBoundToTimestampSourceBatch() throws Exception {
+        MemoryRecords newerTimestampFirst = records(0L, 7, 3_000L, "newer-a", "newer-b");
+        MemoryRecords olderTimestampLater = records(2L, 7, 1_000L, "older-a", "older-b");
+        KafkaRecordBatchAdapter.SerializedBatch firstBatch = onlyBatch(newerTimestampFirst);
+        KafkaRecordBatchAdapter.SerializedBatch secondBatch = onlyBatch(olderTimestampLater);
+
+        Path walDir = tempDir.resolve("non-monotonic-timestamp-wal");
+        File logDir = tempDir.resolve("non-monotonic-timestamp-topic-0").toFile();
+        Files.createDirectories(logDir.toPath());
+        Properties properties = new Properties();
+        properties.put("index.interval.bytes", "1");
+        LogConfig config = new LogConfig(properties);
+
+        try (SharedStorageEngine engine = engine(walDir)) {
+            SharedLogSegment initial = SharedLogSegment.open(
+                logDir,
+                0L,
+                config,
+                new MockTime(),
+                engine,
+                PARTITION,
+                false,
+                ""
+            );
+            initial.append(firstBatch.lastOffset(), newerTimestampFirst);
+            initial.append(secondBatch.lastOffset(), olderTimestampLater);
+            initial.close();
+
+            SharedLogSegment recovered = SharedLogSegment.open(
+                logDir,
+                0L,
+                config,
+                new MockTime(),
+                engine,
+                PARTITION,
+                true,
+                ""
+            );
+            ProducerStateManager producerStateManager = Mockito.mock(ProducerStateManager.class);
+            LeaderEpochFileCache leaderEpochCache = Mockito.mock(LeaderEpochFileCache.class);
+
+            assertDoesNotThrow(() -> recovered.recover(producerStateManager, leaderEpochCache));
+            assertEquals(secondBatch.lastOffset() + 1, recovered.readNextOffset());
+            assertEquals(firstBatch.maxTimestamp(), recovered.maxTimestampSoFar());
+
+            recovered.close();
         }
     }
 
