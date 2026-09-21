@@ -501,9 +501,10 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         if (readyFuture != null && !readyFuture.isDone()) {
             readyFuture.cancel(true);
         }
+        boolean interrupted = false;
         if (executor != null) {
             executor.shutdownNow();
-            awaitExecutorStop(executor);
+            interrupted = awaitExecutorStop(executor);
         }
 
         IOException failure = null;
@@ -513,12 +514,15 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         failure = close(failure, metadata);
         failure = close(failure, objects);
         failure = close(failure, engine);
+        if (interrupted) {
+            Thread.currentThread().interrupt();
+        }
         if (failure != null) {
             throw failure;
         }
     }
 
-    static void awaitExecutorStop(ExecutorService executor) {
+    static boolean awaitExecutorStop(ExecutorService executor) {
         boolean interrupted = false;
         while (!executor.isTerminated()) {
             try {
@@ -534,9 +538,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
                 executor.shutdownNow();
             }
         }
-        if (interrupted) {
-            Thread.currentThread().interrupt();
-        }
+        return interrupted;
     }
 
     private static IOException close(IOException failure, AutoCloseable resource) {

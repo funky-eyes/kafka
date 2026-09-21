@@ -31,6 +31,10 @@ import java.nio.ByteBuffer;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -41,6 +45,42 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 class S3ObjectStoreTest {
+    @Test
+    void waitsForIoExecutorToTerminateBeforeClosingClientResources() throws Exception {
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch interrupted = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        try {
+            executor.submit(() -> {
+                started.countDown();
+                while (release.getCount() > 0) {
+                    try {
+                        release.await();
+                    } catch (InterruptedException ignored) {
+                        interrupted.countDown();
+                    }
+                }
+            });
+            assertTrue(started.await(10, TimeUnit.SECONDS), "S3 I/O task did not start");
+
+            executor.shutdownNow();
+            CompletableFuture<Boolean> waiter = CompletableFuture.supplyAsync(
+                () -> S3ObjectStore.awaitIoExecutorStop(executor)
+            );
+            assertTrue(interrupted.await(10, TimeUnit.SECONDS), "S3 I/O task did not observe shutdown interruption");
+            assertFalse(waiter.isDone(), "close wait must not finish while an S3 I/O task is still alive");
+
+            release.countDown();
+            assertFalse(waiter.get(10, TimeUnit.SECONDS));
+            assertTrue(executor.isTerminated());
+        } finally {
+            release.countDown();
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(10, TimeUnit.SECONDS), "S3 I/O executor did not terminate");
+        }
+    }
+
     @Test
     void parsesDefaultsAndNormalizesObjectKeys() {
         S3ObjectStoreConfig config = S3ObjectStoreConfig.from(Map.of(

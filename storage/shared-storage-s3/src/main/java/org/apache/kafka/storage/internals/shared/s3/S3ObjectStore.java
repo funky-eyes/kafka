@@ -443,19 +443,28 @@ public final class S3ObjectStore implements ObjectStore {
             return;
         }
         ioExecutor.shutdown();
-        boolean interrupted = false;
+        boolean interrupted = awaitIoExecutorStop(ioExecutor);
         try {
-            if (!ioExecutor.awaitTermination(CLOSE_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
-                ioExecutor.shutdownNow();
-            }
-        } catch (InterruptedException e) {
-            interrupted = true;
-            ioExecutor.shutdownNow();
-        } finally {
             client.close();
+        } finally {
             if (interrupted) {
                 Thread.currentThread().interrupt();
             }
         }
+    }
+
+    static boolean awaitIoExecutorStop(ExecutorService executor) {
+        boolean interrupted = false;
+        while (!executor.isTerminated()) {
+            try {
+                if (!executor.awaitTermination(CLOSE_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                    executor.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                interrupted = true;
+                executor.shutdownNow();
+            }
+        }
+        return interrupted;
     }
 }

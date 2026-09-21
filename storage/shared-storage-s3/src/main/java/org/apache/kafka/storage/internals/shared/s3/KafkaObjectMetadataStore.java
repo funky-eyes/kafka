@@ -482,17 +482,41 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
         failAppliedOffsetWaiters(new IllegalStateException("Shared metadata store is closed"));
         consumer.wakeup();
         Thread thread = consumerThread;
+        boolean interrupted = false;
         if (thread != null && thread != Thread.currentThread()) {
-            try {
-                thread.join(CLOSE_JOIN_TIMEOUT_MS);
-            } catch (InterruptedException e) {
+            interrupted = awaitConsumerThreadStop(thread, consumer::wakeup, CLOSE_JOIN_TIMEOUT_MS);
+        }
+        try {
+            consumer.close();
+            producer.close();
+            sequenceProducer.close();
+            admin.close();
+        } finally {
+            if (interrupted) {
                 Thread.currentThread().interrupt();
             }
         }
-        consumer.close();
-        producer.close();
-        sequenceProducer.close();
-        admin.close();
+    }
+
+    static boolean awaitConsumerThreadStop(Thread thread, Runnable wakeup, long joinTimeoutMs) {
+        Objects.requireNonNull(thread, "thread");
+        Objects.requireNonNull(wakeup, "wakeup");
+        if (joinTimeoutMs <= 0) {
+            throw new IllegalArgumentException("joinTimeoutMs must be positive");
+        }
+        boolean interrupted = false;
+        while (thread.isAlive()) {
+            try {
+                thread.join(joinTimeoutMs);
+                if (thread.isAlive()) {
+                    wakeup.run();
+                }
+            } catch (InterruptedException e) {
+                interrupted = true;
+                wakeup.run();
+            }
+        }
+        return interrupted;
     }
 
     private static IOException asIOException(String message, Throwable t) {

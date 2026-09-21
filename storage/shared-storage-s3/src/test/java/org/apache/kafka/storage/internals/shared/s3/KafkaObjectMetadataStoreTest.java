@@ -23,11 +23,51 @@ import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class KafkaObjectMetadataStoreTest {
+    @Test
+    void waitsForConsumerThreadToExitBeforeClosingKafkaClients() throws Exception {
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch wakeupCalled = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        Thread consumerThread = new Thread(() -> {
+            started.countDown();
+            while (release.getCount() > 0) {
+                try {
+                    release.await();
+                } catch (InterruptedException ignored) {
+                    // Model work outside KafkaConsumer.poll which can delay shutdown after wakeup.
+                }
+            }
+        });
+        consumerThread.start();
+        assertTrue(started.await(10, TimeUnit.SECONDS), "Metadata consumer test thread did not start");
+
+        CompletableFuture<Boolean> waiter = CompletableFuture.supplyAsync(() ->
+            KafkaObjectMetadataStore.awaitConsumerThreadStop(
+                consumerThread,
+                () -> {
+                    wakeupCalled.countDown();
+                    consumerThread.interrupt();
+                },
+                100L
+            )
+        );
+        assertTrue(wakeupCalled.await(10, TimeUnit.SECONDS), "Close path did not retry metadata consumer wakeup");
+        assertFalse(waiter.isDone(), "close wait must not finish while metadata consumer thread is still alive");
+
+        release.countDown();
+        assertFalse(waiter.get(10, TimeUnit.SECONDS));
+        consumerThread.join(10_000L);
+        assertFalse(consumerThread.isAlive());
+    }
+
     @Test
     void retriesOnlyTransientMetadataTopicCreationFailures() {
         assertTrue(KafkaObjectMetadataStore.isTransientTopicCreationFailure(
