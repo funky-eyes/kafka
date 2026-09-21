@@ -50,6 +50,10 @@ jobs:
           ref: ${{ inputs.release_ref }}
           persist-credentials: false
 
+      - name: Resolve checked-out release SHA
+        id: release-sha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Test GA manifest evidence rules
         run: python3 tools/test_shared_storage_ga_manifest.py
 
@@ -63,7 +67,7 @@ jobs:
           set -o pipefail
           args=(
             --repo "${{ github.repository }}"
-            --ref "${{ inputs.release_ref }}"
+            --ref "${{ steps.release-sha.outputs.sha }}"
             --evidence-branch "${{ inputs.evidence_branch }}"
             --output shared-storage-ga-manifest.md
           )

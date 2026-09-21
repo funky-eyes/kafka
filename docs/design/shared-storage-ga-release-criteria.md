@@ -10,9 +10,12 @@ The release gate deliberately separates two concerns:
 * GA hardening gates prove production readiness: performance regression bounds, long-running soak/chaos stability,
   and mixed-version rolling upgrade compatibility.
 
-Run **Shared Storage GA Release Gate** with the candidate release ref. Evidence is matched using a production-tree
-fingerprint rather than the raw commit SHA so author-normalization and test/workflow-only commits do not discard
-otherwise equivalent evidence.
+Run **Shared Storage GA Release Gate** with the candidate release ref. The release workflow resolves that ref once
+after checkout and evaluates the exact checked-out commit SHA, so a moving branch cannot change the candidate during
+the manifest run. Production code is matched using a production-tree fingerprint so author-normalization and unrelated
+documentation/CI commits do not discard otherwise equivalent evidence. Each gate also has a contract fingerprint made
+from its workflow file plus the files selected by that workflow's `push.paths`; workflow or selected test changes
+therefore require fresh evidence.
 
 The GA gate currently requires these hardening workflows in addition to the correctness suite:
 
@@ -54,9 +57,15 @@ substitute for this workflow when AWS S3 support is claimed.
 
 ### Evidence branch isolation
 
-Evidence is branch-scoped. The GA release workflow requires an `evidence_branch` and only accepts GitHub Actions runs
-whose event is `push` or `workflow_dispatch` and whose `head_branch` and `head_repository` match that branch in
-this repository. Production-tree equivalence still handles author normalization and later documentation-only commits,
-but a green run from a pull request, fork, or different development branch cannot satisfy a release gate. Recursive
-GitHub tree responses must also be complete; a truncated tree is rejected rather than producing a partial production
-fingerprint.
+Evidence is branch-scoped. The GA release workflow requires an `evidence_branch`, binds every required gate to its
+expected workflow file path, and only accepts runs whose `head_branch` and `head_repository` match that branch in
+this repository. Core correctness and GA hardening gates accept only automatic `push` runs; manual
+`workflow_dispatch` runs cannot satisfy those gates because several workflows expose tunable workload or threshold
+inputs. The optional real-AWS-S3 gate is the exception and requires `workflow_dispatch`, because its protected bucket
+and region are release-environment inputs.
+
+For every accepted run, both the Shared Storage production fingerprint and that workflow's gate-contract fingerprint
+must match the candidate. This preserves author-normalization equivalence without allowing an old green run to survive
+a workflow or selected-test change. A pull request, fork, different branch, same-named workflow at another path, or
+partial recursive GitHub tree cannot satisfy a release gate. Recursive tree responses are rejected when GitHub marks
+them truncated.
