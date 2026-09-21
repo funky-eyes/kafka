@@ -63,7 +63,7 @@ import java.util.function.LongSupplier;
  */
 public final class SharedUploadScheduler implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(SharedUploadScheduler.class);
-    private static final long CLOSE_DRAIN_TIMEOUT_SECONDS = 30L;
+    private static final long CLOSE_WAIT_LOG_INTERVAL_SECONDS = 30L;
     static final long DEFAULT_MAX_LINGER_MS = 1_000L;
     static final int DEFAULT_WAL_PRESSURE_PERCENT = 70;
     static final int DEFAULT_MAX_INFLIGHT = 1;
@@ -557,37 +557,55 @@ public final class SharedUploadScheduler implements AutoCloseable {
             return;
         }
         pendingHead.set(null);
-        if (executor != null) {
-            executor.shutdownNow();
+        ScheduledExecutorService executorToStop = executor;
+        if (executorToStop != null) {
+            executorToStop.shutdownNow();
             executor = null;
         }
-        awaitUploadDrain();
-    }
-
-    private void awaitUploadDrain() {
-        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(CLOSE_DRAIN_TIMEOUT_SECONDS);
-        boolean interrupted = false;
-        synchronized (uploadDrainMonitor) {
-            while (uploadsInProgress.get() > 0) {
-                long remainingNanos = deadlineNanos - System.nanoTime();
-                if (remainingNanos <= 0) {
-                    LOG.warn(
-                        "Timed out draining {} shared object upload(s) during scheduler close",
-                        uploadsInProgress.get()
-                    );
-                    break;
-                }
-                try {
-                    TimeUnit.NANOSECONDS.timedWait(uploadDrainMonitor, remainingNanos);
-                } catch (InterruptedException e) {
-                    interrupted = true;
-                    break;
-                }
-            }
-        }
+        boolean interrupted = awaitExecutorStop(executorToStop);
+        interrupted |= awaitUploadDrain();
         if (interrupted) {
             Thread.currentThread().interrupt();
         }
+    }
+
+    private boolean awaitExecutorStop(ScheduledExecutorService executorToStop) {
+        if (executorToStop == null) {
+            return false;
+        }
+        boolean interrupted = false;
+        while (!executorToStop.isTerminated()) {
+            try {
+                if (!executorToStop.awaitTermination(CLOSE_WAIT_LOG_INTERVAL_SECONDS, TimeUnit.SECONDS)) {
+                    LOG.warn("Shared upload scheduler executor is still running during close; interrupting it again");
+                    executorToStop.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                interrupted = true;
+                executorToStop.shutdownNow();
+            }
+        }
+        return interrupted;
+    }
+
+    private boolean awaitUploadDrain() {
+        boolean interrupted = false;
+        synchronized (uploadDrainMonitor) {
+            while (uploadsInProgress.get() > 0) {
+                try {
+                    TimeUnit.SECONDS.timedWait(uploadDrainMonitor, CLOSE_WAIT_LOG_INTERVAL_SECONDS);
+                    if (uploadsInProgress.get() > 0) {
+                        LOG.warn(
+                            "Still draining {} shared object upload(s) during scheduler close",
+                            uploadsInProgress.get()
+                        );
+                    }
+                } catch (InterruptedException e) {
+                    interrupted = true;
+                }
+            }
+        }
+        return interrupted;
     }
 
     private record CandidateSelection(

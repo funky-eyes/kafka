@@ -22,6 +22,7 @@ import org.apache.kafka.storage.internals.shared.metadata.OffsetRange;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 import org.apache.kafka.storage.internals.shared.object.InMemoryObjectStore;
+import org.apache.kafka.storage.internals.shared.object.ObjectStore;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectPacker;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectUploader;
 import org.apache.kafka.storage.internals.shared.wal.FileSharedWal;
@@ -32,7 +33,9 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -47,6 +50,64 @@ class SharedUploadSchedulerTest {
 
     @TempDir
     Path tempDir;
+
+    @Test
+    void closeWaitsForInFlightUploadBeforeReturning() throws Exception {
+        InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
+        CountDownLatch putStarted = new CountDownLatch(1);
+        CompletableFuture<Void> blockedPut = new CompletableFuture<>();
+        ObjectStore objectStore = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                putStarted.countDown();
+                return blockedPut;
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return CompletableFuture.completedFuture(null);
+            }
+        };
+
+        try (SharedStorageEngine engine = engine("close-drain")) {
+            append(engine, P0, 0L, 9L, new byte[] {1, 2, 3});
+            SharedCommitProgress progress = leaderProgress(P0, 0L, 10L);
+            SharedObjectUploader uploader = new SharedObjectUploader(
+                objectStore,
+                metadataStore,
+                new SharedObjectPacker(),
+                engine
+            );
+            SharedUploadScheduler scheduler = new SharedUploadScheduler(
+                engine,
+                progress,
+                uploader,
+                () -> 100L,
+                () -> 1_000L,
+                1024L
+            );
+
+            CompletableFuture<Optional<SharedObjectMetadata>> upload = scheduler.tryUploadOnce();
+            assertTrue(putStarted.await(10, TimeUnit.SECONDS), "Object PUT did not start");
+
+            CompletableFuture<Void> closeFuture = CompletableFuture.runAsync(scheduler::close);
+            assertThrows(
+                java.util.concurrent.TimeoutException.class,
+                () -> closeFuture.get(200, TimeUnit.MILLISECONDS),
+                "Scheduler close must wait for the in-flight upload"
+            );
+
+            blockedPut.complete(null);
+            closeFuture.get(10, TimeUnit.SECONDS);
+            assertTrue(upload.get(10, TimeUnit.SECONDS).isPresent());
+            assertEquals(0, scheduler.uploadsInProgress());
+        }
+    }
 
     @Test
     void neverUploadsWalBatchAtOrBeyondKafkaHighWatermark() throws Exception {

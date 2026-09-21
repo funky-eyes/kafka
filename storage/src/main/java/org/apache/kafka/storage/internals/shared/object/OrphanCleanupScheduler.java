@@ -32,6 +32,7 @@ import java.util.function.LongSupplier;
 /** Periodically claims and re-deletes orphan physical objects without overlapping cleanup passes. */
 public final class OrphanCleanupScheduler implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(OrphanCleanupScheduler.class);
+    private static final long CLOSE_WAIT_LOG_INTERVAL_SECONDS = 30L;
 
     private final OrphanObjectCleaner cleaner;
     private final LongSupplier currentTimeMsSupplier;
@@ -39,6 +40,7 @@ public final class OrphanCleanupScheduler implements AutoCloseable {
     private final AtomicBoolean cleanupInProgress = new AtomicBoolean();
     private final AtomicBoolean closed = new AtomicBoolean();
     private final AtomicReference<Throwable> lastFailure = new AtomicReference<>();
+    private final Object cleanupDrainMonitor = new Object();
 
     private ScheduledExecutorService executor;
 
@@ -85,12 +87,16 @@ public final class OrphanCleanupScheduler implements AutoCloseable {
         if (!cleanupInProgress.compareAndSet(false, true)) {
             return CompletableFuture.completedFuture(0);
         }
+        if (closed.get()) {
+            releaseCleanupSlot();
+            return CompletableFuture.failedFuture(new IllegalStateException("Orphan cleanup scheduler is closed"));
+        }
 
         final long cutoff;
         try {
             cutoff = Math.max(0L, Math.subtractExact(currentTimeMsSupplier.getAsLong(), orphanGraceMs));
         } catch (ArithmeticException e) {
-            cleanupInProgress.set(false);
+            releaseCleanupSlot();
             return CompletableFuture.failedFuture(e);
         }
 
@@ -98,25 +104,35 @@ public final class OrphanCleanupScheduler implements AutoCloseable {
         try {
             result = cleaner.clean(cutoff);
         } catch (RuntimeException e) {
-            cleanupInProgress.set(false);
+            releaseCleanupSlot();
             return CompletableFuture.failedFuture(e);
         }
         return result.whenComplete((deleted, error) -> {
-            if (error == null) {
-                lastFailure.set(null);
-                if (deleted != null && deleted > 0) {
-                    LOG.info("Shared orphan cleanup deleted {} physical object(s)", deleted);
+            try {
+                if (error == null) {
+                    lastFailure.set(null);
+                    if (deleted != null && deleted > 0) {
+                        LOG.info("Shared orphan cleanup deleted {} physical object(s)", deleted);
+                    }
+                } else {
+                    lastFailure.set(error);
+                    LOG.warn("Shared orphan cleanup failed", error);
                 }
-            } else {
-                lastFailure.set(error);
-                LOG.warn("Shared orphan cleanup failed", error);
+            } finally {
+                releaseCleanupSlot();
             }
-            cleanupInProgress.set(false);
         });
     }
 
     public Optional<Throwable> lastFailure() {
         return Optional.ofNullable(lastFailure.get());
+    }
+
+    private void releaseCleanupSlot() {
+        synchronized (cleanupDrainMonitor) {
+            cleanupInProgress.set(false);
+            cleanupDrainMonitor.notifyAll();
+        }
     }
 
     private void runScheduledCleanup() {
@@ -132,9 +148,51 @@ public final class OrphanCleanupScheduler implements AutoCloseable {
         if (!closed.compareAndSet(false, true)) {
             return;
         }
-        if (executor != null) {
-            executor.shutdownNow();
+        ScheduledExecutorService executorToStop = executor;
+        if (executorToStop != null) {
+            executorToStop.shutdownNow();
             executor = null;
         }
+        boolean interrupted = awaitExecutorStop(executorToStop);
+        interrupted |= awaitCleanupDrain();
+        if (interrupted) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private boolean awaitExecutorStop(ScheduledExecutorService executorToStop) {
+        if (executorToStop == null) {
+            return false;
+        }
+        boolean interrupted = false;
+        while (!executorToStop.isTerminated()) {
+            try {
+                if (!executorToStop.awaitTermination(CLOSE_WAIT_LOG_INTERVAL_SECONDS, TimeUnit.SECONDS)) {
+                    LOG.warn("Shared orphan cleanup scheduler executor is still running during close; interrupting it again");
+                    executorToStop.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                interrupted = true;
+                executorToStop.shutdownNow();
+            }
+        }
+        return interrupted;
+    }
+
+    private boolean awaitCleanupDrain() {
+        boolean interrupted = false;
+        synchronized (cleanupDrainMonitor) {
+            while (cleanupInProgress.get()) {
+                try {
+                    TimeUnit.SECONDS.timedWait(cleanupDrainMonitor, CLOSE_WAIT_LOG_INTERVAL_SECONDS);
+                    if (cleanupInProgress.get()) {
+                        LOG.warn("Still draining an in-flight orphan cleanup during scheduler close");
+                    }
+                } catch (InterruptedException e) {
+                    interrupted = true;
+                }
+            }
+        }
+        return interrupted;
     }
 }

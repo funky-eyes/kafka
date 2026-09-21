@@ -26,9 +26,50 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class OrphanCleanupSchedulerTest {
+    @Test
+    void closeWaitsForInFlightCleanupBeforeReturning() throws Exception {
+        InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
+        metadata.prepare(105L, 1L).get();
+        CompletableFuture<Void> blockedDelete = new CompletableFuture<>();
+        ObjectStore objects = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                return CompletableFuture.completedFuture(null);
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return blockedDelete;
+            }
+        };
+        OrphanCleanupScheduler scheduler = new OrphanCleanupScheduler(
+            new OrphanObjectCleaner(objects, metadata),
+            () -> 10_000L,
+            1_000L
+        );
+
+        CompletableFuture<Integer> cleanup = scheduler.tryCleanOnce();
+        CompletableFuture<Void> closeFuture = CompletableFuture.runAsync(scheduler::close);
+        assertThrows(
+            java.util.concurrent.TimeoutException.class,
+            () -> closeFuture.get(200, TimeUnit.MILLISECONDS),
+            "Scheduler close must wait for the in-flight orphan delete"
+        );
+
+        blockedDelete.complete(null);
+        closeFuture.get(10, TimeUnit.SECONDS);
+        assertEquals(1, cleanup.get(10, TimeUnit.SECONDS));
+    }
+
     @Test
     void appliesGraceCutoffBeforeClaimingPreparedObjects() throws Exception {
         InMemoryObjectStore objects = new InMemoryObjectStore();
