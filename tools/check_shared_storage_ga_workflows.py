@@ -325,7 +325,7 @@ def main():
     if "--evidence-branch" not in ga_release:
         errors.append(f"{GA_RELEASE_WORKFLOW_NAME}: release evidence must be explicitly branch-scoped")
 
-    if "git rev-parse HEAD" not in ga_release or "--ref \"\${{ steps.release-sha.outputs.sha }}\"" not in ga_release:
+    if "git rev-parse HEAD" not in ga_release or "--ref \"${{ steps.release-sha.outputs.sha }}\"" not in ga_release:
         errors.append(
             f"{GA_RELEASE_WORKFLOW_NAME}: release evaluation must use the exact checked-out commit SHA"
         )
