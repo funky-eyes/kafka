@@ -424,6 +424,7 @@ public class SharedStorageRollingUpgradeE2ETest {
     ) throws Exception {
         Properties properties = new Properties();
         properties.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+        properties.put(ProducerConfig.CLIENT_ID_CONFIG, "shared-rolling-stage-" + stage);
         properties.put(ProducerConfig.ACKS_CONFIG, "all");
         properties.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
         properties.put(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, 1);
@@ -618,7 +619,7 @@ public class SharedStorageRollingUpgradeE2ETest {
     }
 
     private void copyDiagnostics() {
-        Path output = Path.of("core/build/shared-storage-rolling-upgrade-diagnostics");
+        Path output = Path.of("build/shared-storage-rolling-upgrade-diagnostics");
         try {
             Files.createDirectories(output);
             try (Stream<Path> paths = Files.walk(tempDir)) {
