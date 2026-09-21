@@ -52,6 +52,7 @@ import java.util.stream.Stream;
 public final class FileSharedWal implements SharedWal {
     private static final Pattern SEGMENT_FILE_PATTERN = Pattern.compile("wal-(\\d{20})\\.log");
     private static final int MAX_DRAINED_APPENDS = 1024;
+    private static final long DEFAULT_WRITER_SHUTDOWN_TIMEOUT_MS = TimeUnit.SECONDS.toMillis(30);
 
     private final Path directory;
     private final long capacityBytes;
@@ -60,24 +61,41 @@ public final class FileSharedWal implements SharedWal {
     private final LinkedBlockingQueue<PendingAppend> pendingAppends = new LinkedBlockingQueue<>();
     private final AtomicBoolean running = new AtomicBoolean(true);
     private final AtomicBoolean closed = new AtomicBoolean(false);
+    private final AtomicBoolean ioResourcesClosed = new AtomicBoolean(false);
     private final AtomicLong nextGroupId;
     private final AtomicLong usedBytes;
     private final Object lifecycleLock = new Object();
     private final Object writerIoLock = new Object();
+    private final long writerShutdownTimeoutMs;
     private final Thread writerThread;
 
     private volatile boolean accepting = true;
     private volatile Throwable failure;
+    private volatile IOException deferredCloseFailure;
     private volatile SegmentWriter activeSegment;
     private long nextSegmentId;
 
     public FileSharedWal(Path directory, long capacityBytes, long segmentBytes) throws IOException {
-        this(directory, capacityBytes, segmentBytes, new FileChannelWalIoBackend());
+        this(directory, capacityBytes, segmentBytes, new FileChannelWalIoBackend(), DEFAULT_WRITER_SHUTDOWN_TIMEOUT_MS);
     }
 
     FileSharedWal(Path directory, long capacityBytes, long segmentBytes, WalIoBackend ioBackend) throws IOException {
+        this(directory, capacityBytes, segmentBytes, ioBackend, DEFAULT_WRITER_SHUTDOWN_TIMEOUT_MS);
+    }
+
+    FileSharedWal(
+        Path directory,
+        long capacityBytes,
+        long segmentBytes,
+        WalIoBackend ioBackend,
+        long writerShutdownTimeoutMs
+    ) throws IOException {
         this.directory = Objects.requireNonNull(directory, "directory");
         this.ioBackend = Objects.requireNonNull(ioBackend, "ioBackend");
+        if (writerShutdownTimeoutMs <= 0) {
+            throw new IllegalArgumentException("writerShutdownTimeoutMs must be positive");
+        }
+        this.writerShutdownTimeoutMs = writerShutdownTimeoutMs;
         if (capacityBytes <= 0) {
             throw new IllegalArgumentException("capacityBytes must be positive");
         }
@@ -275,8 +293,12 @@ public final class FileSharedWal implements SharedWal {
             return;
         }
         stopWriter();
-        IOException closeError = awaitWriterStop();
-        closeError = closeIoResources(closeError);
+        WriterStopResult writerStop = awaitWriterStop();
+        IOException closeError = writerStop.error();
+        if (writerStop.stopped()) {
+            closeError = closeIoResources(closeError);
+            closeError = mergeCloseError(closeError, deferredCloseFailure);
+        }
         if (closeError != null) {
             throw closeError;
         }
@@ -291,24 +313,34 @@ public final class FileSharedWal implements SharedWal {
         }
     }
 
-    private IOException awaitWriterStop() {
+    private WriterStopResult awaitWriterStop() {
         try {
-            writerThread.join(TimeUnit.SECONDS.toMillis(30));
+            writerThread.join(writerShutdownTimeoutMs);
             if (writerThread.isAlive()) {
-                return new IOException("Timed out waiting for WAL writer to stop");
+                return new WriterStopResult(
+                    false,
+                    new IOException("Timed out waiting for WAL writer to stop after " +
+                        writerShutdownTimeoutMs + " ms")
+                );
             }
-            return null;
+            return new WriterStopResult(true, null);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            return new IOException("Interrupted while closing WAL", e);
+            return new WriterStopResult(
+                !writerThread.isAlive(),
+                new IOException("Interrupted while closing WAL", e)
+            );
         }
     }
 
     private IOException closeIoResources(IOException closeError) {
+        if (!ioResourcesClosed.compareAndSet(false, true)) {
+            return closeError;
+        }
         synchronized (writerIoLock) {
             closeError = closeActiveSegment(closeError);
+            return closeBackend(closeError);
         }
-        return closeBackend(closeError);
     }
 
     private IOException closeActiveSegment(IOException closeError) {
@@ -334,18 +366,34 @@ public final class FileSharedWal implements SharedWal {
         }
     }
 
+    private void closeResourcesAfterWriterExit() {
+        if (!closed.get()) {
+            return;
+        }
+        IOException closeFailure = closeIoResources(null);
+        if (closeFailure != null) {
+            deferredCloseFailure = closeFailure;
+        }
+    }
+
     private static IOException mergeCloseError(IOException closeError, IOException additional) {
+        if (additional == null) {
+            return closeError;
+        }
         if (closeError == null) {
             return additional;
         }
-        closeError.addSuppressed(additional);
+        if (closeError != additional) {
+            closeError.addSuppressed(additional);
+        }
         return closeError;
     }
 
     private void writerLoop() {
         List<PendingAppend> drained = new ArrayList<>(MAX_DRAINED_APPENDS);
-        while (running.get() || !pendingAppends.isEmpty()) {
-            try {
+        try {
+            while (running.get() || !pendingAppends.isEmpty()) {
+                try {
                 drained.clear();
                 PendingAppend first = pendingAppends.take();
                 if (first.poison) {
@@ -367,15 +415,21 @@ public final class FileSharedWal implements SharedWal {
                     drained.add(next);
                 }
                 writeDrainedGroups(drained);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                failWriter(new IOException("WAL writer interrupted", e), drained);
-                return;
-            } catch (Throwable t) {
-                failWriter(t, drained);
-                return;
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    failWriter(new IOException("WAL writer interrupted", e), drained);
+                    return;
+                } catch (Throwable t) {
+                    failWriter(t, drained);
+                    return;
+                }
             }
+        } finally {
+            closeResourcesAfterWriterExit();
         }
+    }
+
+    private record WriterStopResult(boolean stopped, IOException error) {
     }
 
     private void failWriter(Throwable t, List<PendingAppend> currentGroups) {
