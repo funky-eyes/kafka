@@ -84,6 +84,13 @@ EVIDENCE_WORKFLOW_PATHS = {
     "Shared Storage Real S3 Compatibility": ".github/workflows/shared-storage-real-s3.yml",
 }
 
+EVIDENCE_EXTRA_CONTRACT_PATHS = {
+    "Shared Storage Real S3 Compatibility": (
+        "storage/shared-storage-s3/src/test/java/org/apache/kafka/storage/internals/shared/s3/"
+        "S3RealCompatibilityTest.java",
+    ),
+}
+
 AUTOMATIC_EVIDENCE_EVENT = "push"
 REAL_S3_EVIDENCE_EVENT = "workflow_dispatch"
 
@@ -255,17 +262,21 @@ class GitHub:
         self.workflow_text_cache[key] = text
         return text
 
-    def workflow_contract_fingerprint(self, ref, workflow_path, patterns):
+    def workflow_contract_fingerprint(self, ref, workflow_path, patterns, extra_paths=()):
         blobs = self.tree_blobs(ref)
-        workflow_sha = blobs.get(workflow_path)
-        if workflow_sha is None:
-            raise RuntimeError(f"workflow {workflow_path} is missing at {ref}")
-        rows = [workflow_path + "\0" + workflow_sha]
-        rows.extend(
-            path + "\0" + sha
-            for path, sha in blobs.items()
+        contract_paths = {workflow_path}
+        contract_paths.update(
+            path
+            for path in blobs
             if path != workflow_path and path_is_selected(path, patterns)
         )
+        contract_paths.update(extra_paths)
+        missing = sorted(path for path in contract_paths if path not in blobs)
+        if missing:
+            raise RuntimeError(
+                f"gate contract paths are missing at {ref}: {', '.join(missing)}"
+            )
+        rows = [path + "\0" + blobs[path] for path in contract_paths]
         return self.fingerprint_rows(rows), len(rows)
 
     def workflow_runs(self, workflow_path, branch, event, max_pages=10):
@@ -350,12 +361,14 @@ def main():
         event = evidence_event(name)
         workflow_text = github.workflow_text(target_sha, workflow_path)
         patterns = push_path_patterns(workflow_text) if event == AUTOMATIC_EVIDENCE_EVENT else []
+        extra_paths = EVIDENCE_EXTRA_CONTRACT_PATHS.get(name, ())
         if event == AUTOMATIC_EVIDENCE_EVENT and not patterns:
             raise RuntimeError(f"automatic evidence workflow {workflow_path} has no push path contract")
         target_contract, contract_files = github.workflow_contract_fingerprint(
             target_sha,
             workflow_path,
             patterns,
+            extra_paths,
         )
 
         candidates = github.workflow_runs(
@@ -383,10 +396,15 @@ def main():
                 if fingerprint is None:
                     fingerprint, _ = github.production_fingerprint(sha)
                     fingerprint_cache[sha] = fingerprint
-                contract_key = (sha, workflow_path, tuple(patterns))
+                contract_key = (sha, workflow_path, tuple(patterns), tuple(extra_paths))
                 contract = contract_cache.get(contract_key)
                 if contract is None:
-                    contract, _ = github.workflow_contract_fingerprint(sha, workflow_path, patterns)
+                    contract, _ = github.workflow_contract_fingerprint(
+                        sha,
+                        workflow_path,
+                        patterns,
+                        extra_paths,
+                    )
                     contract_cache[contract_key] = contract
             except RuntimeError:
                 continue

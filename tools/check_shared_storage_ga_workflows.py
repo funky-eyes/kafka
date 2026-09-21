@@ -55,6 +55,7 @@ def manifest_constants():
             "GA_HARDENING_REQUIRED",
             "REAL_S3_REQUIRED",
             "EVIDENCE_WORKFLOW_PATHS",
+            "EVIDENCE_EXTRA_CONTRACT_PATHS",
             "JAVA_PRODUCTION_PREFIXES",
             "PRODUCTION_PREFIXES",
             "PRODUCTION_PATHS",
@@ -65,6 +66,7 @@ def manifest_constants():
         "GA_HARDENING_REQUIRED",
         "REAL_S3_REQUIRED",
         "EVIDENCE_WORKFLOW_PATHS",
+        "EVIDENCE_EXTRA_CONTRACT_PATHS",
         "JAVA_PRODUCTION_PREFIXES",
         "PRODUCTION_PREFIXES",
         "PRODUCTION_PATHS",
@@ -226,6 +228,27 @@ def main():
         if actual != mapped:
             errors.append(
                 f"GA evidence workflow path mismatch for {name!r}: expected {actual}, manifest has {mapped}"
+            )
+
+    for name, extra_paths in constants["EVIDENCE_EXTRA_CONTRACT_PATHS"].items():
+        if name not in expected_evidence_names:
+            errors.append(f"GA evidence extra contract has unexpected workflow: {name}")
+        for extra_path in extra_paths:
+            if not (ROOT / extra_path).is_file():
+                errors.append(f"GA evidence extra contract path is missing: {extra_path}")
+
+    real_s3_name = constants["REAL_S3_REQUIRED"]
+    real_s3_contract = set(constants["EVIDENCE_EXTRA_CONTRACT_PATHS"].get(real_s3_name, ()))
+    for selector in sorted(exact_test_selectors(texts.get(real_s3_name, ""))):
+        sources = test_sources(selector)
+        if not sources:
+            errors.append(f"{real_s3_name}: cannot resolve test selector to a test source: {selector}")
+            continue
+        missing_sources = sorted(sources - real_s3_contract)
+        if missing_sources:
+            errors.append(
+                f"{real_s3_name}: selected test source is not covered by the explicit GA contract: "
+                + ", ".join(missing_sources)
             )
 
     # The GA manifest compares one global production fingerprint for every required gate.

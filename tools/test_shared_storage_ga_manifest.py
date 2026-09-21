@@ -17,7 +17,9 @@
 import unittest
 
 from shared_storage_ga_manifest import (
+    EVIDENCE_EXTRA_CONTRACT_PATHS,
     GitHub,
+    REAL_S3_REQUIRED,
     is_branch_evidence_run,
     path_is_selected,
     push_path_patterns,
@@ -168,6 +170,47 @@ class ProductionFingerprintTest(unittest.TestCase):
         self.assertEqual(1, first_count)
         self.assertEqual(1, second_count)
         self.assertNotEqual(first_fingerprint, second_fingerprint)
+
+    def test_real_s3_contract_changes_when_compatibility_test_changes(self):
+        workflow_path = ".github/workflows/shared-storage-real-s3.yml"
+        test_path = EVIDENCE_EXTRA_CONTRACT_PATHS[REAL_S3_REQUIRED][0]
+        first = StubGitHub({
+            "git/commits/candidate": {"tree": {"sha": "tree-a"}},
+            "git/trees/tree-a": {
+                "truncated": False,
+                "tree": [
+                    {"type": "blob", "path": workflow_path, "sha": "workflow"},
+                    {"type": "blob", "path": test_path, "sha": "test-a"},
+                ],
+            },
+        })
+        second = StubGitHub({
+            "git/commits/candidate": {"tree": {"sha": "tree-b"}},
+            "git/trees/tree-b": {
+                "truncated": False,
+                "tree": [
+                    {"type": "blob", "path": workflow_path, "sha": "workflow"},
+                    {"type": "blob", "path": test_path, "sha": "test-b"},
+                ],
+            },
+        })
+
+        first_fp, first_count = first.workflow_contract_fingerprint(
+            "candidate",
+            workflow_path,
+            [],
+            (test_path,),
+        )
+        second_fp, second_count = second.workflow_contract_fingerprint(
+            "candidate",
+            workflow_path,
+            [],
+            (test_path,),
+        )
+
+        self.assertEqual(2, first_count)
+        self.assertEqual(2, second_count)
+        self.assertNotEqual(first_fp, second_fp)
 
     def test_workflow_contract_changes_when_selected_test_or_workflow_changes(self):
         workflow_path = ".github/workflows/shared-storage.yml"

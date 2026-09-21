@@ -13,9 +13,10 @@ The release gate deliberately separates two concerns:
 Run **Shared Storage GA Release Gate** with the candidate release ref. The release workflow resolves that ref once
 after checkout and evaluates the exact checked-out commit SHA, so a moving branch cannot change the candidate during
 the manifest run. Production code is matched using a production-tree fingerprint so author-normalization and unrelated
-documentation/CI commits do not discard otherwise equivalent evidence. Each gate also has a contract fingerprint made
-from its workflow file plus the files selected by that workflow's `push.paths`; workflow or selected test changes
-therefore require fresh evidence.
+documentation/CI commits do not discard otherwise equivalent evidence. Automatic gates also have a contract fingerprint
+made from their workflow file plus the files selected by that workflow's `push.paths`. The manually dispatched real-S3
+gate fingerprints its workflow and the explicitly mapped `S3RealCompatibilityTest` source. Workflow or selected test
+changes therefore require fresh evidence.
 
 The GA gate currently requires these hardening workflows in addition to the correctness suite:
 
