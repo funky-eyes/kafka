@@ -244,8 +244,13 @@ public class SharedStoragePerformanceBaselineTest {
         Arrays.fill(payload, (byte) 7);
         List<Future<RecordMetadata>> futures = new ArrayList<>(records);
 
-        long started = System.nanoTime();
+        long elapsedNanos;
         try (KafkaProducer<byte[], byte[]> producer = new KafkaProducer<>(properties)) {
+            // Producer construction, metadata discovery and close are lifecycle costs, not steady-state append throughput.
+            // Resolve the benchmark topic before starting the clock so classic/shared ratios measure the data path itself.
+            producer.partitionsFor(topic);
+
+            long started = System.nanoTime();
             for (int index = 0; index < records; index++) {
                 byte[] key = new byte[] {
                     (byte) (index >>> 24),
@@ -259,8 +264,9 @@ public class SharedStoragePerformanceBaselineTest {
             for (Future<RecordMetadata> future : futures) {
                 future.get(60, TimeUnit.SECONDS);
             }
+            elapsedNanos = System.nanoTime() - started;
         }
-        return recordsPerSecond(records, System.nanoTime() - started);
+        return recordsPerSecond(records, elapsedNanos);
     }
 
     private static double consume(String bootstrapServers, String topic, int records) {
@@ -277,19 +283,26 @@ public class SharedStoragePerformanceBaselineTest {
         }
 
         long consumed = 0L;
-        long started = System.nanoTime();
-        long deadline = started + TimeUnit.SECONDS.toNanos(120);
+        long elapsedNanos;
         try (KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<>(properties)) {
             consumer.assign(partitions);
             consumer.seekToBeginning(partitions);
+            // Force assignment metadata/position resolution before measuring the sequential fetch path.
+            for (TopicPartition partition : partitions) {
+                consumer.position(partition);
+            }
+
+            long started = System.nanoTime();
+            long deadline = started + TimeUnit.SECONDS.toNanos(120);
             while (consumed < records && System.nanoTime() < deadline) {
                 consumed = Math.addExact(consumed, consumer.poll(Duration.ofMillis(250)).count());
             }
+            elapsedNanos = System.nanoTime() - started;
         }
         if (consumed != records) {
             throw new AssertionError("Expected " + records + " records but consumed " + consumed);
         }
-        return recordsPerSecond(records, System.nanoTime() - started);
+        return recordsPerSecond(records, elapsedNanos);
     }
 
     private static double recordsPerSecond(int records, long elapsedNanos) {
