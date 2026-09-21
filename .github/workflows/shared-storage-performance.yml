@@ -19,7 +19,6 @@ on:
   push:
     branches:
       - shared-wal-s3-4.3.1
-      - chatgpt-performance-timing-d0fb
     paths:
       # Every production-fingerprint change invalidates this gate's GA evidence.
       - 'build.gradle'
