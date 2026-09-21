@@ -75,6 +75,30 @@ class ProductionFingerprintTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "truncated recursive tree"):
             github.production_fingerprint("candidate")
 
+    def test_incomplete_log_initialization_exception_is_part_of_production_fingerprint(self):
+        path = "storage/src/main/java/org/apache/kafka/storage/internals/log/IncompleteLogInitializationException.java"
+        first = StubGitHub({
+            "git/commits/candidate": {"tree": {"sha": "tree-sha"}},
+            "git/trees/tree-sha": {
+                "truncated": False,
+                "tree": [{"type": "blob", "path": path, "sha": "blob-a"}],
+            },
+        })
+        second = StubGitHub({
+            "git/commits/candidate": {"tree": {"sha": "tree-sha"}},
+            "git/trees/tree-sha": {
+                "truncated": False,
+                "tree": [{"type": "blob", "path": path, "sha": "blob-b"}],
+            },
+        })
+
+        first_fingerprint, first_count = first.production_fingerprint("candidate")
+        second_fingerprint, second_count = second.production_fingerprint("candidate")
+
+        self.assertEqual(1, first_count)
+        self.assertEqual(1, second_count)
+        self.assertNotEqual(first_fingerprint, second_fingerprint)
+
 
 if __name__ == "__main__":
     unittest.main()

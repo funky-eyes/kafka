@@ -68,6 +68,7 @@ PRODUCTION_PATHS = {
     "build.gradle",
     "settings.gradle",
     "storage/shared-storage-s3/build.gradle",
+    "storage/src/main/java/org/apache/kafka/storage/internals/log/IncompleteLogInitializationException.java",
     "storage/src/main/java/org/apache/kafka/storage/internals/log/LogLoader.java",
     "storage/src/main/java/org/apache/kafka/storage/internals/log/LocalLog.java",
     "storage/src/main/java/org/apache/kafka/storage/internals/log/LogOffsetsListener.java",

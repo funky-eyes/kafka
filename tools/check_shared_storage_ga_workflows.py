@@ -28,6 +28,10 @@ WORKFLOW_DIR = ROOT / ".github" / "workflows"
 MANIFEST = ROOT / "tools" / "shared_storage_ga_manifest.py"
 MAIN_WORKFLOW_NAME = "Shared Storage"
 GA_RELEASE_WORKFLOW_NAME = "Shared Storage GA Release Gate"
+UNBUILT_ROOT_SHARED_SOURCE_DIRS = (
+    ROOT / "src" / "main" / "java" / "org" / "apache" / "kafka" / "storage" / "internals" / "shared",
+    ROOT / "src" / "test" / "java" / "org" / "apache" / "kafka" / "storage" / "internals" / "shared",
+)
 
 FOCUSED_CORE_EXCLUSIONS = (
     "-x :core:checkstyleMain",
@@ -173,6 +177,16 @@ def main():
             errors.append(f"duplicate workflow name {name!r}: {workflows[name]} and {path}")
         workflows[name] = path
         texts[name] = text
+
+    for source_dir in UNBUILT_ROOT_SHARED_SOURCE_DIRS:
+        if not source_dir.exists():
+            continue
+        java_sources = sorted(path.relative_to(ROOT).as_posix() for path in source_dir.rglob("*.java"))
+        if java_sources:
+            errors.append(
+                "shared-storage Java sources must live in a compiled Gradle subproject, not the root src tree: "
+                + ", ".join(java_sources)
+            )
 
     required_names = (
         list(constants["CORE_REQUIRED"])
