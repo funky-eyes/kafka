@@ -48,6 +48,7 @@ on:
       - 'storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3/S3SharedStorageExtension.java'
       - 'storage/shared-storage-s3/src/test/**'
       - 'storage/shared-storage-s3/src/test/java/org/apache/kafka/storage/internals/shared/s3/S3SharedStorageWalFactoryTest.java'
+      - '.github/actions/setup-gradle/**'
       - '.github/workflows/shared-storage-ring-wal-correctness.yml'
   pull_request:
     paths:

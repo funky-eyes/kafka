@@ -35,6 +35,7 @@ on:
       - 'storage/src/main/**'
       - 'storage/shared-storage-s3/src/main/**'
       - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
+      - '.github/actions/setup-gradle/**'
       - '.github/workflows/shared-storage-wal-capacity.yml'
   pull_request:
     paths:

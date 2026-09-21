@@ -37,6 +37,7 @@ on:
       - 'core/src/main/java/kafka/server/builders/LogManagerBuilder.java'
       - 'core/src/test/java/kafka/server/SharedStorageKafkaSemanticsParityIntegrationTest.java'
       - 'core/src/test/java/kafka/server/SharedStorageHighAvailabilityE2ETest.java'
+      - '.github/actions/setup-gradle/**'
       - '.github/workflows/shared-storage-kafka-semantics-ha.yml'
   pull_request:
     paths:

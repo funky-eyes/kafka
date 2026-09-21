@@ -35,6 +35,7 @@ on:
       - 'core/src/main/scala/kafka/server/ReplicaManager.scala'
       - 'core/src/main/java/kafka/server/builders/LogManagerBuilder.java'
       - 'core/src/test/java/kafka/server/SharedStorageTopicLifecycleE2ETest.java'
+      - '.github/actions/setup-gradle/**'
       - '.github/workflows/shared-storage-topic-lifecycle.yml'
   pull_request:
     paths:

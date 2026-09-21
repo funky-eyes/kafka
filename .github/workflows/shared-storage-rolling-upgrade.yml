@@ -32,6 +32,7 @@ on:
       - 'core/src/main/scala/kafka/server/**'
       - 'core/src/main/java/kafka/server/builders/LogManagerBuilder.java'
       - 'core/src/test/java/kafka/server/SharedStorageRollingUpgradeE2ETest.java'
+      - '.github/actions/setup-gradle/**'
       - '.github/workflows/shared-storage-rolling-upgrade.yml'
   workflow_dispatch:
     inputs:

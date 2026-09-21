@@ -303,6 +303,12 @@ def main():
         if not patterns:
             errors.append(f"{workflows[name]}: GA-required evidence workflow must define push.paths")
             continue
+        for contract_path in sorted(constants["COMMON_EVIDENCE_CONTRACT_PATHS"]):
+            if not path_is_triggered(contract_path, patterns):
+                errors.append(
+                    f"{workflows[name]}: push.paths does not cover GA common evidence contract path: "
+                    f"{contract_path}"
+                )
         for production_path in sorted(constants["PRODUCTION_PATHS"]):
             if not path_is_triggered(production_path, patterns):
                 errors.append(

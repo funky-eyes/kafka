@@ -54,6 +54,7 @@ on:
       - 'core/src/test/**/kafka/server/**'
       - 'checkstyle/import-control-shared-storage-s3.xml'
       - 'settings.gradle'
+      - '.github/actions/setup-gradle/**'
       - '.github/workflows/shared-storage.yml'
   pull_request:
     paths:

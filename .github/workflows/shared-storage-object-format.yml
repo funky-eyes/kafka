@@ -38,6 +38,7 @@ on:
       - 'storage/src/test/**'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/metadata/SharedObjectMetadataTest.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/object/**'
+      - '.github/actions/setup-gradle/**'
       - '.github/workflows/shared-storage-object-format.yml'
   pull_request:
     paths:

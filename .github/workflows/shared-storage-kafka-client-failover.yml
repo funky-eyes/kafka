@@ -36,6 +36,7 @@ on:
       - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
       - 'core/src/main/java/kafka/server/builders/LogManagerBuilder.java'
       - 'core/src/test/java/kafka/server/SharedStorageKafkaClientFailoverE2ETest.java'
+      - '.github/actions/setup-gradle/**'
       - '.github/workflows/shared-storage-kafka-client-failover.yml'
   pull_request:
     paths:

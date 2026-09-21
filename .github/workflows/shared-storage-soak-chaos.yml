@@ -35,6 +35,7 @@ on:
       - 'core/src/test/java/kafka/server/SharedStorageKafkaClientFailoverE2ETest.java'
       - 'core/src/test/java/kafka/server/SharedStorageS3OutageKRaftIntegrationTest.java'
       - 'core/src/test/java/kafka/server/SharedStorageLocalStateLossE2ETest.java'
+      - '.github/actions/setup-gradle/**'
       - '.github/workflows/shared-storage-soak-chaos.yml'
   workflow_dispatch:
     inputs:

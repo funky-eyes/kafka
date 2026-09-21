@@ -38,6 +38,7 @@ on:
       - 'storage/shared-storage-s3/src/test/java/org/apache/kafka/storage/internals/shared/s3/S3SharedStorageUploadCrashE2ETest.java'
       - 'core/src/main/scala/kafka/cluster/Partition.scala'
       - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
+      - '.github/actions/setup-gradle/**'
       - '.github/workflows/shared-storage-upload-crash.yml'
   pull_request:
     paths:

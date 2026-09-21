@@ -36,6 +36,7 @@ on:
       - 'core/src/main/scala/kafka/server/ControllerServer.scala'
       - 'core/src/main/scala/kafka/server/ReplicaManager.scala'
       - 'core/src/test/java/kafka/server/SharedStorageControllerQuorumE2ETest.java'
+      - '.github/actions/setup-gradle/**'
       - '.github/workflows/shared-storage-controller-ha.yml'
   pull_request:
     paths:

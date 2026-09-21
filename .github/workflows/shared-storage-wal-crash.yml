@@ -45,6 +45,7 @@ on:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/metadata/RemoteObjectIndex.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/metadata/LocalRemoteObjectCheckpointTest.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/metadata/RemoteObjectIndexTest.java'
+      - '.github/actions/setup-gradle/**'
       - '.github/workflows/shared-storage-wal-crash.yml'
   pull_request:
     paths:

@@ -46,6 +46,7 @@ on:
       - 'core/src/test/scala/unit/kafka/server/ReplicaFetcherThreadRecoveryTest.scala'
       - 'core/src/test/java/kafka/server/SharedStorageLocalStateLossE2ETest.java'
       - 'core/src/test/java/kafka/server/SharedStorageRemoteCheckpointLossE2ETest.java'
+      - '.github/actions/setup-gradle/**'
       - '.github/workflows/shared-storage-local-state-loss.yml'
       - '.github/workflows/shared-storage-upload-crash.yml'
   pull_request:
