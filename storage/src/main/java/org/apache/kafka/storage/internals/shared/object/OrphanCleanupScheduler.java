@@ -81,15 +81,12 @@ public final class OrphanCleanupScheduler implements AutoCloseable {
     }
 
     public CompletableFuture<Integer> tryCleanOnce() {
-        if (closed.get()) {
+        CleanupAdmission admission = acquireCleanupSlot();
+        if (admission == CleanupAdmission.CLOSED) {
             return CompletableFuture.failedFuture(new IllegalStateException("Orphan cleanup scheduler is closed"));
         }
-        if (!cleanupInProgress.compareAndSet(false, true)) {
+        if (admission == CleanupAdmission.BUSY) {
             return CompletableFuture.completedFuture(0);
-        }
-        if (closed.get()) {
-            releaseCleanupSlot();
-            return CompletableFuture.failedFuture(new IllegalStateException("Orphan cleanup scheduler is closed"));
         }
 
         final long cutoff;
@@ -126,6 +123,20 @@ public final class OrphanCleanupScheduler implements AutoCloseable {
 
     public Optional<Throwable> lastFailure() {
         return Optional.ofNullable(lastFailure.get());
+    }
+
+    private CleanupAdmission acquireCleanupSlot() {
+        if (closed.get()) {
+            return CleanupAdmission.CLOSED;
+        }
+        if (!cleanupInProgress.compareAndSet(false, true)) {
+            return CleanupAdmission.BUSY;
+        }
+        if (closed.get()) {
+            releaseCleanupSlot();
+            return CleanupAdmission.CLOSED;
+        }
+        return CleanupAdmission.ACQUIRED;
     }
 
     private void releaseCleanupSlot() {
@@ -189,6 +200,12 @@ public final class OrphanCleanupScheduler implements AutoCloseable {
             }
         }
         return interrupted;
+    }
+
+    private enum CleanupAdmission {
+        ACQUIRED,
+        BUSY,
+        CLOSED
     }
 
     private boolean awaitCleanupDrain() {

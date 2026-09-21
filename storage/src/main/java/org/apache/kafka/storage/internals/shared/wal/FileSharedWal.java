@@ -394,27 +394,27 @@ public final class FileSharedWal implements SharedWal {
         try {
             while (running.get() || !pendingAppends.isEmpty()) {
                 try {
-                drained.clear();
-                PendingAppend first = pendingAppends.take();
-                if (first.poison) {
-                    if (!running.get() && pendingAppends.isEmpty()) {
-                        break;
+                    drained.clear();
+                    PendingAppend first = pendingAppends.take();
+                    if (first.poison) {
+                        if (!running.get() && pendingAppends.isEmpty()) {
+                            break;
+                        }
+                        continue;
                     }
-                    continue;
-                }
-                drained.add(first);
-                while (drained.size() < MAX_DRAINED_APPENDS) {
-                    PendingAppend next = pendingAppends.poll();
-                    if (next == null) {
-                        break;
+                    drained.add(first);
+                    while (drained.size() < MAX_DRAINED_APPENDS) {
+                        PendingAppend next = pendingAppends.poll();
+                        if (next == null) {
+                            break;
+                        }
+                        if (next.poison) {
+                            pendingAppends.offer(next);
+                            break;
+                        }
+                        drained.add(next);
                     }
-                    if (next.poison) {
-                        pendingAppends.offer(next);
-                        break;
-                    }
-                    drained.add(next);
-                }
-                writeDrainedGroups(drained);
+                    writeDrainedGroups(drained);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     failWriter(new IOException("WAL writer interrupted", e), drained);
