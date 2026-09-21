@@ -15,10 +15,13 @@ after checkout and evaluates the exact checked-out commit SHA, so a moving branc
 the manifest run. Production code is matched using a production-tree fingerprint so author-normalization and unrelated
 documentation/CI commits do not discard otherwise equivalent evidence. Automatic gates also have a contract fingerprint
 made from their workflow file plus the files selected by that workflow's `push.paths`. All gate contracts include the
-shared local `setup-gradle` composite action they execute, and automatic evidence workflows include that action in
-their `push.paths` so an action change both invalidates stale evidence and produces replacement evidence. The manually
-dispatched real-S3 gate additionally fingerprints the explicitly mapped `S3RealCompatibilityTest` source. Workflow,
-local-action, or selected-test changes therefore require fresh evidence.
+shared local `setup-gradle` composite action and the Gradle launcher/wrapper inputs they execute. Automatic evidence
+workflows include those execution inputs in their `push.paths`, so a harness change both invalidates stale evidence
+and produces replacement evidence. The production fingerprint also includes `gradle.properties` and
+`gradle/dependencies.gradle`, because version and dependency changes alter the build even when Java/Scala source is
+unchanged. The manually dispatched real-S3 gate additionally fingerprints the explicitly mapped
+`S3RealCompatibilityTest` source. Workflow, build-harness, local-action, or selected-test changes therefore require
+fresh evidence.
 
 The GA gate currently requires these hardening workflows in addition to the correctness suite:
 

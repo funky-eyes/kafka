@@ -86,6 +86,9 @@ EVIDENCE_WORKFLOW_PATHS = {
 
 COMMON_EVIDENCE_CONTRACT_PATHS = (
     ".github/actions/setup-gradle/action.yml",
+    "gradlew",
+    "wrapper.gradle",
+    "gradle/wrapper/gradle-wrapper.properties",
 )
 
 EVIDENCE_EXTRA_CONTRACT_PATHS = {
@@ -109,6 +112,8 @@ PRODUCTION_PREFIXES = (
 PRODUCTION_PATHS = {
     "build.gradle",
     "settings.gradle",
+    "gradle.properties",
+    "gradle/dependencies.gradle",
     "storage/shared-storage-s3/build.gradle",
     "storage/src/main/java/org/apache/kafka/storage/internals/log/IncompleteLogInitializationException.java",
     "storage/src/main/java/org/apache/kafka/storage/internals/log/LogLoader.java",

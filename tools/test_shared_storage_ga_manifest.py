@@ -22,6 +22,7 @@ from shared_storage_ga_manifest import (
     GitHub,
     REAL_S3_REQUIRED,
     is_branch_evidence_run,
+    is_production_path,
     path_is_selected,
     push_path_patterns,
 )
@@ -109,6 +110,10 @@ class GateContractTest(unittest.TestCase):
 
 
 class ProductionFingerprintTest(unittest.TestCase):
+    def test_gradle_dependency_inputs_are_production_identity(self):
+        self.assertTrue(is_production_path("gradle.properties"))
+        self.assertTrue(is_production_path("gradle/dependencies.gradle"))
+
     def test_rejects_truncated_recursive_tree(self):
         github = StubGitHub({
             "git/commits/candidate": {"tree": {"sha": "tree-sha"}},
@@ -171,6 +176,15 @@ class ProductionFingerprintTest(unittest.TestCase):
         self.assertEqual(1, first_count)
         self.assertEqual(1, second_count)
         self.assertNotEqual(first_fingerprint, second_fingerprint)
+
+    def test_common_contract_covers_gradle_execution_inputs(self):
+        expected = {
+            ".github/actions/setup-gradle/action.yml",
+            "gradlew",
+            "wrapper.gradle",
+            "gradle/wrapper/gradle-wrapper.properties",
+        }
+        self.assertTrue(expected.issubset(set(COMMON_EVIDENCE_CONTRACT_PATHS)))
 
     def test_common_setup_action_change_invalidates_gate_contract(self):
         workflow_path = ".github/workflows/shared-storage.yml"

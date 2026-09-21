@@ -20,6 +20,11 @@ on:
     branches:
       - shared-wal-s3-4.3.1
     paths:
+      - 'gradle.properties'
+      - 'gradle/dependencies.gradle'
+      - 'gradlew'
+      - 'wrapper.gradle'
+      - 'gradle/wrapper/gradle-wrapper.properties'
       # Every production-fingerprint change invalidates this gate's GA evidence.
       - 'build.gradle'
       - 'settings.gradle'
