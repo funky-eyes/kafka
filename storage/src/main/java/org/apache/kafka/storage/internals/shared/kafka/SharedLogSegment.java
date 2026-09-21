@@ -429,6 +429,7 @@ public final class SharedLogSegment extends LogSegment {
         timeIndex().reset();
         txnIndex().reset();
         int lastIndexPosition = 0;
+        TimestampOffset maxTimestampSeen = TimestampOffset.UNKNOWN;
         for (StoredBatch recovered : readStoredBatches(
             baseOffset(),
             nextLogicalSegmentBaseOffset(log().file().getParentFile())
@@ -439,9 +440,14 @@ public final class SharedLogSegment extends LogSegment {
                 throw new IOException(
                     "Missing recovered shared batch metadata at offset " + recovered.metadata().firstOffset());
             }
+            if (metadata.maxTimestamp > maxTimestampSeen.timestamp()) {
+                maxTimestampSeen = new TimestampOffset(metadata.maxTimestamp, metadata.lastOffset);
+            }
             if (metadata.virtualPosition - lastIndexPosition > indexIntervalBytes) {
                 offsetIndex().append(metadata.lastOffset, metadata.virtualPosition);
-                timeIndex().maybeAppend(maxTimestampAt(metadata.firstOffset), metadata.lastOffset);
+                if (maxTimestampSeen.timestamp() >= 0) {
+                    timeIndex().maybeAppend(maxTimestampSeen.timestamp(), maxTimestampSeen.offset());
+                }
                 lastIndexPosition = metadata.virtualPosition;
             }
             if (batch.magic() >= RecordBatch.MAGIC_VALUE_V2) {
