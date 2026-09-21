@@ -27,6 +27,8 @@ from shared_storage_ga_manifest import (
 class StubGitHub(GitHub):
     def __init__(self, responses):
         self.responses = responses
+        self.tree_cache = {}
+        self.workflow_text_cache = {}
 
     def get(self, path, params=None):
         return self.responses[path]
