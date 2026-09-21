@@ -518,10 +518,23 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         }
     }
 
-    private static void awaitExecutorStop(ExecutorService executor) {
-        try {
-            executor.awaitTermination(BOOTSTRAP_EXECUTOR_STOP_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-        } catch (InterruptedException e) {
+    static void awaitExecutorStop(ExecutorService executor) {
+        boolean interrupted = false;
+        while (!executor.isTerminated()) {
+            try {
+                if (!executor.awaitTermination(BOOTSTRAP_EXECUTOR_STOP_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                    LOG.warn(
+                        "Shared storage bootstrap executor is still running during shutdown; " +
+                            "interrupting it again before shared resources are closed"
+                    );
+                    executor.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                interrupted = true;
+                executor.shutdownNow();
+            }
+        }
+        if (interrupted) {
             Thread.currentThread().interrupt();
         }
     }
