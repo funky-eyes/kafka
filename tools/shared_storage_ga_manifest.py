@@ -268,21 +268,12 @@ class GitHub:
         )
         return self.fingerprint_rows(rows), len(rows)
 
-    def recent_runs(self, branch, max_pages=10):
-        runs = []
-        for page in range(1, max_pages + 1):
-            payload = self.get("actions/runs", {"branch": branch, "per_page": 100, "page": page})
-            page_runs = payload.get("workflow_runs", [])
-            runs.extend(page_runs)
-            if len(page_runs) < 100:
-                break
-        return runs
-
-    def workflow_runs(self, workflow_id, branch, event, max_pages=10):
+    def workflow_runs(self, workflow_path, branch, event, max_pages=10):
+        workflow_file = os.path.basename(workflow_path)
         runs = []
         for page in range(1, max_pages + 1):
             payload = self.get(
-                f"actions/workflows/{workflow_id}/runs",
+                "actions/workflows/" + urllib.parse.quote(workflow_file, safe="") + "/runs",
                 {
                     "branch": branch,
                     "event": event,
@@ -349,21 +340,6 @@ def main():
     if args.require_real_s3:
         required.append(REAL_S3_REQUIRED)
 
-    discovery_runs = github.recent_runs(args.evidence_branch)
-    workflow_ids = {}
-    discovery_by_path = {}
-    for run in discovery_runs:
-        head_repository = run.get("head_repository") or {}
-        if head_repository.get("full_name") != args.repo or run.get("head_branch") != args.evidence_branch:
-            continue
-        path = run.get("path")
-        if not path:
-            continue
-        discovery_by_path.setdefault(path, []).append(run)
-        workflow_id = run.get("workflow_id")
-        if workflow_id is not None:
-            workflow_ids.setdefault(path, workflow_id)
-
     fingerprint_cache = {target_sha: target_fingerprint}
     contract_cache = {}
     rows = []
@@ -382,19 +358,11 @@ def main():
             patterns,
         )
 
-        candidates = discovery_by_path.get(workflow_path, [])
-        workflow_id = workflow_ids.get(workflow_path)
-        if workflow_id is not None:
-            try:
-                candidates = github.workflow_runs(
-                    workflow_id,
-                    args.evidence_branch,
-                    event,
-                )
-            except RuntimeError:
-                # Fall back to the branch discovery window. This remains fail-closed because
-                # every candidate is still checked for event/path/tree/contract equivalence.
-                pass
+        candidates = github.workflow_runs(
+            workflow_path,
+            args.evidence_branch,
+            event,
+        )
 
         equivalent = []
         for run in candidates:
