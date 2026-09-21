@@ -19,6 +19,7 @@ on:
   push:
     branches:
       - shared-wal-s3-4.3.1
+      - chatgpt-ga-hardening-c4c3b557
     paths:
       - '.github/workflows/shared-storage*.yml'
       - 'tools/shared_storage_ga_manifest.py'
