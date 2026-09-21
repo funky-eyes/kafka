@@ -55,6 +55,7 @@ def manifest_constants():
             "GA_HARDENING_REQUIRED",
             "REAL_S3_REQUIRED",
             "EVIDENCE_WORKFLOW_PATHS",
+            "COMMON_EVIDENCE_CONTRACT_PATHS",
             "EVIDENCE_EXTRA_CONTRACT_PATHS",
             "JAVA_PRODUCTION_PREFIXES",
             "PRODUCTION_PREFIXES",
@@ -66,6 +67,7 @@ def manifest_constants():
         "GA_HARDENING_REQUIRED",
         "REAL_S3_REQUIRED",
         "EVIDENCE_WORKFLOW_PATHS",
+        "COMMON_EVIDENCE_CONTRACT_PATHS",
         "EVIDENCE_EXTRA_CONTRACT_PATHS",
         "JAVA_PRODUCTION_PREFIXES",
         "PRODUCTION_PREFIXES",
@@ -120,6 +122,19 @@ def event_block(text, event):
 
 def event_path_patterns(text, event):
     return workflow_path_patterns(event_block(text, event))
+
+
+def local_action_references(text):
+    return set(re.findall(r"uses:\s+(\./\.github/actions/[^\s]+)", text))
+
+
+def local_action_files(reference):
+    action_dir = ROOT / reference.removeprefix("./")
+    return {
+        path.relative_to(ROOT).as_posix()
+        for name in ("action.yml", "action.yaml")
+        if (path := action_dir / name).is_file()
+    }
 
 
 def exact_test_selectors(text):
@@ -236,6 +251,28 @@ def main():
         for extra_path in extra_paths:
             if not (ROOT / extra_path).is_file():
                 errors.append(f"GA evidence extra contract path is missing: {extra_path}")
+
+    common_contract = set(constants["COMMON_EVIDENCE_CONTRACT_PATHS"])
+    for common_path in sorted(common_contract):
+        if not (ROOT / common_path).is_file():
+            errors.append(f"GA common evidence contract path is missing: {common_path}")
+
+    for name in expected_evidence_names:
+        text = texts.get(name, "")
+        gate_contract = common_contract | set(
+            constants["EVIDENCE_EXTRA_CONTRACT_PATHS"].get(name, ())
+        )
+        for reference in sorted(local_action_references(text)):
+            action_files = local_action_files(reference)
+            if not action_files:
+                errors.append(f"{name}: cannot resolve local action reference: {reference}")
+                continue
+            missing_action_files = sorted(action_files - gate_contract)
+            if missing_action_files:
+                errors.append(
+                    f"{name}: local action is not covered by the GA evidence contract: "
+                    + ", ".join(missing_action_files)
+                )
 
     real_s3_name = constants["REAL_S3_REQUIRED"]
     real_s3_contract = set(constants["EVIDENCE_EXTRA_CONTRACT_PATHS"].get(real_s3_name, ()))

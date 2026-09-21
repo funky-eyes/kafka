@@ -84,6 +84,10 @@ EVIDENCE_WORKFLOW_PATHS = {
     "Shared Storage Real S3 Compatibility": ".github/workflows/shared-storage-real-s3.yml",
 }
 
+COMMON_EVIDENCE_CONTRACT_PATHS = (
+    ".github/actions/setup-gradle/action.yml",
+)
+
 EVIDENCE_EXTRA_CONTRACT_PATHS = {
     "Shared Storage Real S3 Compatibility": (
         "storage/shared-storage-s3/src/test/java/org/apache/kafka/storage/internals/shared/s3/"
@@ -361,7 +365,10 @@ def main():
         event = evidence_event(name)
         workflow_text = github.workflow_text(target_sha, workflow_path)
         patterns = push_path_patterns(workflow_text) if event == AUTOMATIC_EVIDENCE_EVENT else []
-        extra_paths = EVIDENCE_EXTRA_CONTRACT_PATHS.get(name, ())
+        extra_paths = (
+            COMMON_EVIDENCE_CONTRACT_PATHS
+            + EVIDENCE_EXTRA_CONTRACT_PATHS.get(name, ())
+        )
         if event == AUTOMATIC_EVIDENCE_EVENT and not patterns:
             raise RuntimeError(f"automatic evidence workflow {workflow_path} has no push path contract")
         target_contract, contract_files = github.workflow_contract_fingerprint(
