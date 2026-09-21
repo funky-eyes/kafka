@@ -20,8 +20,10 @@ import org.apache.kafka.common.compress.Compression;
 import org.apache.kafka.common.record.internal.MemoryRecords;
 import org.apache.kafka.common.record.internal.SimpleRecord;
 import org.apache.kafka.common.utils.MockTime;
+import org.apache.kafka.storage.internals.epoch.LeaderEpochFileCache;
 import org.apache.kafka.storage.internals.log.FetchDataInfo;
 import org.apache.kafka.storage.internals.log.LogConfig;
+import org.apache.kafka.storage.internals.log.ProducerStateManager;
 import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
 import org.apache.kafka.storage.internals.shared.metadata.OffsetRange;
 import org.apache.kafka.storage.internals.shared.metadata.RemoteObjectIndex;
@@ -32,6 +34,7 @@ import org.apache.kafka.storage.internals.shared.object.SharedObjectReader;
 import org.apache.kafka.storage.internals.shared.wal.FileSharedWal;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.mockito.Mockito;
 
 import java.io.File;
 import java.nio.ByteBuffer;
@@ -210,6 +213,49 @@ class SharedLogSegmentRemoteRecoveryTest {
             assertEquals(revisionAfterReplay, engine.remoteIndex().revision(PARTITION),
                 "Replaying identical authoritative metadata must not force another rematerialization");
             afterMetadataReplay.close();
+        }
+    }
+
+    @Test
+    void shouldRecoverTimeIndexWithNonMonotonicBatchTimestamps() throws Exception {
+        Properties configProperties = new Properties();
+        configProperties.put("index.interval.bytes", "1");
+        LogConfig config = new LogConfig(configProperties);
+        Path walDir = tempDir.resolve("non-monotonic-time-index-wal");
+        File logDir = tempDir.resolve("non-monotonic-time-index-topic-0").toFile();
+        Files.createDirectories(logDir.toPath());
+
+        MemoryRecords newestTimestampFirst = records(0L, 1, 5000L, "high-a", "high-b");
+        MemoryRecords olderTimestampSecond = records(2L, 1, 1000L, "low-a", "low-b");
+        MemoryRecords middleTimestampLast = records(4L, 1, 2000L, "middle-a", "middle-b");
+
+        try (SharedStorageEngine engine = engine(walDir)) {
+            SharedLogSegment segment = SharedLogSegment.open(
+                logDir,
+                0L,
+                config,
+                new MockTime(),
+                engine,
+                PARTITION,
+                false,
+                ""
+            );
+            try {
+                segment.append(1L, newestTimestampFirst);
+                segment.append(3L, olderTimestampSecond);
+                segment.append(5L, middleTimestampLast);
+
+                ProducerStateManager producerStateManager = Mockito.mock(ProducerStateManager.class);
+                LeaderEpochFileCache leaderEpochCache = Mockito.mock(LeaderEpochFileCache.class);
+                Mockito.when(leaderEpochCache.latestEpoch()).thenReturn(Optional.empty());
+
+                segment.recover(producerStateManager, leaderEpochCache);
+
+                assertEquals(1L, segment.timeIndex().lastEntry().offset(),
+                    "Recovered time index must retain the offset where the maximum timestamp actually occurred");
+            } finally {
+                segment.close();
+            }
         }
     }
 

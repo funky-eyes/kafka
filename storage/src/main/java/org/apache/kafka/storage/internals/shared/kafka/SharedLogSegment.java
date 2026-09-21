@@ -429,6 +429,7 @@ public final class SharedLogSegment extends LogSegment {
         timeIndex().reset();
         txnIndex().reset();
         int lastIndexPosition = 0;
+        TimestampOffset recoveredMaxTimestamp = TimestampOffset.UNKNOWN;
         for (StoredBatch recovered : readStoredBatches(
             baseOffset(),
             nextLogicalSegmentBaseOffset(log().file().getParentFile())
@@ -439,9 +440,12 @@ public final class SharedLogSegment extends LogSegment {
                 throw new IOException(
                     "Missing recovered shared batch metadata at offset " + recovered.metadata().firstOffset());
             }
+            if (metadata.maxTimestamp > recoveredMaxTimestamp.timestamp()) {
+                recoveredMaxTimestamp = new TimestampOffset(metadata.maxTimestamp, metadata.lastOffset);
+            }
             if (metadata.virtualPosition - lastIndexPosition > indexIntervalBytes) {
                 offsetIndex().append(metadata.lastOffset, metadata.virtualPosition);
-                timeIndex().maybeAppend(maxTimestampAt(metadata.firstOffset), metadata.lastOffset);
+                timeIndex().maybeAppend(recoveredMaxTimestamp.timestamp(), recoveredMaxTimestamp.offset());
                 lastIndexPosition = metadata.virtualPosition;
             }
             if (batch.magic() >= RecordBatch.MAGIC_VALUE_V2) {
@@ -617,14 +621,6 @@ public final class SharedLogSegment extends LogSegment {
                 .min()
                 .orElse(Long.MAX_VALUE);
         }
-    }
-
-    private long maxTimestampAt(long inclusiveLastOffset) {
-        long maxTimestamp = RecordBatch.NO_TIMESTAMP;
-        for (BatchMetadata metadata : batches.headMap(inclusiveLastOffset, true).values()) {
-            maxTimestamp = Math.max(maxTimestamp, metadata.maxTimestamp);
-        }
-        return maxTimestamp;
     }
 
     private void updateProducerState(ProducerStateManager producerStateManager, RecordBatch batch) throws IOException {
