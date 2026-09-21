@@ -75,6 +75,37 @@ class ProductionFingerprintTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "truncated recursive tree"):
             github.production_fingerprint("candidate")
 
+    def test_non_java_marker_under_java_source_prefix_does_not_change_fingerprint(self):
+        java_path = "storage/src/main/java/org/apache/kafka/storage/internals/shared/object/ObjectStore.java"
+        marker_path = "storage/src/main/java/org/apache/kafka/storage/internals/shared/object/CI_EXACT_TREE_TRIGGER.md"
+        first = StubGitHub({
+            "git/commits/candidate": {"tree": {"sha": "tree-sha"}},
+            "git/trees/tree-sha": {
+                "truncated": False,
+                "tree": [
+                    {"type": "blob", "path": java_path, "sha": "java-blob"},
+                    {"type": "blob", "path": marker_path, "sha": "marker-a"},
+                ],
+            },
+        })
+        second = StubGitHub({
+            "git/commits/candidate": {"tree": {"sha": "tree-sha"}},
+            "git/trees/tree-sha": {
+                "truncated": False,
+                "tree": [
+                    {"type": "blob", "path": java_path, "sha": "java-blob"},
+                    {"type": "blob", "path": marker_path, "sha": "marker-b"},
+                ],
+            },
+        })
+
+        first_fingerprint, first_count = first.production_fingerprint("candidate")
+        second_fingerprint, second_count = second.production_fingerprint("candidate")
+
+        self.assertEqual(1, first_count)
+        self.assertEqual(1, second_count)
+        self.assertEqual(first_fingerprint, second_fingerprint)
+
     def test_incomplete_log_initialization_exception_is_part_of_production_fingerprint(self):
         path = "storage/src/main/java/org/apache/kafka/storage/internals/log/IncompleteLogInitializationException.java"
         first = StubGitHub({

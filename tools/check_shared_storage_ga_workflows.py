@@ -54,6 +54,7 @@ def manifest_constants():
             "CORE_REQUIRED",
             "GA_HARDENING_REQUIRED",
             "REAL_S3_REQUIRED",
+            "JAVA_PRODUCTION_PREFIXES",
             "PRODUCTION_PREFIXES",
             "PRODUCTION_PATHS",
         }:
@@ -62,6 +63,7 @@ def manifest_constants():
         "CORE_REQUIRED",
         "GA_HARDENING_REQUIRED",
         "REAL_S3_REQUIRED",
+        "JAVA_PRODUCTION_PREFIXES",
         "PRODUCTION_PREFIXES",
         "PRODUCTION_PATHS",
     } - values.keys()
@@ -80,6 +82,8 @@ def workflow_name(text, path):
 def fingerprint_covers(path, constants):
     if path in constants["PRODUCTION_PATHS"]:
         return True
+    if any(path.startswith(prefix) for prefix in constants["JAVA_PRODUCTION_PREFIXES"]):
+        return path.endswith(".java")
     return any(path.startswith(prefix) for prefix in constants["PRODUCTION_PREFIXES"])
 
 
@@ -218,8 +222,14 @@ def main():
                 errors.append(
                     f"{workflows[name]}: push.paths does not cover GA production path: {production_path}"
                 )
-        for prefix in sorted(constants["PRODUCTION_PREFIXES"]):
+        for prefix in sorted(constants["JAVA_PRODUCTION_PREFIXES"]):
             probe = prefix + "__ga_trigger_probe__.java"
+            if not path_is_triggered(probe, patterns):
+                errors.append(
+                    f"{workflows[name]}: push.paths does not cover GA Java production prefix: {prefix}"
+                )
+        for prefix in sorted(constants["PRODUCTION_PREFIXES"]):
+            probe = prefix + "__ga_trigger_probe__"
             if not path_is_triggered(probe, patterns):
                 errors.append(
                     f"{workflows[name]}: push.paths does not cover GA production prefix: {prefix}"
@@ -235,8 +245,14 @@ def main():
         if not fingerprint_covers(path, constants):
             errors.append(f"GA production fingerprint does not cover workflow production path: {path}")
 
-    expected_prefixes = {
+    expected_java_prefixes = {
         "storage/src/main/java/org/apache/kafka/storage/internals/shared/",
+    }
+    missing_java_prefixes = expected_java_prefixes - set(constants["JAVA_PRODUCTION_PREFIXES"])
+    for prefix in sorted(missing_java_prefixes):
+        errors.append(f"GA production fingerprint is missing required Java production prefix: {prefix}")
+
+    expected_prefixes = {
         "storage/shared-storage-s3/src/main/",
     }
     missing_prefixes = expected_prefixes - set(constants["PRODUCTION_PREFIXES"])

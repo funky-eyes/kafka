@@ -59,8 +59,11 @@ REAL_S3_REQUIRED = "Shared Storage Real S3 Compatibility"
 
 EVIDENCE_EVENTS = {"push", "workflow_dispatch"}
 
-PRODUCTION_PREFIXES = (
+JAVA_PRODUCTION_PREFIXES = (
     "storage/src/main/java/org/apache/kafka/storage/internals/shared/",
+)
+
+PRODUCTION_PREFIXES = (
     "storage/shared-storage-s3/src/main/",
 )
 
@@ -91,6 +94,14 @@ PRODUCTION_PATHS = {
     "core/src/main/scala/kafka/server/ReplicaFetcherThread.scala",
     "core/src/main/scala/kafka/server/AbstractFetcherThread.scala",
 }
+
+
+def is_production_path(path):
+    if path in PRODUCTION_PATHS:
+        return True
+    if any(path.startswith(prefix) for prefix in JAVA_PRODUCTION_PREFIXES):
+        return path.endswith(".java")
+    return any(path.startswith(prefix) for prefix in PRODUCTION_PREFIXES)
 
 
 class GitHub:
@@ -140,7 +151,7 @@ class GitHub:
             if entry.get("type") != "blob":
                 continue
             path = entry["path"]
-            if path in PRODUCTION_PATHS or path.startswith(PRODUCTION_PREFIXES):
+            if is_production_path(path):
                 rows.append(path + "\0" + entry["sha"])
         rows.sort()
         digest = hashlib.sha256()
