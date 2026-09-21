@@ -95,6 +95,10 @@ class SharedUploadSchedulerTest {
             CompletableFuture<Optional<SharedObjectMetadata>> upload = scheduler.tryUploadOnce();
             assertTrue(putStarted.await(10, TimeUnit.SECONDS), "Object PUT did not start");
 
+            assertFalse(scheduler.stop(), "Stopping a healthy scheduler should not report interruption");
+            assertEquals(1, scheduler.uploadsInProgress(),
+                "First shutdown phase must leave the in-flight upload available for an explicit drain");
+
             CompletableFuture<Void> closeFuture = CompletableFuture.runAsync(scheduler::close);
             assertThrows(
                 java.util.concurrent.TimeoutException.class,

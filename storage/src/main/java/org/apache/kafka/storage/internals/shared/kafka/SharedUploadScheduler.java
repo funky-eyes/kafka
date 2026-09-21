@@ -551,10 +551,18 @@ public final class SharedUploadScheduler implements AutoCloseable {
         }
     }
 
-    @Override
-    public synchronized void close() {
+    /**
+     * Stops accepting and scheduling new uploads without waiting for already-started asynchronous uploads to finish.
+     *
+     * <p>The S3 extension uses this first shutdown phase before closing the metadata store. Closing metadata then
+     * completes any upload futures waiting for metadata application exceptionally, after which {@link #close()} can
+     * safely drain the remaining bounded object-store work.</p>
+     *
+     * @return true if the caller was interrupted while waiting for the scheduler executor to stop
+     */
+    public synchronized boolean stop() {
         if (!closed.compareAndSet(false, true)) {
-            return;
+            return false;
         }
         pendingHead.set(null);
         ScheduledExecutorService executorToStop = executor;
@@ -562,7 +570,12 @@ public final class SharedUploadScheduler implements AutoCloseable {
             executorToStop.shutdownNow();
             executor = null;
         }
-        boolean interrupted = awaitExecutorStop(executorToStop);
+        return awaitExecutorStop(executorToStop);
+    }
+
+    @Override
+    public void close() {
+        boolean interrupted = stop();
         interrupted |= awaitUploadDrain();
         if (interrupted) {
             Thread.currentThread().interrupt();

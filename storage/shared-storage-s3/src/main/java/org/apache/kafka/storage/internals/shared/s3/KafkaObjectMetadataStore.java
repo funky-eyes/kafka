@@ -486,15 +486,38 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
         if (thread != null && thread != Thread.currentThread()) {
             interrupted = awaitConsumerThreadStop(thread, consumer::wakeup, CLOSE_JOIN_TIMEOUT_MS);
         }
+        RuntimeException closeFailure = null;
+        closeFailure = closeResource(closeFailure, consumer);
+        closeFailure = closeResource(closeFailure, producer);
+        closeFailure = closeResource(closeFailure, sequenceProducer);
+        closeFailure = closeResource(closeFailure, admin);
+        if (interrupted) {
+            Thread.currentThread().interrupt();
+        }
+        if (closeFailure != null) {
+            throw closeFailure;
+        }
+    }
+
+    static RuntimeException closeResource(RuntimeException failure, AutoCloseable resource) {
         try {
-            consumer.close();
-            producer.close();
-            sequenceProducer.close();
-            admin.close();
-        } finally {
-            if (interrupted) {
-                Thread.currentThread().interrupt();
+            resource.close();
+            return failure;
+        } catch (RuntimeException e) {
+            if (failure == null) {
+                return e;
             }
+            if (failure != e) {
+                failure.addSuppressed(e);
+            }
+            return failure;
+        } catch (Exception e) {
+            RuntimeException wrapped = new RuntimeException("Unable to close shared metadata client resource", e);
+            if (failure == null) {
+                return wrapped;
+            }
+            failure.addSuppressed(wrapped);
+            return failure;
         }
     }
 

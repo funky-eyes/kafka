@@ -143,17 +143,29 @@ public final class OrphanCleanupScheduler implements AutoCloseable {
         });
     }
 
-    @Override
-    public synchronized void close() {
+    /**
+     * Stops accepting and scheduling new cleanup passes without waiting for an already-started asynchronous delete.
+     *
+     * <p>The extension closes the metadata store between this phase and {@link #close()} so a cleanup waiting for a
+     * metadata claim cannot deadlock broker shutdown.</p>
+     *
+     * @return true if the caller was interrupted while waiting for the scheduler executor to stop
+     */
+    public synchronized boolean stop() {
         if (!closed.compareAndSet(false, true)) {
-            return;
+            return false;
         }
         ScheduledExecutorService executorToStop = executor;
         if (executorToStop != null) {
             executorToStop.shutdownNow();
             executor = null;
         }
-        boolean interrupted = awaitExecutorStop(executorToStop);
+        return awaitExecutorStop(executorToStop);
+    }
+
+    @Override
+    public void close() {
+        boolean interrupted = stop();
         interrupted |= awaitCleanupDrain();
         if (interrupted) {
             Thread.currentThread().interrupt();

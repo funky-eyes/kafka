@@ -58,6 +58,9 @@ class OrphanCleanupSchedulerTest {
         );
 
         CompletableFuture<Integer> cleanup = scheduler.tryCleanOnce();
+        assertFalse(scheduler.stop(), "Stopping a healthy scheduler should not report interruption");
+        assertFalse(cleanup.isDone(), "First shutdown phase must not abandon the in-flight cleanup");
+
         CompletableFuture<Void> closeFuture = CompletableFuture.runAsync(scheduler::close);
         assertThrows(
             java.util.concurrent.TimeoutException.class,

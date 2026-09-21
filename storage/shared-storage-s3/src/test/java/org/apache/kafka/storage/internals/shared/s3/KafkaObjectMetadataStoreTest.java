@@ -23,6 +23,7 @@ import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -31,6 +32,26 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class KafkaObjectMetadataStoreTest {
+    @Test
+    void closeAggregationAttemptsEveryMetadataClientResource() {
+        AtomicInteger closed = new AtomicInteger();
+        RuntimeException first = new IllegalStateException("first");
+        RuntimeException failure = null;
+        failure = KafkaObjectMetadataStore.closeResource(failure, () -> {
+            closed.incrementAndGet();
+            throw first;
+        });
+        failure = KafkaObjectMetadataStore.closeResource(failure, () -> {
+            closed.incrementAndGet();
+            throw new IllegalArgumentException("second");
+        });
+        failure = KafkaObjectMetadataStore.closeResource(failure, closed::incrementAndGet);
+
+        assertTrue(failure == first);
+        assertTrue(failure.getSuppressed().length == 1);
+        assertTrue(closed.get() == 3);
+    }
+
     @Test
     void waitsForConsumerThreadToExitBeforeClosingKafkaClients() throws Exception {
         CountDownLatch started = new CountDownLatch(1);

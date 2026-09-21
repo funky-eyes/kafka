@@ -507,11 +507,25 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             interrupted = awaitExecutorStop(executor);
         }
 
+        // Phase 1: stop every scheduler from admitting new asynchronous work. Do not drain yet because an upload or
+        // cleanup may be waiting indefinitely for the metadata consumer to apply its record.
+        if (cleanupScheduler != null) {
+            interrupted |= cleanupScheduler.stop();
+        }
+        if (scheduler != null) {
+            interrupted |= scheduler.stop();
+        }
+
         IOException failure = null;
-        failure = close(failure, cleanupScheduler);
         failure = close(failure, sharedMetrics);
-        failure = close(failure, scheduler);
+
+        // Phase 2: fail metadata waiters and stop the metadata consumer/producers. This breaks the only unbounded
+        // dependency of an in-flight upload/cleanup before the schedulers are drained.
         failure = close(failure, metadata);
+
+        // Phase 3: all remaining async work is bounded by the S3 request policy. Drain it before closing S3 or WAL.
+        failure = close(failure, cleanupScheduler);
+        failure = close(failure, scheduler);
         failure = close(failure, objects);
         failure = close(failure, engine);
         if (interrupted) {
