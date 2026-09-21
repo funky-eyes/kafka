@@ -54,6 +54,7 @@ def manifest_constants():
             "CORE_REQUIRED",
             "GA_HARDENING_REQUIRED",
             "REAL_S3_REQUIRED",
+            "EVIDENCE_WORKFLOW_PATHS",
             "JAVA_PRODUCTION_PREFIXES",
             "PRODUCTION_PREFIXES",
             "PRODUCTION_PATHS",
@@ -63,6 +64,7 @@ def manifest_constants():
         "CORE_REQUIRED",
         "GA_HARDENING_REQUIRED",
         "REAL_S3_REQUIRED",
+        "EVIDENCE_WORKFLOW_PATHS",
         "JAVA_PRODUCTION_PREFIXES",
         "PRODUCTION_PREFIXES",
         "PRODUCTION_PATHS",
@@ -202,6 +204,30 @@ def main():
         if name not in workflows:
             errors.append(f"required workflow is missing: {name}")
 
+    expected_evidence_names = (
+        list(constants["CORE_REQUIRED"])
+        + list(constants["GA_HARDENING_REQUIRED"])
+        + [constants["REAL_S3_REQUIRED"]]
+    )
+    mapped_names = set(constants["EVIDENCE_WORKFLOW_PATHS"])
+    if mapped_names != set(expected_evidence_names):
+        missing = sorted(set(expected_evidence_names) - mapped_names)
+        extra = sorted(mapped_names - set(expected_evidence_names))
+        if missing:
+            errors.append("GA evidence workflow path map is missing: " + ", ".join(missing))
+        if extra:
+            errors.append("GA evidence workflow path map has unexpected entries: " + ", ".join(extra))
+    for name in expected_evidence_names:
+        path = workflows.get(name)
+        mapped = constants["EVIDENCE_WORKFLOW_PATHS"].get(name)
+        if path is None or mapped is None:
+            continue
+        actual = path.relative_to(ROOT).as_posix()
+        if actual != mapped:
+            errors.append(
+                f"GA evidence workflow path mismatch for {name!r}: expected {actual}, manifest has {mapped}"
+            )
+
     # The GA manifest compares one global production fingerprint for every required gate.
     # A production-tree change therefore invalidates every core/hardening gate's evidence.
     # Verify the release-branch push wiring against that same contract so a production change
@@ -298,6 +324,11 @@ def main():
         errors.append(f"{GA_RELEASE_WORKFLOW_NAME}: workflow consistency check must run before manifest evaluation")
     if "--evidence-branch" not in ga_release:
         errors.append(f"{GA_RELEASE_WORKFLOW_NAME}: release evidence must be explicitly branch-scoped")
+
+    if "git rev-parse HEAD" not in ga_release or "--ref \"\${{ steps.release-sha.outputs.sha }}\"" not in ga_release:
+        errors.append(
+            f"{GA_RELEASE_WORKFLOW_NAME}: release evaluation must use the exact checked-out commit SHA"
+        )
 
     if errors:
         print("Shared Storage GA workflow consistency: FAILED", file=sys.stderr)
