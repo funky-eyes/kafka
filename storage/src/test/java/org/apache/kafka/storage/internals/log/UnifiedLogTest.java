@@ -148,6 +148,7 @@ public class UnifiedLogTest {
     @Test
     public void shouldSerializeStructuralMutationsWithLogLock() throws Exception {
         log = createLog(logDir, new LogConfig(new Properties()));
+        log.appendAsLeader(singletonRecords("value".getBytes()), 0);
         CountDownLatch lockHeld = new CountDownLatch(1);
         CountDownLatch releaseLock = new CountDownLatch(1);
         CountDownLatch rollAttempted = new CountDownLatch(1);
