@@ -188,7 +188,7 @@ public final class SharedUnifiedLog extends UnifiedLog {
     public <T> T withRemoteRecoveryFence(StorageAction<T, IOException> action) throws IOException {
         remoteRecoveryFence.writeLock().lock();
         try {
-            return action.execute();
+            return withLogLock(action);
         } finally {
             remoteRecoveryFence.writeLock().unlock();
         }

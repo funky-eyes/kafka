@@ -93,8 +93,13 @@ import java.util.Random;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -138,6 +143,54 @@ public class UnifiedLogTest {
             Utils.closeQuietly(log, "UnifiedLog");
         }
         Utils.delete(tmpDir);
+    }
+
+    @Test
+    public void shouldSerializeStructuralMutationsWithLogLock() throws Exception {
+        log = createLog(logDir, new LogConfig(new Properties()));
+        CountDownLatch lockHeld = new CountDownLatch(1);
+        CountDownLatch releaseLock = new CountDownLatch(1);
+        CountDownLatch rollAttempted = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> holder = executor.submit(() -> {
+                log.withLogLock(() -> {
+                    lockHeld.countDown();
+                    try {
+                        if (!releaseLock.await(30, TimeUnit.SECONDS)) {
+                            throw new IOException("Timed out waiting to release UnifiedLog lock");
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new IOException("Interrupted while holding UnifiedLog lock", e);
+                    }
+                    return null;
+                });
+                return null;
+            });
+            assertTrue(lockHeld.await(10, TimeUnit.SECONDS), "Test holder did not acquire UnifiedLog lock");
+
+            Future<?> roll = executor.submit(() -> {
+                rollAttempted.countDown();
+                log.roll();
+                return null;
+            });
+            assertTrue(rollAttempted.await(10, TimeUnit.SECONDS), "Roll task did not start");
+            assertThrows(
+                TimeoutException.class,
+                () -> roll.get(200, TimeUnit.MILLISECONDS),
+                "Structural mutation must wait for the shared internal log monitor"
+            );
+
+            releaseLock.countDown();
+            holder.get(10, TimeUnit.SECONDS);
+            roll.get(10, TimeUnit.SECONDS);
+            assertEquals(2, log.numberOfSegments());
+        } finally {
+            releaseLock.countDown();
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(10, TimeUnit.SECONDS), "Executor did not terminate");
+        }
     }
 
     @Test

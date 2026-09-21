@@ -2519,6 +2519,19 @@ public class UnifiedLog implements AutoCloseable {
         return LocalLog.maybeHandleIOException(logDirFailureChannel(), parentDir(), msg, fun);
     }
 
+    /**
+     * Executes an internal storage action while holding the same monitor that guards UnifiedLog structural state.
+     *
+     * <p>Storage specializations may use this hook when they have an outer synchronization boundary which must compose
+     * with Kafka's segment, producer-state and leader-epoch mutations. Callers must establish any outer lock before
+     * invoking this method so the lock order remains deterministic.</p>
+     */
+    protected final <T> T withLogLock(StorageAction<T, IOException> action) throws IOException {
+        synchronized (lock) {
+            return action.execute();
+        }
+    }
+
     public List<LogSegment> splitOverflowedSegment(LogSegment segment) throws IOException {
         synchronized (lock) {
             LocalLog.SplitSegmentResult result = LocalLog.splitOverflowedSegment(segment, localLog.segments(), dir(), topicPartition(), config(), scheduler(), logDirFailureChannel(), logIdent);
