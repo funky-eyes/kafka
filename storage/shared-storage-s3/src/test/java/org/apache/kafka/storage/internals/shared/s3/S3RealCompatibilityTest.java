@@ -21,14 +21,19 @@ import org.apache.kafka.storage.internals.shared.object.ObjectStore;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
+import software.amazon.awssdk.services.s3.model.S3Exception;
+
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
@@ -65,7 +70,7 @@ class S3RealCompatibilityTest {
 
         try (S3ObjectStore store = new S3ObjectStore(config)) {
             try {
-                store.put(1L, ByteBuffer.wrap(small)).get(60, TimeUnit.SECONDS);
+                store.put(1L, small.length, partSource(small)).get(60, TimeUnit.SECONDS);
                 assertArrayEquals(
                     Arrays.copyOfRange(small, 101, 229),
                     bytes(store.rangeRead(1L, 101L, 128).get(60, TimeUnit.SECONDS))
@@ -88,6 +93,14 @@ class S3RealCompatibilityTest {
                 );
 
                 assertEquals(0, store.rangeRead(2L, 0L, 0).get(60, TimeUnit.SECONDS).remaining());
+
+                store.delete(1L).get(60, TimeUnit.SECONDS);
+                CompletionException deletedRead = assertThrows(
+                    CompletionException.class,
+                    () -> store.rangeRead(1L, 0L, 1).join()
+                );
+                S3Exception deleted = assertInstanceOf(S3Exception.class, deletedRead.getCause());
+                assertEquals(404, deleted.statusCode());
             } finally {
                 deleteObjects(store, 1L, 2L);
             }
