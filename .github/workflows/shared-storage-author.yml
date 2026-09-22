@@ -21,6 +21,7 @@ on:
       - shared-wal-s3-4.3.1
 
 permissions:
+  actions: read
   contents: write
 
 concurrency:
@@ -109,3 +110,83 @@ jobs:
           git push \
             --force-with-lease="refs/heads/${TARGET_BRANCH}:${remote_head}" \
             origin "HEAD:${TARGET_BRANCH}"
+
+  seal-ga-evidence:
+    name: Seal GA evidence for normalized branch
+    needs: normalize-author
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout normalized branch
+        uses: actions/checkout@v5
+        with:
+          ref: shared-wal-s3-4.3.1
+          persist-credentials: false
+
+      - name: Resolve normalized release SHA
+        id: release-sha
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Test GA manifest evidence rules
+        run: python3 tools/test_shared_storage_ga_manifest.py
+
+      - name: Validate GA workflow consistency
+        run: python3 tools/check_shared_storage_ga_workflows.py
+
+      - name: Wait for terminal GA evidence
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          EVIDENCE_BRANCH: shared-wal-s3-4.3.1
+          RELEASE_SHA: ${{ steps.release-sha.outputs.sha }}
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 1200))
+          attempt=0
+
+          while true; do
+            attempt=$((attempt + 1))
+            rm -f shared-storage-ga-manifest.md /tmp/shared-storage-ga-manifest.out
+
+            set +e
+            python3 tools/shared_storage_ga_manifest.py \
+              --repo "${{ github.repository }}" \
+              --ref "${RELEASE_SHA}" \
+              --evidence-branch "${EVIDENCE_BRANCH}" \
+              --output shared-storage-ga-manifest.md \
+              > /tmp/shared-storage-ga-manifest.out 2>&1
+            status=$?
+            set -e
+
+            if [ "${status}" -eq 0 ]; then
+              cat /tmp/shared-storage-ga-manifest.out
+              exit 0
+            fi
+
+            echo "GA evidence attempt ${attempt} is not terminal-green yet."
+            if [ -f shared-storage-ga-manifest.md ]; then
+              grep -E '\| (MISSING|PENDING|FAIL) \|' shared-storage-ga-manifest.md || true
+              if grep -Fq '| FAIL |' shared-storage-ga-manifest.md; then
+                cat /tmp/shared-storage-ga-manifest.out
+                exit "${status}"
+              fi
+            else
+              cat /tmp/shared-storage-ga-manifest.out
+            fi
+
+            if [ "${SECONDS}" -ge "${deadline}" ]; then
+              echo "Timed out waiting for Shared Storage GA evidence to become terminal."
+              cat /tmp/shared-storage-ga-manifest.out
+              exit "${status}"
+            fi
+            sleep 15
+          done
+
+      - name: Upload normalized-branch GA manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shared-storage-normalized-ga-manifest
+          path: shared-storage-ga-manifest.md
+          if-no-files-found: warn
