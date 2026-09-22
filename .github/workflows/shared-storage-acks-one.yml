@@ -40,7 +40,6 @@ on:
       - 'core/src/test/java/kafka/server/SharedStorageAcksOneKRaftIntegrationTest.java'
       - 'core/src/test/java/kafka/server/SharedStorageAcksOneReplicatedSigkillTest.java'
       - 'storage/src/main/**'
-      - 'storage/shared-storage-s3/**'
       - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
       - '.github/actions/setup-gradle/**'
       - '.github/workflows/shared-storage-acks-one.yml'
@@ -50,7 +49,6 @@ on:
       - 'core/src/test/java/kafka/server/SharedStorageAcksOneKRaftIntegrationTest.java'
       - 'core/src/test/java/kafka/server/SharedStorageAcksOneReplicatedSigkillTest.java'
       - 'storage/src/main/**'
-      - 'storage/shared-storage-s3/**'
       - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
       - '.github/workflows/shared-storage-acks-one.yml'
   workflow_dispatch:

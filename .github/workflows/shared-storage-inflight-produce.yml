@@ -34,7 +34,6 @@ on:
       - 'core/src/main/scala/kafka/server/**'
       - 'core/src/main/java/kafka/server/builders/LogManagerBuilder.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/**'
-      - 'storage/shared-storage-s3/**'
       - 'core/src/main/scala/kafka/cluster/Partition.scala'
       - 'core/src/main/scala/kafka/log/LogManager.scala'
       - 'core/src/main/scala/kafka/server/BrokerServer.scala'
@@ -46,7 +45,6 @@ on:
   pull_request:
     paths:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/**'
-      - 'storage/shared-storage-s3/**'
       - 'core/src/main/scala/kafka/cluster/Partition.scala'
       - 'core/src/main/scala/kafka/log/LogManager.scala'
       - 'core/src/main/scala/kafka/server/BrokerServer.scala'

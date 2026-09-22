@@ -38,7 +38,6 @@ on:
       - 'core/src/main/java/kafka/server/builders/LogManagerBuilder.java'
       - 'core/src/test/java/kafka/server/SharedStorageIndependentProcessSigkillTest.java'
       - 'storage/src/main/**'
-      - 'storage/shared-storage-s3/**'
       - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
       - '.github/actions/setup-gradle/**'
       - '.github/workflows/shared-storage-sigkill.yml'
@@ -46,7 +45,6 @@ on:
     paths:
       - 'core/src/test/java/kafka/server/SharedStorageIndependentProcessSigkillTest.java'
       - 'storage/src/main/**'
-      - 'storage/shared-storage-s3/**'
       - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
       - '.github/workflows/shared-storage-sigkill.yml'
   workflow_dispatch:
