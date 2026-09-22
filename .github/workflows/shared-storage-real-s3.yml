@@ -35,6 +35,10 @@ permissions:
   contents: read
   id-token: write
 
+concurrency:
+  group: shared-storage-real-s3-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   aws-s3-compatibility:
     name: AWS S3 single-put, range-read, multipart, and delete

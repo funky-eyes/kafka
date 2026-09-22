@@ -28,6 +28,7 @@ WORKFLOW_DIR = ROOT / ".github" / "workflows"
 MANIFEST = ROOT / "tools" / "shared_storage_ga_manifest.py"
 MAIN_WORKFLOW_NAME = "Shared Storage"
 GA_RELEASE_WORKFLOW_NAME = "Shared Storage GA Release Gate"
+REAL_S3_SEAL_WORKFLOW_NAME = "Shared Storage Real S3 GA Seal"
 UNBUILT_ROOT_SHARED_SOURCE_DIRS = (
     ROOT / "src" / "main" / "java" / "org" / "apache" / "kafka" / "storage" / "internals" / "shared",
     ROOT / "src" / "test" / "java" / "org" / "apache" / "kafka" / "storage" / "internals" / "shared",
@@ -217,7 +218,7 @@ def main():
         list(constants["CORE_REQUIRED"])
         + list(constants["GA_HARDENING_REQUIRED"])
         + [constants["REAL_S3_REQUIRED"]]
-        + [GA_RELEASE_WORKFLOW_NAME]
+        + [GA_RELEASE_WORKFLOW_NAME, REAL_S3_SEAL_WORKFLOW_NAME]
     )
     for name in required_names:
         if name not in workflows:
@@ -291,6 +292,25 @@ def main():
         errors.append(f"{real_s3_name}: branch evidence must read the protected environment S3 bucket variable")
     if "environment: shared-storage-aws-s3" not in real_s3_text:
         errors.append(f"{real_s3_name}: real-S3 evidence must use the protected shared-storage-aws-s3 environment")
+
+    real_s3_seal = texts.get(REAL_S3_SEAL_WORKFLOW_NAME, "")
+    real_s3_seal_push = event_block(real_s3_seal, "push")
+    real_s3_seal_branches = set(
+        branch.strip("'\"")
+        for branch in re.findall(r"(?m)^\s+- ([^'\"\s][^\s]*|'[^']+'|\"[^\"]+\")\s*$", real_s3_seal_push)
+    )
+    if not any(branch.endswith(real_s3_branch_suffix) for branch in real_s3_seal_branches):
+        errors.append(
+            f"{REAL_S3_SEAL_WORKFLOW_NAME}: push trigger must include the dedicated Real S3 evidence branch"
+        )
+    if "actions: read" not in real_s3_seal:
+        errors.append(f"{REAL_S3_SEAL_WORKFLOW_NAME}: actions: read permission is required")
+    if "--require-real-s3" not in real_s3_seal:
+        errors.append(f"{REAL_S3_SEAL_WORKFLOW_NAME}: strict manifest must require real S3 evidence")
+    if "--evidence-branch" not in real_s3_seal:
+        errors.append(f"{REAL_S3_SEAL_WORKFLOW_NAME}: strict manifest must resolve the base evidence branch")
+    if "ref: ${{ github.sha }}" not in real_s3_seal or "git rev-parse HEAD" not in real_s3_seal:
+        errors.append(f"{REAL_S3_SEAL_WORKFLOW_NAME}: strict manifest must bind to the exact push candidate SHA")
 
     real_s3_contract = set(constants["EVIDENCE_EXTRA_CONTRACT_PATHS"].get(real_s3_name, ()))
     for selector in sorted(exact_test_selectors(texts.get(real_s3_name, ""))):

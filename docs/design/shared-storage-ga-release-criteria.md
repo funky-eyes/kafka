@@ -61,9 +61,12 @@ The role should use GitHub OIDC and receive only the bucket permissions needed f
 The workflow uses a random object prefix and deletes the objects it creates.
 
 For pre-merge evidence, create or fast-forward `<evidence_branch>-real-s3` to the candidate SHA. The push runs the
-branch-local workflow without requiring the workflow file to exist on the default branch. The GA manifest accepts that
-run only from the same repository and dedicated evidence branch, and still requires matching production and gate-contract
-fingerprints. Do not force the development branch or create a synthetic code commit merely to trigger AWS evidence.
+branch-local AWS workflow without requiring the workflow file to exist on the default branch. A companion
+`Shared Storage Real S3 GA Seal` workflow waits for that AWS run to become terminal and then generates
+`shared-storage-real-s3-ga-manifest` with `--require-real-s3` against the exact candidate SHA. The manifest accepts
+the AWS run only from the same repository and dedicated evidence branch, and still requires matching production and
+gate-contract fingerprints. Do not force the development branch or create a synthetic code commit merely to trigger
+AWS evidence.
 
 The proof intentionally uses the AWS SDK default endpoint, TLS and virtual-hosted addressing. It verifies a normal PUT,
 Range GET, native multipart completion across the five-MiB S3 part boundary, and DELETE. MinIO evidence does not

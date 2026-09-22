@@ -1,0 +1,122 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements. See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License. You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Shared Storage Real S3 GA Seal
+
+on:
+  push:
+    branches:
+      - shared-wal-s3-4.3.1-real-s3
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: shared-storage-real-s3-ga-seal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  strict-ga-manifest:
+    name: Seal GA with real AWS S3 evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact evidence candidate
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Resolve candidate and evidence branch
+        id: candidate
+        shell: bash
+        env:
+          REAL_S3_BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          case "${REAL_S3_BRANCH}" in
+            *-real-s3) ;;
+            *)
+              echo "Unexpected Real S3 evidence branch: ${REAL_S3_BRANCH}"
+              exit 1
+              ;;
+          esac
+          echo "sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+          echo "evidence_branch=${REAL_S3_BRANCH%-real-s3}" >> "${GITHUB_OUTPUT}"
+
+      - name: Test GA manifest evidence rules
+        run: python3 tools/test_shared_storage_ga_manifest.py
+
+      - name: Validate GA workflow consistency
+        run: python3 tools/check_shared_storage_ga_workflows.py
+
+      - name: Wait for strict real-S3 GA evidence
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ steps.candidate.outputs.sha }}
+          EVIDENCE_BRANCH: ${{ steps.candidate.outputs.evidence_branch }}
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 900))
+          attempt=0
+
+          while true; do
+            attempt=$((attempt + 1))
+            rm -f shared-storage-ga-real-s3-manifest.md /tmp/shared-storage-ga-real-s3.out
+
+            set +e
+            python3 tools/shared_storage_ga_manifest.py \
+              --repo "${{ github.repository }}" \
+              --ref "${RELEASE_SHA}" \
+              --evidence-branch "${EVIDENCE_BRANCH}" \
+              --require-real-s3 \
+              --output shared-storage-ga-real-s3-manifest.md \
+              > /tmp/shared-storage-ga-real-s3.out 2>&1
+            status=$?
+            set -e
+
+            if [ "${status}" -eq 0 ]; then
+              cat /tmp/shared-storage-ga-real-s3.out
+              exit 0
+            fi
+
+            echo "Strict GA evidence attempt ${attempt} is not terminal-green yet."
+            if [ -f shared-storage-ga-real-s3-manifest.md ]; then
+              grep -E '\| (MISSING|PENDING|FAIL) \|' shared-storage-ga-real-s3-manifest.md || true
+              if grep -Fq '| FAIL |' shared-storage-ga-real-s3-manifest.md; then
+                cat /tmp/shared-storage-ga-real-s3.out
+                exit "${status}"
+              fi
+            else
+              cat /tmp/shared-storage-ga-real-s3.out
+            fi
+
+            if [ "${SECONDS}" -ge "${deadline}" ]; then
+              echo "Timed out waiting for strict Shared Storage GA evidence with real AWS S3."
+              cat /tmp/shared-storage-ga-real-s3.out
+              exit "${status}"
+            fi
+            sleep 15
+          done
+
+      - name: Upload strict real-S3 GA manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shared-storage-real-s3-ga-manifest
+          path: shared-storage-ga-real-s3-manifest.md
+          if-no-files-found: warn
