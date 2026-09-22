@@ -16,12 +16,13 @@
  */
 package org.apache.kafka.storage.internals.shared.s3;
 
+import org.apache.kafka.storage.internals.shared.object.ObjectStore;
+
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 import java.nio.ByteBuffer;
 import java.util.Arrays;
-import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
@@ -35,7 +36,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  *
  * <p>The test deliberately leaves endpoint override empty and path-style access disabled. This exercises the AWS SDK
  * default endpoint resolution, TLS, virtual-hosted bucket addressing, workload credentials, Range GET semantics and
- * the multipart completion path used by Shared Storage.</p>
+ * the known-size streaming multipart path used by the production Shared Object uploader.</p>
  */
 @Timeout(value = 5, unit = TimeUnit.MINUTES)
 class S3RealCompatibilityTest {
@@ -63,30 +64,65 @@ class S3RealCompatibilityTest {
         byte[] finalPart = bytes(MULTIPART_TAIL_BYTES, 73);
 
         try (S3ObjectStore store = new S3ObjectStore(config)) {
-            store.put(1L, ByteBuffer.wrap(small)).get(60, TimeUnit.SECONDS);
-            assertArrayEquals(
-                Arrays.copyOfRange(small, 101, 229),
-                bytes(store.rangeRead(1L, 101L, 128).get(60, TimeUnit.SECONDS))
-            );
+            try {
+                store.put(1L, ByteBuffer.wrap(small)).get(60, TimeUnit.SECONDS);
+                assertArrayEquals(
+                    Arrays.copyOfRange(small, 101, 229),
+                    bytes(store.rangeRead(1L, 101L, 128).get(60, TimeUnit.SECONDS))
+                );
 
-            store.put(
-                2L,
-                List.of(ByteBuffer.wrap(firstPart), ByteBuffer.wrap(finalPart))
-            ).get(120, TimeUnit.SECONDS);
+                long multipartBytes = Math.addExact((long) firstPart.length, finalPart.length);
+                store.put(
+                    2L,
+                    multipartBytes,
+                    partSource(firstPart, finalPart)
+                ).get(120, TimeUnit.SECONDS);
 
-            int boundaryStart = firstPart.length - 64;
-            byte[] expectedBoundary = new byte[128];
-            System.arraycopy(firstPart, boundaryStart, expectedBoundary, 0, 64);
-            System.arraycopy(finalPart, 0, expectedBoundary, 64, 64);
-            assertArrayEquals(
-                expectedBoundary,
-                bytes(store.rangeRead(2L, boundaryStart, 128).get(60, TimeUnit.SECONDS))
-            );
+                int boundaryStart = firstPart.length - 64;
+                byte[] expectedBoundary = new byte[128];
+                System.arraycopy(firstPart, boundaryStart, expectedBoundary, 0, 64);
+                System.arraycopy(finalPart, 0, expectedBoundary, 64, 64);
+                assertArrayEquals(
+                    expectedBoundary,
+                    bytes(store.rangeRead(2L, boundaryStart, 128).get(60, TimeUnit.SECONDS))
+                );
 
-            assertEquals(0, store.rangeRead(2L, 0L, 0).get(60, TimeUnit.SECONDS).remaining());
+                assertEquals(0, store.rangeRead(2L, 0L, 0).get(60, TimeUnit.SECONDS).remaining());
+            } finally {
+                deleteObjects(store, 1L, 2L);
+            }
+        }
+    }
 
-            store.delete(1L).get(60, TimeUnit.SECONDS);
-            store.delete(2L).get(60, TimeUnit.SECONDS);
+    private static ObjectStore.PartSource partSource(byte[]... parts) {
+        return new ObjectStore.PartSource() {
+            private int index;
+
+            @Override
+            public ByteBuffer nextPart() {
+                if (index >= parts.length) {
+                    return null;
+                }
+                return ByteBuffer.wrap(parts[index++]);
+            }
+        };
+    }
+
+    private static void deleteObjects(S3ObjectStore store, long... objectIds) throws Exception {
+        Exception failure = null;
+        for (long objectId : objectIds) {
+            try {
+                store.delete(objectId).get(60, TimeUnit.SECONDS);
+            } catch (Exception e) {
+                if (failure == null) {
+                    failure = e;
+                } else {
+                    failure.addSuppressed(e);
+                }
+            }
+        }
+        if (failure != null) {
+            throw failure;
         }
     }
 
