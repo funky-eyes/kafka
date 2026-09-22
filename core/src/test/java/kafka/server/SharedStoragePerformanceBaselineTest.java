@@ -162,7 +162,6 @@ public class SharedStoragePerformanceBaselineTest {
             .build();
         KafkaClusterTestKit.Builder builder = new KafkaClusterTestKit.Builder(nodes);
         String topic = "shared-performance-" + (sharedStorage ? "shared" : "classic");
-        String warmupTopic = topic + "-warmup";
 
         if (sharedStorage) {
             builder
@@ -191,19 +190,14 @@ public class SharedStoragePerformanceBaselineTest {
             String bootstrapServers = cluster.bootstrapServers();
             try (Admin admin = cluster.admin()) {
                 Map<String, String> topicConfigs = Map.of(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2");
-                List<String> benchmarkTopics = List.of(warmupTopic, topic);
                 admin.createTopics(List.of(
-                    new NewTopic(warmupTopic, PARTITIONS, (short) 3).configs(topicConfigs),
                     new NewTopic(topic, PARTITIONS, (short) 3).configs(topicConfigs)
                 )).all().get(30, TimeUnit.SECONDS);
-                waitForTopicReady(admin, benchmarkTopics);
+                waitForTopicReady(admin, List.of(topic));
             }
 
-            produce(bootstrapServers, warmupTopic, warmupRecords);
-            consume(bootstrapServers, warmupTopic, warmupRecords);
-
-            double produceRate = produce(bootstrapServers, topic, records);
-            double consumeRate = consume(bootstrapServers, topic, records);
+            double produceRate = produce(bootstrapServers, topic, warmupRecords, records);
+            double consumeRate = consume(bootstrapServers, topic, warmupRecords, records);
             return new BenchmarkResult(produceRate, consumeRate);
         }
     }
@@ -229,7 +223,12 @@ public class SharedStoragePerformanceBaselineTest {
         }, 60_000L, () -> "Benchmark topics did not converge to RF3/ISR3: " + topics);
     }
 
-    private static double produce(String bootstrapServers, String topic, int records) throws Exception {
+    private static double produce(
+        String bootstrapServers,
+        String topic,
+        int warmupRecords,
+        int records
+    ) throws Exception {
         Properties properties = new Properties();
         properties.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
         properties.put(ProducerConfig.ACKS_CONFIG, "all");
@@ -242,34 +241,54 @@ public class SharedStoragePerformanceBaselineTest {
 
         byte[] payload = new byte[PAYLOAD_BYTES];
         Arrays.fill(payload, (byte) 7);
-        List<Future<RecordMetadata>> futures = new ArrayList<>(records);
 
         long elapsedNanos;
         try (KafkaProducer<byte[], byte[]> producer = new KafkaProducer<>(properties)) {
-            // Producer construction, metadata discovery and close are lifecycle costs, not steady-state append throughput.
-            // Resolve the benchmark topic before starting the clock so classic/shared ratios measure the data path itself.
+            // Producer construction and metadata discovery are lifecycle costs, not steady-state append throughput.
             producer.partitionsFor(topic);
+            awaitSends(sendRecords(producer, topic, 0, warmupRecords, payload));
 
             long started = System.nanoTime();
-            for (int index = 0; index < records; index++) {
-                byte[] key = new byte[] {
-                    (byte) (index >>> 24),
-                    (byte) (index >>> 16),
-                    (byte) (index >>> 8),
-                    (byte) index
-                };
-                futures.add(producer.send(new ProducerRecord<>(topic, index % PARTITIONS, key, payload)));
-            }
-            producer.flush();
-            for (Future<RecordMetadata> future : futures) {
-                future.get(60, TimeUnit.SECONDS);
-            }
+            awaitSends(sendRecords(producer, topic, warmupRecords, records, payload));
             elapsedNanos = System.nanoTime() - started;
         }
         return recordsPerSecond(records, elapsedNanos);
     }
 
-    private static double consume(String bootstrapServers, String topic, int records) {
+    private static List<Future<RecordMetadata>> sendRecords(
+        KafkaProducer<byte[], byte[]> producer,
+        String topic,
+        int startIndex,
+        int records,
+        byte[] payload
+    ) {
+        List<Future<RecordMetadata>> futures = new ArrayList<>(records);
+        for (int relativeIndex = 0; relativeIndex < records; relativeIndex++) {
+            int index = Math.addExact(startIndex, relativeIndex);
+            byte[] key = new byte[] {
+                (byte) (index >>> 24),
+                (byte) (index >>> 16),
+                (byte) (index >>> 8),
+                (byte) index
+            };
+            futures.add(producer.send(new ProducerRecord<>(topic, index % PARTITIONS, key, payload)));
+        }
+        producer.flush();
+        return futures;
+    }
+
+    private static void awaitSends(List<Future<RecordMetadata>> futures) throws Exception {
+        for (Future<RecordMetadata> future : futures) {
+            future.get(60, TimeUnit.SECONDS);
+        }
+    }
+
+    private static double consume(
+        String bootstrapServers,
+        String topic,
+        int warmupRecords,
+        int records
+    ) {
         Properties properties = new Properties();
         properties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
         properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
@@ -287,9 +306,25 @@ public class SharedStoragePerformanceBaselineTest {
         try (KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<>(properties)) {
             consumer.assign(partitions);
             consumer.seekToBeginning(partitions);
-            // Force assignment metadata/position resolution before measuring the sequential fetch path.
             for (TopicPartition partition : partitions) {
                 consumer.position(partition);
+            }
+
+            long warmupConsumed = 0L;
+            long warmupDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(120);
+            while (warmupConsumed < warmupRecords && System.nanoTime() < warmupDeadline) {
+                warmupConsumed = Math.addExact(
+                    warmupConsumed,
+                    consumer.poll(Duration.ofMillis(250)).count()
+                );
+            }
+            if (warmupConsumed < warmupRecords) {
+                throw new AssertionError(
+                    "Expected at least " + warmupRecords + " warmup records but consumed " + warmupConsumed
+                );
+            }
+            for (TopicPartition partition : partitions) {
+                consumer.seek(partition, warmupEndOffset(partition.partition(), warmupRecords));
             }
 
             long started = System.nanoTime();
@@ -303,6 +338,13 @@ public class SharedStoragePerformanceBaselineTest {
             throw new AssertionError("Expected " + records + " records but consumed " + consumed);
         }
         return recordsPerSecond(records, elapsedNanos);
+    }
+
+    private static long warmupEndOffset(int partition, int warmupRecords) {
+        if (warmupRecords <= partition) {
+            return 0L;
+        }
+        return ((long) warmupRecords - 1L - partition) / PARTITIONS + 1L;
     }
 
     private static double recordsPerSecond(int records, long elapsedNanos) {
