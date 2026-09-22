@@ -20,7 +20,9 @@ from shared_storage_ga_manifest import (
     COMMON_EVIDENCE_CONTRACT_PATHS,
     EVIDENCE_EXTRA_CONTRACT_PATHS,
     GitHub,
+    REAL_S3_EVIDENCE_BRANCH_SUFFIX,
     REAL_S3_REQUIRED,
+    evidence_run_specs,
     is_branch_evidence_run,
     is_production_path,
     path_is_selected,
@@ -39,6 +41,19 @@ class StubGitHub(GitHub):
 
 
 class EvidenceRunTest(unittest.TestCase):
+    def test_real_s3_uses_dispatch_branch_and_dedicated_push_branch(self):
+        self.assertEqual(
+            (
+                ("release", "workflow_dispatch"),
+                ("release" + REAL_S3_EVIDENCE_BRANCH_SUFFIX, "push"),
+            ),
+            evidence_run_specs(REAL_S3_REQUIRED, "release"),
+        )
+        self.assertEqual(
+            (("release", "push"),),
+            evidence_run_specs("Shared Storage", "release"),
+        )
+
     def test_accepts_exact_workflow_event_repository_and_branch(self):
         run = {
             "event": "push",

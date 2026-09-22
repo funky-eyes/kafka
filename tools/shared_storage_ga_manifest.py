@@ -100,6 +100,7 @@ EVIDENCE_EXTRA_CONTRACT_PATHS = {
 
 AUTOMATIC_EVIDENCE_EVENT = "push"
 REAL_S3_EVIDENCE_EVENT = "workflow_dispatch"
+REAL_S3_EVIDENCE_BRANCH_SUFFIX = "-real-s3"
 
 JAVA_PRODUCTION_PREFIXES = (
     "storage/src/main/java/org/apache/kafka/storage/internals/shared/",
@@ -179,8 +180,13 @@ def path_is_selected(path, patterns):
     return selected
 
 
-def evidence_event(name):
-    return REAL_S3_EVIDENCE_EVENT if name == REAL_S3_REQUIRED else AUTOMATIC_EVIDENCE_EVENT
+def evidence_run_specs(name, evidence_branch):
+    if name == REAL_S3_REQUIRED:
+        return (
+            (evidence_branch, REAL_S3_EVIDENCE_EVENT),
+            (evidence_branch + REAL_S3_EVIDENCE_BRANCH_SUFFIX, AUTOMATIC_EVIDENCE_EVENT),
+        )
+    return ((evidence_branch, AUTOMATIC_EVIDENCE_EVENT),)
 
 
 class GitHub:
@@ -367,14 +373,14 @@ def main():
 
     for name in required:
         workflow_path = EVIDENCE_WORKFLOW_PATHS[name]
-        event = evidence_event(name)
+        run_specs = evidence_run_specs(name, args.evidence_branch)
         workflow_text = github.workflow_text(target_sha, workflow_path)
-        patterns = push_path_patterns(workflow_text) if event == AUTOMATIC_EVIDENCE_EVENT else []
+        patterns = [] if name == REAL_S3_REQUIRED else push_path_patterns(workflow_text)
         extra_paths = (
             COMMON_EVIDENCE_CONTRACT_PATHS
             + EVIDENCE_EXTRA_CONTRACT_PATHS.get(name, ())
         )
-        if event == AUTOMATIC_EVIDENCE_EVENT and not patterns:
+        if name != REAL_S3_REQUIRED and not patterns:
             raise RuntimeError(f"automatic evidence workflow {workflow_path} has no push path contract")
         target_contract, contract_files = github.workflow_contract_fingerprint(
             target_sha,
@@ -383,18 +389,19 @@ def main():
             extra_paths,
         )
 
-        candidates = github.workflow_runs(
-            workflow_path,
-            args.evidence_branch,
-            event,
-        )
+        candidates = []
+        for evidence_branch, event in run_specs:
+            candidates.extend(
+                (run, evidence_branch, event)
+                for run in github.workflow_runs(workflow_path, evidence_branch, event)
+            )
 
         equivalent = []
-        for run in candidates:
+        for run, evidence_branch, event in candidates:
             if not is_branch_evidence_run(
                 run,
                 args.repo,
-                args.evidence_branch,
+                evidence_branch,
                 name,
                 workflow_path,
                 event,
@@ -449,6 +456,7 @@ def main():
         f"- Release ref: `{args.ref}`",
         f"- Release commit: `{target_sha}`",
         f"- Evidence branch: `{args.evidence_branch}`",
+        f"- Real S3 evidence branch: `{args.evidence_branch + REAL_S3_EVIDENCE_BRANCH_SUFFIX}`",
         f"- Production fingerprint: `{target_fingerprint}`",
         f"- Production files fingerprinted: {production_files}",
         "- Automatic evidence event: `push`",

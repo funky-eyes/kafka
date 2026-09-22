@@ -16,6 +16,9 @@
 name: Shared Storage Real S3 Compatibility
 
 on:
+  push:
+    branches:
+      - shared-wal-s3-4.3.1-real-s3
   workflow_dispatch:
     inputs:
       bucket:
@@ -38,17 +41,29 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: shared-storage-aws-s3
+    env:
+      SHARED_STORAGE_REAL_S3_BUCKET: ${{ github.event_name == 'workflow_dispatch' && inputs.bucket || vars.SHARED_STORAGE_AWS_S3_BUCKET }}
+      SHARED_STORAGE_REAL_S3_REGION: ${{ github.event_name == 'workflow_dispatch' && inputs.region || vars.SHARED_STORAGE_AWS_S3_REGION || 'us-east-1' }}
     steps:
       - name: Checkout release candidate
         uses: actions/checkout@v5
         with:
           persist-credentials: false
 
+      - name: Validate real S3 evidence configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${SHARED_STORAGE_REAL_S3_BUCKET}" ]; then
+            echo "SHARED_STORAGE_AWS_S3_BUCKET environment variable is required for branch-triggered real-S3 evidence."
+            exit 1
+          fi
+
       - name: Configure AWS workload credentials
         uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.SHARED_STORAGE_AWS_ROLE_ARN }}
-          aws-region: ${{ inputs.region }}
+          aws-region: ${{ env.SHARED_STORAGE_REAL_S3_REGION }}
           role-session-name: kafka-shared-storage-ga
 
       - name: Setup Gradle
@@ -58,9 +73,6 @@ jobs:
           gradle-cache-read-only: true
 
       - name: Run real AWS S3 compatibility proof
-        env:
-          SHARED_STORAGE_REAL_S3_BUCKET: ${{ inputs.bucket }}
-          SHARED_STORAGE_REAL_S3_REGION: ${{ inputs.region }}
         run: |
           set -o pipefail
           ./gradlew :storage:shared-storage-s3:test \

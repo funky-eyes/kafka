@@ -54,6 +54,7 @@ def manifest_constants():
             "CORE_REQUIRED",
             "GA_HARDENING_REQUIRED",
             "REAL_S3_REQUIRED",
+            "REAL_S3_EVIDENCE_BRANCH_SUFFIX",
             "EVIDENCE_WORKFLOW_PATHS",
             "COMMON_EVIDENCE_CONTRACT_PATHS",
             "EVIDENCE_EXTRA_CONTRACT_PATHS",
@@ -66,6 +67,7 @@ def manifest_constants():
         "CORE_REQUIRED",
         "GA_HARDENING_REQUIRED",
         "REAL_S3_REQUIRED",
+        "REAL_S3_EVIDENCE_BRANCH_SUFFIX",
         "EVIDENCE_WORKFLOW_PATHS",
         "COMMON_EVIDENCE_CONTRACT_PATHS",
         "EVIDENCE_EXTRA_CONTRACT_PATHS",
@@ -275,6 +277,21 @@ def main():
                 )
 
     real_s3_name = constants["REAL_S3_REQUIRED"]
+    real_s3_text = texts.get(real_s3_name, "")
+    real_s3_push = event_block(real_s3_text, "push")
+    real_s3_branch_suffix = constants["REAL_S3_EVIDENCE_BRANCH_SUFFIX"]
+    real_s3_branches = set(re.findall(r"(?m)^\s+- ([^'\"\s][^\s]*|'[^']+'|\"[^\"]+\")\s*$", real_s3_push))
+    normalized_real_s3_branches = {branch.strip("'\"") for branch in real_s3_branches}
+    if not any(branch.endswith(real_s3_branch_suffix) for branch in normalized_real_s3_branches):
+        errors.append(
+            f"{real_s3_name}: push trigger must include a dedicated evidence branch ending in "
+            f"{real_s3_branch_suffix!r}"
+        )
+    if "vars.SHARED_STORAGE_AWS_S3_BUCKET" not in real_s3_text:
+        errors.append(f"{real_s3_name}: branch evidence must read the protected environment S3 bucket variable")
+    if "environment: shared-storage-aws-s3" not in real_s3_text:
+        errors.append(f"{real_s3_name}: real-S3 evidence must use the protected shared-storage-aws-s3 environment")
+
     real_s3_contract = set(constants["EVIDENCE_EXTRA_CONTRACT_PATHS"].get(real_s3_name, ()))
     for selector in sorted(exact_test_selectors(texts.get(real_s3_name, ""))):
         sources = test_sources(selector)
@@ -354,6 +371,10 @@ def main():
     for name, path in workflows.items():
         text = texts[name]
         if re.search(r"(?m)^  push:\s*$", text) is None:
+            continue
+        if name == real_s3_name:
+            # Real S3 is deliberately branch-triggered so it can run before its workflow lands on the default branch.
+            # Its selected test source is bound explicitly through EVIDENCE_EXTRA_CONTRACT_PATHS instead of push.paths.
             continue
         patterns = event_path_patterns(text, "push")
         for selector in sorted(exact_test_selectors(text)):
