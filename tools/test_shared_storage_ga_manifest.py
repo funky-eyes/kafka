@@ -101,6 +101,14 @@ class EvidenceRunTest(unittest.TestCase):
             )
 
 
+class WorkflowLookupTest(unittest.TestCase):
+    def test_repository_workflow_runs_returns_empty_for_missing_real_s3_evidence(self):
+        github = StubGitHub({
+            "actions/runs": {"workflow_runs": []},
+        })
+        self.assertEqual([], github.repository_workflow_runs("release-real-s3", "push"))
+
+
 class GateContractTest(unittest.TestCase):
     def test_push_path_patterns_only_reads_paths_block(self):
         workflow = """on:

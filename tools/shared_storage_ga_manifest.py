@@ -296,10 +296,23 @@ class GitHub:
 
     def workflow_runs(self, workflow_path, branch, event, max_pages=10):
         workflow_file = os.path.basename(workflow_path)
+        return self._workflow_runs(
+            "actions/workflows/" + urllib.parse.quote(workflow_file, safe="") + "/runs",
+            branch,
+            event,
+            max_pages,
+        )
+
+    def repository_workflow_runs(self, branch, event, max_pages=10):
+        # Repository-wide lookup is required for branch-local workflows that have never existed on the default branch.
+        # GitHub may not register those files as dispatchable workflows yet, but their push runs are still discoverable.
+        return self._workflow_runs("actions/runs", branch, event, max_pages)
+
+    def _workflow_runs(self, path, branch, event, max_pages):
         runs = []
         for page in range(1, max_pages + 1):
             payload = self.get(
-                "actions/workflows/" + urllib.parse.quote(workflow_file, safe="") + "/runs",
+                path,
                 {
                     "branch": branch,
                     "event": event,
@@ -391,9 +404,13 @@ def main():
 
         candidates = []
         for evidence_branch, event in run_specs:
+            if name == REAL_S3_REQUIRED:
+                candidate_runs = github.repository_workflow_runs(evidence_branch, event)
+            else:
+                candidate_runs = github.workflow_runs(workflow_path, evidence_branch, event)
             candidates.extend(
                 (run, evidence_branch, event)
-                for run in github.workflow_runs(workflow_path, evidence_branch, event)
+                for run in candidate_runs
             )
 
         equivalent = []
@@ -460,7 +477,7 @@ def main():
         f"- Production fingerprint: `{target_fingerprint}`",
         f"- Production files fingerprinted: {production_files}",
         "- Automatic evidence event: `push`",
-        "- Real S3 evidence event: `workflow_dispatch`",
+        "- Real S3 evidence events: `workflow_dispatch` on the evidence branch or `push` on the dedicated Real S3 evidence branch",
         f"- Result: **{'PASS' if not failures else 'BLOCKED'}**",
         "",
         "| Workflow | Gate | Run | Status | Evidence SHA | Evidence |",
