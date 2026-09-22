@@ -24,13 +24,12 @@ permissions:
   actions: read
   contents: write
 
-concurrency:
-  group: shared-storage-author-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
   normalize-author:
     if: github.actor != 'github-actions[bot]'
+    concurrency:
+      group: shared-storage-author-normalize-${{ github.ref }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
