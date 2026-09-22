@@ -1,15 +1,18 @@
 # Shared Storage Development Status
 
-This document is the durable development checkpoint for the Kafka 4.3.1 shared-storage branch. It records architecture invariants, implemented milestones, current CI evidence, and the next implementation boundary. It is intentionally stricter than a roadmap: a gate is marked green only when there is evidence for the exact code tree or an explicitly identified identical tree.
+This document is the durable development checkpoint for the Kafka 4.3.1 shared-storage branch. It records architecture invariants, implemented milestones, current machine-verifiable GA evidence, and the next implementation boundary. It is intentionally stricter than a roadmap: a gate is marked green only when its production-tree and gate-contract evidence is proven equivalent to the candidate.
 
 ## Branch
 
 - Repository: `funky-eyes/kafka`
 - Branch: `shared-wal-s3-4.3.1`
 - Kafka baseline: 4.3.1
-- Current canonical commit at this checkpoint: `effe8460d80c3052225ba00586776e320e8ff8d9`
-- Current code tree at this checkpoint: `dbfda4c7d1bd7fe96d8575f43a03ceeff3de1c66`
+- Latest canonical checkpoint before this document update: `3ab792a4dc773e90889509dcab869bb062cd2db0`
+- Shared Storage production fingerprint: `ec77fbf08a62316bce38b0f838f9ad99930490d06c0f30a3699bffc4be56da45`
+- Production files fingerprinted by the GA manifest: 99
 - Canonical author/committer identity: `Jianbin Chen <jianbin@apache.org>`
+
+Author normalization may rewrite commit IDs while preserving the tree. GA evidence therefore does not bind correctness to a raw commit ID alone: it requires both the Shared Storage production fingerprint and each gate's contract fingerprint to match the release candidate.
 
 ## Architecture invariants
 
@@ -23,6 +26,8 @@ This document is the durable development checkpoint for the Kafka 4.3.1 shared-s
 8. WAL physical reclamation requires authoritative remote coverage to be durably represented by the local remote-object checkpoint.
 9. Physical S3 orphans from `PUT` success followed by metadata `COMMIT` failure are reclaimed only through race-safe orphan state/claim rules.
 10. The design is not Kafka tiered storage. The target is an AutoMQ-like WAL + object-storage data plane while retaining Kafka partition replicas.
+11. No append future may complete successfully before the bytes and the checkpoint making them reachable have crossed the required durability barrier.
+12. Circular physical reuse must never make a stale logical WAL location alias newly written bytes.
 
 ## Implemented milestones
 
@@ -31,9 +36,8 @@ This document is the durable development checkpoint for the Kafka 4.3.1 shared-s
 - Shared-topic extension and Kafka log integration.
 - Broker-wide WAL append path.
 - Crash-atomic logical append groups using DATA/control records followed by `GROUP_COMMIT`.
-- `FileChannel.force(false)` durability barrier before append futures complete.
-- Directory fsync after creation of new WAL segment directory entries.
-- WAL restart recovery and truncation of incomplete final append groups.
+- Durability barrier before append futures complete.
+- WAL restart recovery and fail-closed handling of incomplete/corrupt committed state.
 - Partition WAL index and remote-object index.
 - Kafka-HW-gated upload candidate selection.
 - S3 range read with checksum validation and remote fallback after local reclaim.
@@ -44,15 +48,16 @@ This document is the durable development checkpoint for the Kafka 4.3.1 shared-s
 - Kafka-backed authoritative object metadata.
 - Logical deduplication/checksum-conflict handling.
 - Race-safe orphan cleanup protocol.
-- Upload crash-window coverage for AFTER_PREPARE / AFTER_PUT / AFTER_COMMIT on previously validated identical functional trees.
+- Upload crash-window coverage around PREPARE, PUT, and COMMIT.
+- S3 outage behavior is fail-closed when local durable capacity cannot safely advance.
 
 ### Performance phase 1: WAL read cache
 
 - Bounded in-memory WAL DATA cache, default 256 MiB.
-- Physical `(logicalSegmentId, position)` identity.
-- Cache population only after the WAL durability future succeeds.
+- Physical WAL identity is used to prevent cache ambiguity across reclaim/reuse.
+- Cache population occurs only after the WAL durability future succeeds.
 - Cache miss falls back to physical WAL.
-- Cache is disposable across reclaim/restart.
+- Cache contents are disposable across reclaim/restart.
 
 ### Performance phase 2: upload scheduling
 
@@ -68,99 +73,155 @@ Upload scheduling is driven by:
 - Physical candidate reservation prevents duplicate concurrent upload of the same WAL location.
 - Disjoint object uploads may complete out of order.
 - Failed upload releases reservation and permits retry with a new object identity.
-- Existing synchronous S3 client I/O pool is reused; this is bounded concurrent synchronous-client I/O, not yet a native async S3 client.
+- Existing synchronous S3 client I/O is reused behind bounded parallelism; this is not a claim of native async S3 I/O.
 
-## Performance phase 4A: online WAL reclaim
+### Performance phase 4A: online WAL reclaim
 
-The former reclaim implementation stopped the WAL data plane:
+The original reclaim design stopped the WAL data plane while closing, scanning, deleting, reopening, and replaying the WAL. The current implementation replaces that with online segment lifecycle management.
 
-`block operations -> wait -> close FileSharedWal -> scan -> delete -> reopen FileSharedWal -> clear/replay index`
+Implemented properties include:
 
-The current implementation replaces that with online segment lifecycle management.
+- monotonic physical reclaim progress;
+- targeted `PartitionWalIndex` pruning instead of clear-and-replay;
+- atomic used-capacity accounting;
+- reader draining only where required by physical deletion;
+- append groups remain pinned until their complete `GROUP_COMMIT` boundary is reclaimable;
+- active-segment sealing is conditional and does not turn S3 outage into segment churn;
+- partial physical deletion accounting is applied before propagating a later delete/fsync failure.
 
-### Implemented changes
+### Performance phase 4B: WAL I/O abstraction — implemented
 
-- `SharedWal.reclaimedThroughSegmentId()` exposes the highest monotonically increasing logical segment id physically reclaimed. A backend that cannot expose a boundary returns `-1` and may use replay fallback.
-- `PartitionWalIndex` prunes only locations in reclaimed physical logical segments instead of clearing and replaying the entire index.
-- `FileSharedWal.usedBytes` is atomic so writer increments and online reclaim decrements cannot lose updates.
-- Active segment publication is visible to the reclaim path.
-- Reclaim drains readers that may have old segment files open, but does not stop normal append admission for the entire reclaim scan/delete cycle.
-- Only immutable segments before the active logical segment are normally scanned/deleted.
-- Append groups spanning segment boundaries remain pinned until a complete `GROUP_COMMIT` proves a reclaimable boundary.
-- A `sealActiveSegment()` primitive can force/close the current active segment without stopping/restarting the writer thread. This avoids the single-segment capacity deadlock where a safe active segment could not be reclaimed because there was no free capacity to trigger a natural roll.
-- Active sealing is conditional: first reclaim an already-immutable safe prefix; seal the active segment only if additional headroom is required and the scan was not blocked by an unsafe oldest group. This prevents segment churn during S3 outage or stalled remote coverage.
-- Partial physical deletion accounting is applied before propagating a later delete/fsync error so in-memory capacity accounting cannot diverge from already-deleted durable directory state.
-- Reclaim scan and deletion state machines are decomposed into small functions to satisfy Kafka Checkstyle NPath limits while preserving protocol behavior.
+The physical WAL boundary is now represented by `WalIoBackend`.
 
-### Phase 4A required correctness gates
+The abstraction owns:
 
-- `Shared Storage` main Java 25 shared-storage test/static-analysis gate.
-- `Shared Storage` MinIO + 3-broker KRaft failover gate.
-- `Shared Storage WAL Crash Windows` deterministic crash/restart/checkpoint/reclaim gate.
-- `Shared Storage WAL Capacity` S3-outage fail-closed capacity gate.
-- `Shared Storage S3 Outage` acks=all outage/failover gate.
-- `Shared Storage acks=1 Durability Matrix` RF1/RF2/RF3 external-JVM contract gates.
-- `Shared Storage acks=all Durability Matrix` RF1/RF2/RF3 independent-JVM leader-SIGKILL gates.
-
-### Exact-tree evidence at the time this checkpoint was written
-
-For raw commit `2a3ee1cd2954d787f02ac28ef533882afd73762e`, normalized as canonical commit `effe8460d80c3052225ba00586776e320e8ff8d9`, tree `dbfda4c7d1bd7fe96d8575f43a03ceeff3de1c66`:
-
-- Normalize Shared Storage Author #259: SUCCESS.
-- Shared Storage WAL Capacity #46: SUCCESS.
-- Shared Storage #204: running when this checkpoint was written.
-- Shared Storage WAL Crash Windows #34: running when this checkpoint was written.
-- Shared Storage acks=1 Durability Matrix #96: running when this checkpoint was written.
-- Shared Storage acks=all Durability Matrix #64: running when this checkpoint was written.
-- Shared Storage S3 Outage #48: running when this checkpoint was written.
-
-Do not promote the remaining gates to green until their terminal results have been checked.
-
-## WAL I/O direction
-
-Do not equate Java `AsynchronousFileChannel` with native asynchronous Linux disk I/O. On common Linux JDK implementations it may use a thread pool over blocking file operations and therefore does not by itself provide the desired architecture or latency characteristics.
-
-The preferred evolution is:
-
-1. Preserve a single logical WAL writer and natural group commit.
-2. Introduce an internal WAL I/O abstraction without changing durability semantics.
-3. Keep a FileChannel/NIO backend as the portable correctness baseline.
-4. Move WAL storage from unbounded filename rotation toward a fixed-capacity, preallocated circular/block layout.
-5. Keep logical segment/generation identity monotonically increasing even when physical slots are reused.
-6. Benchmark alternative backends only after the fixed-layout semantics are proven: buffered NIO, preallocation, direct I/O where justified, and Linux io_uring/native backend where deployment/runtime constraints are acceptable.
-
-## Planned phase 4B: I/O abstraction
-
-Introduce a narrow internal backend around physical WAL operations. The abstraction must not own logical append-group semantics; those remain in the WAL state machine.
-
-Expected responsibilities include:
-
-- positional write/read;
+- positional read/write;
+- truncate/preallocation capability;
 - force/durability barrier;
-- open/create/seal/close physical storage units;
-- optional preallocation capability reporting;
-- no change to `WalRecordCodec`, `GROUP_COMMIT`, Kafka ACK semantics, or replay semantics.
+- physical-unit seal/close lifecycle.
 
-The first backend remains FileChannel based. Native/AIO/io_uring experimentation is a later optimization behind the same contract.
+It deliberately does not own Kafka offsets, append groups, `GROUP_COMMIT`, capacity admission, reclaim policy, or replay semantics.
 
-## Planned phase 4C: fixed-slot circular WAL
+`FileChannelWalIoBackend` remains the portable correctness baseline. Java `AsynchronousFileChannel` is not treated as equivalent to native asynchronous Linux I/O, and no io_uring performance claim is made.
 
-Target physical layout:
+### Performance phase 4C: fixed-capacity circular Ring WAL — implemented
 
-- configured total WAL capacity is divided into a fixed number of preallocated slots/blocks;
-- physical slots are recycled instead of continually creating/deleting files;
-- each reuse receives a new monotonically increasing logical generation/segment id;
-- a `WalLocation` must identify generation plus position so a stale location can never alias newly written data in a reused slot;
-- head/tail movement is constrained by durable remote coverage and local checkpoint state;
-- crash recovery reconstructs only committed logical append groups and the current head/tail/generation state;
-- no slot may be overwritten while a local reader/index entry can still legally reference its current generation.
+The branch now contains `RingSharedWal`, `RingWalFile`, `RingWalLayout`, dual superblocks, authenticated wrap padding markers, preallocation handling, and circular logical-to-physical mapping.
 
-This phase will be accepted only with explicit wrap-around, stale-location, crash-at-wrap, capacity-pressure, restart, failover, and remote-fallback tests.
+Important properties:
+
+- configured WAL capacity is physically bounded;
+- logical WAL offsets remain monotonic while physical file positions are reused;
+- stale logical locations outside the durable head/tail window are rejected;
+- wrap padding is authenticated when large enough to contain a record header and otherwise must remain zero-filled;
+- durable head/tail transitions are checkpointed using alternating superblocks;
+- checkpoint failure fences the live WAL until reopen/recovery;
+- recovery fails closed on invalid magic, partial committed records, malformed append groups, or invalid wrap markers;
+- reclaim advances only across complete append groups accepted by the reclaim policy.
+
+The Ring writer already performs natural durability batching: it drains multiple pending append groups and crosses one physical force/checkpoint barrier for the admitted drained batch. Do not introduce another batching rewrite unless measured steady-state evidence demonstrates a remaining bottleneck.
+
+## Ring WAL correctness coverage
+
+The current suite includes explicit coverage for:
+
+- normal append/read/replay;
+- physical wrap and stale-padding clearing;
+- authenticated wrap markers and corrupted padding;
+- group admission when the final `GROUP_COMMIT` cannot fit;
+- reclaim stopping before the first unsafe append group;
+- process crash and crash windows;
+- superblock selection/recovery;
+- checkpoint failure and live-WAL fencing;
+- preallocation failure;
+- fallback/reuse behavior;
+- writer lifecycle and close timeout behavior;
+- remote recovery integration and TimeIndex recovery regression.
+
+The GA graph additionally requires the focused `Shared Storage Ring WAL Correctness` workflow.
+
+## Performance baseline status
+
+The relative performance gate compares shared storage with classic Kafka on the same runner and alternates execution order.
+
+The measurement contract now warms the same topic and producer instance used for the timed sample. Consumer warmup is followed by exact per-partition seek to the warmup end offset before timing.
+
+Latest validated produce ratios for the corrected measurement contract:
+
+- 0.6379
+- 0.6093
+- 0.7092
+- median: **0.6379**
+- required minimum: **0.60**
+
+The gate is therefore green. The corrected samples are materially less variable than the previous cold-start-contaminated benchmark. No production WAL optimization was introduced to obtain this result and the threshold was not lowered.
+
+Do not start an additional Ring WAL group-commit/durability-barrier optimization solely to create more headroom while this steady-state gate remains green. Reopen that work only if repeated corrected measurements show a stable regression below the release threshold or profiling identifies a separate production bottleneck.
+
+## GA evidence status
+
+The machine-generated GA manifest for canonical release checkpoint `3ab792a4dc773e90889509dcab869bb062cd2db0` reports:
+
+- Result: **PASS**
+- Production fingerprint: `ec77fbf08a62316bce38b0f838f9ad99930490d06c0f30a3699bffc4be56da45`
+- Mandatory gates: **19/19 PASS**
+
+The mandatory set includes:
+
+- main Shared Storage integration/static-analysis evidence;
+- `acks=1` durability matrix;
+- `acks=all` durability matrix;
+- WAL crash windows;
+- WAL capacity;
+- S3 outage;
+- upload crash points;
+- Ring WAL correctness;
+- object format correctness;
+- Kafka semantics and HA;
+- Kafka client failover;
+- KRaft controller HA;
+- local state loss recovery;
+- inflight idempotent produce;
+- Kafka multipart E2E;
+- topic lifecycle;
+- performance baseline;
+- soak and chaos;
+- rolling upgrade.
+
+The normalized-branch seal workflow now evaluates the canonical branch HEAD and uploads `shared-storage-normalized-ga-manifest`. Evidence lookup is lazy by Actions page and stops at the newest production+contract-equivalent run rather than preloading up to ten pages for every gate. Obsolete seal jobs are bounded by their own cancel-in-progress concurrency group and no longer block author normalization.
+
+## Real AWS S3 release evidence
+
+Real AWS S3 compatibility remains optional in the default MinIO-oriented GA manifest and becomes mandatory only when `require_real_s3=true`.
+
+The code path is ready for pre-merge evidence:
+
+- workflow: `Shared Storage Real S3 Compatibility`;
+- protected environment: `shared-storage-aws-s3`;
+- OIDC role secret: `SHARED_STORAGE_AWS_ROLE_ARN`;
+- branch-trigger bucket variable: `SHARED_STORAGE_AWS_S3_BUCKET`;
+- optional region variable: `SHARED_STORAGE_AWS_S3_REGION` (defaults to `us-east-1`);
+- dedicated pre-merge evidence branch: `shared-wal-s3-4.3.1-real-s3`.
+
+Pointing that dedicated evidence branch at the exact candidate SHA triggers the branch-local workflow without requiring the workflow file to exist on the repository default branch. The GA manifest accepts the run only when repository, workflow name/path, event, evidence branch, production fingerprint, and real-S3 gate contract all match.
+
+At this checkpoint no dedicated Real S3 evidence run has been executed. Therefore do not claim AWS S3 release compatibility until that protected-environment run succeeds and a `require_real_s3=true` manifest accepts it.
+
+## Next implementation boundary
+
+The next boundary is release evidence, not a new storage architecture phase:
+
+1. Configure/verify the protected `shared-storage-aws-s3` GitHub Environment and its OIDC role/bucket variables.
+2. Point `shared-wal-s3-4.3.1-real-s3` at the exact release candidate to obtain real AWS S3 compatibility evidence.
+3. Run the final GA release manifest with `require_real_s3=true` if the release claims AWS S3 support.
+4. Treat any subsequent production or gate-contract change as evidence-invalidating and regenerate only the affected evidence according to the manifest rules.
+5. Reopen performance implementation work only from corrected steady-state regression evidence or profiling, not from historical cold-start variance.
 
 ## Non-goals / claims not yet justified
 
 - Do not claim AutoMQ performance parity.
-- Do not claim the current rotating WAL is already a circular WAL.
-- Do not claim Java AIO is faster without benchmark evidence.
-- Do not claim io_uring is production-ready until a concrete backend, packaging/runtime strategy, fallback path, and crash/durability benchmark suite exist.
-- Do not claim a tree is fully green using CI evidence from a different functional tree unless the trees are proven identical.
+- Do not claim native async or io_uring performance without a concrete backend, packaging/runtime strategy, fallback path, and benchmark evidence.
+- Do not claim real AWS S3 compatibility before the protected Real S3 gate has passed for an equivalent candidate tree.
+- Do not lower GA performance thresholds to make a candidate pass.
+- Do not treat a green run from a different production or gate-contract fingerprint as release evidence.
+- Do not re-implement already completed WAL I/O abstraction or Ring WAL phases based on the obsolete pre-Ring roadmap.
