@@ -363,6 +363,13 @@ def main():
                 errors.append(
                     f"{workflows[name]}: push.paths does not cover GA production prefix: {prefix}"
                 )
+        if name != MAIN_WORKFLOW_NAME:
+            for real_s3_path in sorted(real_s3_contract):
+                if path_is_triggered(real_s3_path, patterns):
+                    errors.append(
+                        f"{workflows[name]}: specialized gate must not include Real S3-only evidence source: "
+                        f"{real_s3_path}"
+                    )
 
     production_paths = set()
     for text in texts.values():
