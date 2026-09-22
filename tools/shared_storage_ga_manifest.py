@@ -294,22 +294,35 @@ class GitHub:
         rows = [path + "\0" + blobs[path] for path in contract_paths]
         return self.fingerprint_rows(rows), len(rows)
 
-    def workflow_runs(self, workflow_path, branch, event, max_pages=10):
+    def workflow_run_pages(self, workflow_path, branch, event, max_pages=10):
         workflow_file = os.path.basename(workflow_path)
-        return self._workflow_runs(
+        return self._workflow_run_pages(
             "actions/workflows/" + urllib.parse.quote(workflow_file, safe="") + "/runs",
             branch,
             event,
             max_pages,
         )
 
-    def repository_workflow_runs(self, branch, event, max_pages=10):
+    def repository_workflow_run_pages(self, branch, event, max_pages=10):
         # Repository-wide lookup is required for branch-local workflows that have never existed on the default branch.
         # GitHub may not register those files as dispatchable workflows yet, but their push runs are still discoverable.
-        return self._workflow_runs("actions/runs", branch, event, max_pages)
+        return self._workflow_run_pages("actions/runs", branch, event, max_pages)
 
-    def _workflow_runs(self, path, branch, event, max_pages):
-        runs = []
+    def workflow_runs(self, workflow_path, branch, event, max_pages=10):
+        return [
+            run
+            for page_runs in self.workflow_run_pages(workflow_path, branch, event, max_pages)
+            for run in page_runs
+        ]
+
+    def repository_workflow_runs(self, branch, event, max_pages=10):
+        return [
+            run
+            for page_runs in self.repository_workflow_run_pages(branch, event, max_pages)
+            for run in page_runs
+        ]
+
+    def _workflow_run_pages(self, path, branch, event, max_pages):
         for page in range(1, max_pages + 1):
             payload = self.get(
                 path,
@@ -321,10 +334,9 @@ class GitHub:
                 },
             )
             page_runs = payload.get("workflow_runs", [])
-            runs.extend(page_runs)
+            yield page_runs
             if len(page_runs) < 100:
                 break
-        return runs
 
 
 def is_branch_evidence_run(run, repo, branch, name, workflow_path, event):
@@ -402,53 +414,54 @@ def main():
             extra_paths,
         )
 
-        candidates = []
+        equivalent = []
         for evidence_branch, event in run_specs:
             if name == REAL_S3_REQUIRED:
-                candidate_runs = github.repository_workflow_runs(evidence_branch, event)
+                run_pages = github.repository_workflow_run_pages(evidence_branch, event)
             else:
-                candidate_runs = github.workflow_runs(workflow_path, evidence_branch, event)
-            candidates.extend(
-                (run, evidence_branch, event)
-                for run in candidate_runs
-            )
+                run_pages = github.workflow_run_pages(workflow_path, evidence_branch, event)
 
-        equivalent = []
-        for run, evidence_branch, event in candidates:
-            if not is_branch_evidence_run(
-                run,
-                args.repo,
-                evidence_branch,
-                name,
-                workflow_path,
-                event,
-            ):
-                continue
-            sha = run.get("head_sha")
-            if not sha:
-                continue
-            try:
-                fingerprint = fingerprint_cache.get(sha)
-                if fingerprint is None:
-                    fingerprint, _ = github.production_fingerprint(sha)
-                    fingerprint_cache[sha] = fingerprint
-                contract_key = (sha, workflow_path, tuple(patterns), tuple(extra_paths))
-                contract = contract_cache.get(contract_key)
-                if contract is None:
-                    contract, _ = github.workflow_contract_fingerprint(
-                        sha,
+            latest_for_spec = None
+            for candidate_runs in run_pages:
+                for run in candidate_runs:
+                    if not is_branch_evidence_run(
+                        run,
+                        args.repo,
+                        evidence_branch,
+                        name,
                         workflow_path,
-                        patterns,
-                        extra_paths,
-                    )
-                    contract_cache[contract_key] = contract
-            except RuntimeError:
-                continue
-            if fingerprint == target_fingerprint and contract == target_contract:
-                equivalent.append(run)
+                        event,
+                    ):
+                        continue
+                    sha = run.get("head_sha")
+                    if not sha:
+                        continue
+                    try:
+                        fingerprint = fingerprint_cache.get(sha)
+                        if fingerprint is None:
+                            fingerprint, _ = github.production_fingerprint(sha)
+                            fingerprint_cache[sha] = fingerprint
+                        contract_key = (sha, workflow_path, tuple(patterns), tuple(extra_paths))
+                        contract = contract_cache.get(contract_key)
+                        if contract is None:
+                            contract, _ = github.workflow_contract_fingerprint(
+                                sha,
+                                workflow_path,
+                                patterns,
+                                extra_paths,
+                            )
+                            contract_cache[contract_key] = contract
+                    except RuntimeError:
+                        continue
+                    if fingerprint == target_fingerprint and contract == target_contract:
+                        latest_for_spec = run
+                        break
+                if latest_for_spec is not None:
+                    break
+            if latest_for_spec is not None:
+                equivalent.append(latest_for_spec)
 
-        equivalent.sort(key=lambda item: item.get("created_at", ""), reverse=True)
-        run = equivalent[0] if equivalent else None
+        run = max(equivalent, key=lambda item: item.get("created_at", "")) if equivalent else None
         if run is None:
             state = "MISSING"
             detail = "no run covers this production tree and gate contract"

@@ -108,6 +108,30 @@ class WorkflowLookupTest(unittest.TestCase):
         })
         self.assertEqual([], github.repository_workflow_runs("release-real-s3", "push"))
 
+    def test_workflow_run_pages_are_lazy(self):
+        class PagedGitHub(GitHub):
+            def __init__(self):
+                self.cache = {}
+                self.tree_cache = {}
+                self.workflow_text_cache = {}
+                self.requested_pages = []
+
+            def get(self, path, params=None):
+                page = params["page"]
+                self.requested_pages.append(page)
+                if page == 1:
+                    return {"workflow_runs": [{"id": 1}] * 100}
+                return {"workflow_runs": [{"id": 2}]}
+
+        github = PagedGitHub()
+        pages = github.repository_workflow_run_pages("release", "push")
+        self.assertEqual([{"id": 1}] * 100, next(pages))
+        self.assertEqual([1], github.requested_pages)
+        self.assertEqual([{"id": 2}], next(pages))
+        self.assertEqual([1, 2], github.requested_pages)
+        with self.assertRaises(StopIteration):
+            next(pages)
+
 
 class GateContractTest(unittest.TestCase):
     def test_push_path_patterns_only_reads_paths_block(self):
