@@ -42,6 +42,28 @@ class RingSharedWalLifecycleTest {
     Path tempDir;
 
     @Test
+    void closeWakesWriterWaitingForSingletonCoalescingPartner() throws Exception {
+        RingSharedWal wal = new RingSharedWal(
+            tempDir.resolve("ring-close-coalescing.wal"),
+            TOTAL_CAPACITY,
+            new FileChannelWalIoBackend(),
+            TimeUnit.SECONDS.toMillis(2L),
+            TimeUnit.SECONDS.toNanos(5L)
+        );
+        CompletableFuture<List<WalAppendResult>> append = wal.appendBatch(List.of(
+            WalRecord.data(1L, 2L, 0, 3, 0L, 0L, new byte[32])
+        ));
+
+        long startedNanos = System.nanoTime();
+        wal.close();
+        long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
+
+        assertTrue(elapsedMillis < 2_000L,
+            "close must wake the writer instead of waiting for the coalescing deadline");
+        assertEquals(1, append.get(10, TimeUnit.SECONDS).size());
+    }
+
+    @Test
     void closeTimeoutDoesNotBlockOnWriterIoLockAndWriterEventuallyClosesResources() throws Exception {
         BlockingForceBackend backend = new BlockingForceBackend(2);
         RingSharedWal wal = new RingSharedWal(
