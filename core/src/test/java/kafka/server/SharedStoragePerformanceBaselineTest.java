@@ -58,8 +58,9 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /**
  * Relative performance guardrail for the shared-storage data path.
  *
- * <p>Classic and shared clusters execute the same workload sequentially on the same test host. The gate compares
- * ratios instead of absolute throughput so release evidence is less sensitive to runner hardware variance.</p>
+ * <p>Each ratio is measured from a classic-routed topic and a shared-routed topic in the same extension-enabled
+ * Kafka cluster. Holding broker lifecycle, JVM state, log devices and runner placement constant makes the ratio less
+ * sensitive to cluster startup order while still exercising the production routing boundary.</p>
  */
 @Tag("integration")
 @Timeout(value = 20, unit = TimeUnit.MINUTES)
@@ -99,17 +100,9 @@ public class SharedStoragePerformanceBaselineTest {
         String bucket = environment("SHARED_STORAGE_S3_BUCKET", "kafka-shared-storage-performance");
         String region = environment("SHARED_STORAGE_S3_REGION", "us-east-1");
 
-        // Each measured benchmark builds a fresh Kafka cluster. Warm both execution modes once before collecting
-        // samples so JVM/JIT and KafkaClusterTestKit lifecycle cold-start do not contaminate the first ratio.
-        BenchmarkResult sharedCalibration = benchmark(
-            true,
-            endpoint,
-            region,
-            bucket,
-            warmupRecords,
-            records
-        );
-        BenchmarkResult classicCalibration = benchmark(
+        // Warm both routed data paths once before collecting samples so JVM/JIT cold-start does not contaminate
+        // the first paired ratio. Classic runs first in calibration so no shared upload backlog can precede it.
+        BenchmarkPair calibration = benchmarkPair(
             false,
             endpoint,
             region,
@@ -117,6 +110,8 @@ public class SharedStoragePerformanceBaselineTest {
             warmupRecords,
             records
         );
+        BenchmarkResult sharedCalibration = calibration.shared();
+        BenchmarkResult classicCalibration = calibration.classic();
         System.out.printf(
             "SHARED_STORAGE_PERF_LIFECYCLE_CALIBRATION sharedProduce=%.2f classicProduce=%.2f " +
                 "sharedConsume=%.2f classicConsume=%.2f records=%d warmupRecords=%d " +
@@ -160,18 +155,18 @@ public class SharedStoragePerformanceBaselineTest {
         List<Double> produceRatios = new ArrayList<>(repetitions);
         List<Double> consumeRatios = new ArrayList<>(repetitions);
         for (int repetition = 0; repetition < repetitions; repetition++) {
-            BenchmarkResult classic;
-            BenchmarkResult shared;
-            String order;
-            if ((repetition & 1) == 0) {
-                order = "classic-shared";
-                classic = benchmark(false, endpoint, region, bucket, warmupRecords, records);
-                shared = benchmark(true, endpoint, region, bucket, warmupRecords, records);
-            } else {
-                order = "shared-classic";
-                shared = benchmark(true, endpoint, region, bucket, warmupRecords, records);
-                classic = benchmark(false, endpoint, region, bucket, warmupRecords, records);
-            }
+            boolean sharedFirst = (repetition & 1) != 0;
+            String order = sharedFirst ? "shared-classic" : "classic-shared";
+            BenchmarkPair pair = benchmarkPair(
+                sharedFirst,
+                endpoint,
+                region,
+                bucket,
+                warmupRecords,
+                records
+            );
+            BenchmarkResult classic = pair.classic();
+            BenchmarkResult shared = pair.shared();
 
             double produceRatio = shared.produceRecordsPerSecond() / classic.produceRecordsPerSecond();
             double consumeRatio = shared.consumeRecordsPerSecond() / classic.consumeRecordsPerSecond();
@@ -244,8 +239,8 @@ public class SharedStoragePerformanceBaselineTest {
         );
     }
 
-    private static BenchmarkResult benchmark(
-        boolean sharedStorage,
+    private static BenchmarkPair benchmarkPair(
+        boolean sharedFirst,
         String endpoint,
         String region,
         String bucket,
@@ -257,58 +252,143 @@ public class SharedStoragePerformanceBaselineTest {
             .setNumControllerNodes(1)
             .setNumDisksPerBroker(1)
             .build();
-        KafkaClusterTestKit.Builder builder = new KafkaClusterTestKit.Builder(nodes);
-        String topic = "shared-performance-" + (sharedStorage ? "shared" : "classic");
-
-        if (sharedStorage) {
-            builder
-                .setConfigProp("storage.extension.class",
-                    "org.apache.kafka.storage.internals.shared.s3.S3SharedStorageExtension")
-                .setConfigProp("shared.storage.topic.pattern", "shared-performance-.*")
-                .setConfigProp("shared.storage.wal.engine", "ring")
-                .setConfigProp("shared.storage.wal.capacity.bytes", 128L * 1024 * 1024)
-                .setConfigProp("shared.storage.object.target.bytes", 4L * 1024 * 1024)
-                .setConfigProp("shared.storage.upload.interval.ms", 100L)
-                .setConfigProp("shared.storage.upload.max.linger.ms", 1_000L)
-                .setConfigProp("shared.storage.metadata.replication.factor", 3)
-                .setConfigProp("shared.storage.metadata.min.insync.replicas", 2)
-                .setConfigProp("shared.storage.s3.endpoint", endpoint)
-                .setConfigProp("shared.storage.s3.region", region)
-                .setConfigProp("shared.storage.s3.bucket", bucket)
-                .setConfigProp("shared.storage.s3.key.prefix", "performance/" + UUID.randomUUID() + "/objects")
-                .setConfigProp("shared.storage.s3.path.style", true)
-                .setConfigProp("shared.storage.s3.io.threads", 4);
-        }
+        String sharedTopic = "shared-performance-shared";
+        String classicTopic = "classic-performance-classic";
+        KafkaClusterTestKit.Builder builder = new KafkaClusterTestKit.Builder(nodes)
+            .setConfigProp("storage.extension.class",
+                "org.apache.kafka.storage.internals.shared.s3.S3SharedStorageExtension")
+            .setConfigProp("shared.storage.topic.pattern", sharedTopic)
+            .setConfigProp("shared.storage.wal.engine", "ring")
+            .setConfigProp("shared.storage.wal.capacity.bytes", 128L * 1024 * 1024)
+            .setConfigProp("shared.storage.object.target.bytes", 4L * 1024 * 1024)
+            .setConfigProp("shared.storage.upload.interval.ms", 100L)
+            .setConfigProp("shared.storage.upload.max.linger.ms", 1_000L)
+            .setConfigProp("shared.storage.metadata.replication.factor", 3)
+            .setConfigProp("shared.storage.metadata.min.insync.replicas", 2)
+            .setConfigProp("shared.storage.s3.endpoint", endpoint)
+            .setConfigProp("shared.storage.s3.region", region)
+            .setConfigProp("shared.storage.s3.bucket", bucket)
+            .setConfigProp("shared.storage.s3.key.prefix", "performance/" + UUID.randomUUID() + "/objects")
+            .setConfigProp("shared.storage.s3.path.style", true)
+            .setConfigProp("shared.storage.s3.io.threads", 4);
 
         try (KafkaClusterTestKit cluster = builder.build()) {
             cluster.format();
             cluster.startup();
             cluster.waitForReadyBrokers();
             String bootstrapServers = cluster.bootstrapServers();
+            List<Integer> brokerIds = List.copyOf(cluster.brokers().keySet());
             try (Admin admin = cluster.admin()) {
                 Map<String, String> topicConfigs = Map.of(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2");
                 admin.createTopics(List.of(
-                    new NewTopic(topic, PARTITIONS, (short) 3).configs(topicConfigs)
+                    new NewTopic(sharedTopic, PARTITIONS, (short) 3).configs(topicConfigs),
+                    new NewTopic(classicTopic, PARTITIONS, (short) 3).configs(topicConfigs)
                 )).all().get(30, TimeUnit.SECONDS);
-                waitForTopicReady(admin, List.of(topic));
+                waitForTopicReady(admin, List.of(sharedTopic, classicTopic));
             }
 
-            ProduceMeasurement produce = produce(
-                bootstrapServers,
-                topic,
-                warmupRecords,
-                records,
-                sharedStorage,
-                List.copyOf(cluster.brokers().keySet())
-            );
-            double consumeRate = consume(bootstrapServers, topic, warmupRecords, records);
-            return new BenchmarkResult(
-                produce.recordsPerSecond(),
-                consumeRate,
-                produce.elapsedNanos(),
-                produce.walDurability()
-            );
+            BenchmarkResult classic;
+            BenchmarkResult shared;
+            if (sharedFirst) {
+                shared = benchmarkTopic(
+                    bootstrapServers,
+                    sharedTopic,
+                    warmupRecords,
+                    records,
+                    true,
+                    brokerIds
+                );
+                waitForSharedBackgroundIdle(brokerIds);
+                classic = benchmarkTopic(
+                    bootstrapServers,
+                    classicTopic,
+                    warmupRecords,
+                    records,
+                    false,
+                    brokerIds
+                );
+            } else {
+                classic = benchmarkTopic(
+                    bootstrapServers,
+                    classicTopic,
+                    warmupRecords,
+                    records,
+                    false,
+                    brokerIds
+                );
+                shared = benchmarkTopic(
+                    bootstrapServers,
+                    sharedTopic,
+                    warmupRecords,
+                    records,
+                    true,
+                    brokerIds
+                );
+            }
+            return new BenchmarkPair(classic, shared);
         }
+    }
+
+    private static BenchmarkResult benchmarkTopic(
+        String bootstrapServers,
+        String topic,
+        int warmupRecords,
+        int records,
+        boolean sharedStorage,
+        List<Integer> brokerIds
+    ) throws Exception {
+        ProduceMeasurement produce = produce(
+            bootstrapServers,
+            topic,
+            warmupRecords,
+            records,
+            sharedStorage,
+            brokerIds
+        );
+        double consumeRate = consume(bootstrapServers, topic, warmupRecords, records);
+        return new BenchmarkResult(
+            produce.recordsPerSecond(),
+            consumeRate,
+            produce.elapsedNanos(),
+            produce.walDurability()
+        );
+    }
+
+    private static void waitForSharedBackgroundIdle(List<Integer> brokerIds) throws Exception {
+        TestUtils.waitForCondition(
+            () -> sharedBackgroundSnapshot(brokerIds).idle(),
+            60_000L,
+            () -> "Shared background work did not quiesce before paired classic measurement: " +
+                sharedBackgroundSnapshot(brokerIds)
+        );
+    }
+
+    private static SharedBackgroundSnapshot sharedBackgroundSnapshot(List<Integer> brokerIds) {
+        long uploadsInProgress = 0L;
+        long reservedUploadCandidates = 0L;
+        long uploadCandidateCount = 0L;
+        long eligibleUploadBytes = 0L;
+        long pendingRemoteCheckpoints = 0L;
+        long uploadFailurePresent = 0L;
+        long maintenanceFailurePresent = 0L;
+        for (int brokerId : brokerIds) {
+            uploadsInProgress += sharedStorageGauge("UploadsInProgress", brokerId);
+            reservedUploadCandidates += sharedStorageGauge("ReservedUploadCandidates", brokerId);
+            uploadCandidateCount += sharedStorageGauge("UploadCandidateCount", brokerId);
+            eligibleUploadBytes += sharedStorageGauge("EligibleUploadBytes", brokerId);
+            pendingRemoteCheckpoints += sharedStorageGauge("PendingRemoteCheckpoints", brokerId);
+            uploadFailurePresent += sharedStorageGauge("UploadFailurePresent", brokerId);
+            maintenanceFailurePresent += sharedStorageGauge("MaintenanceFailurePresent", brokerId);
+        }
+        return new SharedBackgroundSnapshot(
+            uploadsInProgress,
+            reservedUploadCandidates,
+            uploadCandidateCount,
+            eligibleUploadBytes,
+            pendingRemoteCheckpoints,
+            uploadFailurePresent,
+            maintenanceFailurePresent
+        );
     }
 
     private static void waitForTopicReady(Admin admin, List<String> topics) throws Exception {
@@ -614,6 +694,32 @@ public class SharedStoragePerformanceBaselineTest {
         long produceElapsedNanos,
         WalDurabilitySnapshot walDurability
     ) {
+    }
+
+    private record BenchmarkPair(
+        BenchmarkResult classic,
+        BenchmarkResult shared
+    ) {
+    }
+
+    private record SharedBackgroundSnapshot(
+        long uploadsInProgress,
+        long reservedUploadCandidates,
+        long uploadCandidateCount,
+        long eligibleUploadBytes,
+        long pendingRemoteCheckpoints,
+        long uploadFailurePresent,
+        long maintenanceFailurePresent
+    ) {
+        boolean idle() {
+            return uploadsInProgress == 0L &&
+                reservedUploadCandidates == 0L &&
+                uploadCandidateCount == 0L &&
+                eligibleUploadBytes == 0L &&
+                pendingRemoteCheckpoints == 0L &&
+                uploadFailurePresent == 0L &&
+                maintenanceFailurePresent == 0L;
+        }
     }
 
     private record WalDurabilitySnapshot(

@@ -47,12 +47,12 @@ on:
         default: "50000"
         type: string
       warmup_records:
-        description: Untimed records used to warm each classic/shared cluster before measurement
+        description: Untimed records used to warm each classic/shared topic before measurement
         required: true
         default: "20000"
         type: string
       repetitions:
-        description: Paired classic/shared benchmark repetitions; must be even so both execution orders are balanced
+        description: Same-cluster classic/shared benchmark pairs; must be even so both execution orders are balanced
         required: true
         default: "4"
         type: string
