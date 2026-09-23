@@ -142,24 +142,39 @@ final class RingWalFile implements AutoCloseable {
     }
 
     synchronized RingWalSuperblock.State forceAndCheckpoint(long headOffset, long tailOffset) throws IOException {
+        return forceAndCheckpointWithStats(headOffset, tailOffset).state();
+    }
+
+    synchronized DurabilityCheckpoint forceAndCheckpointWithStats(long headOffset, long tailOffset) throws IOException {
         ensureOpen();
         validateForwardCheckpoint(headOffset, tailOffset);
         RingWalSuperblock.State current = state;
         RingWalSuperblock.State next = current.next(headOffset, tailOffset);
 
         try {
+            long dataForceStartedNanos = System.nanoTime();
             handle.force();
+            long dataForceNanos = System.nanoTime() - dataForceStartedNanos;
             writeSuperblock(next);
+            long checkpointForceStartedNanos = System.nanoTime();
             handle.force();
+            long checkpointForceNanos = System.nanoTime() - checkpointForceStartedNanos;
             if (headOffset > current.headOffset()) {
                 mirrorSuperblock(next);
             }
             state = next;
-            return state;
+            return new DurabilityCheckpoint(state, dataForceNanos, checkpointForceNanos);
         } catch (IOException | RuntimeException failure) {
             checkpointFailure = failure;
             throw failure;
         }
+    }
+
+    record DurabilityCheckpoint(
+        RingWalSuperblock.State state,
+        long dataForceNanos,
+        long checkpointForceNanos
+    ) {
     }
 
     @Override

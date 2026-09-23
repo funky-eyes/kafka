@@ -22,6 +22,8 @@ public record WalDurabilityStats(
     long durableAppendGroupCount,
     long durableBytes,
     long durabilityBarrierNanos,
+    long durabilityDataForceNanos,
+    long durabilityCheckpointForceNanos,
     long maxGroupsPerDurabilityBatch,
     long singletonCoalesceWaitCount,
     long singletonCoalesceHitCount,
@@ -47,6 +49,8 @@ public record WalDurabilityStats(
             durableAppendGroupCount,
             durableBytes,
             durabilityBarrierNanos,
+            0L,
+            0L,
             maxGroupsPerDurabilityBatch,
             0L,
             0L,
@@ -65,6 +69,8 @@ public record WalDurabilityStats(
         requireNonNegative("durableAppendGroupCount", durableAppendGroupCount);
         requireNonNegative("durableBytes", durableBytes);
         requireNonNegative("durabilityBarrierNanos", durabilityBarrierNanos);
+        requireNonNegative("durabilityDataForceNanos", durabilityDataForceNanos);
+        requireNonNegative("durabilityCheckpointForceNanos", durabilityCheckpointForceNanos);
         requireNonNegative("maxGroupsPerDurabilityBatch", maxGroupsPerDurabilityBatch);
         requireNonNegative("singletonCoalesceWaitCount", singletonCoalesceWaitCount);
         requireNonNegative("singletonCoalesceHitCount", singletonCoalesceHitCount);

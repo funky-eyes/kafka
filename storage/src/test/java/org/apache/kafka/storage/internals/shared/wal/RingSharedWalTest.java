@@ -59,6 +59,12 @@ class RingSharedWalTest {
             assertEquals(1L, first.durableAppendGroupCount());
             assertEquals(wal.usedBytes(), first.durableBytes());
             assertTrue(first.durabilityBarrierNanos() >= 0L);
+            assertTrue(first.durabilityDataForceNanos() >= 0L);
+            assertTrue(first.durabilityCheckpointForceNanos() >= 0L);
+            assertTrue(
+                first.durabilityBarrierNanos() >=
+                    first.durabilityDataForceNanos() + first.durabilityCheckpointForceNanos()
+            );
             assertEquals(1L, first.maxGroupsPerDurabilityBatch());
             assertEquals(0L, first.singletonCoalesceWaitCount());
             assertEquals(0L, first.singletonCoalesceHitCount());
@@ -71,6 +77,14 @@ class RingSharedWalTest {
             assertEquals(2L, second.durableAppendGroupCount());
             assertEquals(wal.usedBytes(), second.durableBytes());
             assertTrue(second.durabilityBarrierNanos() >= first.durabilityBarrierNanos());
+            assertTrue(second.durabilityDataForceNanos() >= first.durabilityDataForceNanos());
+            assertTrue(
+                second.durabilityCheckpointForceNanos() >= first.durabilityCheckpointForceNanos()
+            );
+            assertTrue(
+                second.durabilityBarrierNanos() >=
+                    second.durabilityDataForceNanos() + second.durabilityCheckpointForceNanos()
+            );
             assertEquals(1L, second.maxGroupsPerDurabilityBatch());
             assertEquals(0L, second.singletonCoalesceWaitCount());
             assertEquals(0L, second.singletonCoalesceHitCount());

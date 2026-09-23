@@ -46,6 +46,8 @@ public final class SharedStorageMetrics implements AutoCloseable {
         "WalDurableAppendGroupCount",
         "WalDurableBytes",
         "WalDurabilityBarrierNanos",
+        "WalDurabilityDataForceNanos",
+        "WalDurabilityCheckpointForceNanos",
         "WalMaxGroupsPerDurabilityBatch",
         "WalSingletonCoalesceWaitCount",
         "WalSingletonCoalesceHitCount",
@@ -99,6 +101,16 @@ public final class SharedStorageMetrics implements AutoCloseable {
         metricsGroup.newGauge(
             "WalDurabilityBarrierNanos",
             () -> engine.walDurabilityStats().durabilityBarrierNanos(),
+            tags
+        );
+        metricsGroup.newGauge(
+            "WalDurabilityDataForceNanos",
+            () -> engine.walDurabilityStats().durabilityDataForceNanos(),
+            tags
+        );
+        metricsGroup.newGauge(
+            "WalDurabilityCheckpointForceNanos",
+            () -> engine.walDurabilityStats().durabilityCheckpointForceNanos(),
             tags
         );
         metricsGroup.newGauge(

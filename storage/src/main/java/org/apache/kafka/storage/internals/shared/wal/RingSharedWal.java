@@ -64,6 +64,8 @@ public final class RingSharedWal implements SharedWal {
     private final AtomicLong durableAppendGroupCount = new AtomicLong();
     private final AtomicLong durableBytes = new AtomicLong();
     private final AtomicLong durabilityBarrierNanos = new AtomicLong();
+    private final AtomicLong durabilityDataForceNanos = new AtomicLong();
+    private final AtomicLong durabilityCheckpointForceNanos = new AtomicLong();
     private final AtomicLong maxGroupsPerDurabilityBatch = new AtomicLong();
     private final Object lifecycleLock = new Object();
     private final Object ioLock = new Object();
@@ -353,6 +355,8 @@ public final class RingSharedWal implements SharedWal {
             durableAppendGroupCount.get(),
             durableBytes.get(),
             durabilityBarrierNanos.get(),
+            durabilityDataForceNanos.get(),
+            durabilityCheckpointForceNanos.get(),
             maxGroupsPerDurabilityBatch.get(),
             diagnostics.singletonCoalesceWaitCount(),
             diagnostics.singletonCoalesceHitCount(),
@@ -641,13 +645,16 @@ public final class RingSharedWal implements SharedWal {
         List<PlannedGroup> admitted
     ) throws IOException {
         long durabilityStartedNanos = System.nanoTime();
-        file.forceAndCheckpoint(durable.headOffset(), plannedTail);
+        RingWalFile.DurabilityCheckpoint checkpoint =
+            file.forceAndCheckpointWithStats(durable.headOffset(), plannedTail);
         long durabilityElapsedNanos = System.nanoTime() - durabilityStartedNanos;
         long batchBytes = plannedTail - durable.tailOffset();
         durabilityBatchCount.incrementAndGet();
         durableAppendGroupCount.addAndGet(admitted.size());
         durableBytes.addAndGet(batchBytes);
         durabilityBarrierNanos.addAndGet(durabilityElapsedNanos);
+        durabilityDataForceNanos.addAndGet(checkpoint.dataForceNanos());
+        durabilityCheckpointForceNanos.addAndGet(checkpoint.checkpointForceNanos());
         maxGroupsPerDurabilityBatch.accumulateAndGet(admitted.size(), Math::max);
         publishCoalescingDiagnostics();
         for (PlannedGroup group : admitted) {

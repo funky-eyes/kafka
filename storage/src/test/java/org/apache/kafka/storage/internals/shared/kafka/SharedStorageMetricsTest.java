@@ -52,6 +52,8 @@ class SharedStorageMetricsTest {
         MetricName durabilityBatchCountName = metricName("WalDurabilityBatchCount", brokerId);
         MetricName durableAppendGroupCountName = metricName("WalDurableAppendGroupCount", brokerId);
         MetricName durabilityBarrierNanosName = metricName("WalDurabilityBarrierNanos", brokerId);
+        MetricName dataForceNanosName = metricName("WalDurabilityDataForceNanos", brokerId);
+        MetricName checkpointForceNanosName = metricName("WalDurabilityCheckpointForceNanos", brokerId);
         MetricName coalesceWaitCountName = metricName("WalSingletonCoalesceWaitCount", brokerId);
         MetricName coalesceHitCountName = metricName("WalSingletonCoalesceHitCount", brokerId);
         MetricName interArrivalCountName = metricName("WalAppendInterArrivalCount", brokerId);
@@ -65,6 +67,8 @@ class SharedStorageMetricsTest {
             Gauge<?> durabilityBatchCount = gauge(durabilityBatchCountName);
             Gauge<?> durableAppendGroupCount = gauge(durableAppendGroupCountName);
             Gauge<?> durabilityBarrierNanos = gauge(durabilityBarrierNanosName);
+            Gauge<?> dataForceNanos = gauge(dataForceNanosName);
+            Gauge<?> checkpointForceNanos = gauge(checkpointForceNanosName);
             Gauge<?> coalesceWaitCount = gauge(coalesceWaitCountName);
             Gauge<?> coalesceHitCount = gauge(coalesceHitCountName);
             Gauge<?> interArrivalCount = gauge(interArrivalCountName);
@@ -76,6 +80,8 @@ class SharedStorageMetricsTest {
             assertEquals(0L, ((Number) durabilityBatchCount.value()).longValue());
             assertEquals(0L, ((Number) durableAppendGroupCount.value()).longValue());
             assertEquals(0L, ((Number) durabilityBarrierNanos.value()).longValue());
+            assertEquals(0L, ((Number) dataForceNanos.value()).longValue());
+            assertEquals(0L, ((Number) checkpointForceNanos.value()).longValue());
             assertEquals(0L, ((Number) coalesceWaitCount.value()).longValue());
             assertEquals(0L, ((Number) coalesceHitCount.value()).longValue());
             assertEquals(0L, ((Number) interArrivalCount.value()).longValue());
