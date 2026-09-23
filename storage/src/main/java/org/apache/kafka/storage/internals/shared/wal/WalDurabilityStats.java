@@ -61,30 +61,61 @@ public record WalDurabilityStats(
     }
 
     public WalDurabilityStats {
-        if (durabilityBatchCount < 0L ||
-            durableAppendGroupCount < 0L ||
-            durableBytes < 0L ||
-            durabilityBarrierNanos < 0L ||
-            maxGroupsPerDurabilityBatch < 0L ||
-            singletonCoalesceWaitCount < 0L ||
-            singletonCoalesceHitCount < 0L ||
-            singletonCoalesceWaitNanos < 0L ||
-            appendInterArrivalCount < 0L ||
-            appendInterArrivalNanos < 0L ||
-            appendInterArrivalLe100MicrosCount < 0L ||
-            appendInterArrivalLe250MicrosCount < 0L ||
-            appendInterArrivalLe500MicrosCount < 0L ||
-            appendInterArrivalLe1000MicrosCount < 0L) {
-            throw new IllegalArgumentException("WAL durability stats must be non-negative");
+        requireNonNegative("durabilityBatchCount", durabilityBatchCount);
+        requireNonNegative("durableAppendGroupCount", durableAppendGroupCount);
+        requireNonNegative("durableBytes", durableBytes);
+        requireNonNegative("durabilityBarrierNanos", durabilityBarrierNanos);
+        requireNonNegative("maxGroupsPerDurabilityBatch", maxGroupsPerDurabilityBatch);
+        requireNonNegative("singletonCoalesceWaitCount", singletonCoalesceWaitCount);
+        requireNonNegative("singletonCoalesceHitCount", singletonCoalesceHitCount);
+        requireNonNegative("singletonCoalesceWaitNanos", singletonCoalesceWaitNanos);
+        requireNonNegative("appendInterArrivalCount", appendInterArrivalCount);
+        requireNonNegative("appendInterArrivalNanos", appendInterArrivalNanos);
+        requireNonNegative("appendInterArrivalLe100MicrosCount", appendInterArrivalLe100MicrosCount);
+        requireNonNegative("appendInterArrivalLe250MicrosCount", appendInterArrivalLe250MicrosCount);
+        requireNonNegative("appendInterArrivalLe500MicrosCount", appendInterArrivalLe500MicrosCount);
+        requireNonNegative("appendInterArrivalLe1000MicrosCount", appendInterArrivalLe1000MicrosCount);
+        requireAtMost(
+            "singletonCoalesceHitCount",
+            singletonCoalesceHitCount,
+            "singletonCoalesceWaitCount",
+            singletonCoalesceWaitCount
+        );
+        requireAtMost(
+            "appendInterArrivalLe100MicrosCount",
+            appendInterArrivalLe100MicrosCount,
+            "appendInterArrivalLe250MicrosCount",
+            appendInterArrivalLe250MicrosCount
+        );
+        requireAtMost(
+            "appendInterArrivalLe250MicrosCount",
+            appendInterArrivalLe250MicrosCount,
+            "appendInterArrivalLe500MicrosCount",
+            appendInterArrivalLe500MicrosCount
+        );
+        requireAtMost(
+            "appendInterArrivalLe500MicrosCount",
+            appendInterArrivalLe500MicrosCount,
+            "appendInterArrivalLe1000MicrosCount",
+            appendInterArrivalLe1000MicrosCount
+        );
+        requireAtMost(
+            "appendInterArrivalLe1000MicrosCount",
+            appendInterArrivalLe1000MicrosCount,
+            "appendInterArrivalCount",
+            appendInterArrivalCount
+        );
+    }
+
+    private static void requireNonNegative(String name, long value) {
+        if (value < 0L) {
+            throw new IllegalArgumentException(name + " must be non-negative");
         }
-        if (singletonCoalesceHitCount > singletonCoalesceWaitCount) {
-            throw new IllegalArgumentException("WAL coalescing hits cannot exceed wait attempts");
-        }
-        if (appendInterArrivalLe100MicrosCount > appendInterArrivalLe250MicrosCount ||
-            appendInterArrivalLe250MicrosCount > appendInterArrivalLe500MicrosCount ||
-            appendInterArrivalLe500MicrosCount > appendInterArrivalLe1000MicrosCount ||
-            appendInterArrivalLe1000MicrosCount > appendInterArrivalCount) {
-            throw new IllegalArgumentException("WAL append inter-arrival buckets must be cumulative");
+    }
+
+    private static void requireAtMost(String lowerName, long lower, String upperName, long upper) {
+        if (lower > upper) {
+            throw new IllegalArgumentException(lowerName + " cannot exceed " + upperName);
         }
     }
 }
