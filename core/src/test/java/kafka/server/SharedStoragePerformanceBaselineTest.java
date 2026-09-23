@@ -62,7 +62,7 @@ public class SharedStoragePerformanceBaselineTest {
     private static final int PARTITIONS = 3;
     private static final int DEFAULT_RECORDS = 50_000;
     private static final int DEFAULT_WARMUP_RECORDS = 20_000;
-    private static final int DEFAULT_REPETITIONS = 3;
+    private static final int DEFAULT_REPETITIONS = 4;
     private static final int PAYLOAD_BYTES = 1024;
     private static final double DEFAULT_MIN_PRODUCE_RATIO = 0.60d;
     private static final double DEFAULT_MIN_CONSUME_RATIO = 0.50d;
@@ -78,6 +78,11 @@ public class SharedStoragePerformanceBaselineTest {
             DEFAULT_WARMUP_RECORDS
         );
         int repetitions = positiveIntEnvironment("SHARED_STORAGE_PERF_REPETITIONS", DEFAULT_REPETITIONS);
+        if ((repetitions & 1) != 0) {
+            throw new IllegalArgumentException(
+                "SHARED_STORAGE_PERF_REPETITIONS must be even so both benchmark orders have equal weight"
+            );
+        }
         double minProduceRatio = ratioEnvironment(
             "SHARED_STORAGE_MIN_PRODUCE_RATIO",
             DEFAULT_MIN_PRODUCE_RATIO
