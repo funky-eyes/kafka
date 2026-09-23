@@ -326,10 +326,13 @@ public class SharedStoragePerformanceBaselineTest {
                 waitForTopicReady(admin, List.of(sharedTopic, classicTopic));
             }
 
-            BenchmarkResult classic;
-            BenchmarkResult shared;
+            warmPairedProducePaths(bootstrapServers, classicTopic, sharedTopic, warmupRecords);
+            waitForSharedBackgroundIdle(brokerIds);
+
+            ProduceMeasurement classicProduce;
+            ProduceMeasurement sharedProduce;
             if (sharedFirst) {
-                shared = benchmarkTopic(
+                sharedProduce = produce(
                     bootstrapServers,
                     sharedTopic,
                     warmupRecords,
@@ -338,7 +341,7 @@ public class SharedStoragePerformanceBaselineTest {
                     brokerIds
                 );
                 waitForSharedBackgroundIdle(brokerIds);
-                classic = benchmarkTopic(
+                classicProduce = produce(
                     bootstrapServers,
                     classicTopic,
                     warmupRecords,
@@ -347,7 +350,7 @@ public class SharedStoragePerformanceBaselineTest {
                     brokerIds
                 );
             } else {
-                classic = benchmarkTopic(
+                classicProduce = produce(
                     bootstrapServers,
                     classicTopic,
                     warmupRecords,
@@ -355,7 +358,7 @@ public class SharedStoragePerformanceBaselineTest {
                     false,
                     brokerIds
                 );
-                shared = benchmarkTopic(
+                sharedProduce = produce(
                     bootstrapServers,
                     sharedTopic,
                     warmupRecords,
@@ -364,27 +367,25 @@ public class SharedStoragePerformanceBaselineTest {
                     brokerIds
                 );
             }
+
+            waitForSharedBackgroundIdle(brokerIds);
+            double classicConsume;
+            double sharedConsume;
+            if (sharedFirst) {
+                sharedConsume = consume(bootstrapServers, sharedTopic, warmupRecords, records);
+                classicConsume = consume(bootstrapServers, classicTopic, warmupRecords, records);
+            } else {
+                classicConsume = consume(bootstrapServers, classicTopic, warmupRecords, records);
+                sharedConsume = consume(bootstrapServers, sharedTopic, warmupRecords, records);
+            }
+
+            BenchmarkResult classic = benchmarkResult(classicProduce, classicConsume);
+            BenchmarkResult shared = benchmarkResult(sharedProduce, sharedConsume);
             return new BenchmarkPair(classic, shared);
         }
     }
 
-    private static BenchmarkResult benchmarkTopic(
-        String bootstrapServers,
-        String topic,
-        int warmupRecords,
-        int records,
-        boolean sharedStorage,
-        List<Integer> brokerIds
-    ) throws Exception {
-        ProduceMeasurement produce = produce(
-            bootstrapServers,
-            topic,
-            warmupRecords,
-            records,
-            sharedStorage,
-            brokerIds
-        );
-        double consumeRate = consume(bootstrapServers, topic, warmupRecords, records);
+    private static BenchmarkResult benchmarkResult(ProduceMeasurement produce, double consumeRate) {
         return new BenchmarkResult(
             produce.recordsPerSecond(),
             consumeRate,
@@ -451,14 +452,30 @@ public class SharedStoragePerformanceBaselineTest {
         }, 60_000L, () -> "Benchmark topics did not converge to RF3/ISR3: " + topics);
     }
 
-    private static ProduceMeasurement produce(
+    private static void warmPairedProducePaths(
         String bootstrapServers,
-        String topic,
-        int warmupRecords,
-        int records,
-        boolean sharedStorage,
-        List<Integer> brokerIds
+        String classicTopic,
+        String sharedTopic,
+        int warmupRecords
     ) throws Exception {
+        Properties properties = producerProperties(bootstrapServers);
+        byte[] payload = payload();
+        List<Future<RecordMetadata>> futures = new ArrayList<>(Math.multiplyExact(warmupRecords, 2));
+        try (KafkaProducer<byte[], byte[]> producer = new KafkaProducer<>(properties)) {
+            producer.partitionsFor(classicTopic);
+            producer.partitionsFor(sharedTopic);
+            for (int index = 0; index < warmupRecords; index++) {
+                byte[] key = recordKey(index);
+                int partition = index % PARTITIONS;
+                futures.add(producer.send(new ProducerRecord<>(classicTopic, partition, key, payload)));
+                futures.add(producer.send(new ProducerRecord<>(sharedTopic, partition, key, payload)));
+            }
+            producer.flush();
+            awaitSends(futures);
+        }
+    }
+
+    private static Properties producerProperties(String bootstrapServers) {
         Properties properties = new Properties();
         properties.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
         properties.put(ProducerConfig.ACKS_CONFIG, "all");
@@ -468,15 +485,30 @@ public class SharedStoragePerformanceBaselineTest {
         properties.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, "lz4");
         properties.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class);
         properties.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class);
+        return properties;
+    }
 
+    private static byte[] payload() {
         byte[] payload = new byte[PAYLOAD_BYTES];
         Arrays.fill(payload, (byte) 7);
+        return payload;
+    }
+
+    private static ProduceMeasurement produce(
+        String bootstrapServers,
+        String topic,
+        int warmupRecords,
+        int records,
+        boolean sharedStorage,
+        List<Integer> brokerIds
+    ) throws Exception {
+        Properties properties = producerProperties(bootstrapServers);
+        byte[] payload = payload();
 
         long elapsedNanos;
         try (KafkaProducer<byte[], byte[]> producer = new KafkaProducer<>(properties)) {
             // Producer construction and metadata discovery are lifecycle costs, not steady-state append throughput.
             producer.partitionsFor(topic);
-            awaitSends(sendRecords(producer, topic, 0, warmupRecords, payload));
 
             WalDurabilitySnapshot before = sharedStorage
                 ? walDurabilitySnapshot(brokerIds)
@@ -505,16 +537,20 @@ public class SharedStoragePerformanceBaselineTest {
         List<Future<RecordMetadata>> futures = new ArrayList<>(records);
         for (int relativeIndex = 0; relativeIndex < records; relativeIndex++) {
             int index = Math.addExact(startIndex, relativeIndex);
-            byte[] key = new byte[] {
-                (byte) (index >>> 24),
-                (byte) (index >>> 16),
-                (byte) (index >>> 8),
-                (byte) index
-            };
+            byte[] key = recordKey(index);
             futures.add(producer.send(new ProducerRecord<>(topic, index % PARTITIONS, key, payload)));
         }
         producer.flush();
         return futures;
+    }
+
+    private static byte[] recordKey(int index) {
+        return new byte[] {
+            (byte) (index >>> 24),
+            (byte) (index >>> 16),
+            (byte) (index >>> 8),
+            (byte) index
+        };
     }
 
     private static void awaitSends(List<Future<RecordMetadata>> futures) throws Exception {
