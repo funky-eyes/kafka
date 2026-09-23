@@ -121,7 +121,7 @@ public class SharedStoragePerformanceBaselineTest {
             "SHARED_STORAGE_PERF_LIFECYCLE_CALIBRATION sharedProduce=%.2f classicProduce=%.2f " +
                 "sharedConsume=%.2f classicConsume=%.2f records=%d warmupRecords=%d " +
                 "walBatches=%d walGroups=%d walGroupsPerBatch=%.3f walBarrierMs=%.3f " +
-                "walAvgBarrierMicros=%.3f walDurableBytes=%d walMaxGroupsObserved=%d%n",
+                "walAvgBarrierMicros=%.3f walDurableBytes=%d walBarrierShare=%.4f walMaxGroupsSinceStart=%d%n",
             sharedCalibration.produceRecordsPerSecond(),
             classicCalibration.produceRecordsPerSecond(),
             sharedCalibration.consumeRecordsPerSecond(),
@@ -134,6 +134,7 @@ public class SharedStoragePerformanceBaselineTest {
             sharedCalibration.walDurability().durabilityBarrierNanos() / 1_000_000.0d,
             sharedCalibration.walDurability().averageBarrierMicros(),
             sharedCalibration.walDurability().durableBytes(),
+            sharedCalibration.walDurability().barrierShareOf(sharedCalibration.produceElapsedNanos()),
             sharedCalibration.walDurability().maxGroupsPerDurabilityBatch()
         );
 
@@ -162,7 +163,7 @@ public class SharedStoragePerformanceBaselineTest {
                 "SHARED_STORAGE_PERF_SAMPLE repetition=%d order=%s classicProduce=%.2f sharedProduce=%.2f " +
                     "produceRatio=%.4f classicConsume=%.2f sharedConsume=%.2f consumeRatio=%.4f records=%d " +
                     "walBatches=%d walGroups=%d walGroupsPerBatch=%.3f walBarrierMs=%.3f " +
-                    "walAvgBarrierMicros=%.3f walDurableBytes=%d walMaxGroupsObserved=%d%n",
+                    "walAvgBarrierMicros=%.3f walDurableBytes=%d walBarrierShare=%.4f walMaxGroupsSinceStart=%d%n",
                 repetition + 1,
                 order,
                 classic.produceRecordsPerSecond(),
@@ -178,6 +179,7 @@ public class SharedStoragePerformanceBaselineTest {
                 shared.walDurability().durabilityBarrierNanos() / 1_000_000.0d,
                 shared.walDurability().averageBarrierMicros(),
                 shared.walDurability().durableBytes(),
+                shared.walDurability().barrierShareOf(shared.produceElapsedNanos()),
                 shared.walDurability().maxGroupsPerDurabilityBatch()
             );
         }
@@ -265,6 +267,7 @@ public class SharedStoragePerformanceBaselineTest {
             return new BenchmarkResult(
                 produce.recordsPerSecond(),
                 consumeRate,
+                produce.elapsedNanos(),
                 produce.walDurability()
             );
         }
@@ -329,6 +332,7 @@ public class SharedStoragePerformanceBaselineTest {
                 : WalDurabilitySnapshot.EMPTY;
             return new ProduceMeasurement(
                 recordsPerSecond(records, elapsedNanos),
+                elapsedNanos,
                 after.deltaFrom(before)
             );
         }
@@ -513,6 +517,7 @@ public class SharedStoragePerformanceBaselineTest {
 
     private record ProduceMeasurement(
         double recordsPerSecond,
+        long elapsedNanos,
         WalDurabilitySnapshot walDurability
     ) {
     }
@@ -520,6 +525,7 @@ public class SharedStoragePerformanceBaselineTest {
     private record BenchmarkResult(
         double produceRecordsPerSecond,
         double consumeRecordsPerSecond,
+        long produceElapsedNanos,
         WalDurabilitySnapshot walDurability
     ) {
     }
@@ -556,6 +562,10 @@ public class SharedStoragePerformanceBaselineTest {
                 return 0.0d;
             }
             return durabilityBarrierNanos / (double) durabilityBatchCount / 1_000.0d;
+        }
+
+        double barrierShareOf(long measuredElapsedNanos) {
+            return durabilityBarrierNanos / (double) Math.max(1L, measuredElapsedNanos);
         }
     }
 }
