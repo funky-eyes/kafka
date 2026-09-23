@@ -29,22 +29,77 @@ import software.amazon.awssdk.services.s3.model.S3Exception;
 import java.net.URI;
 import java.nio.ByteBuffer;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.AbstractExecutorService;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 class S3ObjectStoreTest {
+    @Test
+    void closeRaceReturnsFailedFutureInsteadOfThrowingSynchronously() throws Exception {
+        S3ObjectStoreConfig config = S3ObjectStoreConfig.from(Map.of(
+            S3ObjectStoreConfig.BUCKET_CONFIG, "shared-data"
+        ));
+        CloseRaceExecutor executor = new CloseRaceExecutor();
+        S3ObjectStore store = new S3ObjectStore(config, S3ObjectStore.buildClient(config), executor);
+        AtomicReference<CompletableFuture<Void>> returned = new AtomicReference<>();
+        AtomicReference<Throwable> synchronousFailure = new AtomicReference<>();
+        Thread submitter = new Thread(() -> {
+            try {
+                returned.set(store.delete(1L));
+            } catch (Throwable t) {
+                synchronousFailure.set(t);
+            }
+        }, "s3-close-race-submitter");
+
+        try {
+            submitter.start();
+            assertTrue(
+                executor.awaitExecuteEntered(10, TimeUnit.SECONDS),
+                "S3 async submission did not reach the executor"
+            );
+
+            store.close();
+            submitter.join(TimeUnit.SECONDS.toMillis(10));
+
+            assertFalse(submitter.isAlive(), "S3 async submission did not finish after close");
+            assertNull(synchronousFailure.get(), "async API must not throw executor rejection synchronously");
+            CompletableFuture<Void> future = returned.get();
+            assertNotNull(future, "async API must return a future during close race");
+
+            ExecutionException failure = assertThrows(
+                ExecutionException.class,
+                () -> future.get(10, TimeUnit.SECONDS)
+            );
+            IllegalStateException closed = assertInstanceOf(IllegalStateException.class, failure.getCause());
+            assertTrue(closed.getMessage().contains("closed"));
+            assertInstanceOf(RejectedExecutionException.class, closed.getCause());
+        } finally {
+            store.close();
+            submitter.interrupt();
+            submitter.join(TimeUnit.SECONDS.toMillis(10));
+        }
+    }
+
     @Test
     void waitsForIoExecutorToTerminateBeforeClosingClientResources() throws Exception {
         ExecutorService executor = Executors.newSingleThreadExecutor();
@@ -221,5 +276,57 @@ class S3ObjectStoreTest {
     private static String environment(String name, String defaultValue) {
         String value = System.getenv(name);
         return value == null || value.isBlank() ? defaultValue : value;
+    }
+
+    private static final class CloseRaceExecutor extends AbstractExecutorService {
+        private final CountDownLatch executeEntered = new CountDownLatch(1);
+        private final CountDownLatch shutdown = new CountDownLatch(1);
+        private final AtomicBoolean shutdownRequested = new AtomicBoolean();
+
+        @Override
+        public void shutdown() {
+            if (shutdownRequested.compareAndSet(false, true)) {
+                shutdown.countDown();
+            }
+        }
+
+        @Override
+        public List<Runnable> shutdownNow() {
+            shutdown();
+            return List.of();
+        }
+
+        @Override
+        public boolean isShutdown() {
+            return shutdownRequested.get();
+        }
+
+        @Override
+        public boolean isTerminated() {
+            return shutdownRequested.get();
+        }
+
+        @Override
+        public boolean awaitTermination(long timeout, TimeUnit unit) throws InterruptedException {
+            return shutdownRequested.get() || shutdown.await(timeout, unit);
+        }
+
+        @Override
+        public void execute(Runnable command) {
+            executeEntered.countDown();
+            try {
+                if (!shutdown.await(10, TimeUnit.SECONDS)) {
+                    throw new RejectedExecutionException("timed out waiting for executor shutdown");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RejectedExecutionException("interrupted while waiting for executor shutdown", e);
+            }
+            throw new RejectedExecutionException("executor shut down before async submission");
+        }
+
+        boolean awaitExecuteEntered(long timeout, TimeUnit unit) throws InterruptedException {
+            return executeEntered.await(timeout, unit);
+        }
     }
 }

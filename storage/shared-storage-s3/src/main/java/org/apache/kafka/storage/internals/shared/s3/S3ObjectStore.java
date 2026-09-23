@@ -48,9 +48,11 @@ import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 
 /**
  * S3-backed immutable object store.
@@ -393,17 +395,30 @@ public final class S3ObjectStore implements ObjectStore {
     }
 
     private CompletableFuture<Void> runAsync(Runnable operation) {
-        if (closed.get()) {
-            return CompletableFuture.failedFuture(new IllegalStateException("S3 object store is closed"));
-        }
-        return CompletableFuture.runAsync(operation, ioExecutor);
+        return submitAsync(() -> {
+            operation.run();
+            return null;
+        });
     }
 
-    private <T> CompletableFuture<T> supplyAsync(java.util.function.Supplier<T> operation) {
+    private <T> CompletableFuture<T> supplyAsync(Supplier<T> operation) {
+        return submitAsync(operation);
+    }
+
+    private <T> CompletableFuture<T> submitAsync(Supplier<T> operation) {
         if (closed.get()) {
             return CompletableFuture.failedFuture(new IllegalStateException("S3 object store is closed"));
         }
-        return CompletableFuture.supplyAsync(operation, ioExecutor);
+        try {
+            return CompletableFuture.supplyAsync(operation, ioExecutor);
+        } catch (RejectedExecutionException e) {
+            if (closed.get()) {
+                return CompletableFuture.failedFuture(
+                    new IllegalStateException("S3 object store is closed", e)
+                );
+            }
+            return CompletableFuture.failedFuture(e);
+        }
     }
 
     static S3Client buildClient(S3ObjectStoreConfig config) {
