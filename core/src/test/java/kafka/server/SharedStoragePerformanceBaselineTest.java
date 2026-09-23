@@ -712,13 +712,19 @@ public class SharedStoragePerformanceBaselineTest {
         long maintenanceFailurePresent
     ) {
         boolean idle() {
+            return noPendingWork() && noFailures();
+        }
+
+        private boolean noPendingWork() {
             return uploadsInProgress == 0L &&
                 reservedUploadCandidates == 0L &&
                 uploadCandidateCount == 0L &&
                 eligibleUploadBytes == 0L &&
-                pendingRemoteCheckpoints == 0L &&
-                uploadFailurePresent == 0L &&
-                maintenanceFailurePresent == 0L;
+                pendingRemoteCheckpoints == 0L;
+        }
+
+        private boolean noFailures() {
+            return uploadFailurePresent == 0L && maintenanceFailurePresent == 0L;
         }
     }
 
