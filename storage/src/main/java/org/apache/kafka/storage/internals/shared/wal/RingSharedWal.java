@@ -549,37 +549,53 @@ public final class RingSharedWal implements SharedWal {
             RingWalSuperblock.State durable = file.state();
             long plannedTail = durable.tailOffset();
             List<PlannedGroup> admitted = new ArrayList<>(groups.size());
-            int firstRejected = -1;
+            int nextGroupIndex = 0;
             WalCapacityExceededException capacityFailure = null;
 
-            for (int i = 0; i < groups.size(); i++) {
-                PendingAppend group = groups.get(i);
-                try {
-                    PlannedGroup plan = planGroup(group, durable.headOffset(), plannedTail);
-                    admitted.add(plan);
-                    plannedTail = plan.nextTailOffset();
-                } catch (WalCapacityExceededException e) {
-                    firstRejected = i;
-                    capacityFailure = e;
+            while (true) {
+                int firstNewPlan = admitted.size();
+                for (; nextGroupIndex < groups.size(); nextGroupIndex++) {
+                    PendingAppend group = groups.get(nextGroupIndex);
+                    try {
+                        PlannedGroup plan = planGroup(group, durable.headOffset(), plannedTail);
+                        admitted.add(plan);
+                        plannedTail = plan.nextTailOffset();
+                    } catch (WalCapacityExceededException e) {
+                        capacityFailure = e;
+                        break;
+                    }
+                }
+
+                if (capacityFailure != null) {
+                    for (int i = nextGroupIndex; i < groups.size(); i++) {
+                        groups.get(i).future().completeExceptionally(capacityFailure);
+                    }
+                }
+
+                for (int i = firstNewPlan; i < admitted.size(); i++) {
+                    PlannedGroup group = admitted.get(i);
+                    for (PlannedRecord record : group.records()) {
+                        writePadding(record.allocation());
+                        writeEncoded(record.allocation().walOffset(), record.encoded());
+                    }
+                }
+
+                if (capacityFailure != null || groups.size() >= MAX_DRAINED_APPENDS) {
                     break;
                 }
+
+                int previousGroupCount = groups.size();
+                drainAvailableAppends(groups);
+                if (groups.size() == previousGroupCount) {
+                    break;
+                }
+                recordAppendInterArrivals(groups.subList(previousGroupCount, groups.size()));
             }
 
-            if (firstRejected >= 0) {
-                for (int i = firstRejected; i < groups.size(); i++) {
-                    groups.get(i).future().completeExceptionally(capacityFailure);
-                }
-            }
             if (admitted.isEmpty()) {
                 return;
             }
 
-            for (PlannedGroup group : admitted) {
-                for (PlannedRecord record : group.records()) {
-                    writePadding(record.allocation());
-                    writeEncoded(record.allocation().walOffset(), record.encoded());
-                }
-            }
             long durabilityStartedNanos = System.nanoTime();
             file.forceAndCheckpoint(durable.headOffset(), plannedTail);
             long durabilityElapsedNanos = System.nanoTime() - durabilityStartedNanos;

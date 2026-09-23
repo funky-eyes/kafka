@@ -19,6 +19,7 @@ package org.apache.kafka.storage.internals.shared.wal;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Path;
@@ -26,8 +27,10 @@ import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -103,6 +106,43 @@ class RingSharedWalTest {
             assertTrue(stats.singletonCoalesceWaitNanos() >= 0L);
             assertEquals(1L, stats.appendInterArrivalCount());
             assertTrue(stats.appendInterArrivalNanos() >= 0L);
+        }
+    }
+
+    @Test
+    void coalescesAppendArrivingDuringDataWriteWithoutLinger() throws Exception {
+        Path path = tempDir.resolve("durability-late-drain.wal");
+        long totalCapacity = RingWalLayout.DATA_START + 4096L;
+        BlockingDataWriteBackend backend = new BlockingDataWriteBackend();
+
+        try (RingSharedWal wal = new RingSharedWal(
+            path,
+            totalCapacity,
+            backend,
+            TimeUnit.SECONDS.toMillis(30L),
+            0L
+        )) {
+            backend.blockNextDataWrite();
+            CompletableFuture<List<WalAppendResult>> first =
+                wal.appendBatch(List.of(dataRecord(0L, 32)));
+            assertTrue(backend.awaitDataWrite(10, TimeUnit.SECONDS));
+
+            CompletableFuture<List<WalAppendResult>> second =
+                wal.appendBatch(List.of(dataRecord(1L, 32)));
+            backend.releaseDataWrite();
+
+            assertEquals(1, first.get(10, TimeUnit.SECONDS).size());
+            assertEquals(1, second.get(10, TimeUnit.SECONDS).size());
+
+            WalDurabilityStats stats = wal.durabilityStats();
+            assertEquals(1L, stats.durabilityBatchCount());
+            assertEquals(2L, stats.durableAppendGroupCount());
+            assertEquals(2L, stats.maxGroupsPerDurabilityBatch());
+            assertEquals(0L, stats.singletonCoalesceWaitCount());
+            assertEquals(0L, stats.singletonCoalesceHitCount());
+            assertEquals(1L, stats.appendInterArrivalCount());
+        } finally {
+            backend.releaseDataWrite();
         }
     }
 
@@ -199,6 +239,116 @@ class RingSharedWalTest {
             List<WalRecord> replayed = new ArrayList<>();
             wal.replay((replayedRecord, ignored) -> replayed.add(replayedRecord));
             assertEquals(List.of(), replayed);
+        }
+    }
+
+    private static final class BlockingDataWriteBackend implements WalIoBackend {
+        private final WalIoBackend delegate = new FileChannelWalIoBackend();
+        private final AtomicBoolean blockNextDataWrite = new AtomicBoolean(false);
+        private final CountDownLatch dataWriteEntered = new CountDownLatch(1);
+        private final CountDownLatch allowDataWrite = new CountDownLatch(1);
+
+        void blockNextDataWrite() {
+            blockNextDataWrite.set(true);
+        }
+
+        boolean awaitDataWrite(long timeout, TimeUnit unit) throws InterruptedException {
+            return dataWriteEntered.await(timeout, unit);
+        }
+
+        void releaseDataWrite() {
+            allowDataWrite.countDown();
+        }
+
+        @Override
+        public Handle openRead(Path path) throws IOException {
+            return wrap(delegate.openRead(path));
+        }
+
+        @Override
+        public Handle reopen(Path path) throws IOException {
+            return wrap(delegate.reopen(path));
+        }
+
+        @Override
+        public Handle create(Path path) throws IOException {
+            return wrap(delegate.create(path));
+        }
+
+        @Override
+        public long size(Path path) throws IOException {
+            return delegate.size(path);
+        }
+
+        @Override
+        public boolean supportsPreallocation() {
+            return delegate.supportsPreallocation();
+        }
+
+        @Override
+        public boolean supportsDirectIo() {
+            return delegate.supportsDirectIo();
+        }
+
+        @Override
+        public void close() throws IOException {
+            delegate.close();
+        }
+
+        private Handle wrap(Handle handle) {
+            return new Handle() {
+                @Override
+                public long size() throws IOException {
+                    return handle.size();
+                }
+
+                @Override
+                public int read(ByteBuffer destination, long position) throws IOException {
+                    return handle.read(destination, position);
+                }
+
+                @Override
+                public int write(ByteBuffer source, long position) throws IOException {
+                    if (position >= RingWalLayout.DATA_START &&
+                        blockNextDataWrite.compareAndSet(true, false)) {
+                        dataWriteEntered.countDown();
+                        try {
+                            if (!allowDataWrite.await(10, TimeUnit.SECONDS)) {
+                                throw new IOException("Timed out waiting to release test data write");
+                            }
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            throw new IOException("Interrupted while blocking test data write", e);
+                        }
+                    }
+                    return handle.write(source, position);
+                }
+
+                @Override
+                public void truncate(long size) throws IOException {
+                    handle.truncate(size);
+                }
+
+                @Override
+                public void preallocate(long size) throws IOException {
+                    handle.preallocate(size);
+                }
+
+                @Override
+                public void force() throws IOException {
+                    handle.force();
+                }
+
+                @Override
+                public void seal() throws IOException {
+                    handle.seal();
+                }
+
+                @Override
+                public void close() throws IOException {
+                    handle.close();
+                }
+            };
         }
     }
 
