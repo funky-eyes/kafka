@@ -112,50 +112,7 @@ public class SharedStoragePerformanceBaselineTest {
         );
         BenchmarkResult sharedCalibration = calibration.shared();
         BenchmarkResult classicCalibration = calibration.classic();
-        System.out.printf(
-            "SHARED_STORAGE_PERF_LIFECYCLE_CALIBRATION sharedProduce=%.2f classicProduce=%.2f " +
-                "sharedConsume=%.2f classicConsume=%.2f records=%d warmupRecords=%d " +
-                "walBatches=%d walGroups=%d walGroupsPerBatch=%.3f walBarrierMs=%.3f " +
-                "walAvgBarrierMicros=%.3f walDataForceMs=%.3f walCheckpointForceMs=%.3f " +
-                "walAvgDataForceMicros=%.3f walAvgCheckpointForceMicros=%.3f " +
-                "walMaxBarrierMicrosSinceStart=%.3f walMaxDataForceMicrosSinceStart=%.3f " +
-                "walMaxCheckpointForceMicrosSinceStart=%.3f walDurableBytes=%d " +
-                "walBarrierShare=%.4f walMaxGroupsSinceStart=%d " +
-                "walCoalesceWaits=%d walCoalesceHits=%d walCoalesceHitRate=%.3f walCoalesceWaitMs=%.3f " +
-                "walInterArrivalSamples=%d walInterArrivalAvgMicros=%.3f walInterArrivalLe100=%.3f " +
-                "walInterArrivalLe250=%.3f walInterArrivalLe500=%.3f walInterArrivalLe1000=%.3f%n",
-            sharedCalibration.produceRecordsPerSecond(),
-            classicCalibration.produceRecordsPerSecond(),
-            sharedCalibration.consumeRecordsPerSecond(),
-            classicCalibration.consumeRecordsPerSecond(),
-            records,
-            warmupRecords,
-            sharedCalibration.walDurability().durabilityBatchCount(),
-            sharedCalibration.walDurability().durableAppendGroupCount(),
-            sharedCalibration.walDurability().groupsPerBatch(),
-            sharedCalibration.walDurability().durabilityBarrierNanos() / 1_000_000.0d,
-            sharedCalibration.walDurability().averageBarrierMicros(),
-            sharedCalibration.walDurability().durabilityDataForceNanos() / 1_000_000.0d,
-            sharedCalibration.walDurability().durabilityCheckpointForceNanos() / 1_000_000.0d,
-            sharedCalibration.walDurability().averageDataForceMicros(),
-            sharedCalibration.walDurability().averageCheckpointForceMicros(),
-            sharedCalibration.walDurability().maxDurabilityBarrierNanos() / 1_000.0d,
-            sharedCalibration.walDurability().maxDurabilityDataForceNanos() / 1_000.0d,
-            sharedCalibration.walDurability().maxDurabilityCheckpointForceNanos() / 1_000.0d,
-            sharedCalibration.walDurability().durableBytes(),
-            sharedCalibration.walDurability().barrierShareOf(sharedCalibration.produceElapsedNanos()),
-            sharedCalibration.walDurability().maxGroupsPerDurabilityBatch(),
-            sharedCalibration.walDurability().singletonCoalesceWaitCount(),
-            sharedCalibration.walDurability().singletonCoalesceHitCount(),
-            sharedCalibration.walDurability().coalesceHitRate(),
-            sharedCalibration.walDurability().singletonCoalesceWaitNanos() / 1_000_000.0d,
-            sharedCalibration.walDurability().appendInterArrivalCount(),
-            sharedCalibration.walDurability().averageInterArrivalMicros(),
-            sharedCalibration.walDurability().interArrivalLe100Ratio(),
-            sharedCalibration.walDurability().interArrivalLe250Ratio(),
-            sharedCalibration.walDurability().interArrivalLe500Ratio(),
-            sharedCalibration.walDurability().interArrivalLe1000Ratio()
-        );
+        printCalibration(sharedCalibration, classicCalibration, records, warmupRecords);
 
         List<Double> produceRatios = new ArrayList<>(repetitions);
         List<Double> consumeRatios = new ArrayList<>(repetitions);
@@ -178,52 +135,14 @@ public class SharedStoragePerformanceBaselineTest {
             produceRatios.add(produceRatio);
             consumeRatios.add(consumeRatio);
 
-            System.out.printf(
-                "SHARED_STORAGE_PERF_SAMPLE repetition=%d order=%s classicProduce=%.2f sharedProduce=%.2f " +
-                    "produceRatio=%.4f classicConsume=%.2f sharedConsume=%.2f consumeRatio=%.4f records=%d " +
-                    "walBatches=%d walGroups=%d walGroupsPerBatch=%.3f walBarrierMs=%.3f " +
-                    "walAvgBarrierMicros=%.3f walDataForceMs=%.3f walCheckpointForceMs=%.3f " +
-                    "walAvgDataForceMicros=%.3f walAvgCheckpointForceMicros=%.3f " +
-                    "walMaxBarrierMicrosSinceStart=%.3f walMaxDataForceMicrosSinceStart=%.3f " +
-                    "walMaxCheckpointForceMicrosSinceStart=%.3f walDurableBytes=%d " +
-                    "walBarrierShare=%.4f walMaxGroupsSinceStart=%d " +
-                    "walCoalesceWaits=%d walCoalesceHits=%d walCoalesceHitRate=%.3f walCoalesceWaitMs=%.3f " +
-                    "walInterArrivalSamples=%d walInterArrivalAvgMicros=%.3f walInterArrivalLe100=%.3f " +
-                    "walInterArrivalLe250=%.3f walInterArrivalLe500=%.3f walInterArrivalLe1000=%.3f%n",
+            printSample(
                 repetition + 1,
                 order,
-                classic.produceRecordsPerSecond(),
-                shared.produceRecordsPerSecond(),
+                classic,
+                shared,
                 produceRatio,
-                classic.consumeRecordsPerSecond(),
-                shared.consumeRecordsPerSecond(),
                 consumeRatio,
-                records,
-                shared.walDurability().durabilityBatchCount(),
-                shared.walDurability().durableAppendGroupCount(),
-                shared.walDurability().groupsPerBatch(),
-                shared.walDurability().durabilityBarrierNanos() / 1_000_000.0d,
-                shared.walDurability().averageBarrierMicros(),
-                shared.walDurability().durabilityDataForceNanos() / 1_000_000.0d,
-                shared.walDurability().durabilityCheckpointForceNanos() / 1_000_000.0d,
-                shared.walDurability().averageDataForceMicros(),
-                shared.walDurability().averageCheckpointForceMicros(),
-                shared.walDurability().maxDurabilityBarrierNanos() / 1_000.0d,
-                shared.walDurability().maxDurabilityDataForceNanos() / 1_000.0d,
-                shared.walDurability().maxDurabilityCheckpointForceNanos() / 1_000.0d,
-                shared.walDurability().durableBytes(),
-                shared.walDurability().barrierShareOf(shared.produceElapsedNanos()),
-                shared.walDurability().maxGroupsPerDurabilityBatch(),
-                shared.walDurability().singletonCoalesceWaitCount(),
-                shared.walDurability().singletonCoalesceHitCount(),
-                shared.walDurability().coalesceHitRate(),
-                shared.walDurability().singletonCoalesceWaitNanos() / 1_000_000.0d,
-                shared.walDurability().appendInterArrivalCount(),
-                shared.walDurability().averageInterArrivalMicros(),
-                shared.walDurability().interArrivalLe100Ratio(),
-                shared.walDurability().interArrivalLe250Ratio(),
-                shared.walDurability().interArrivalLe500Ratio(),
-                shared.walDurability().interArrivalLe1000Ratio()
+                records
             );
         }
 
@@ -246,6 +165,116 @@ public class SharedStoragePerformanceBaselineTest {
         assertTrue(
             medianConsumeRatio >= minConsumeRatio,
             () -> "Median shared consume throughput ratio " + medianConsumeRatio + " is below " + minConsumeRatio
+        );
+    }
+
+    private static void printCalibration(
+        BenchmarkResult shared,
+        BenchmarkResult classic,
+        int records,
+        int warmupRecords
+    ) {
+        System.out.printf(
+            "SHARED_STORAGE_PERF_LIFECYCLE_CALIBRATION sharedProduce=%.2f classicProduce=%.2f " +
+                "sharedConsume=%.2f classicConsume=%.2f records=%d warmupRecords=%d " +
+                "walBatches=%d walGroups=%d walGroupsPerBatch=%.3f walBarrierMs=%.3f " +
+                "walAvgBarrierMicros=%.3f walDataForceMs=%.3f walCheckpointForceMs=%.3f " +
+                "walAvgDataForceMicros=%.3f walAvgCheckpointForceMicros=%.3f " +
+                "walMaxBarrierMicrosSinceStart=%.3f walMaxDataForceMicrosSinceStart=%.3f " +
+                "walMaxCheckpointForceMicrosSinceStart=%.3f walDurableBytes=%d " +
+                "walBarrierShare=%.4f walMaxGroupsSinceStart=%d " +
+                "walCoalesceWaits=%d walCoalesceHits=%d walCoalesceHitRate=%.3f walCoalesceWaitMs=%.3f " +
+                "walInterArrivalSamples=%d walInterArrivalAvgMicros=%.3f walInterArrivalLe100=%.3f " +
+                "walInterArrivalLe250=%.3f walInterArrivalLe500=%.3f walInterArrivalLe1000=%.3f%n",
+            shared.produceRecordsPerSecond(),
+            classic.produceRecordsPerSecond(),
+            shared.consumeRecordsPerSecond(),
+            classic.consumeRecordsPerSecond(),
+            records,
+            warmupRecords,
+            shared.walDurability().durabilityBatchCount(),
+            shared.walDurability().durableAppendGroupCount(),
+            shared.walDurability().groupsPerBatch(),
+            shared.walDurability().durabilityBarrierNanos() / 1_000_000.0d,
+            shared.walDurability().averageBarrierMicros(),
+            shared.walDurability().durabilityDataForceNanos() / 1_000_000.0d,
+            shared.walDurability().durabilityCheckpointForceNanos() / 1_000_000.0d,
+            shared.walDurability().averageDataForceMicros(),
+            shared.walDurability().averageCheckpointForceMicros(),
+            shared.walDurability().maxDurabilityBarrierNanos() / 1_000.0d,
+            shared.walDurability().maxDurabilityDataForceNanos() / 1_000.0d,
+            shared.walDurability().maxDurabilityCheckpointForceNanos() / 1_000.0d,
+            shared.walDurability().durableBytes(),
+            shared.walDurability().barrierShareOf(shared.produceElapsedNanos()),
+            shared.walDurability().maxGroupsPerDurabilityBatch(),
+            shared.walDurability().singletonCoalesceWaitCount(),
+            shared.walDurability().singletonCoalesceHitCount(),
+            shared.walDurability().coalesceHitRate(),
+            shared.walDurability().singletonCoalesceWaitNanos() / 1_000_000.0d,
+            shared.walDurability().appendInterArrivalCount(),
+            shared.walDurability().averageInterArrivalMicros(),
+            shared.walDurability().interArrivalLe100Ratio(),
+            shared.walDurability().interArrivalLe250Ratio(),
+            shared.walDurability().interArrivalLe500Ratio(),
+            shared.walDurability().interArrivalLe1000Ratio()
+        );
+    }
+
+    private static void printSample(
+        int repetition,
+        String order,
+        BenchmarkResult classic,
+        BenchmarkResult shared,
+        double produceRatio,
+        double consumeRatio,
+        int records
+    ) {
+        System.out.printf(
+            "SHARED_STORAGE_PERF_SAMPLE repetition=%d order=%s classicProduce=%.2f sharedProduce=%.2f " +
+                "produceRatio=%.4f classicConsume=%.2f sharedConsume=%.2f consumeRatio=%.4f records=%d " +
+                "walBatches=%d walGroups=%d walGroupsPerBatch=%.3f walBarrierMs=%.3f " +
+                "walAvgBarrierMicros=%.3f walDataForceMs=%.3f walCheckpointForceMs=%.3f " +
+                "walAvgDataForceMicros=%.3f walAvgCheckpointForceMicros=%.3f " +
+                "walMaxBarrierMicrosSinceStart=%.3f walMaxDataForceMicrosSinceStart=%.3f " +
+                "walMaxCheckpointForceMicrosSinceStart=%.3f walDurableBytes=%d " +
+                "walBarrierShare=%.4f walMaxGroupsSinceStart=%d " +
+                "walCoalesceWaits=%d walCoalesceHits=%d walCoalesceHitRate=%.3f walCoalesceWaitMs=%.3f " +
+                "walInterArrivalSamples=%d walInterArrivalAvgMicros=%.3f walInterArrivalLe100=%.3f " +
+                "walInterArrivalLe250=%.3f walInterArrivalLe500=%.3f walInterArrivalLe1000=%.3f%n",
+            repetition,
+            order,
+            classic.produceRecordsPerSecond(),
+            shared.produceRecordsPerSecond(),
+            produceRatio,
+            classic.consumeRecordsPerSecond(),
+            shared.consumeRecordsPerSecond(),
+            consumeRatio,
+            records,
+            shared.walDurability().durabilityBatchCount(),
+            shared.walDurability().durableAppendGroupCount(),
+            shared.walDurability().groupsPerBatch(),
+            shared.walDurability().durabilityBarrierNanos() / 1_000_000.0d,
+            shared.walDurability().averageBarrierMicros(),
+            shared.walDurability().durabilityDataForceNanos() / 1_000_000.0d,
+            shared.walDurability().durabilityCheckpointForceNanos() / 1_000_000.0d,
+            shared.walDurability().averageDataForceMicros(),
+            shared.walDurability().averageCheckpointForceMicros(),
+            shared.walDurability().maxDurabilityBarrierNanos() / 1_000.0d,
+            shared.walDurability().maxDurabilityDataForceNanos() / 1_000.0d,
+            shared.walDurability().maxDurabilityCheckpointForceNanos() / 1_000.0d,
+            shared.walDurability().durableBytes(),
+            shared.walDurability().barrierShareOf(shared.produceElapsedNanos()),
+            shared.walDurability().maxGroupsPerDurabilityBatch(),
+            shared.walDurability().singletonCoalesceWaitCount(),
+            shared.walDurability().singletonCoalesceHitCount(),
+            shared.walDurability().coalesceHitRate(),
+            shared.walDurability().singletonCoalesceWaitNanos() / 1_000_000.0d,
+            shared.walDurability().appendInterArrivalCount(),
+            shared.walDurability().averageInterArrivalMicros(),
+            shared.walDurability().interArrivalLe100Ratio(),
+            shared.walDurability().interArrivalLe250Ratio(),
+            shared.walDurability().interArrivalLe500Ratio(),
+            shared.walDurability().interArrivalLe1000Ratio()
         );
     }
 
