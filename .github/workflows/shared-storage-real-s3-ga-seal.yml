@@ -32,7 +32,7 @@ jobs:
   strict-ga-manifest:
     name: Seal GA with real AWS S3 evidence
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: Checkout exact evidence candidate
         uses: actions/checkout@v5
@@ -71,7 +71,7 @@ jobs:
           EVIDENCE_BRANCH: ${{ steps.candidate.outputs.evidence_branch }}
         run: |
           set -euo pipefail
-          deadline=$((SECONDS + 900))
+          deadline=$((SECONDS + 1200))
           attempt=0
 
           while true; do

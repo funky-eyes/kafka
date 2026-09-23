@@ -171,6 +171,20 @@ def path_is_triggered(path, patterns):
     return any(fnmatch(path, pattern) for pattern in patterns)
 
 
+def workflow_timeout_minutes(text, name):
+    values = [int(value) for value in re.findall(r"(?m)^\s+timeout-minutes:\s*(\d+)\s*$", text)]
+    if len(values) != 1:
+        raise AssertionError(f"{name}: expected exactly one timeout-minutes value, found {len(values)}")
+    return values[0]
+
+
+def seal_wait_seconds(text):
+    match = re.search(r"deadline=\$\(\(SECONDS \+ (\d+)\)\)", text)
+    if match is None:
+        raise AssertionError("Real S3 GA seal has no fixed evidence wait deadline")
+    return int(match.group(1))
+
+
 def focused_core_test_blocks(text):
     lines = text.splitlines()
     blocks = []
@@ -311,6 +325,26 @@ def main():
         errors.append(f"{REAL_S3_SEAL_WORKFLOW_NAME}: strict manifest must resolve the base evidence branch")
     if "ref: ${{ github.sha }}" not in real_s3_seal or "git rev-parse HEAD" not in real_s3_seal:
         errors.append(f"{REAL_S3_SEAL_WORKFLOW_NAME}: strict manifest must bind to the exact push candidate SHA")
+
+    try:
+        real_s3_timeout_seconds = workflow_timeout_minutes(real_s3_text, real_s3_name) * 60
+        real_s3_seal_timeout_seconds = workflow_timeout_minutes(
+            real_s3_seal,
+            REAL_S3_SEAL_WORKFLOW_NAME,
+        ) * 60
+        real_s3_seal_wait_seconds = seal_wait_seconds(real_s3_seal)
+        if real_s3_seal_wait_seconds <= real_s3_timeout_seconds:
+            errors.append(
+                f"{REAL_S3_SEAL_WORKFLOW_NAME}: evidence wait must exceed the Real S3 gate timeout "
+                f"({real_s3_seal_wait_seconds}s <= {real_s3_timeout_seconds}s)"
+            )
+        if real_s3_seal_timeout_seconds <= real_s3_seal_wait_seconds:
+            errors.append(
+                f"{REAL_S3_SEAL_WORKFLOW_NAME}: job timeout must exceed its evidence wait "
+                f"({real_s3_seal_timeout_seconds}s <= {real_s3_seal_wait_seconds}s)"
+            )
+    except AssertionError as e:
+        errors.append(str(e))
 
     real_s3_contract = set(constants["EVIDENCE_EXTRA_CONTRACT_PATHS"].get(real_s3_name, ()))
     for selector in sorted(exact_test_selectors(texts.get(real_s3_name, ""))):
