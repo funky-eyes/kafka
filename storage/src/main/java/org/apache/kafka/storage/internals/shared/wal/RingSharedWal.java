@@ -65,23 +65,24 @@ public final class RingSharedWal implements SharedWal {
     private final AtomicLong durableBytes = new AtomicLong();
     private final AtomicLong durabilityBarrierNanos = new AtomicLong();
     private final AtomicLong maxGroupsPerDurabilityBatch = new AtomicLong();
-    private final AtomicLong singletonCoalesceWaitCount = new AtomicLong();
-    private final AtomicLong singletonCoalesceHitCount = new AtomicLong();
-    private final AtomicLong singletonCoalesceWaitNanos = new AtomicLong();
-    private final AtomicLong appendInterArrivalCount = new AtomicLong();
-    private final AtomicLong appendInterArrivalNanos = new AtomicLong();
-    private final AtomicLong appendInterArrivalLe100MicrosCount = new AtomicLong();
-    private final AtomicLong appendInterArrivalLe250MicrosCount = new AtomicLong();
-    private final AtomicLong appendInterArrivalLe500MicrosCount = new AtomicLong();
-    private final AtomicLong appendInterArrivalLe1000MicrosCount = new AtomicLong();
     private final Object lifecycleLock = new Object();
     private final Object ioLock = new Object();
     private final long writerShutdownTimeoutMs;
     private final long singletonCoalesceNanos;
     private final Thread writerThread;
 
+    private long singletonCoalesceWaitCount;
+    private long singletonCoalesceHitCount;
+    private long singletonCoalesceWaitNanos;
+    private long appendInterArrivalCount;
+    private long appendInterArrivalNanos;
+    private long appendInterArrivalLe100MicrosCount;
+    private long appendInterArrivalLe250MicrosCount;
+    private long appendInterArrivalLe500MicrosCount;
+    private long appendInterArrivalLe1000MicrosCount;
     private long previousObservedAppendEnqueueNanos = -1L;
 
+    private volatile CoalescingDiagnostics coalescingDiagnostics = CoalescingDiagnostics.EMPTY;
     private volatile boolean accepting = true;
     private volatile Throwable failure;
     private volatile IOException deferredCloseFailure;
@@ -346,21 +347,22 @@ public final class RingSharedWal implements SharedWal {
 
     @Override
     public WalDurabilityStats durabilityStats() {
+        CoalescingDiagnostics diagnostics = coalescingDiagnostics;
         return new WalDurabilityStats(
             durabilityBatchCount.get(),
             durableAppendGroupCount.get(),
             durableBytes.get(),
             durabilityBarrierNanos.get(),
             maxGroupsPerDurabilityBatch.get(),
-            singletonCoalesceWaitCount.get(),
-            singletonCoalesceHitCount.get(),
-            singletonCoalesceWaitNanos.get(),
-            appendInterArrivalCount.get(),
-            appendInterArrivalNanos.get(),
-            appendInterArrivalLe100MicrosCount.get(),
-            appendInterArrivalLe250MicrosCount.get(),
-            appendInterArrivalLe500MicrosCount.get(),
-            appendInterArrivalLe1000MicrosCount.get()
+            diagnostics.singletonCoalesceWaitCount(),
+            diagnostics.singletonCoalesceHitCount(),
+            diagnostics.singletonCoalesceWaitNanos(),
+            diagnostics.appendInterArrivalCount(),
+            diagnostics.appendInterArrivalNanos(),
+            diagnostics.appendInterArrivalLe100MicrosCount(),
+            diagnostics.appendInterArrivalLe250MicrosCount(),
+            diagnostics.appendInterArrivalLe500MicrosCount(),
+            diagnostics.appendInterArrivalLe1000MicrosCount()
         );
     }
 
@@ -472,15 +474,15 @@ public final class RingSharedWal implements SharedWal {
                     drained.add(first);
                     drainAvailableAppends(drained);
                     if (drained.size() == 1 && singletonCoalesceNanos > 0L && running.get()) {
-                        singletonCoalesceWaitCount.incrementAndGet();
+                        singletonCoalesceWaitCount++;
                         long coalesceStartedNanos = System.nanoTime();
                         PendingAppend next = pendingAppends.poll(singletonCoalesceNanos, TimeUnit.NANOSECONDS);
-                        singletonCoalesceWaitNanos.addAndGet(System.nanoTime() - coalesceStartedNanos);
+                        singletonCoalesceWaitNanos += System.nanoTime() - coalesceStartedNanos;
                         if (next != null) {
                             if (next.poison()) {
                                 pendingAppends.offer(next);
                             } else {
-                                singletonCoalesceHitCount.incrementAndGet();
+                                singletonCoalesceHitCount++;
                                 drained.add(next);
                                 drainAvailableAppends(drained);
                             }
@@ -525,19 +527,19 @@ public final class RingSharedWal implements SharedWal {
                 continue;
             }
             long interArrivalNanos = Math.max(0L, enqueuedNanos - previousEnqueuedNanos);
-            appendInterArrivalCount.incrementAndGet();
-            appendInterArrivalNanos.addAndGet(interArrivalNanos);
+            appendInterArrivalCount++;
+            appendInterArrivalNanos += interArrivalNanos;
             if (interArrivalNanos <= INTER_ARRIVAL_100_MICROS_NANOS) {
-                appendInterArrivalLe100MicrosCount.incrementAndGet();
+                appendInterArrivalLe100MicrosCount++;
             }
             if (interArrivalNanos <= INTER_ARRIVAL_250_MICROS_NANOS) {
-                appendInterArrivalLe250MicrosCount.incrementAndGet();
+                appendInterArrivalLe250MicrosCount++;
             }
             if (interArrivalNanos <= INTER_ARRIVAL_500_MICROS_NANOS) {
-                appendInterArrivalLe500MicrosCount.incrementAndGet();
+                appendInterArrivalLe500MicrosCount++;
             }
             if (interArrivalNanos <= INTER_ARRIVAL_1000_MICROS_NANOS) {
-                appendInterArrivalLe1000MicrosCount.incrementAndGet();
+                appendInterArrivalLe1000MicrosCount++;
             }
         }
     }
@@ -587,10 +589,25 @@ public final class RingSharedWal implements SharedWal {
             durableBytes.addAndGet(batchBytes);
             durabilityBarrierNanos.addAndGet(durabilityElapsedNanos);
             maxGroupsPerDurabilityBatch.accumulateAndGet(admitted.size(), Math::max);
+            publishCoalescingDiagnostics();
             for (PlannedGroup group : admitted) {
                 group.pending().future().complete(group.userResults());
             }
         }
+    }
+
+    private void publishCoalescingDiagnostics() {
+        coalescingDiagnostics = new CoalescingDiagnostics(
+            singletonCoalesceWaitCount,
+            singletonCoalesceHitCount,
+            singletonCoalesceWaitNanos,
+            appendInterArrivalCount,
+            appendInterArrivalNanos,
+            appendInterArrivalLe100MicrosCount,
+            appendInterArrivalLe250MicrosCount,
+            appendInterArrivalLe500MicrosCount,
+            appendInterArrivalLe1000MicrosCount
+        );
     }
 
     private PlannedGroup planGroup(PendingAppend pending, long headOffset, long tailOffset) {
@@ -894,6 +911,21 @@ public final class RingSharedWal implements SharedWal {
         @Override
         public void close() {
         }
+    }
+
+    private record CoalescingDiagnostics(
+        long singletonCoalesceWaitCount,
+        long singletonCoalesceHitCount,
+        long singletonCoalesceWaitNanos,
+        long appendInterArrivalCount,
+        long appendInterArrivalNanos,
+        long appendInterArrivalLe100MicrosCount,
+        long appendInterArrivalLe250MicrosCount,
+        long appendInterArrivalLe500MicrosCount,
+        long appendInterArrivalLe1000MicrosCount
+    ) {
+        private static final CoalescingDiagnostics EMPTY =
+            new CoalescingDiagnostics(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L);
     }
 
     private record PendingAppend(
