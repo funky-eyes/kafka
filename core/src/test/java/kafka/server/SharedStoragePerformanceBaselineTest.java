@@ -31,7 +31,12 @@ import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.test.KafkaClusterTestKit;
 import org.apache.kafka.common.test.TestKitNodes;
+import org.apache.kafka.server.metrics.KafkaMetricsGroup;
+import org.apache.kafka.server.metrics.KafkaYammerMetrics;
 import org.apache.kafka.test.TestUtils;
+
+import com.yammer.metrics.core.Gauge;
+import com.yammer.metrics.core.MetricName;
 
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
@@ -114,13 +119,22 @@ public class SharedStoragePerformanceBaselineTest {
         );
         System.out.printf(
             "SHARED_STORAGE_PERF_LIFECYCLE_CALIBRATION sharedProduce=%.2f classicProduce=%.2f " +
-                "sharedConsume=%.2f classicConsume=%.2f records=%d warmupRecords=%d%n",
+                "sharedConsume=%.2f classicConsume=%.2f records=%d warmupRecords=%d " +
+                "walBatches=%d walGroups=%d walGroupsPerBatch=%.3f walBarrierMs=%.3f " +
+                "walAvgBarrierMicros=%.3f walDurableBytes=%d walMaxGroupsObserved=%d%n",
             sharedCalibration.produceRecordsPerSecond(),
             classicCalibration.produceRecordsPerSecond(),
             sharedCalibration.consumeRecordsPerSecond(),
             classicCalibration.consumeRecordsPerSecond(),
             records,
-            warmupRecords
+            warmupRecords,
+            sharedCalibration.walDurability().durabilityBatchCount(),
+            sharedCalibration.walDurability().durableAppendGroupCount(),
+            sharedCalibration.walDurability().groupsPerBatch(),
+            sharedCalibration.walDurability().durabilityBarrierNanos() / 1_000_000.0d,
+            sharedCalibration.walDurability().averageBarrierMicros(),
+            sharedCalibration.walDurability().durableBytes(),
+            sharedCalibration.walDurability().maxGroupsPerDurabilityBatch()
         );
 
         List<Double> produceRatios = new ArrayList<>(repetitions);
@@ -146,7 +160,9 @@ public class SharedStoragePerformanceBaselineTest {
 
             System.out.printf(
                 "SHARED_STORAGE_PERF_SAMPLE repetition=%d order=%s classicProduce=%.2f sharedProduce=%.2f " +
-                    "produceRatio=%.4f classicConsume=%.2f sharedConsume=%.2f consumeRatio=%.4f records=%d%n",
+                    "produceRatio=%.4f classicConsume=%.2f sharedConsume=%.2f consumeRatio=%.4f records=%d " +
+                    "walBatches=%d walGroups=%d walGroupsPerBatch=%.3f walBarrierMs=%.3f " +
+                    "walAvgBarrierMicros=%.3f walDurableBytes=%d walMaxGroupsObserved=%d%n",
                 repetition + 1,
                 order,
                 classic.produceRecordsPerSecond(),
@@ -155,7 +171,14 @@ public class SharedStoragePerformanceBaselineTest {
                 classic.consumeRecordsPerSecond(),
                 shared.consumeRecordsPerSecond(),
                 consumeRatio,
-                records
+                records,
+                shared.walDurability().durabilityBatchCount(),
+                shared.walDurability().durableAppendGroupCount(),
+                shared.walDurability().groupsPerBatch(),
+                shared.walDurability().durabilityBarrierNanos() / 1_000_000.0d,
+                shared.walDurability().averageBarrierMicros(),
+                shared.walDurability().durableBytes(),
+                shared.walDurability().maxGroupsPerDurabilityBatch()
             );
         }
 
@@ -230,9 +253,20 @@ public class SharedStoragePerformanceBaselineTest {
                 waitForTopicReady(admin, List.of(topic));
             }
 
-            double produceRate = produce(bootstrapServers, topic, warmupRecords, records);
+            ProduceMeasurement produce = produce(
+                bootstrapServers,
+                topic,
+                warmupRecords,
+                records,
+                sharedStorage,
+                List.copyOf(cluster.brokers().keySet())
+            );
             double consumeRate = consume(bootstrapServers, topic, warmupRecords, records);
-            return new BenchmarkResult(produceRate, consumeRate);
+            return new BenchmarkResult(
+                produce.recordsPerSecond(),
+                consumeRate,
+                produce.walDurability()
+            );
         }
     }
 
@@ -257,11 +291,13 @@ public class SharedStoragePerformanceBaselineTest {
         }, 60_000L, () -> "Benchmark topics did not converge to RF3/ISR3: " + topics);
     }
 
-    private static double produce(
+    private static ProduceMeasurement produce(
         String bootstrapServers,
         String topic,
         int warmupRecords,
-        int records
+        int records,
+        boolean sharedStorage,
+        List<Integer> brokerIds
     ) throws Exception {
         Properties properties = new Properties();
         properties.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
@@ -282,11 +318,20 @@ public class SharedStoragePerformanceBaselineTest {
             producer.partitionsFor(topic);
             awaitSends(sendRecords(producer, topic, 0, warmupRecords, payload));
 
+            WalDurabilitySnapshot before = sharedStorage
+                ? walDurabilitySnapshot(brokerIds)
+                : WalDurabilitySnapshot.EMPTY;
             long started = System.nanoTime();
             awaitSends(sendRecords(producer, topic, warmupRecords, records, payload));
             elapsedNanos = System.nanoTime() - started;
+            WalDurabilitySnapshot after = sharedStorage
+                ? walDurabilitySnapshot(brokerIds)
+                : WalDurabilitySnapshot.EMPTY;
+            return new ProduceMeasurement(
+                recordsPerSecond(records, elapsedNanos),
+                after.deltaFrom(before)
+            );
         }
-        return recordsPerSecond(records, elapsedNanos);
     }
 
     private static List<Future<RecordMetadata>> sendRecords(
@@ -381,6 +426,45 @@ public class SharedStoragePerformanceBaselineTest {
         return ((long) warmupRecords - 1L - partition) / PARTITIONS + 1L;
     }
 
+    private static WalDurabilitySnapshot walDurabilitySnapshot(List<Integer> brokerIds) {
+        long durabilityBatchCount = 0L;
+        long durableAppendGroupCount = 0L;
+        long durableBytes = 0L;
+        long durabilityBarrierNanos = 0L;
+        long maxGroupsPerDurabilityBatch = 0L;
+        for (int brokerId : brokerIds) {
+            durabilityBatchCount += sharedStorageGauge("WalDurabilityBatchCount", brokerId);
+            durableAppendGroupCount += sharedStorageGauge("WalDurableAppendGroupCount", brokerId);
+            durableBytes += sharedStorageGauge("WalDurableBytes", brokerId);
+            durabilityBarrierNanos += sharedStorageGauge("WalDurabilityBarrierNanos", brokerId);
+            maxGroupsPerDurabilityBatch = Math.max(
+                maxGroupsPerDurabilityBatch,
+                sharedStorageGauge("WalMaxGroupsPerDurabilityBatch", brokerId)
+            );
+        }
+        return new WalDurabilitySnapshot(
+            durabilityBatchCount,
+            durableAppendGroupCount,
+            durableBytes,
+            durabilityBarrierNanos,
+            maxGroupsPerDurabilityBatch
+        );
+    }
+
+    private static long sharedStorageGauge(String name, int brokerId) {
+        MetricName metricName = new KafkaMetricsGroup("kafka.server", "SharedStorage").metricName(
+            name,
+            Map.of("brokerId", Integer.toString(brokerId))
+        );
+        Object metric = KafkaYammerMetrics.defaultRegistry().allMetrics().get(metricName);
+        if (!(metric instanceof Gauge<?> gauge) || !(gauge.value() instanceof Number value)) {
+            throw new IllegalStateException(
+                "Missing shared-storage metric " + name + " for broker " + brokerId
+            );
+        }
+        return value.longValue();
+    }
+
     private static double recordsPerSecond(int records, long elapsedNanos) {
         return records * 1_000_000_000.0d / Math.max(1L, elapsedNanos);
     }
@@ -427,6 +511,51 @@ public class SharedStoragePerformanceBaselineTest {
         return value == null || value.isBlank() ? defaultValue : value;
     }
 
-    private record BenchmarkResult(double produceRecordsPerSecond, double consumeRecordsPerSecond) {
+    private record ProduceMeasurement(
+        double recordsPerSecond,
+        WalDurabilitySnapshot walDurability
+    ) {
+    }
+
+    private record BenchmarkResult(
+        double produceRecordsPerSecond,
+        double consumeRecordsPerSecond,
+        WalDurabilitySnapshot walDurability
+    ) {
+    }
+
+    private record WalDurabilitySnapshot(
+        long durabilityBatchCount,
+        long durableAppendGroupCount,
+        long durableBytes,
+        long durabilityBarrierNanos,
+        long maxGroupsPerDurabilityBatch
+    ) {
+        private static final WalDurabilitySnapshot EMPTY =
+            new WalDurabilitySnapshot(0L, 0L, 0L, 0L, 0L);
+
+        WalDurabilitySnapshot deltaFrom(WalDurabilitySnapshot before) {
+            return new WalDurabilitySnapshot(
+                durabilityBatchCount - before.durabilityBatchCount,
+                durableAppendGroupCount - before.durableAppendGroupCount,
+                durableBytes - before.durableBytes,
+                durabilityBarrierNanos - before.durabilityBarrierNanos,
+                maxGroupsPerDurabilityBatch
+            );
+        }
+
+        double groupsPerBatch() {
+            if (durabilityBatchCount == 0L) {
+                return 0.0d;
+            }
+            return (double) durableAppendGroupCount / durabilityBatchCount;
+        }
+
+        double averageBarrierMicros() {
+            if (durabilityBatchCount == 0L) {
+                return 0.0d;
+            }
+            return durabilityBarrierNanos / (double) durabilityBatchCount / 1_000.0d;
+        }
     }
 }
