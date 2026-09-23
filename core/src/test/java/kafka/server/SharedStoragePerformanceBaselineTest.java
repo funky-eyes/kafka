@@ -89,6 +89,35 @@ public class SharedStoragePerformanceBaselineTest {
         String bucket = environment("SHARED_STORAGE_S3_BUCKET", "kafka-shared-storage-performance");
         String region = environment("SHARED_STORAGE_S3_REGION", "us-east-1");
 
+        // Each measured benchmark builds a fresh Kafka cluster. Warm both execution modes once before collecting
+        // samples so JVM/JIT and KafkaClusterTestKit lifecycle cold-start do not contaminate the first ratio.
+        BenchmarkResult sharedCalibration = benchmark(
+            true,
+            endpoint,
+            region,
+            bucket,
+            warmupRecords,
+            records
+        );
+        BenchmarkResult classicCalibration = benchmark(
+            false,
+            endpoint,
+            region,
+            bucket,
+            warmupRecords,
+            records
+        );
+        System.out.printf(
+            "SHARED_STORAGE_PERF_LIFECYCLE_CALIBRATION sharedProduce=%.2f classicProduce=%.2f " +
+                "sharedConsume=%.2f classicConsume=%.2f records=%d warmupRecords=%d%n",
+            sharedCalibration.produceRecordsPerSecond(),
+            classicCalibration.produceRecordsPerSecond(),
+            sharedCalibration.consumeRecordsPerSecond(),
+            classicCalibration.consumeRecordsPerSecond(),
+            records,
+            warmupRecords
+        );
+
         List<Double> produceRatios = new ArrayList<>(repetitions);
         List<Double> consumeRatios = new ArrayList<>(repetitions);
         for (int repetition = 0; repetition < repetitions; repetition++) {
