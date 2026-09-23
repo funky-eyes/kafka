@@ -66,6 +66,9 @@ public final class RingSharedWal implements SharedWal {
     private final AtomicLong durabilityBarrierNanos = new AtomicLong();
     private final AtomicLong durabilityDataForceNanos = new AtomicLong();
     private final AtomicLong durabilityCheckpointForceNanos = new AtomicLong();
+    private final AtomicLong maxDurabilityBarrierNanos = new AtomicLong();
+    private final AtomicLong maxDurabilityDataForceNanos = new AtomicLong();
+    private final AtomicLong maxDurabilityCheckpointForceNanos = new AtomicLong();
     private final AtomicLong maxGroupsPerDurabilityBatch = new AtomicLong();
     private final Object lifecycleLock = new Object();
     private final Object ioLock = new Object();
@@ -357,6 +360,9 @@ public final class RingSharedWal implements SharedWal {
             durabilityBarrierNanos.get(),
             durabilityDataForceNanos.get(),
             durabilityCheckpointForceNanos.get(),
+            maxDurabilityBarrierNanos.get(),
+            maxDurabilityDataForceNanos.get(),
+            maxDurabilityCheckpointForceNanos.get(),
             maxGroupsPerDurabilityBatch.get(),
             diagnostics.singletonCoalesceWaitCount(),
             diagnostics.singletonCoalesceHitCount(),
@@ -655,6 +661,9 @@ public final class RingSharedWal implements SharedWal {
         durabilityBarrierNanos.addAndGet(durabilityElapsedNanos);
         durabilityDataForceNanos.addAndGet(checkpoint.dataForceNanos());
         durabilityCheckpointForceNanos.addAndGet(checkpoint.checkpointForceNanos());
+        maxDurabilityBarrierNanos.accumulateAndGet(durabilityElapsedNanos, Math::max);
+        maxDurabilityDataForceNanos.accumulateAndGet(checkpoint.dataForceNanos(), Math::max);
+        maxDurabilityCheckpointForceNanos.accumulateAndGet(checkpoint.checkpointForceNanos(), Math::max);
         maxGroupsPerDurabilityBatch.accumulateAndGet(admitted.size(), Math::max);
         publishCoalescingDiagnostics();
         for (PlannedGroup group : admitted) {

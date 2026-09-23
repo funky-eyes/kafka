@@ -54,6 +54,10 @@ class SharedStorageMetricsTest {
         MetricName durabilityBarrierNanosName = metricName("WalDurabilityBarrierNanos", brokerId);
         MetricName dataForceNanosName = metricName("WalDurabilityDataForceNanos", brokerId);
         MetricName checkpointForceNanosName = metricName("WalDurabilityCheckpointForceNanos", brokerId);
+        MetricName maxBarrierNanosName = metricName("WalMaxDurabilityBarrierNanos", brokerId);
+        MetricName maxDataForceNanosName = metricName("WalMaxDurabilityDataForceNanos", brokerId);
+        MetricName maxCheckpointForceNanosName =
+            metricName("WalMaxDurabilityCheckpointForceNanos", brokerId);
         MetricName coalesceWaitCountName = metricName("WalSingletonCoalesceWaitCount", brokerId);
         MetricName coalesceHitCountName = metricName("WalSingletonCoalesceHitCount", brokerId);
         MetricName interArrivalCountName = metricName("WalAppendInterArrivalCount", brokerId);
@@ -69,6 +73,9 @@ class SharedStorageMetricsTest {
             Gauge<?> durabilityBarrierNanos = gauge(durabilityBarrierNanosName);
             Gauge<?> dataForceNanos = gauge(dataForceNanosName);
             Gauge<?> checkpointForceNanos = gauge(checkpointForceNanosName);
+            Gauge<?> maxBarrierNanos = gauge(maxBarrierNanosName);
+            Gauge<?> maxDataForceNanos = gauge(maxDataForceNanosName);
+            Gauge<?> maxCheckpointForceNanos = gauge(maxCheckpointForceNanosName);
             Gauge<?> coalesceWaitCount = gauge(coalesceWaitCountName);
             Gauge<?> coalesceHitCount = gauge(coalesceHitCountName);
             Gauge<?> interArrivalCount = gauge(interArrivalCountName);
@@ -82,6 +89,9 @@ class SharedStorageMetricsTest {
             assertEquals(0L, ((Number) durabilityBarrierNanos.value()).longValue());
             assertEquals(0L, ((Number) dataForceNanos.value()).longValue());
             assertEquals(0L, ((Number) checkpointForceNanos.value()).longValue());
+            assertEquals(0L, ((Number) maxBarrierNanos.value()).longValue());
+            assertEquals(0L, ((Number) maxDataForceNanos.value()).longValue());
+            assertEquals(0L, ((Number) maxCheckpointForceNanos.value()).longValue());
             assertEquals(0L, ((Number) coalesceWaitCount.value()).longValue());
             assertEquals(0L, ((Number) coalesceHitCount.value()).longValue());
             assertEquals(0L, ((Number) interArrivalCount.value()).longValue());
@@ -106,6 +116,11 @@ class SharedStorageMetricsTest {
         assertFalse(KafkaYammerMetrics.defaultRegistry().allMetrics().containsKey(durabilityBatchCountName));
         assertFalse(KafkaYammerMetrics.defaultRegistry().allMetrics().containsKey(durableAppendGroupCountName));
         assertFalse(KafkaYammerMetrics.defaultRegistry().allMetrics().containsKey(durabilityBarrierNanosName));
+        assertFalse(KafkaYammerMetrics.defaultRegistry().allMetrics().containsKey(dataForceNanosName));
+        assertFalse(KafkaYammerMetrics.defaultRegistry().allMetrics().containsKey(checkpointForceNanosName));
+        assertFalse(KafkaYammerMetrics.defaultRegistry().allMetrics().containsKey(maxBarrierNanosName));
+        assertFalse(KafkaYammerMetrics.defaultRegistry().allMetrics().containsKey(maxDataForceNanosName));
+        assertFalse(KafkaYammerMetrics.defaultRegistry().allMetrics().containsKey(maxCheckpointForceNanosName));
         assertFalse(KafkaYammerMetrics.defaultRegistry().allMetrics().containsKey(coalesceWaitCountName));
         assertFalse(KafkaYammerMetrics.defaultRegistry().allMetrics().containsKey(coalesceHitCountName));
         assertFalse(KafkaYammerMetrics.defaultRegistry().allMetrics().containsKey(interArrivalCountName));

@@ -117,7 +117,9 @@ public class SharedStoragePerformanceBaselineTest {
                 "sharedConsume=%.2f classicConsume=%.2f records=%d warmupRecords=%d " +
                 "walBatches=%d walGroups=%d walGroupsPerBatch=%.3f walBarrierMs=%.3f " +
                 "walAvgBarrierMicros=%.3f walDataForceMs=%.3f walCheckpointForceMs=%.3f " +
-                "walAvgDataForceMicros=%.3f walAvgCheckpointForceMicros=%.3f walDurableBytes=%d " +
+                "walAvgDataForceMicros=%.3f walAvgCheckpointForceMicros=%.3f " +
+                "walMaxBarrierMicrosSinceStart=%.3f walMaxDataForceMicrosSinceStart=%.3f " +
+                "walMaxCheckpointForceMicrosSinceStart=%.3f walDurableBytes=%d " +
                 "walBarrierShare=%.4f walMaxGroupsSinceStart=%d " +
                 "walCoalesceWaits=%d walCoalesceHits=%d walCoalesceHitRate=%.3f walCoalesceWaitMs=%.3f " +
                 "walInterArrivalSamples=%d walInterArrivalAvgMicros=%.3f walInterArrivalLe100=%.3f " +
@@ -137,6 +139,9 @@ public class SharedStoragePerformanceBaselineTest {
             sharedCalibration.walDurability().durabilityCheckpointForceNanos() / 1_000_000.0d,
             sharedCalibration.walDurability().averageDataForceMicros(),
             sharedCalibration.walDurability().averageCheckpointForceMicros(),
+            sharedCalibration.walDurability().maxDurabilityBarrierNanos() / 1_000.0d,
+            sharedCalibration.walDurability().maxDurabilityDataForceNanos() / 1_000.0d,
+            sharedCalibration.walDurability().maxDurabilityCheckpointForceNanos() / 1_000.0d,
             sharedCalibration.walDurability().durableBytes(),
             sharedCalibration.walDurability().barrierShareOf(sharedCalibration.produceElapsedNanos()),
             sharedCalibration.walDurability().maxGroupsPerDurabilityBatch(),
@@ -178,7 +183,9 @@ public class SharedStoragePerformanceBaselineTest {
                     "produceRatio=%.4f classicConsume=%.2f sharedConsume=%.2f consumeRatio=%.4f records=%d " +
                     "walBatches=%d walGroups=%d walGroupsPerBatch=%.3f walBarrierMs=%.3f " +
                     "walAvgBarrierMicros=%.3f walDataForceMs=%.3f walCheckpointForceMs=%.3f " +
-                    "walAvgDataForceMicros=%.3f walAvgCheckpointForceMicros=%.3f walDurableBytes=%d " +
+                    "walAvgDataForceMicros=%.3f walAvgCheckpointForceMicros=%.3f " +
+                    "walMaxBarrierMicrosSinceStart=%.3f walMaxDataForceMicrosSinceStart=%.3f " +
+                    "walMaxCheckpointForceMicrosSinceStart=%.3f walDurableBytes=%d " +
                     "walBarrierShare=%.4f walMaxGroupsSinceStart=%d " +
                     "walCoalesceWaits=%d walCoalesceHits=%d walCoalesceHitRate=%.3f walCoalesceWaitMs=%.3f " +
                     "walInterArrivalSamples=%d walInterArrivalAvgMicros=%.3f walInterArrivalLe100=%.3f " +
@@ -201,6 +208,9 @@ public class SharedStoragePerformanceBaselineTest {
                 shared.walDurability().durabilityCheckpointForceNanos() / 1_000_000.0d,
                 shared.walDurability().averageDataForceMicros(),
                 shared.walDurability().averageCheckpointForceMicros(),
+                shared.walDurability().maxDurabilityBarrierNanos() / 1_000.0d,
+                shared.walDurability().maxDurabilityDataForceNanos() / 1_000.0d,
+                shared.walDurability().maxDurabilityCheckpointForceNanos() / 1_000.0d,
                 shared.walDurability().durableBytes(),
                 shared.walDurability().barrierShareOf(shared.produceElapsedNanos()),
                 shared.walDurability().maxGroupsPerDurabilityBatch(),
@@ -555,6 +565,9 @@ public class SharedStoragePerformanceBaselineTest {
         long durabilityBarrierNanos = 0L;
         long durabilityDataForceNanos = 0L;
         long durabilityCheckpointForceNanos = 0L;
+        long maxDurabilityBarrierNanos = 0L;
+        long maxDurabilityDataForceNanos = 0L;
+        long maxDurabilityCheckpointForceNanos = 0L;
         long maxGroupsPerDurabilityBatch = 0L;
         long singletonCoalesceWaitCount = 0L;
         long singletonCoalesceHitCount = 0L;
@@ -574,6 +587,18 @@ public class SharedStoragePerformanceBaselineTest {
             durabilityCheckpointForceNanos += sharedStorageGauge(
                 "WalDurabilityCheckpointForceNanos",
                 brokerId
+            );
+            maxDurabilityBarrierNanos = Math.max(
+                maxDurabilityBarrierNanos,
+                sharedStorageGauge("WalMaxDurabilityBarrierNanos", brokerId)
+            );
+            maxDurabilityDataForceNanos = Math.max(
+                maxDurabilityDataForceNanos,
+                sharedStorageGauge("WalMaxDurabilityDataForceNanos", brokerId)
+            );
+            maxDurabilityCheckpointForceNanos = Math.max(
+                maxDurabilityCheckpointForceNanos,
+                sharedStorageGauge("WalMaxDurabilityCheckpointForceNanos", brokerId)
             );
             maxGroupsPerDurabilityBatch = Math.max(
                 maxGroupsPerDurabilityBatch,
@@ -608,6 +633,9 @@ public class SharedStoragePerformanceBaselineTest {
             durabilityBarrierNanos,
             durabilityDataForceNanos,
             durabilityCheckpointForceNanos,
+            maxDurabilityBarrierNanos,
+            maxDurabilityDataForceNanos,
+            maxDurabilityCheckpointForceNanos,
             maxGroupsPerDurabilityBatch,
             singletonCoalesceWaitCount,
             singletonCoalesceHitCount,
@@ -735,6 +763,9 @@ public class SharedStoragePerformanceBaselineTest {
         long durabilityBarrierNanos,
         long durabilityDataForceNanos,
         long durabilityCheckpointForceNanos,
+        long maxDurabilityBarrierNanos,
+        long maxDurabilityDataForceNanos,
+        long maxDurabilityCheckpointForceNanos,
         long maxGroupsPerDurabilityBatch,
         long singletonCoalesceWaitCount,
         long singletonCoalesceHitCount,
@@ -749,7 +780,8 @@ public class SharedStoragePerformanceBaselineTest {
         private static final WalDurabilitySnapshot EMPTY =
             new WalDurabilitySnapshot(
                 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L,
-                0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L
+                0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L,
+                0L, 0L, 0L
             );
 
         WalDurabilitySnapshot deltaFrom(WalDurabilitySnapshot before) {
@@ -760,6 +792,9 @@ public class SharedStoragePerformanceBaselineTest {
                 durabilityBarrierNanos - before.durabilityBarrierNanos,
                 durabilityDataForceNanos - before.durabilityDataForceNanos,
                 durabilityCheckpointForceNanos - before.durabilityCheckpointForceNanos,
+                maxDurabilityBarrierNanos,
+                maxDurabilityDataForceNanos,
+                maxDurabilityCheckpointForceNanos,
                 maxGroupsPerDurabilityBatch,
                 singletonCoalesceWaitCount - before.singletonCoalesceWaitCount,
                 singletonCoalesceHitCount - before.singletonCoalesceHitCount,

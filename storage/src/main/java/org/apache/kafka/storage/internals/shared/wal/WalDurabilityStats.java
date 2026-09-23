@@ -24,6 +24,9 @@ public record WalDurabilityStats(
     long durabilityBarrierNanos,
     long durabilityDataForceNanos,
     long durabilityCheckpointForceNanos,
+    long maxDurabilityBarrierNanos,
+    long maxDurabilityDataForceNanos,
+    long maxDurabilityCheckpointForceNanos,
     long maxGroupsPerDurabilityBatch,
     long singletonCoalesceWaitCount,
     long singletonCoalesceHitCount,
@@ -51,6 +54,9 @@ public record WalDurabilityStats(
             durabilityBarrierNanos,
             0L,
             0L,
+            0L,
+            0L,
+            0L,
             maxGroupsPerDurabilityBatch,
             0L,
             0L,
@@ -71,7 +77,22 @@ public record WalDurabilityStats(
         requireNonNegative("durabilityBarrierNanos", durabilityBarrierNanos);
         requireNonNegative("durabilityDataForceNanos", durabilityDataForceNanos);
         requireNonNegative("durabilityCheckpointForceNanos", durabilityCheckpointForceNanos);
+        requireNonNegative("maxDurabilityBarrierNanos", maxDurabilityBarrierNanos);
+        requireNonNegative("maxDurabilityDataForceNanos", maxDurabilityDataForceNanos);
+        requireNonNegative("maxDurabilityCheckpointForceNanos", maxDurabilityCheckpointForceNanos);
         requireNonNegative("maxGroupsPerDurabilityBatch", maxGroupsPerDurabilityBatch);
+        requireAtMost(
+            "maxDurabilityDataForceNanos",
+            maxDurabilityDataForceNanos,
+            "maxDurabilityBarrierNanos",
+            maxDurabilityBarrierNanos
+        );
+        requireAtMost(
+            "maxDurabilityCheckpointForceNanos",
+            maxDurabilityCheckpointForceNanos,
+            "maxDurabilityBarrierNanos",
+            maxDurabilityBarrierNanos
+        );
         requireNonNegative("singletonCoalesceWaitCount", singletonCoalesceWaitCount);
         requireNonNegative("singletonCoalesceHitCount", singletonCoalesceHitCount);
         requireNonNegative("singletonCoalesceWaitNanos", singletonCoalesceWaitNanos);
