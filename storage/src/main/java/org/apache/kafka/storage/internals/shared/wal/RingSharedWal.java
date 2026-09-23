@@ -44,7 +44,7 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public final class RingSharedWal implements SharedWal {
     private static final int MAX_DRAINED_APPENDS = 1024;
-    private static final long DEFAULT_SINGLETON_COALESCE_NANOS = TimeUnit.MICROSECONDS.toNanos(100L);
+    private static final long DEFAULT_SINGLETON_COALESCE_NANOS = 0L;
     private static final long INTER_ARRIVAL_100_MICROS_NANOS = TimeUnit.MICROSECONDS.toNanos(100L);
     private static final long INTER_ARRIVAL_250_MICROS_NANOS = TimeUnit.MICROSECONDS.toNanos(250L);
     private static final long INTER_ARRIVAL_500_MICROS_NANOS = TimeUnit.MICROSECONDS.toNanos(500L);
