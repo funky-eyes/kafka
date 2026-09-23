@@ -547,68 +547,111 @@ public final class RingSharedWal implements SharedWal {
     private void writeDrainedGroups(List<PendingAppend> groups) throws IOException {
         synchronized (ioLock) {
             RingWalSuperblock.State durable = file.state();
-            long plannedTail = durable.tailOffset();
             List<PlannedGroup> admitted = new ArrayList<>(groups.size());
+            long plannedTail = durable.tailOffset();
             int nextGroupIndex = 0;
-            WalCapacityExceededException capacityFailure = null;
 
             while (true) {
                 int firstNewPlan = admitted.size();
-                for (; nextGroupIndex < groups.size(); nextGroupIndex++) {
-                    PendingAppend group = groups.get(nextGroupIndex);
-                    try {
-                        PlannedGroup plan = planGroup(group, durable.headOffset(), plannedTail);
-                        admitted.add(plan);
-                        plannedTail = plan.nextTailOffset();
-                    } catch (WalCapacityExceededException e) {
-                        capacityFailure = e;
-                        break;
-                    }
-                }
+                AdmissionResult admission = admitPendingGroups(
+                    groups,
+                    nextGroupIndex,
+                    admitted,
+                    durable.headOffset(),
+                    plannedTail
+                );
+                nextGroupIndex = admission.nextGroupIndex();
+                plannedTail = admission.plannedTail();
 
-                if (capacityFailure != null) {
-                    for (int i = nextGroupIndex; i < groups.size(); i++) {
-                        groups.get(i).future().completeExceptionally(capacityFailure);
-                    }
+                if (admission.capacityFailure() != null) {
+                    failGroupsFrom(groups, nextGroupIndex, admission.capacityFailure());
                 }
+                writeNewlyAdmittedGroups(admitted, firstNewPlan);
 
-                for (int i = firstNewPlan; i < admitted.size(); i++) {
-                    PlannedGroup group = admitted.get(i);
-                    for (PlannedRecord record : group.records()) {
-                        writePadding(record.allocation());
-                        writeEncoded(record.allocation().walOffset(), record.encoded());
-                    }
-                }
-
-                if (capacityFailure != null || groups.size() >= MAX_DRAINED_APPENDS) {
+                if (admission.capacityFailure() != null || !lateDrainAvailable(groups)) {
                     break;
                 }
-
-                int previousGroupCount = groups.size();
-                drainAvailableAppends(groups);
-                if (groups.size() == previousGroupCount) {
-                    break;
-                }
-                recordAppendInterArrivals(groups.subList(previousGroupCount, groups.size()));
             }
 
             if (admitted.isEmpty()) {
                 return;
             }
+            forceAndCompleteDurabilityBatch(durable, plannedTail, admitted);
+        }
+    }
 
-            long durabilityStartedNanos = System.nanoTime();
-            file.forceAndCheckpoint(durable.headOffset(), plannedTail);
-            long durabilityElapsedNanos = System.nanoTime() - durabilityStartedNanos;
-            long batchBytes = plannedTail - durable.tailOffset();
-            durabilityBatchCount.incrementAndGet();
-            durableAppendGroupCount.addAndGet(admitted.size());
-            durableBytes.addAndGet(batchBytes);
-            durabilityBarrierNanos.addAndGet(durabilityElapsedNanos);
-            maxGroupsPerDurabilityBatch.accumulateAndGet(admitted.size(), Math::max);
-            publishCoalescingDiagnostics();
-            for (PlannedGroup group : admitted) {
-                group.pending().future().complete(group.userResults());
+    private AdmissionResult admitPendingGroups(
+        List<PendingAppend> groups,
+        int firstGroupIndex,
+        List<PlannedGroup> admitted,
+        long headOffset,
+        long plannedTail
+    ) {
+        long nextTail = plannedTail;
+        int groupIndex = firstGroupIndex;
+        for (; groupIndex < groups.size(); groupIndex++) {
+            PendingAppend group = groups.get(groupIndex);
+            try {
+                PlannedGroup plan = planGroup(group, headOffset, nextTail);
+                admitted.add(plan);
+                nextTail = plan.nextTailOffset();
+            } catch (WalCapacityExceededException e) {
+                return new AdmissionResult(groupIndex, nextTail, e);
             }
+        }
+        return new AdmissionResult(groupIndex, nextTail, null);
+    }
+
+    private void failGroupsFrom(
+        List<PendingAppend> groups,
+        int firstRejected,
+        WalCapacityExceededException capacityFailure
+    ) {
+        for (int i = firstRejected; i < groups.size(); i++) {
+            groups.get(i).future().completeExceptionally(capacityFailure);
+        }
+    }
+
+    private void writeNewlyAdmittedGroups(List<PlannedGroup> admitted, int firstNewPlan) throws IOException {
+        for (int i = firstNewPlan; i < admitted.size(); i++) {
+            PlannedGroup group = admitted.get(i);
+            for (PlannedRecord record : group.records()) {
+                writePadding(record.allocation());
+                writeEncoded(record.allocation().walOffset(), record.encoded());
+            }
+        }
+    }
+
+    private boolean lateDrainAvailable(List<PendingAppend> groups) {
+        if (groups.size() >= MAX_DRAINED_APPENDS) {
+            return false;
+        }
+        int previousGroupCount = groups.size();
+        drainAvailableAppends(groups);
+        if (groups.size() == previousGroupCount) {
+            return false;
+        }
+        recordAppendInterArrivals(groups.subList(previousGroupCount, groups.size()));
+        return true;
+    }
+
+    private void forceAndCompleteDurabilityBatch(
+        RingWalSuperblock.State durable,
+        long plannedTail,
+        List<PlannedGroup> admitted
+    ) throws IOException {
+        long durabilityStartedNanos = System.nanoTime();
+        file.forceAndCheckpoint(durable.headOffset(), plannedTail);
+        long durabilityElapsedNanos = System.nanoTime() - durabilityStartedNanos;
+        long batchBytes = plannedTail - durable.tailOffset();
+        durabilityBatchCount.incrementAndGet();
+        durableAppendGroupCount.addAndGet(admitted.size());
+        durableBytes.addAndGet(batchBytes);
+        durabilityBarrierNanos.addAndGet(durabilityElapsedNanos);
+        maxGroupsPerDurabilityBatch.accumulateAndGet(admitted.size(), Math::max);
+        publishCoalescingDiagnostics();
+        for (PlannedGroup group : admitted) {
+            group.pending().future().complete(group.userResults());
         }
     }
 
@@ -927,6 +970,13 @@ public final class RingSharedWal implements SharedWal {
         @Override
         public void close() {
         }
+    }
+
+    private record AdmissionResult(
+        int nextGroupIndex,
+        long plannedTail,
+        WalCapacityExceededException capacityFailure
+    ) {
     }
 
     private record CoalescingDiagnostics(
