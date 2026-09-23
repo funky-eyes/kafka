@@ -44,6 +44,7 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public final class RingSharedWal implements SharedWal {
     private static final int MAX_DRAINED_APPENDS = 1024;
+    private static final long DEFAULT_SINGLETON_COALESCE_NANOS = TimeUnit.MICROSECONDS.toNanos(100L);
     private static final int ZERO_CHUNK_BYTES = 64 * 1024;
     private static final long DEFAULT_WRITER_SHUTDOWN_TIMEOUT_MS = TimeUnit.SECONDS.toMillis(30);
     private static final ByteBuffer ZERO_CHUNK = ByteBuffer.allocate(ZERO_CHUNK_BYTES).asReadOnlyBuffer();
@@ -63,6 +64,7 @@ public final class RingSharedWal implements SharedWal {
     private final Object lifecycleLock = new Object();
     private final Object ioLock = new Object();
     private final long writerShutdownTimeoutMs;
+    private final long singletonCoalesceNanos;
     private final Thread writerThread;
 
     private volatile boolean accepting = true;
@@ -70,11 +72,23 @@ public final class RingSharedWal implements SharedWal {
     private volatile IOException deferredCloseFailure;
 
     public RingSharedWal(Path path, long totalCapacityBytes) throws IOException {
-        this(path, totalCapacityBytes, new FileChannelWalIoBackend(), DEFAULT_WRITER_SHUTDOWN_TIMEOUT_MS);
+        this(
+            path,
+            totalCapacityBytes,
+            new FileChannelWalIoBackend(),
+            DEFAULT_WRITER_SHUTDOWN_TIMEOUT_MS,
+            DEFAULT_SINGLETON_COALESCE_NANOS
+        );
     }
 
     RingSharedWal(Path path, long totalCapacityBytes, WalIoBackend ioBackend) throws IOException {
-        this(path, totalCapacityBytes, ioBackend, DEFAULT_WRITER_SHUTDOWN_TIMEOUT_MS);
+        this(
+            path,
+            totalCapacityBytes,
+            ioBackend,
+            DEFAULT_WRITER_SHUTDOWN_TIMEOUT_MS,
+            DEFAULT_SINGLETON_COALESCE_NANOS
+        );
     }
 
     RingSharedWal(
@@ -83,12 +97,26 @@ public final class RingSharedWal implements SharedWal {
         WalIoBackend ioBackend,
         long writerShutdownTimeoutMs
     ) throws IOException {
+        this(path, totalCapacityBytes, ioBackend, writerShutdownTimeoutMs, DEFAULT_SINGLETON_COALESCE_NANOS);
+    }
+
+    RingSharedWal(
+        Path path,
+        long totalCapacityBytes,
+        WalIoBackend ioBackend,
+        long writerShutdownTimeoutMs,
+        long singletonCoalesceNanos
+    ) throws IOException {
         Objects.requireNonNull(path, "path");
         Objects.requireNonNull(ioBackend, "ioBackend");
         if (writerShutdownTimeoutMs <= 0) {
             throw new IllegalArgumentException("writerShutdownTimeoutMs must be positive");
         }
+        if (singletonCoalesceNanos < 0L) {
+            throw new IllegalArgumentException("singletonCoalesceNanos must be non-negative");
+        }
         this.writerShutdownTimeoutMs = writerShutdownTimeoutMs;
+        this.singletonCoalesceNanos = singletonCoalesceNanos;
         this.file = new RingWalFile(path, totalCapacityBytes, ioBackend);
         this.layout = file.layout();
 
@@ -412,16 +440,17 @@ public final class RingSharedWal implements SharedWal {
                         continue;
                     }
                     drained.add(first);
-                    while (drained.size() < MAX_DRAINED_APPENDS) {
-                        PendingAppend next = pendingAppends.poll();
-                        if (next == null) {
-                            break;
+                    drainAvailableAppends(drained);
+                    if (drained.size() == 1 && singletonCoalesceNanos > 0L && running.get()) {
+                        PendingAppend next = pendingAppends.poll(singletonCoalesceNanos, TimeUnit.NANOSECONDS);
+                        if (next != null) {
+                            if (next.poison()) {
+                                pendingAppends.offer(next);
+                            } else {
+                                drained.add(next);
+                                drainAvailableAppends(drained);
+                            }
                         }
-                        if (next.poison()) {
-                            pendingAppends.offer(next);
-                            break;
-                        }
-                        drained.add(next);
                     }
                     writeDrainedGroups(drained);
                 } catch (InterruptedException e) {
@@ -435,6 +464,20 @@ public final class RingSharedWal implements SharedWal {
             }
         } finally {
             closeResourcesAfterWriterExit();
+        }
+    }
+
+    private void drainAvailableAppends(List<PendingAppend> drained) {
+        while (drained.size() < MAX_DRAINED_APPENDS) {
+            PendingAppend next = pendingAppends.poll();
+            if (next == null) {
+                return;
+            }
+            if (next.poison()) {
+                pendingAppends.offer(next);
+                return;
+            }
+            drained.add(next);
         }
     }
 
