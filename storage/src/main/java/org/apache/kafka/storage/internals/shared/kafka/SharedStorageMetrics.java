@@ -42,6 +42,11 @@ public final class SharedStorageMetrics implements AutoCloseable {
         "WalUsedBytes",
         "WalCapacityBytes",
         "WalUtilizationPercent",
+        "WalDurabilityBatchCount",
+        "WalDurableAppendGroupCount",
+        "WalDurableBytes",
+        "WalDurabilityBarrierNanos",
+        "WalMaxGroupsPerDurabilityBatch",
         "PendingRemoteCheckpoints",
         "RemoteControlPlaneReady",
         "MetadataBootstrapFailureCount",
@@ -67,6 +72,31 @@ public final class SharedStorageMetrics implements AutoCloseable {
         metricsGroup.newGauge("WalUsedBytes", engine::walUsedBytes, tags);
         metricsGroup.newGauge("WalCapacityBytes", engine::walCapacityBytes, tags);
         metricsGroup.newGauge("WalUtilizationPercent", this::walUtilizationPercent, tags);
+        metricsGroup.newGauge(
+            "WalDurabilityBatchCount",
+            () -> engine.walDurabilityStats().durabilityBatchCount(),
+            tags
+        );
+        metricsGroup.newGauge(
+            "WalDurableAppendGroupCount",
+            () -> engine.walDurabilityStats().durableAppendGroupCount(),
+            tags
+        );
+        metricsGroup.newGauge(
+            "WalDurableBytes",
+            () -> engine.walDurabilityStats().durableBytes(),
+            tags
+        );
+        metricsGroup.newGauge(
+            "WalDurabilityBarrierNanos",
+            () -> engine.walDurabilityStats().durabilityBarrierNanos(),
+            tags
+        );
+        metricsGroup.newGauge(
+            "WalMaxGroupsPerDurabilityBatch",
+            () -> engine.walDurabilityStats().maxGroupsPerDurabilityBatch(),
+            tags
+        );
         metricsGroup.newGauge("PendingRemoteCheckpoints", engine::pendingRemoteCheckpointCount, tags);
         metricsGroup.newGauge("RemoteControlPlaneReady", () -> remoteControlPlaneReady.get() ? 1 : 0, tags);
         metricsGroup.newGauge("MetadataBootstrapFailureCount", metadataBootstrapFailureCount::get, tags);

@@ -31,6 +31,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RingSharedWalTest {
     private static final long DATA_CAPACITY = 256L;
@@ -38,6 +39,32 @@ class RingSharedWalTest {
 
     @TempDir
     Path tempDir;
+
+    @Test
+    void reportsSuccessfulDurabilityBatchStats() throws Exception {
+        Path path = tempDir.resolve("durability-stats.wal");
+        long totalCapacity = RingWalLayout.DATA_START + 4096L;
+
+        try (RingSharedWal wal = new RingSharedWal(path, totalCapacity)) {
+            assertEquals(WalDurabilityStats.EMPTY, wal.durabilityStats());
+
+            wal.appendBatch(List.of(dataRecord(0L, 32), dataRecord(1L, 32))).join();
+            WalDurabilityStats first = wal.durabilityStats();
+            assertEquals(1L, first.durabilityBatchCount());
+            assertEquals(1L, first.durableAppendGroupCount());
+            assertEquals(wal.usedBytes(), first.durableBytes());
+            assertTrue(first.durabilityBarrierNanos() >= 0L);
+            assertEquals(1L, first.maxGroupsPerDurabilityBatch());
+
+            wal.appendBatch(List.of(dataRecord(2L, 32))).join();
+            WalDurabilityStats second = wal.durabilityStats();
+            assertEquals(2L, second.durabilityBatchCount());
+            assertEquals(2L, second.durableAppendGroupCount());
+            assertEquals(wal.usedBytes(), second.durableBytes());
+            assertTrue(second.durabilityBarrierNanos() >= first.durabilityBarrierNanos());
+            assertEquals(1L, second.maxGroupsPerDurabilityBatch());
+        }
+    }
 
     @Test
     void replaysAcrossWrapAndClearsStalePhysicalPadding() throws Exception {

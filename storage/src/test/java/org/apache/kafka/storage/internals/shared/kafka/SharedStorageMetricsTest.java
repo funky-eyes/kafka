@@ -49,6 +49,9 @@ class SharedStorageMetricsTest {
         int brokerId = 17;
         MetricName usedBytesName = metricName("WalUsedBytes", brokerId);
         MetricName capacityName = metricName("WalCapacityBytes", brokerId);
+        MetricName durabilityBatchCountName = metricName("WalDurabilityBatchCount", brokerId);
+        MetricName durableAppendGroupCountName = metricName("WalDurableAppendGroupCount", brokerId);
+        MetricName durabilityBarrierNanosName = metricName("WalDurabilityBarrierNanos", brokerId);
         MetricName readyName = metricName("RemoteControlPlaneReady", brokerId);
         MetricName bootstrapFailuresName = metricName("MetadataBootstrapFailureCount", brokerId);
 
@@ -56,11 +59,17 @@ class SharedStorageMetricsTest {
              SharedStorageMetrics metrics = new SharedStorageMetrics(engine, brokerId)) {
             Gauge<?> usedBytes = gauge(usedBytesName);
             Gauge<?> capacity = gauge(capacityName);
+            Gauge<?> durabilityBatchCount = gauge(durabilityBatchCountName);
+            Gauge<?> durableAppendGroupCount = gauge(durableAppendGroupCountName);
+            Gauge<?> durabilityBarrierNanos = gauge(durabilityBarrierNanosName);
             Gauge<?> ready = gauge(readyName);
             Gauge<?> bootstrapFailures = gauge(bootstrapFailuresName);
 
             assertEquals(0L, ((Number) usedBytes.value()).longValue());
             assertEquals(engine.walCapacityBytes(), ((Number) capacity.value()).longValue());
+            assertEquals(0L, ((Number) durabilityBatchCount.value()).longValue());
+            assertEquals(0L, ((Number) durableAppendGroupCount.value()).longValue());
+            assertEquals(0L, ((Number) durabilityBarrierNanos.value()).longValue());
             assertEquals(0, ((Number) ready.value()).intValue());
             assertEquals(0L, ((Number) bootstrapFailures.value()).longValue());
 
@@ -79,6 +88,9 @@ class SharedStorageMetricsTest {
 
         assertFalse(KafkaYammerMetrics.defaultRegistry().allMetrics().containsKey(usedBytesName));
         assertFalse(KafkaYammerMetrics.defaultRegistry().allMetrics().containsKey(capacityName));
+        assertFalse(KafkaYammerMetrics.defaultRegistry().allMetrics().containsKey(durabilityBatchCountName));
+        assertFalse(KafkaYammerMetrics.defaultRegistry().allMetrics().containsKey(durableAppendGroupCountName));
+        assertFalse(KafkaYammerMetrics.defaultRegistry().allMetrics().containsKey(durabilityBarrierNanosName));
         assertFalse(KafkaYammerMetrics.defaultRegistry().allMetrics().containsKey(readyName));
         assertFalse(KafkaYammerMetrics.defaultRegistry().allMetrics().containsKey(bootstrapFailuresName));
     }

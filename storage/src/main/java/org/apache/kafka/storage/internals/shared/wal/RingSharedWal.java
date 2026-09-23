@@ -55,6 +55,11 @@ public final class RingSharedWal implements SharedWal {
     private final AtomicBoolean closed = new AtomicBoolean(false);
     private final AtomicBoolean ioResourcesClosed = new AtomicBoolean(false);
     private final AtomicLong nextGroupId;
+    private final AtomicLong durabilityBatchCount = new AtomicLong();
+    private final AtomicLong durableAppendGroupCount = new AtomicLong();
+    private final AtomicLong durableBytes = new AtomicLong();
+    private final AtomicLong durabilityBarrierNanos = new AtomicLong();
+    private final AtomicLong maxGroupsPerDurabilityBatch = new AtomicLong();
     private final Object lifecycleLock = new Object();
     private final Object ioLock = new Object();
     private final long writerShutdownTimeoutMs;
@@ -291,6 +296,17 @@ public final class RingSharedWal implements SharedWal {
     }
 
     @Override
+    public WalDurabilityStats durabilityStats() {
+        return new WalDurabilityStats(
+            durabilityBatchCount.get(),
+            durableAppendGroupCount.get(),
+            durableBytes.get(),
+            durabilityBarrierNanos.get(),
+            maxGroupsPerDurabilityBatch.get()
+        );
+    }
+
+    @Override
     public void close() throws IOException {
         if (!closed.compareAndSet(false, true)) {
             return;
@@ -458,7 +474,15 @@ public final class RingSharedWal implements SharedWal {
                     writeEncoded(record.allocation().walOffset(), record.encoded());
                 }
             }
+            long durabilityStartedNanos = System.nanoTime();
             file.forceAndCheckpoint(durable.headOffset(), plannedTail);
+            long durabilityElapsedNanos = System.nanoTime() - durabilityStartedNanos;
+            long batchBytes = plannedTail - durable.tailOffset();
+            durabilityBatchCount.incrementAndGet();
+            durableAppendGroupCount.addAndGet(admitted.size());
+            durableBytes.addAndGet(batchBytes);
+            durabilityBarrierNanos.addAndGet(durabilityElapsedNanos);
+            maxGroupsPerDurabilityBatch.accumulateAndGet(admitted.size(), Math::max);
             for (PlannedGroup group : admitted) {
                 group.pending().future().complete(group.userResults());
             }

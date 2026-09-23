@@ -91,6 +91,16 @@ public interface SharedWal extends AutoCloseable {
 
     long capacityBytes();
 
+    /**
+     * Returns a point-in-time snapshot of WAL durability batching diagnostics.
+     *
+     * <p>The default is empty so portable or legacy WAL implementations do not need to expose backend-specific
+     * batching details. Implementations must not mutate durability behavior merely to collect these counters.</p>
+     */
+    default WalDurabilityStats durabilityStats() {
+        return WalDurabilityStats.EMPTY;
+    }
+
     @Override
     void close() throws IOException;
 }
