@@ -22,17 +22,69 @@ public record WalDurabilityStats(
     long durableAppendGroupCount,
     long durableBytes,
     long durabilityBarrierNanos,
-    long maxGroupsPerDurabilityBatch
+    long maxGroupsPerDurabilityBatch,
+    long singletonCoalesceWaitCount,
+    long singletonCoalesceHitCount,
+    long singletonCoalesceWaitNanos,
+    long appendInterArrivalCount,
+    long appendInterArrivalNanos,
+    long appendInterArrivalLe100MicrosCount,
+    long appendInterArrivalLe250MicrosCount,
+    long appendInterArrivalLe500MicrosCount,
+    long appendInterArrivalLe1000MicrosCount
 ) {
     public static final WalDurabilityStats EMPTY = new WalDurabilityStats(0L, 0L, 0L, 0L, 0L);
+
+    public WalDurabilityStats(
+        long durabilityBatchCount,
+        long durableAppendGroupCount,
+        long durableBytes,
+        long durabilityBarrierNanos,
+        long maxGroupsPerDurabilityBatch
+    ) {
+        this(
+            durabilityBatchCount,
+            durableAppendGroupCount,
+            durableBytes,
+            durabilityBarrierNanos,
+            maxGroupsPerDurabilityBatch,
+            0L,
+            0L,
+            0L,
+            0L,
+            0L,
+            0L,
+            0L,
+            0L,
+            0L
+        );
+    }
 
     public WalDurabilityStats {
         if (durabilityBatchCount < 0L ||
             durableAppendGroupCount < 0L ||
             durableBytes < 0L ||
             durabilityBarrierNanos < 0L ||
-            maxGroupsPerDurabilityBatch < 0L) {
+            maxGroupsPerDurabilityBatch < 0L ||
+            singletonCoalesceWaitCount < 0L ||
+            singletonCoalesceHitCount < 0L ||
+            singletonCoalesceWaitNanos < 0L ||
+            appendInterArrivalCount < 0L ||
+            appendInterArrivalNanos < 0L ||
+            appendInterArrivalLe100MicrosCount < 0L ||
+            appendInterArrivalLe250MicrosCount < 0L ||
+            appendInterArrivalLe500MicrosCount < 0L ||
+            appendInterArrivalLe1000MicrosCount < 0L) {
             throw new IllegalArgumentException("WAL durability stats must be non-negative");
+        }
+        if (singletonCoalesceHitCount > singletonCoalesceWaitCount) {
+            throw new IllegalArgumentException("WAL coalescing hits cannot exceed wait attempts");
+        }
+        if (appendInterArrivalLe100MicrosCount > appendInterArrivalLe250MicrosCount ||
+            appendInterArrivalLe250MicrosCount > appendInterArrivalLe500MicrosCount ||
+            appendInterArrivalLe500MicrosCount > appendInterArrivalLe1000MicrosCount ||
+            appendInterArrivalLe1000MicrosCount > appendInterArrivalCount) {
+            throw new IllegalArgumentException("WAL append inter-arrival buckets must be cumulative");
         }
     }
 }

@@ -121,7 +121,10 @@ public class SharedStoragePerformanceBaselineTest {
             "SHARED_STORAGE_PERF_LIFECYCLE_CALIBRATION sharedProduce=%.2f classicProduce=%.2f " +
                 "sharedConsume=%.2f classicConsume=%.2f records=%d warmupRecords=%d " +
                 "walBatches=%d walGroups=%d walGroupsPerBatch=%.3f walBarrierMs=%.3f " +
-                "walAvgBarrierMicros=%.3f walDurableBytes=%d walBarrierShare=%.4f walMaxGroupsSinceStart=%d%n",
+                "walAvgBarrierMicros=%.3f walDurableBytes=%d walBarrierShare=%.4f walMaxGroupsSinceStart=%d " +
+                "walCoalesceWaits=%d walCoalesceHits=%d walCoalesceHitRate=%.3f walCoalesceWaitMs=%.3f " +
+                "walInterArrivalSamples=%d walInterArrivalAvgMicros=%.3f walInterArrivalLe100=%.3f " +
+                "walInterArrivalLe250=%.3f walInterArrivalLe500=%.3f walInterArrivalLe1000=%.3f%n",
             sharedCalibration.produceRecordsPerSecond(),
             classicCalibration.produceRecordsPerSecond(),
             sharedCalibration.consumeRecordsPerSecond(),
@@ -135,7 +138,17 @@ public class SharedStoragePerformanceBaselineTest {
             sharedCalibration.walDurability().averageBarrierMicros(),
             sharedCalibration.walDurability().durableBytes(),
             sharedCalibration.walDurability().barrierShareOf(sharedCalibration.produceElapsedNanos()),
-            sharedCalibration.walDurability().maxGroupsPerDurabilityBatch()
+            sharedCalibration.walDurability().maxGroupsPerDurabilityBatch(),
+            sharedCalibration.walDurability().singletonCoalesceWaitCount(),
+            sharedCalibration.walDurability().singletonCoalesceHitCount(),
+            sharedCalibration.walDurability().coalesceHitRate(),
+            sharedCalibration.walDurability().singletonCoalesceWaitNanos() / 1_000_000.0d,
+            sharedCalibration.walDurability().appendInterArrivalCount(),
+            sharedCalibration.walDurability().averageInterArrivalMicros(),
+            sharedCalibration.walDurability().interArrivalLe100Ratio(),
+            sharedCalibration.walDurability().interArrivalLe250Ratio(),
+            sharedCalibration.walDurability().interArrivalLe500Ratio(),
+            sharedCalibration.walDurability().interArrivalLe1000Ratio()
         );
 
         List<Double> produceRatios = new ArrayList<>(repetitions);
@@ -163,7 +176,10 @@ public class SharedStoragePerformanceBaselineTest {
                 "SHARED_STORAGE_PERF_SAMPLE repetition=%d order=%s classicProduce=%.2f sharedProduce=%.2f " +
                     "produceRatio=%.4f classicConsume=%.2f sharedConsume=%.2f consumeRatio=%.4f records=%d " +
                     "walBatches=%d walGroups=%d walGroupsPerBatch=%.3f walBarrierMs=%.3f " +
-                    "walAvgBarrierMicros=%.3f walDurableBytes=%d walBarrierShare=%.4f walMaxGroupsSinceStart=%d%n",
+                    "walAvgBarrierMicros=%.3f walDurableBytes=%d walBarrierShare=%.4f walMaxGroupsSinceStart=%d " +
+                    "walCoalesceWaits=%d walCoalesceHits=%d walCoalesceHitRate=%.3f walCoalesceWaitMs=%.3f " +
+                    "walInterArrivalSamples=%d walInterArrivalAvgMicros=%.3f walInterArrivalLe100=%.3f " +
+                    "walInterArrivalLe250=%.3f walInterArrivalLe500=%.3f walInterArrivalLe1000=%.3f%n",
                 repetition + 1,
                 order,
                 classic.produceRecordsPerSecond(),
@@ -180,7 +196,17 @@ public class SharedStoragePerformanceBaselineTest {
                 shared.walDurability().averageBarrierMicros(),
                 shared.walDurability().durableBytes(),
                 shared.walDurability().barrierShareOf(shared.produceElapsedNanos()),
-                shared.walDurability().maxGroupsPerDurabilityBatch()
+                shared.walDurability().maxGroupsPerDurabilityBatch(),
+                shared.walDurability().singletonCoalesceWaitCount(),
+                shared.walDurability().singletonCoalesceHitCount(),
+                shared.walDurability().coalesceHitRate(),
+                shared.walDurability().singletonCoalesceWaitNanos() / 1_000_000.0d,
+                shared.walDurability().appendInterArrivalCount(),
+                shared.walDurability().averageInterArrivalMicros(),
+                shared.walDurability().interArrivalLe100Ratio(),
+                shared.walDurability().interArrivalLe250Ratio(),
+                shared.walDurability().interArrivalLe500Ratio(),
+                shared.walDurability().interArrivalLe1000Ratio()
             );
         }
 
@@ -436,6 +462,15 @@ public class SharedStoragePerformanceBaselineTest {
         long durableBytes = 0L;
         long durabilityBarrierNanos = 0L;
         long maxGroupsPerDurabilityBatch = 0L;
+        long singletonCoalesceWaitCount = 0L;
+        long singletonCoalesceHitCount = 0L;
+        long singletonCoalesceWaitNanos = 0L;
+        long appendInterArrivalCount = 0L;
+        long appendInterArrivalNanos = 0L;
+        long appendInterArrivalLe100MicrosCount = 0L;
+        long appendInterArrivalLe250MicrosCount = 0L;
+        long appendInterArrivalLe500MicrosCount = 0L;
+        long appendInterArrivalLe1000MicrosCount = 0L;
         for (int brokerId : brokerIds) {
             durabilityBatchCount += sharedStorageGauge("WalDurabilityBatchCount", brokerId);
             durableAppendGroupCount += sharedStorageGauge("WalDurableAppendGroupCount", brokerId);
@@ -445,13 +480,43 @@ public class SharedStoragePerformanceBaselineTest {
                 maxGroupsPerDurabilityBatch,
                 sharedStorageGauge("WalMaxGroupsPerDurabilityBatch", brokerId)
             );
+            singletonCoalesceWaitCount += sharedStorageGauge("WalSingletonCoalesceWaitCount", brokerId);
+            singletonCoalesceHitCount += sharedStorageGauge("WalSingletonCoalesceHitCount", brokerId);
+            singletonCoalesceWaitNanos += sharedStorageGauge("WalSingletonCoalesceWaitNanos", brokerId);
+            appendInterArrivalCount += sharedStorageGauge("WalAppendInterArrivalCount", brokerId);
+            appendInterArrivalNanos += sharedStorageGauge("WalAppendInterArrivalNanos", brokerId);
+            appendInterArrivalLe100MicrosCount += sharedStorageGauge(
+                "WalAppendInterArrivalLe100MicrosCount",
+                brokerId
+            );
+            appendInterArrivalLe250MicrosCount += sharedStorageGauge(
+                "WalAppendInterArrivalLe250MicrosCount",
+                brokerId
+            );
+            appendInterArrivalLe500MicrosCount += sharedStorageGauge(
+                "WalAppendInterArrivalLe500MicrosCount",
+                brokerId
+            );
+            appendInterArrivalLe1000MicrosCount += sharedStorageGauge(
+                "WalAppendInterArrivalLe1000MicrosCount",
+                brokerId
+            );
         }
         return new WalDurabilitySnapshot(
             durabilityBatchCount,
             durableAppendGroupCount,
             durableBytes,
             durabilityBarrierNanos,
-            maxGroupsPerDurabilityBatch
+            maxGroupsPerDurabilityBatch,
+            singletonCoalesceWaitCount,
+            singletonCoalesceHitCount,
+            singletonCoalesceWaitNanos,
+            appendInterArrivalCount,
+            appendInterArrivalNanos,
+            appendInterArrivalLe100MicrosCount,
+            appendInterArrivalLe250MicrosCount,
+            appendInterArrivalLe500MicrosCount,
+            appendInterArrivalLe1000MicrosCount
         );
     }
 
@@ -535,10 +600,19 @@ public class SharedStoragePerformanceBaselineTest {
         long durableAppendGroupCount,
         long durableBytes,
         long durabilityBarrierNanos,
-        long maxGroupsPerDurabilityBatch
+        long maxGroupsPerDurabilityBatch,
+        long singletonCoalesceWaitCount,
+        long singletonCoalesceHitCount,
+        long singletonCoalesceWaitNanos,
+        long appendInterArrivalCount,
+        long appendInterArrivalNanos,
+        long appendInterArrivalLe100MicrosCount,
+        long appendInterArrivalLe250MicrosCount,
+        long appendInterArrivalLe500MicrosCount,
+        long appendInterArrivalLe1000MicrosCount
     ) {
         private static final WalDurabilitySnapshot EMPTY =
-            new WalDurabilitySnapshot(0L, 0L, 0L, 0L, 0L);
+            new WalDurabilitySnapshot(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L);
 
         WalDurabilitySnapshot deltaFrom(WalDurabilitySnapshot before) {
             return new WalDurabilitySnapshot(
@@ -546,7 +620,16 @@ public class SharedStoragePerformanceBaselineTest {
                 durableAppendGroupCount - before.durableAppendGroupCount,
                 durableBytes - before.durableBytes,
                 durabilityBarrierNanos - before.durabilityBarrierNanos,
-                maxGroupsPerDurabilityBatch
+                maxGroupsPerDurabilityBatch,
+                singletonCoalesceWaitCount - before.singletonCoalesceWaitCount,
+                singletonCoalesceHitCount - before.singletonCoalesceHitCount,
+                singletonCoalesceWaitNanos - before.singletonCoalesceWaitNanos,
+                appendInterArrivalCount - before.appendInterArrivalCount,
+                appendInterArrivalNanos - before.appendInterArrivalNanos,
+                appendInterArrivalLe100MicrosCount - before.appendInterArrivalLe100MicrosCount,
+                appendInterArrivalLe250MicrosCount - before.appendInterArrivalLe250MicrosCount,
+                appendInterArrivalLe500MicrosCount - before.appendInterArrivalLe500MicrosCount,
+                appendInterArrivalLe1000MicrosCount - before.appendInterArrivalLe1000MicrosCount
             );
         }
 
@@ -566,6 +649,43 @@ public class SharedStoragePerformanceBaselineTest {
 
         double barrierShareOf(long measuredElapsedNanos) {
             return durabilityBarrierNanos / (double) Math.max(1L, measuredElapsedNanos);
+        }
+
+        double coalesceHitRate() {
+            if (singletonCoalesceWaitCount == 0L) {
+                return 0.0d;
+            }
+            return singletonCoalesceHitCount / (double) singletonCoalesceWaitCount;
+        }
+
+        double averageInterArrivalMicros() {
+            if (appendInterArrivalCount == 0L) {
+                return 0.0d;
+            }
+            return appendInterArrivalNanos / (double) appendInterArrivalCount / 1_000.0d;
+        }
+
+        double interArrivalLe100Ratio() {
+            return interArrivalRatio(appendInterArrivalLe100MicrosCount);
+        }
+
+        double interArrivalLe250Ratio() {
+            return interArrivalRatio(appendInterArrivalLe250MicrosCount);
+        }
+
+        double interArrivalLe500Ratio() {
+            return interArrivalRatio(appendInterArrivalLe500MicrosCount);
+        }
+
+        double interArrivalLe1000Ratio() {
+            return interArrivalRatio(appendInterArrivalLe1000MicrosCount);
+        }
+
+        private double interArrivalRatio(long bucketCount) {
+            if (appendInterArrivalCount == 0L) {
+                return 0.0d;
+            }
+            return bucketCount / (double) appendInterArrivalCount;
         }
     }
 }

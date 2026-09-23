@@ -47,6 +47,15 @@ public final class SharedStorageMetrics implements AutoCloseable {
         "WalDurableBytes",
         "WalDurabilityBarrierNanos",
         "WalMaxGroupsPerDurabilityBatch",
+        "WalSingletonCoalesceWaitCount",
+        "WalSingletonCoalesceHitCount",
+        "WalSingletonCoalesceWaitNanos",
+        "WalAppendInterArrivalCount",
+        "WalAppendInterArrivalNanos",
+        "WalAppendInterArrivalLe100MicrosCount",
+        "WalAppendInterArrivalLe250MicrosCount",
+        "WalAppendInterArrivalLe500MicrosCount",
+        "WalAppendInterArrivalLe1000MicrosCount",
         "PendingRemoteCheckpoints",
         "RemoteControlPlaneReady",
         "MetadataBootstrapFailureCount",
@@ -95,6 +104,51 @@ public final class SharedStorageMetrics implements AutoCloseable {
         metricsGroup.newGauge(
             "WalMaxGroupsPerDurabilityBatch",
             () -> engine.walDurabilityStats().maxGroupsPerDurabilityBatch(),
+            tags
+        );
+        metricsGroup.newGauge(
+            "WalSingletonCoalesceWaitCount",
+            () -> engine.walDurabilityStats().singletonCoalesceWaitCount(),
+            tags
+        );
+        metricsGroup.newGauge(
+            "WalSingletonCoalesceHitCount",
+            () -> engine.walDurabilityStats().singletonCoalesceHitCount(),
+            tags
+        );
+        metricsGroup.newGauge(
+            "WalSingletonCoalesceWaitNanos",
+            () -> engine.walDurabilityStats().singletonCoalesceWaitNanos(),
+            tags
+        );
+        metricsGroup.newGauge(
+            "WalAppendInterArrivalCount",
+            () -> engine.walDurabilityStats().appendInterArrivalCount(),
+            tags
+        );
+        metricsGroup.newGauge(
+            "WalAppendInterArrivalNanos",
+            () -> engine.walDurabilityStats().appendInterArrivalNanos(),
+            tags
+        );
+        metricsGroup.newGauge(
+            "WalAppendInterArrivalLe100MicrosCount",
+            () -> engine.walDurabilityStats().appendInterArrivalLe100MicrosCount(),
+            tags
+        );
+        metricsGroup.newGauge(
+            "WalAppendInterArrivalLe250MicrosCount",
+            () -> engine.walDurabilityStats().appendInterArrivalLe250MicrosCount(),
+            tags
+        );
+        metricsGroup.newGauge(
+            "WalAppendInterArrivalLe500MicrosCount",
+            () -> engine.walDurabilityStats().appendInterArrivalLe500MicrosCount(),
+            tags
+        );
+        metricsGroup.newGauge(
+            "WalAppendInterArrivalLe1000MicrosCount",
+            () -> engine.walDurabilityStats().appendInterArrivalLe1000MicrosCount(),
             tags
         );
         metricsGroup.newGauge("PendingRemoteCheckpoints", engine::pendingRemoteCheckpointCount, tags);

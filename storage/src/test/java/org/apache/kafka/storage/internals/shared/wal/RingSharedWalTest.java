@@ -57,6 +57,10 @@ class RingSharedWalTest {
             assertEquals(wal.usedBytes(), first.durableBytes());
             assertTrue(first.durabilityBarrierNanos() >= 0L);
             assertEquals(1L, first.maxGroupsPerDurabilityBatch());
+            assertEquals(1L, first.singletonCoalesceWaitCount());
+            assertEquals(0L, first.singletonCoalesceHitCount());
+            assertTrue(first.singletonCoalesceWaitNanos() >= 0L);
+            assertEquals(0L, first.appendInterArrivalCount());
 
             wal.appendBatch(List.of(dataRecord(2L, 32))).join();
             WalDurabilityStats second = wal.durabilityStats();
@@ -65,6 +69,11 @@ class RingSharedWalTest {
             assertEquals(wal.usedBytes(), second.durableBytes());
             assertTrue(second.durabilityBarrierNanos() >= first.durabilityBarrierNanos());
             assertEquals(1L, second.maxGroupsPerDurabilityBatch());
+            assertEquals(2L, second.singletonCoalesceWaitCount());
+            assertEquals(0L, second.singletonCoalesceHitCount());
+            assertTrue(second.singletonCoalesceWaitNanos() >= first.singletonCoalesceWaitNanos());
+            assertEquals(1L, second.appendInterArrivalCount());
+            assertTrue(second.appendInterArrivalNanos() >= 0L);
         }
     }
 
@@ -78,9 +87,15 @@ class RingSharedWalTest {
             totalCapacity,
             new FileChannelWalIoBackend(),
             TimeUnit.SECONDS.toMillis(30L),
-            TimeUnit.MILLISECONDS.toNanos(50L)
+            TimeUnit.SECONDS.toNanos(5L)
         )) {
             CompletableFuture<List<WalAppendResult>> first = wal.appendBatch(List.of(dataRecord(0L, 32)));
+            long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(10L);
+            while (wal.durabilityStats().singletonCoalesceWaitCount() == 0L &&
+                System.nanoTime() < deadlineNanos) {
+                TimeUnit.MILLISECONDS.sleep(1L);
+            }
+            assertEquals(1L, wal.durabilityStats().singletonCoalesceWaitCount());
             CompletableFuture<List<WalAppendResult>> second = wal.appendBatch(List.of(dataRecord(1L, 32)));
 
             assertEquals(1, first.get(10, TimeUnit.SECONDS).size());
@@ -90,6 +105,11 @@ class RingSharedWalTest {
             assertEquals(1L, stats.durabilityBatchCount());
             assertEquals(2L, stats.durableAppendGroupCount());
             assertEquals(2L, stats.maxGroupsPerDurabilityBatch());
+            assertEquals(1L, stats.singletonCoalesceWaitCount());
+            assertEquals(1L, stats.singletonCoalesceHitCount());
+            assertTrue(stats.singletonCoalesceWaitNanos() >= 0L);
+            assertEquals(1L, stats.appendInterArrivalCount());
+            assertTrue(stats.appendInterArrivalNanos() >= 0L);
         }
     }
 
