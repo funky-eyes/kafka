@@ -25,7 +25,9 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -63,6 +65,31 @@ class RingSharedWalTest {
             assertEquals(wal.usedBytes(), second.durableBytes());
             assertTrue(second.durabilityBarrierNanos() >= first.durabilityBarrierNanos());
             assertEquals(1L, second.maxGroupsPerDurabilityBatch());
+        }
+    }
+
+    @Test
+    void coalescesNearConcurrentSingletonGroupsBehindOneDurabilityBarrier() throws Exception {
+        Path path = tempDir.resolve("durability-coalescing.wal");
+        long totalCapacity = RingWalLayout.DATA_START + 4096L;
+
+        try (RingSharedWal wal = new RingSharedWal(
+            path,
+            totalCapacity,
+            new FileChannelWalIoBackend(),
+            TimeUnit.SECONDS.toMillis(30L),
+            TimeUnit.MILLISECONDS.toNanos(50L)
+        )) {
+            CompletableFuture<List<WalAppendResult>> first = wal.appendBatch(List.of(dataRecord(0L, 32)));
+            CompletableFuture<List<WalAppendResult>> second = wal.appendBatch(List.of(dataRecord(1L, 32)));
+
+            assertEquals(1, first.get(10, TimeUnit.SECONDS).size());
+            assertEquals(1, second.get(10, TimeUnit.SECONDS).size());
+
+            WalDurabilityStats stats = wal.durabilityStats();
+            assertEquals(1L, stats.durabilityBatchCount());
+            assertEquals(2L, stats.durableAppendGroupCount());
+            assertEquals(2L, stats.maxGroupsPerDurabilityBatch());
         }
     }
 
