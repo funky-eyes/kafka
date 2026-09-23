@@ -61,7 +61,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 public class SharedStoragePerformanceBaselineTest {
     private static final int PARTITIONS = 3;
     private static final int DEFAULT_RECORDS = 50_000;
-    private static final int DEFAULT_WARMUP_RECORDS = 5_000;
+    private static final int DEFAULT_WARMUP_RECORDS = 20_000;
     private static final int DEFAULT_REPETITIONS = 3;
     private static final int PAYLOAD_BYTES = 1024;
     private static final double DEFAULT_MIN_PRODUCE_RATIO = 0.60d;
