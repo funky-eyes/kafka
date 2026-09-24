@@ -211,7 +211,9 @@ The code path is ready for pre-merge evidence:
 
 Pointing that dedicated evidence branch at the exact candidate SHA triggers the branch-local workflow without requiring the workflow file to exist on the repository default branch. The GA manifest accepts the run only when repository, workflow name/path, event, evidence branch, production fingerprint, and real-S3 gate contract all match.
 
-At this checkpoint no dedicated Real S3 evidence branch or run has been created. The workflow now fails fast when either the branch-trigger bucket variable or the OIDC role secret is missing, but the GitHub connector used during development cannot inspect protected-environment secrets. Therefore do not claim AWS S3 release compatibility until the protected environment is verified, the dedicated run succeeds, and a `require_real_s3=true` manifest accepts it.
+The dedicated Real S3 evidence branch `shared-wal-s3-4.3.1-real-s3` has now been created at candidate `055a4780d4404517f6f48709664c5f1b20dbbe0d`. Its first compatibility run (`35943806986`) reached the protected environment and failed in the configuration preflight before any AWS credential or S3 operation was attempted. The branch-trigger bucket variable `SHARED_STORAGE_AWS_S3_BUCKET` was empty, and the OIDC role secret `SHARED_STORAGE_AWS_ROLE_ARN` was also unavailable to the job environment.
+
+This is an external release-environment blocker rather than a Shared Storage code failure. Configure those two values in the `shared-storage-aws-s3` protected environment (and optionally `SHARED_STORAGE_AWS_S3_REGION`), then trigger a fresh run from the dedicated evidence branch. Do not claim AWS S3 release compatibility until that run succeeds and a `require_real_s3=true` manifest accepts it.
 
 ## Next implementation boundary
 
