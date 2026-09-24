@@ -151,10 +151,16 @@ shared-wal-s3-4.3.1-real-s3
 With Git:
 
 ```bash
-git fetch origin shared-wal-s3-4.3.1
+git fetch origin \
+  shared-wal-s3-4.3.1 \
+  shared-wal-s3-4.3.1-real-s3
+
 candidate="$(git rev-parse origin/shared-wal-s3-4.3.1)"
-git push --force-with-lease origin \
-  "${candidate}:refs/heads/shared-wal-s3-4.3.1-real-s3"
+previous_evidence="$(git rev-parse origin/shared-wal-s3-4.3.1-real-s3)"
+
+git push \
+  --force-with-lease="refs/heads/shared-wal-s3-4.3.1-real-s3:${previous_evidence}" \
+  origin "${candidate}:refs/heads/shared-wal-s3-4.3.1-real-s3"
 ```
 
 Moving the evidence branch triggers:
