@@ -323,6 +323,16 @@ def main():
         errors.append(f"{real_s3_name}: branch evidence must read the protected environment S3 bucket variable")
     if "environment: shared-storage-aws-s3" not in real_s3_text:
         errors.append(f"{real_s3_name}: real-S3 evidence must use the protected shared-storage-aws-s3 environment")
+    if "id-token: write" not in real_s3_text:
+        errors.append(f"{real_s3_name}: OIDC-based AWS evidence requires id-token: write permission")
+    if "SHARED_STORAGE_AWS_ROLE_ARN: ${{ secrets.SHARED_STORAGE_AWS_ROLE_ARN }}" not in real_s3_text:
+        errors.append(f"{real_s3_name}: configuration preflight must read the protected AWS role secret")
+    if "role-to-assume: ${{ secrets.SHARED_STORAGE_AWS_ROLE_ARN }}" not in real_s3_text:
+        errors.append(f"{real_s3_name}: AWS credentials step must assume the protected AWS role secret")
+    if real_s3_text.count("SHARED_STORAGE_AWS_S3_BUCKET environment variable is required") != 1:
+        errors.append(f"{real_s3_name}: configuration preflight must diagnose a missing protected bucket")
+    if real_s3_text.count("SHARED_STORAGE_AWS_ROLE_ARN environment secret is required") != 1:
+        errors.append(f"{real_s3_name}: configuration preflight must diagnose a missing protected AWS role")
 
     real_s3_seal = texts.get(REAL_S3_SEAL_WORKFLOW_NAME, "")
     real_s3_seal_push = event_block(real_s3_seal, "push")

@@ -60,12 +60,16 @@ jobs:
           SHARED_STORAGE_AWS_ROLE_ARN: ${{ secrets.SHARED_STORAGE_AWS_ROLE_ARN }}
         run: |
           set -euo pipefail
+          missing=0
           if [ -z "${SHARED_STORAGE_REAL_S3_BUCKET}" ]; then
-            echo "SHARED_STORAGE_AWS_S3_BUCKET environment variable is required for branch-triggered real-S3 evidence."
-            exit 1
+            echo "::error::SHARED_STORAGE_AWS_S3_BUCKET environment variable is required for branch-triggered real-S3 evidence."
+            missing=1
           fi
           if [ -z "${SHARED_STORAGE_AWS_ROLE_ARN}" ]; then
-            echo "SHARED_STORAGE_AWS_ROLE_ARN environment secret is required for real-S3 evidence."
+            echo "::error::SHARED_STORAGE_AWS_ROLE_ARN environment secret is required for real-S3 evidence."
+            missing=1
+          fi
+          if [ "${missing}" -ne 0 ]; then
             exit 1
           fi
 
