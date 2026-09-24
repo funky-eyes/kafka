@@ -133,6 +133,18 @@ For the narrowest release-evidence setup, a dedicated bucket using standard S3
 server-side encryption avoids coupling the compatibility proof to unrelated KMS
 policy configuration.
 
+### Versioning and cleanup
+
+The compatibility proof uses ordinary `DeleteObject` and verifies that a later
+read returns 404. On a versioning-enabled bucket, that behavior can be satisfied
+by a delete marker while older object versions remain stored.
+
+Prefer a dedicated evidence bucket with versioning disabled. If versioning is
+required, configure an S3 Lifecycle rule for the `ga-compatibility/` prefix to
+expire noncurrent versions and remove expired delete markers. Do not broaden the
+test role to `s3:DeleteObjectVersion` solely to compensate for bucket-retention
+policy; keep retention cleanup as a bucket lifecycle concern.
+
 ## 4. Trigger exact-candidate evidence
 
 First make sure the development branch is at the intended canonical candidate.
