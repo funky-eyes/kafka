@@ -80,7 +80,6 @@ jobs:
       - name: Run shared storage static checks once
         run: |
           ./gradlew \
-            :core:checkstyleTest \
             :storage:checkstyleMain \
             :storage:shared-storage-s3:checkstyleMain \
             --no-scan

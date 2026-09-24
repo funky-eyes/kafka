@@ -41,6 +41,13 @@ FOCUSED_CORE_EXCLUSIONS = (
     "-x :core:spotbugsTest",
 )
 
+GLOBAL_CORE_VERIFICATION_TASKS = (
+    ":core:checkstyleMain",
+    ":core:checkstyleTest",
+    ":core:spotbugsMain",
+    ":core:spotbugsTest",
+)
+
 
 def manifest_constants():
     tree = ast.parse(MANIFEST.read_text(encoding="utf-8"), filename=str(MANIFEST))
@@ -201,6 +208,16 @@ def focused_core_test_blocks(text):
             blocks.append("\n".join(block))
         index += 1
     return blocks
+
+
+def standalone_core_verification_tasks(text):
+    invoked = set()
+    for line in text.splitlines():
+        stripped = line.strip()
+        for task in GLOBAL_CORE_VERIFICATION_TASKS:
+            if task in stripped and f"-x {task}" not in stripped:
+                invoked.add(task)
+    return invoked
 
 
 def main():
@@ -452,6 +469,12 @@ def main():
     for name, path in workflows.items():
         if name == MAIN_WORKFLOW_NAME:
             continue
+        standalone_core_checks = standalone_core_verification_tasks(texts[name])
+        if standalone_core_checks:
+            errors.append(
+                f"{path}: specialized runtime gate must not invoke global Core verification tasks directly: "
+                + ", ".join(sorted(standalone_core_checks))
+            )
         for block in focused_core_test_blocks(texts[name]):
             missing = [token for token in FOCUSED_CORE_EXCLUSIONS if token not in block]
             if missing:
