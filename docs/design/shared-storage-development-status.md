@@ -200,7 +200,8 @@ Evidence lookup is lazy by Actions page and stops at the newest production+contr
 
 Real AWS S3 compatibility remains optional in the default MinIO-oriented GA manifest and becomes mandatory only when `require_real_s3=true`.
 
-The code path is ready for pre-merge evidence:
+The code path is ready for pre-merge evidence. Operational AWS/GitHub setup is documented in
+[`shared-storage-real-s3-release-runbook.md`](shared-storage-real-s3-release-runbook.md).
 
 - workflow: `Shared Storage Real S3 Compatibility`;
 - protected environment: `shared-storage-aws-s3`;
