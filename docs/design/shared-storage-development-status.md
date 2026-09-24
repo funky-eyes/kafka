@@ -7,9 +7,9 @@ This document is the durable development checkpoint for the Kafka 4.3.1 shared-s
 - Repository: `funky-eyes/kafka`
 - Branch: `shared-wal-s3-4.3.1`
 - Kafka baseline: 4.3.1
-- Latest canonical checkpoint before this document update: `3ab792a4dc773e90889509dcab869bb062cd2db0`
-- Shared Storage production fingerprint: `ec77fbf08a62316bce38b0f838f9ad99930490d06c0f30a3699bffc4be56da45`
-- Production files fingerprinted by the GA manifest: 99
+- Latest canonical checkpoint before this document update: `b0a59bbd3f0f2fcead544f34a7e389c4b2733367`
+- Shared Storage production fingerprint: `ff65cda02e7f9424e03ec655f2f9f0ec755cfa0b93b7bdf63c6f132554185514`
+- Production files fingerprinted by the GA manifest: 100
 - Canonical author/committer identity: `Jianbin Chen <jianbin@apache.org>`
 
 Author normalization may rewrite commit IDs while preserving the tree. GA evidence therefore does not bind correctness to a raw commit ID alone: it requires both the Shared Storage production fingerprint and each gate's contract fingerprint to match the release candidate.
@@ -142,28 +142,32 @@ The GA graph additionally requires the focused `Shared Storage Ring WAL Correctn
 
 ## Performance baseline status
 
-The relative performance gate compares shared storage with classic Kafka on the same runner and alternates execution order.
+The relative performance gate compares shared storage with classic Kafka inside the same three-broker cluster and alternates timed execution order.
 
-The measurement contract now warms the same topic and producer instance used for the timed sample. Consumer warmup is followed by exact per-partition seek to the warmup end offset before timing.
+The current measurement contract preconditions both routed produce paths with interleaved warmup records, waits for shared-storage background work to become idle, measures both produce paths before starting either consume measurement, and keeps the shared/classic produce order balanced across repetitions. Consumer timing seeks each partition to the warmup boundary before measurement. This removes the previous cluster-age and cross-phase order bias without changing the workload or release threshold.
 
-Latest validated produce ratios for the corrected measurement contract:
+Latest validated produce ratios for the corrected paired measurement contract:
 
-- 0.6379
-- 0.6093
-- 0.7092
-- median: **0.6379**
+- 0.7086
+- 0.5228
+- 0.9125
+- 0.6482
+- median: **0.6784**
 - required minimum: **0.60**
 
-The gate is therefore green. The corrected samples are materially less variable than the previous cold-start-contaminated benchmark. No production WAL optimization was introduced to obtain this result and the threshold was not lowered.
+Latest median consume ratio: **0.7056** against the required minimum **0.50**.
+
+The gate is therefore green with measurable headroom. The same run reported per-sample maximum WAL durability barriers of approximately 3.5-5.0 ms and no abnormal tens-of-milliseconds durability spike. No production WAL durability weakening was introduced to obtain this result and the threshold was not lowered.
 
 Do not start an additional Ring WAL group-commit/durability-barrier optimization solely to create more headroom while this steady-state gate remains green. Reopen that work only if repeated corrected measurements show a stable regression below the release threshold or profiling identifies a separate production bottleneck.
 
 ## GA evidence status
 
-The machine-generated GA manifest for canonical release checkpoint `3ab792a4dc773e90889509dcab869bb062cd2db0` reports:
+The machine-generated normalized-branch GA manifest for canonical release checkpoint `b0a59bbd3f0f2fcead544f34a7e389c4b2733367` reports:
 
 - Result: **PASS**
-- Production fingerprint: `ec77fbf08a62316bce38b0f838f9ad99930490d06c0f30a3699bffc4be56da45`
+- Production fingerprint: `ff65cda02e7f9424e03ec655f2f9f0ec755cfa0b93b7bdf63c6f132554185514`
+- Production files fingerprinted: **100**
 - Mandatory gates: **19/19 PASS**
 
 The mandatory set includes:
@@ -188,7 +192,9 @@ The mandatory set includes:
 - soak and chaos;
 - rolling upgrade.
 
-The normalized-branch seal workflow now evaluates the canonical branch HEAD and uploads `shared-storage-normalized-ga-manifest`. Evidence lookup is lazy by Actions page and stops at the newest production+contract-equivalent run rather than preloading up to ten pages for every gate. Obsolete seal jobs are bounded by their own cancel-in-progress concurrency group and no longer block author normalization.
+The normalized-branch seal workflow evaluates the canonical branch HEAD and uploads `shared-storage-normalized-ga-manifest`. The latest seal completed successfully after the corrected paired performance gate and the full RF1/RF2/RF3 `acks=1` durability matrix passed. Specialized runtime workflows are now prevented by the GA consistency checker from directly owning global Core Checkstyle/SpotBugs tasks; those checks remain owned by the main Shared Storage workflow, avoiding unrelated test-source changes blocking runtime evidence.
+
+Evidence lookup is lazy by Actions page and stops at the newest production+contract-equivalent run rather than preloading up to ten pages for every gate. Obsolete seal jobs are bounded by their own cancel-in-progress concurrency group and no longer block author normalization.
 
 ## Real AWS S3 release evidence
 
@@ -205,7 +211,7 @@ The code path is ready for pre-merge evidence:
 
 Pointing that dedicated evidence branch at the exact candidate SHA triggers the branch-local workflow without requiring the workflow file to exist on the repository default branch. The GA manifest accepts the run only when repository, workflow name/path, event, evidence branch, production fingerprint, and real-S3 gate contract all match.
 
-At this checkpoint no dedicated Real S3 evidence run has been executed. Therefore do not claim AWS S3 release compatibility until that protected-environment run succeeds and a `require_real_s3=true` manifest accepts it.
+At this checkpoint no dedicated Real S3 evidence branch or run has been created. The workflow now fails fast when either the branch-trigger bucket variable or the OIDC role secret is missing, but the GitHub connector used during development cannot inspect protected-environment secrets. Therefore do not claim AWS S3 release compatibility until the protected environment is verified, the dedicated run succeeds, and a `require_real_s3=true` manifest accepts it.
 
 ## Next implementation boundary
 
