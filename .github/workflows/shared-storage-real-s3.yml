@@ -52,7 +52,20 @@ jobs:
       - name: Checkout release candidate
         uses: actions/checkout@v5
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
+
+      - name: Verify exact release candidate checkout
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          actual_sha="$(git rev-parse HEAD)"
+          if [ "${actual_sha}" != "${EXPECTED_SHA}" ]; then
+            echo "::error::Real S3 checkout SHA ${actual_sha} does not match workflow SHA ${EXPECTED_SHA}."
+            exit 1
+          fi
 
       - name: Validate real S3 evidence configuration
         shell: bash

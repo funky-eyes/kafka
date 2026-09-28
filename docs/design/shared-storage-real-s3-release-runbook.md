@@ -201,7 +201,9 @@ promoted again from the new canonical HEAD.
 
 A successful `S3RealCompatibilityTest` proves the current production client
 path against AWS S3 using normal AWS endpoint resolution, TLS, and
-virtual-hosted bucket addressing. It verifies:
+virtual-hosted bucket addressing. Before AWS credentials are requested, the
+workflow explicitly checks out `github.sha` and verifies `git rev-parse HEAD`
+matches that SHA, binding the tested tree to the Actions run metadata. It verifies:
 
 - small-object PUT followed by Range GET;
 - known-size multipart upload with a range crossing the 5 MiB part boundary;
