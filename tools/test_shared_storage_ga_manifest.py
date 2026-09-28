@@ -73,6 +73,38 @@ class EvidenceRunTest(unittest.TestCase):
             )
         )
 
+    def test_real_s3_exact_sha_fence_rejects_equivalent_other_commit(self):
+        run = {
+            "event": "push",
+            "name": REAL_S3_REQUIRED,
+            "path": ".github/workflows/shared-storage-real-s3.yml",
+            "head_repository": {"full_name": "apache/kafka"},
+            "head_branch": "release-real-s3",
+            "head_sha": "candidate-sha",
+        }
+        self.assertTrue(
+            is_branch_evidence_run(
+                run,
+                "apache/kafka",
+                "release-real-s3",
+                REAL_S3_REQUIRED,
+                ".github/workflows/shared-storage-real-s3.yml",
+                "push",
+                "candidate-sha",
+            )
+        )
+        self.assertFalse(
+            is_branch_evidence_run(
+                run,
+                "apache/kafka",
+                "release-real-s3",
+                REAL_S3_REQUIRED,
+                ".github/workflows/shared-storage-real-s3.yml",
+                "push",
+                "older-equivalent-sha",
+            )
+        )
+
     def test_rejects_wrong_event_name_path_fork_and_branch(self):
         base = {
             "event": "push",

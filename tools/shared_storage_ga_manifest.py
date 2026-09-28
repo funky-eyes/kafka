@@ -339,7 +339,15 @@ class GitHub:
                 break
 
 
-def is_branch_evidence_run(run, repo, branch, name, workflow_path, event):
+def is_branch_evidence_run(
+    run,
+    repo,
+    branch,
+    name,
+    workflow_path,
+    event,
+    required_head_sha=None,
+):
     head_repository = run.get("head_repository") or {}
     return (
         run.get("event") == event
@@ -347,6 +355,7 @@ def is_branch_evidence_run(run, repo, branch, name, workflow_path, event):
         and run.get("path") == workflow_path
         and head_repository.get("full_name") == repo
         and run.get("head_branch") == branch
+        and (required_head_sha is None or run.get("head_sha") == required_head_sha)
     )
 
 
@@ -377,8 +386,11 @@ def main():
     parser.add_argument("--token", default=os.environ.get("GITHUB_TOKEN"))
     parser.add_argument("--output", default="shared-storage-ga-manifest.md")
     parser.add_argument("--require-real-s3", action="store_true")
+    parser.add_argument("--require-real-s3-exact-sha", action="store_true")
     args = parser.parse_args()
 
+    if args.require_real_s3_exact_sha and not args.require_real_s3:
+        parser.error("--require-real-s3-exact-sha requires --require-real-s3")
     if not args.token:
         parser.error("--token or GITHUB_TOKEN is required")
 
@@ -424,6 +436,11 @@ def main():
             latest_for_spec = None
             for candidate_runs in run_pages:
                 for run in candidate_runs:
+                    required_head_sha = (
+                        target_sha
+                        if name == REAL_S3_REQUIRED and args.require_real_s3_exact_sha
+                        else None
+                    )
                     if not is_branch_evidence_run(
                         run,
                         args.repo,
@@ -431,6 +448,7 @@ def main():
                         name,
                         workflow_path,
                         event,
+                        required_head_sha,
                     ):
                         continue
                     sha = run.get("head_sha")
@@ -464,7 +482,10 @@ def main():
         run = max(equivalent, key=lambda item: item.get("created_at", "")) if equivalent else None
         if run is None:
             state = "MISSING"
-            detail = "no run covers this production tree and gate contract"
+            if name == REAL_S3_REQUIRED and args.require_real_s3_exact_sha:
+                detail = "no run covers this exact release SHA and gate contract"
+            else:
+                detail = "no run covers this production tree and gate contract"
             failures.append(name)
         elif run.get("status") != "completed":
             state = "PENDING"
@@ -491,6 +512,7 @@ def main():
         f"- Production files fingerprinted: {production_files}",
         "- Automatic evidence event: `push`",
         "- Real S3 evidence events: `workflow_dispatch` on the evidence branch or `push` on the dedicated Real S3 evidence branch",
+        f"- Exact Real S3 release SHA required: `{'yes' if args.require_real_s3_exact_sha else 'no'}`",
         f"- Result: **{'PASS' if not failures else 'BLOCKED'}**",
         "",
         "| Workflow | Gate | Run | Status | Evidence SHA | Evidence |",

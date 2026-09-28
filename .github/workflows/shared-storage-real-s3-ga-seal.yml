@@ -84,6 +84,7 @@ jobs:
               --ref "${RELEASE_SHA}" \
               --evidence-branch "${EVIDENCE_BRANCH}" \
               --require-real-s3 \
+              --require-real-s3-exact-sha \
               --output shared-storage-ga-real-s3-manifest.md \
               > /tmp/shared-storage-ga-real-s3.out 2>&1
             status=$?

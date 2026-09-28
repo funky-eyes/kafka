@@ -348,6 +348,10 @@ def main():
         errors.append(f"{REAL_S3_SEAL_WORKFLOW_NAME}: actions: read permission is required")
     if "--require-real-s3" not in real_s3_seal:
         errors.append(f"{REAL_S3_SEAL_WORKFLOW_NAME}: strict manifest must require real S3 evidence")
+    if "--require-real-s3-exact-sha" not in real_s3_seal:
+        errors.append(
+            f"{REAL_S3_SEAL_WORKFLOW_NAME}: strict manifest must require Real S3 evidence from the exact candidate SHA"
+        )
     if "--evidence-branch" not in real_s3_seal:
         errors.append(f"{REAL_S3_SEAL_WORKFLOW_NAME}: strict manifest must resolve the base evidence branch")
     if "ref: ${{ github.sha }}" not in real_s3_seal or "git rev-parse HEAD" not in real_s3_seal:

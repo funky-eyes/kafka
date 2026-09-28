@@ -181,7 +181,10 @@ Moving the evidence branch triggers:
 2. `Shared Storage Real S3 GA Seal`
 
 The strict seal requires the Real S3 result in addition to the normal 19
-mandatory GA gates.
+mandatory GA gates. It also requires the accepted Real S3 run to have
+`head_sha` equal to the exact pushed candidate SHA, so an older
+production-and-contract-equivalent success cannot satisfy a new evidence-branch
+push before that candidate's Real S3 run is registered.
 
 ## 5. Expected compatibility proof
 
