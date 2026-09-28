@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements. See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License. You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+FIXTURE="${ROOT}/tools/shared_storage_minio_fixture.sh"
+TMP="$(mktemp -d)"
+STATE_DIR="${TMP}/state"
+CACHE_DIR="${TMP}/cache"
+
+owned_pid=""
+foreign_pid=""
+
+cleanup() {
+  if [ -n "${owned_pid}" ]; then
+    kill "${owned_pid}" 2>/dev/null || true
+    wait "${owned_pid}" 2>/dev/null || true
+  fi
+  if [ -n "${foreign_pid}" ]; then
+    kill "${foreign_pid}" 2>/dev/null || true
+    wait "${foreign_pid}" 2>/dev/null || true
+  fi
+  rm -rf "${TMP}"
+}
+trap cleanup EXIT
+
+case "$(uname -m)" in
+  x86_64|amd64)
+    platform="linux-amd64"
+    ;;
+  aarch64|arm64)
+    platform="linux-arm64"
+    ;;
+  *)
+    echo "Skipping MinIO PID ownership test on unsupported architecture: $(uname -m)"
+    exit 0
+    ;;
+esac
+
+minio_bin="${CACHE_DIR}/${platform}/minio.${platform}.RELEASE.2025-07-23T15-54-02Z"
+pid_file="${STATE_DIR}/minio.pid"
+mkdir -p "$(dirname "${minio_bin}")" "${STATE_DIR}"
+
+# Use a copied ELF executable so /proc/<pid>/exe resolves to the exact
+# path the fixture considers its MinIO binary without requiring network access.
+cp /bin/sleep "${minio_bin}"
+chmod 0755 "${minio_bin}"
+
+fixture() {
+  env \
+    SHARED_STORAGE_MINIO_STATE_DIR="${STATE_DIR}" \
+    SHARED_STORAGE_MINIO_CACHE_DIR="${CACHE_DIR}" \
+    "${FIXTURE}" "$@"
+}
+
+"${minio_bin}" 60 &
+owned_pid="$!"
+echo "${owned_pid}" > "${pid_file}"
+
+fixture status | grep -Fq "running pid=${owned_pid}"
+fixture stop
+if kill -0 "${owned_pid}" 2>/dev/null; then
+  echo "Fixture stop did not terminate its owned process ${owned_pid}" >&2
+  exit 1
+fi
+wait "${owned_pid}" 2>/dev/null || true
+owned_pid=""
+
+sleep 60 &
+foreign_pid="$!"
+echo "${foreign_pid}" > "${pid_file}"
+
+stderr_file="${TMP}/stale-stop.err"
+fixture stop 2>"${stderr_file}"
+if ! kill -0 "${foreign_pid}" 2>/dev/null; then
+  echo "Fixture stop killed unrelated process ${foreign_pid}" >&2
+  exit 1
+fi
+if [ -e "${pid_file}" ]; then
+  echo "Fixture stop did not clear stale PID file" >&2
+  exit 1
+fi
+grep -Fq "Refusing to stop stale MinIO PID ${foreign_pid}" "${stderr_file}"
+
+echo "MinIO fixture PID ownership tests passed"
