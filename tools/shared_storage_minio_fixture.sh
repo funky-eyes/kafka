@@ -210,15 +210,18 @@ stop_server() {
 
   kill "${pid}" 2>/dev/null || true
   for _ in $(seq 1 50); do
-    if ! kill -0 "${pid}" 2>/dev/null; then
+    if ! pid_is_fixture "${pid}"; then
       rm -f "${PID_FILE}"
       return
     fi
     sleep 0.1
   done
-  kill -KILL "${pid}" 2>/dev/null || true
+
+  if pid_is_fixture "${pid}"; then
+    kill -KILL "${pid}" 2>/dev/null || true
+  fi
   for _ in $(seq 1 20); do
-    if ! kill -0 "${pid}" 2>/dev/null; then
+    if ! pid_is_fixture "${pid}"; then
       break
     fi
     sleep 0.1
