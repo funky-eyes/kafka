@@ -108,10 +108,39 @@ pid_value() {
   fi
 }
 
+process_executable() {
+  local pid="$1"
+  readlink -f "/proc/${pid}/exe" 2>/dev/null || true
+}
+
+fixture_executable() {
+  readlink -f "${MINIO_BIN}" 2>/dev/null || true
+}
+
+pid_is_fixture() {
+  local pid="$1"
+  local actual expected
+  [ -n "${pid}" ] || return 1
+  kill -0 "${pid}" 2>/dev/null || return 1
+  actual="$(process_executable "${pid}")"
+  expected="$(fixture_executable)"
+  [ -n "${actual}" ] && [ -n "${expected}" ] && [ "${actual}" = "${expected}" ]
+}
+
 is_running() {
   local pid
   pid="$(pid_value)"
-  [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null
+  pid_is_fixture "${pid}"
+}
+
+discard_stale_pid() {
+  local pid
+  pid="$(pid_value)"
+  [ -n "${pid}" ] || return
+  if ! pid_is_fixture "${pid}"; then
+    echo "Discarding stale MinIO PID file: pid=${pid}" >&2
+    rm -f "${PID_FILE}"
+  fi
 }
 
 export_github_environment() {
@@ -132,7 +161,7 @@ start_server() {
   if is_running; then
     return
   fi
-  rm -f "${PID_FILE}"
+  discard_stale_pid
 
   {
     echo "=== starting MinIO ${MINIO_RELEASE} at $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
@@ -155,6 +184,11 @@ stop_server() {
     return
   fi
   if ! kill -0 "${pid}" 2>/dev/null; then
+    rm -f "${PID_FILE}"
+    return
+  fi
+  if ! pid_is_fixture "${pid}"; then
+    echo "Refusing to stop stale MinIO PID ${pid}: process does not belong to this fixture" >&2
     rm -f "${PID_FILE}"
     return
   fi
