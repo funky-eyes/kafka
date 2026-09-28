@@ -192,4 +192,5 @@ jobs:
 
       - name: MinIO logs
         if: failure()
-        run: "${GITHUB_WORKSPACE}/tools/shared_storage_minio_fixture.sh" logs || true
+        run: |
+          "${GITHUB_WORKSPACE}/tools/shared_storage_minio_fixture.sh" logs || true
