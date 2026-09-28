@@ -135,8 +135,13 @@ fixture_executable() {
 pid_is_fixture() {
   local pid="$1"
   local actual expected
-  [ -n "${pid}" ] || return 1
-  kill -0 "${pid}" 2>/dev/null || return 1
+  case "${pid}" in
+    ''|*[!0-9]*)
+      return 1
+      ;;
+  esac
+  [ "${pid}" -gt 1 ] || return 1
+  kill -0 -- "${pid}" 2>/dev/null || return 1
   actual="$(process_executable "${pid}")"
   expected="$(fixture_executable)"
   [ -n "${actual}" ] && [ -n "${expected}" ] && [ "${actual}" = "${expected}" ]
@@ -198,17 +203,13 @@ stop_server() {
   if [ -z "${pid}" ]; then
     return
   fi
-  if ! kill -0 "${pid}" 2>/dev/null; then
-    rm -f "${PID_FILE}"
-    return
-  fi
   if ! pid_is_fixture "${pid}"; then
     echo "Refusing to stop stale MinIO PID ${pid}: process does not belong to this fixture" >&2
     rm -f "${PID_FILE}"
     return
   fi
 
-  kill "${pid}" 2>/dev/null || true
+  kill -- "${pid}" 2>/dev/null || true
   for _ in $(seq 1 50); do
     if ! pid_is_fixture "${pid}"; then
       rm -f "${PID_FILE}"
@@ -218,7 +219,7 @@ stop_server() {
   done
 
   if pid_is_fixture "${pid}"; then
-    kill -KILL "${pid}" 2>/dev/null || true
+    kill -KILL -- "${pid}" 2>/dev/null || true
   fi
   for _ in $(seq 1 20); do
     if ! pid_is_fixture "${pid}"; then
