@@ -138,4 +138,4 @@ jobs:
         with:
           name: shared-storage-real-s3-ga-manifest
           path: shared-storage-ga-real-s3-manifest.md
-          if-no-files-found: warn
+          if-no-files-found: error

@@ -105,4 +105,4 @@ jobs:
           path: |
             shared-storage-real-s3.log
             storage/shared-storage-s3/build/test-results/test/**
-          if-no-files-found: warn
+          if-no-files-found: error
