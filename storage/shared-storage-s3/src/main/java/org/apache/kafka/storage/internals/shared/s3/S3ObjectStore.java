@@ -127,7 +127,7 @@ public final class S3ObjectStore implements ObjectStore {
             return CompletableFuture.failedFuture(new IllegalArgumentException("objectSize must be positive"));
         }
         Objects.requireNonNull(source, "source");
-        return runAsync(() -> putKnownSizeSource(objectId, objectSize, source));
+        return runAsync(source, () -> putKnownSizeSource(objectId, objectSize, source));
     }
 
     @Override
@@ -136,7 +136,7 @@ public final class S3ObjectStore implements ObjectStore {
             return CompletableFuture.failedFuture(new IllegalArgumentException("objectId must be non-negative"));
         }
         Objects.requireNonNull(source, "source");
-        return runAsync(() -> putUnknownSizeSource(objectId, source));
+        return runAsync(source, () -> putUnknownSizeSource(objectId, source));
     }
 
     private void putKnownSizeSource(long objectId, long objectSize, PartSource source) {
@@ -399,6 +399,31 @@ public final class S3ObjectStore implements ObjectStore {
             operation.run();
             return null;
         });
+    }
+
+    private CompletableFuture<Void> runAsync(PartSource source, Runnable operation) {
+        if (closed.get()) {
+            IllegalStateException failure = new IllegalStateException("S3 object store is closed");
+            closeRejectedSource(source, failure);
+            return CompletableFuture.failedFuture(failure);
+        }
+        try {
+            return CompletableFuture.runAsync(operation, ioExecutor);
+        } catch (RejectedExecutionException e) {
+            RuntimeException failure = closed.get()
+                ? new IllegalStateException("S3 object store is closed", e)
+                : e;
+            closeRejectedSource(source, failure);
+            return CompletableFuture.failedFuture(failure);
+        }
+    }
+
+    private static void closeRejectedSource(PartSource source, Throwable failure) {
+        try {
+            source.close();
+        } catch (RuntimeException closeFailure) {
+            failure.addSuppressed(closeFailure);
+        }
     }
 
     private <T> CompletableFuture<T> supplyAsync(Supplier<T> operation) {

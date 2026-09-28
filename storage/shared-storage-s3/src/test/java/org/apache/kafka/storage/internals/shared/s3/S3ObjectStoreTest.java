@@ -101,6 +101,62 @@ class S3ObjectStoreTest {
     }
 
     @Test
+    void closeRaceClosesRejectedPartSource() throws Exception {
+        S3ObjectStoreConfig config = S3ObjectStoreConfig.from(Map.of(
+            S3ObjectStoreConfig.BUCKET_CONFIG, "shared-data"
+        ));
+        CloseRaceExecutor executor = new CloseRaceExecutor();
+        S3ObjectStore store = new S3ObjectStore(config, S3ObjectStore.buildClient(config), executor);
+        AtomicBoolean sourceClosed = new AtomicBoolean();
+        ObjectStore.PartSource source = new ObjectStore.PartSource() {
+            @Override
+            public ByteBuffer nextPart() {
+                return ByteBuffer.wrap(new byte[] {1});
+            }
+
+            @Override
+            public void close() {
+                sourceClosed.set(true);
+            }
+        };
+        AtomicReference<CompletableFuture<Void>> returned = new AtomicReference<>();
+        AtomicReference<Throwable> synchronousFailure = new AtomicReference<>();
+        Thread submitter = new Thread(() -> {
+            try {
+                returned.set(store.put(1L, 1L, source));
+            } catch (Throwable t) {
+                synchronousFailure.set(t);
+            }
+        }, "s3-part-source-close-race-submitter");
+
+        try {
+            submitter.start();
+            assertTrue(
+                executor.awaitExecuteEntered(10, TimeUnit.SECONDS),
+                "S3 PartSource submission did not reach the executor"
+            );
+
+            store.close();
+            submitter.join(TimeUnit.SECONDS.toMillis(10));
+
+            assertFalse(submitter.isAlive(), "S3 PartSource submission did not finish after close");
+            assertNull(synchronousFailure.get(), "PartSource API must not throw executor rejection synchronously");
+            CompletableFuture<Void> future = returned.get();
+            assertNotNull(future);
+            ExecutionException failure = assertThrows(
+                ExecutionException.class,
+                () -> future.get(10, TimeUnit.SECONDS)
+            );
+            assertInstanceOf(IllegalStateException.class, failure.getCause());
+            assertTrue(sourceClosed.get(), "rejected PartSource must be closed by the submission path");
+        } finally {
+            store.close();
+            submitter.interrupt();
+            submitter.join(TimeUnit.SECONDS.toMillis(10));
+        }
+    }
+
+    @Test
     void waitsForIoExecutorToTerminateBeforeClosingClientResources() throws Exception {
         ExecutorService executor = Executors.newSingleThreadExecutor();
         CountDownLatch started = new CountDownLatch(1);
