@@ -60,6 +60,18 @@ script_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SO
 
 mkdir -p "${STATE_DIR}" "${CACHE_DIR}"
 
+binary_valid() {
+  local path="$1"
+  local expected_release="$2"
+  local expected_sha256="$3"
+  local actual
+
+  [ -x "${path}" ] || return 1
+  actual="$(sha256sum "${path}" | awk '{print $1}')"
+  [ "${actual}" = "${expected_sha256}" ] || return 1
+  "${path}" --version 2>&1 | grep -Fq "${expected_release}"
+}
+
 download_verified() {
   local url="$1"
   local destination="$2"
@@ -67,12 +79,10 @@ download_verified() {
   local expected_sha256="$4"
   local temporary actual
 
-  if [ -x "${destination}" ]; then
-    actual="$(sha256sum "${destination}" | awk '{print $1}')"
-    if [ "${actual}" = "${expected_sha256}" ] &&
-       "${destination}" --version 2>&1 | grep -Fq "${expected_release}"; then
-      return
-    fi
+  if binary_valid "${destination}" "${expected_release}" "${expected_sha256}"; then
+    return
+  fi
+  if [ -e "${destination}" ]; then
     echo "Discarding invalid cached MinIO fixture binary: ${destination}" >&2
     rm -f "${destination}"
   fi
@@ -275,52 +285,58 @@ show_logs() {
   fi
 }
 
-case "${1:-}" in
-  install)
-    install_fixture
-    ;;
-  start)
-    start_server
-    ;;
-  stop)
-    stop_server
-    ;;
-  restart)
-    stop_server
-    start_server
-    ;;
-  wait-ready)
-    wait_ready "${2:-60}"
-    ;;
-  mb)
-    [ "$#" -eq 2 ] || { echo "usage: $0 mb <bucket>" >&2; exit 2; }
-    make_bucket "$2"
-    ;;
-  ls)
-    [ "$#" -eq 2 ] || { echo "usage: $0 ls <bucket>" >&2; exit 2; }
-    list_bucket "$2"
-    ;;
-  du)
-    [ "$#" -eq 2 ] || { echo "usage: $0 du <bucket>" >&2; exit 2; }
-    du_bucket "$2"
-    ;;
-  find)
-    [ "$#" -eq 2 ] || { echo "usage: $0 find <bucket>" >&2; exit 2; }
-    find_bucket "$2"
-    ;;
-  logs)
-    show_logs
-    ;;
-  status)
-    if is_running; then
-      echo "running pid=$(pid_value)"
-    else
-      echo "stopped"
-      exit 1
-    fi
-    ;;
-  *)
-    echo "usage: $0 {install|start|stop|restart|wait-ready [seconds]|mb <bucket>|ls <bucket>|du <bucket>|find <bucket>|logs|status}" >&2
-    exit 2
-    ;;
-esac
+main() {
+  case "${1:-}" in
+    install)
+      install_fixture
+      ;;
+    start)
+      start_server
+      ;;
+    stop)
+      stop_server
+      ;;
+    restart)
+      stop_server
+      start_server
+      ;;
+    wait-ready)
+      wait_ready "${2:-60}"
+      ;;
+    mb)
+      [ "$#" -eq 2 ] || { echo "usage: $0 mb <bucket>" >&2; exit 2; }
+      make_bucket "$2"
+      ;;
+    ls)
+      [ "$#" -eq 2 ] || { echo "usage: $0 ls <bucket>" >&2; exit 2; }
+      list_bucket "$2"
+      ;;
+    du)
+      [ "$#" -eq 2 ] || { echo "usage: $0 du <bucket>" >&2; exit 2; }
+      du_bucket "$2"
+      ;;
+    find)
+      [ "$#" -eq 2 ] || { echo "usage: $0 find <bucket>" >&2; exit 2; }
+      find_bucket "$2"
+      ;;
+    logs)
+      show_logs
+      ;;
+    status)
+      if is_running; then
+        echo "running pid=$(pid_value)"
+      else
+        echo "stopped"
+        return 1
+      fi
+      ;;
+    *)
+      echo "usage: $0 {install|start|stop|restart|wait-ready [seconds]|mb <bucket>|ls <bucket>|du <bucket>|find <bucket>|logs|status}" >&2
+      return 2
+      ;;
+  esac
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi
