@@ -33,9 +33,13 @@ MC_CONFIG_DIR="${STATE_DIR}/mc-config"
 case "$(uname -m)" in
   x86_64|amd64)
     PLATFORM="linux-amd64"
+    MINIO_SHA256="eef6581f6509f43ece007a6f2eb4c5e3ce41498c8956e919a7ac7b4b170fa431"
+    MC_SHA256="ea4a453be116071ab1ccbd24eb8755bf0579649f41a7b94ab9e68571bb9f4a1e"
     ;;
   aarch64|arm64)
     PLATFORM="linux-arm64"
+    MINIO_SHA256="ec9f48fee97dee7e6ce8fe9f576471bcd52380c035091d8b075b64d606124c7e"
+    MC_SHA256="62a7d4cc0ea37e7a5b564e0991057d4fec2a563566511fabe4ee5c1568f5e00b"
     ;;
   *)
     echo "Unsupported MinIO fixture architecture: $(uname -m)" >&2
@@ -60,35 +64,36 @@ download_verified() {
   local url="$1"
   local destination="$2"
   local expected_release="$3"
-  local temporary checksum_file expected actual
+  local expected_sha256="$4"
+  local temporary actual
 
-  if [ -x "${destination}" ] && "${destination}" --version 2>&1 | grep -Fq "${expected_release}"; then
-    return
+  if [ -x "${destination}" ]; then
+    actual="$(sha256sum "${destination}" | awk '{print $1}')"
+    if [ "${actual}" = "${expected_sha256}" ] &&
+       "${destination}" --version 2>&1 | grep -Fq "${expected_release}"; then
+      return
+    fi
+    echo "Discarding invalid cached MinIO fixture binary: ${destination}" >&2
+    rm -f "${destination}"
   fi
 
   mkdir -p "$(dirname "${destination}")"
   temporary="${destination}.download"
-  checksum_file="${destination}.sha256sum.download"
-  rm -f "${temporary}" "${checksum_file}"
+  rm -f "${temporary}"
 
   curl --fail --location --silent --show-error \
     --retry 5 --retry-all-errors --connect-timeout 20 \
     --output "${temporary}" "${url}"
-  curl --fail --location --silent --show-error \
-    --retry 5 --retry-all-errors --connect-timeout 20 \
-    --output "${checksum_file}" "${url}.sha256sum"
 
-  expected="$(awk 'NF {print $1; exit}' "${checksum_file}")"
   actual="$(sha256sum "${temporary}" | awk '{print $1}')"
-  if [ -z "${expected}" ] || [ "${actual}" != "${expected}" ]; then
-    rm -f "${temporary}" "${checksum_file}"
-    echo "Checksum mismatch downloading ${url}: expected=${expected:-missing} actual=${actual}" >&2
+  if [ "${actual}" != "${expected_sha256}" ]; then
+    rm -f "${temporary}"
+    echo "Checksum mismatch downloading ${url}: expected=${expected_sha256} actual=${actual}" >&2
     exit 1
   fi
 
   chmod 0755 "${temporary}"
   mv "${temporary}" "${destination}"
-  rm -f "${checksum_file}"
 
   if ! "${destination}" --version 2>&1 | grep -Fq "${expected_release}"; then
     rm -f "${destination}"
@@ -98,8 +103,8 @@ download_verified() {
 }
 
 install_fixture() {
-  download_verified "${server_base_url}/${MINIO_RELEASE_FILE}" "${MINIO_BIN}" "${MINIO_RELEASE}"
-  download_verified "${mc_base_url}/${MC_RELEASE_FILE}" "${MC_BIN}" "${MC_RELEASE}"
+  download_verified "${server_base_url}/${MINIO_RELEASE_FILE}" "${MINIO_BIN}" "${MINIO_RELEASE}" "${MINIO_SHA256}"
+  download_verified "${mc_base_url}/${MC_RELEASE_FILE}" "${MC_BIN}" "${MC_RELEASE}" "${MC_SHA256}"
 }
 
 pid_value() {
