@@ -161,20 +161,19 @@ shared-wal-s3-4.3.1
 shared-wal-s3-4.3.1-real-s3
 ```
 
-With Git:
+Use the versioned promotion helper and pass the full canonical SHA you intend to
+release:
 
 ```bash
-git fetch origin \
-  shared-wal-s3-4.3.1 \
-  shared-wal-s3-4.3.1-real-s3
-
-candidate="$(git rev-parse origin/shared-wal-s3-4.3.1)"
-previous_evidence="$(git rev-parse origin/shared-wal-s3-4.3.1-real-s3)"
-
-git push \
-  --force-with-lease="refs/heads/shared-wal-s3-4.3.1-real-s3:${previous_evidence}" \
-  origin "${candidate}:refs/heads/shared-wal-s3-4.3.1-real-s3"
+python3 tools/promote_shared_storage_real_s3_evidence.py "<40-char-canonical-sha>"
 ```
+
+The helper refuses abbreviated SHAs, verifies the remote canonical branch matches
+the expected SHA, fetches that exact candidate, captures the current evidence
+branch SHA, re-checks the canonical remote head immediately before promotion,
+and finally pushes with an explicit `--force-with-lease` bound to the previously
+observed evidence SHA. A concurrent canonical update or evidence-branch update
+therefore fails closed instead of being overwritten.
 
 Moving the evidence branch triggers:
 

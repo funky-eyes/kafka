@@ -24,12 +24,16 @@ on:
       - 'tools/shared_storage_ga_manifest.py'
       - 'tools/check_shared_storage_ga_workflows.py'
       - 'tools/test_shared_storage_ga_manifest.py'
+      - 'tools/promote_shared_storage_real_s3_evidence.py'
+      - 'tools/test_promote_shared_storage_real_s3_evidence.py'
   pull_request:
     paths:
       - '.github/workflows/shared-storage*.yml'
       - 'tools/shared_storage_ga_manifest.py'
       - 'tools/check_shared_storage_ga_workflows.py'
       - 'tools/test_shared_storage_ga_manifest.py'
+      - 'tools/promote_shared_storage_real_s3_evidence.py'
+      - 'tools/test_promote_shared_storage_real_s3_evidence.py'
   workflow_dispatch:
 
 permissions:
@@ -47,6 +51,9 @@ jobs:
 
       - name: Test GA manifest evidence rules
         run: python3 tools/test_shared_storage_ga_manifest.py
+
+      - name: Test Real S3 evidence promotion rules
+        run: python3 tools/test_promote_shared_storage_real_s3_evidence.py
 
       - name: Validate Shared Storage GA workflow graph
         run: python3 tools/check_shared_storage_ga_workflows.py

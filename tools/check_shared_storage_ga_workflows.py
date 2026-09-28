@@ -524,6 +524,23 @@ def main():
         if "workflow_dispatch:" not in text:
             errors.append(f"{name}: release evidence workflow must support workflow_dispatch")
 
+    ga_consistency = texts.get("Shared Storage GA Workflow Consistency", "")
+    ga_consistency_push_paths = event_path_patterns(ga_consistency, "push")
+    for promotion_path in (
+        "tools/promote_shared_storage_real_s3_evidence.py",
+        "tools/test_promote_shared_storage_real_s3_evidence.py",
+    ):
+        if not (ROOT / promotion_path).is_file():
+            errors.append(f"Real S3 promotion tooling is missing: {promotion_path}")
+        if promotion_path not in ga_consistency_push_paths:
+            errors.append(
+                f"Shared Storage GA Workflow Consistency: push.paths must cover {promotion_path}"
+            )
+    if "python3 tools/test_promote_shared_storage_real_s3_evidence.py" not in ga_consistency:
+        errors.append(
+            "Shared Storage GA Workflow Consistency: Real S3 promotion unit tests must run"
+        )
+
     ga_release = texts.get(GA_RELEASE_WORKFLOW_NAME, "")
     if "actions: read" not in ga_release:
         errors.append(f"{GA_RELEASE_WORKFLOW_NAME}: actions: read permission is required")
