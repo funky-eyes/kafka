@@ -150,6 +150,65 @@ class SharedUploadParallelismTest {
         }
     }
 
+    @Test
+    void successfulParallelUploadDoesNotClearAnotherCandidatesFailure() throws Exception {
+        ControlledObjectStore objectStore = new ControlledObjectStore();
+        InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
+        try (SharedStorageEngine engine = engine("parallel-failure-state")) {
+            append(engine, 0L, 9L, new byte[] {1, 2, 3});
+            append(engine, 10L, 19L, new byte[] {4, 5, 6});
+            SharedCommitProgress progress = leaderProgress(0L, 20L);
+            AtomicLong objectIds = new AtomicLong(100L);
+            SharedObjectUploader uploader = new SharedObjectUploader(
+                objectStore,
+                metadataStore,
+                new SharedObjectPacker(),
+                engine
+            );
+
+            try (SharedUploadScheduler scheduler = new SharedUploadScheduler(
+                engine,
+                progress,
+                uploader,
+                objectIds::getAndIncrement,
+                () -> 1_000L,
+                3L,
+                1_000L,
+                70,
+                2
+            )) {
+                CompletableFuture<Optional<SharedObjectMetadata>> first = scheduler.tryUploadOnce();
+                CompletableFuture<Optional<SharedObjectMetadata>> second = scheduler.tryUploadOnce();
+                assertTrue(objectStore.isPending(100L));
+                assertTrue(objectStore.isPending(101L));
+
+                objectStore.failPut(100L, new IllegalStateException("persistent first-range failure"));
+                assertThrows(CompletionException.class, first::join);
+                assertTrue(scheduler.uploadFailurePresent());
+                assertTrue(scheduler.lastFailure().isPresent());
+
+                objectStore.completePut(101L);
+                SharedObjectMetadata secondMetadata = second.get(10, TimeUnit.SECONDS).orElseThrow();
+                assertEquals(new OffsetRange(10L, 20L), secondMetadata.ranges().get(0).offsets());
+
+                assertTrue(
+                    scheduler.uploadFailurePresent(),
+                    "success for another candidate must not hide an unresolved failed range"
+                );
+                assertTrue(scheduler.lastFailure().isPresent());
+
+                CompletableFuture<Optional<SharedObjectMetadata>> retry = scheduler.tryUploadOnce();
+                assertTrue(objectStore.isPending(102L));
+                objectStore.completePut(102L);
+                SharedObjectMetadata retried = retry.get(10, TimeUnit.SECONDS).orElseThrow();
+                assertEquals(new OffsetRange(0L, 10L), retried.ranges().get(0).offsets());
+
+                assertFalse(scheduler.uploadFailurePresent());
+                assertFalse(scheduler.lastFailure().isPresent());
+            }
+        }
+    }
+
     private SharedStorageEngine engine(String name) throws Exception {
         return new SharedStorageEngine(new FileSharedWal(tempDir.resolve(name), 1024 * 1024, 4096));
     }

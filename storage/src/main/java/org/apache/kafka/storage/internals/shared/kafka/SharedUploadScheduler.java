@@ -79,6 +79,7 @@ public final class SharedUploadScheduler implements AutoCloseable {
     private final int maxInflight;
     private final AtomicInteger uploadsInProgress = new AtomicInteger();
     private final Set<CandidateKey> reservedCandidates = ConcurrentHashMap.newKeySet();
+    private final Map<CandidateKey, Throwable> failedCandidates = new ConcurrentHashMap<>();
     private final AtomicBoolean closed = new AtomicBoolean();
     private final AtomicReference<Throwable> lastUploadFailure = new AtomicReference<>();
     private final AtomicReference<Throwable> lastMaintenanceFailure = new AtomicReference<>();
@@ -298,6 +299,7 @@ public final class SharedUploadScheduler implements AutoCloseable {
                 .thenApply(Optional::of);
         } catch (RuntimeException e) {
             releaseReservation(selection.candidates());
+            recordCandidateFailure(selection.candidates(), e);
             return synchronousFailure(e);
         }
         return result.whenComplete((ignored, error) -> completeUpload(selection.candidates(), error));
@@ -306,13 +308,34 @@ public final class SharedUploadScheduler implements AutoCloseable {
     private void completeUpload(List<SharedStorageEngine.UploadCandidate> candidates, Throwable error) {
         releaseReservation(candidates);
         if (error == null) {
-            lastUploadFailure.set(null);
+            clearCandidateFailure(candidates);
             pendingHead.set(null);
         } else {
-            lastUploadFailure.set(error);
+            recordCandidateFailure(candidates, error);
             LOG.warn("Shared object upload failed", error);
         }
         releaseUploadSlot();
+    }
+
+    private void recordCandidateFailure(
+        List<SharedStorageEngine.UploadCandidate> candidates,
+        Throwable error
+    ) {
+        for (SharedStorageEngine.UploadCandidate candidate : candidates) {
+            failedCandidates.put(CandidateKey.from(candidate), error);
+        }
+        lastUploadFailure.set(error);
+    }
+
+    private void clearCandidateFailure(List<SharedStorageEngine.UploadCandidate> candidates) {
+        for (SharedStorageEngine.UploadCandidate candidate : candidates) {
+            failedCandidates.remove(CandidateKey.from(candidate));
+        }
+        if (failedCandidates.isEmpty()) {
+            lastUploadFailure.set(null);
+        } else {
+            lastUploadFailure.set(failedCandidates.values().iterator().next());
+        }
     }
 
     private boolean reserve(List<SharedStorageEngine.UploadCandidate> candidates) {
@@ -400,7 +423,7 @@ public final class SharedUploadScheduler implements AutoCloseable {
     }
 
     boolean uploadFailurePresent() {
-        return lastUploadFailure.get() != null;
+        return lastUploadFailure.get() != null || !failedCandidates.isEmpty();
     }
 
     boolean maintenanceFailurePresent() {
