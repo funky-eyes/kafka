@@ -331,6 +331,19 @@ public final class SharedUploadScheduler implements AutoCloseable {
         for (SharedStorageEngine.UploadCandidate candidate : candidates) {
             failedCandidates.remove(CandidateKey.from(candidate));
         }
+        refreshUploadFailure();
+    }
+
+    private void reconcileFailedCandidates(List<SharedStorageEngine.UploadCandidate> committed) {
+        Set<CandidateKey> current = ConcurrentHashMap.newKeySet();
+        for (SharedStorageEngine.UploadCandidate candidate : committed) {
+            current.add(CandidateKey.from(candidate));
+        }
+        failedCandidates.keySet().removeIf(candidate -> !current.contains(candidate));
+        refreshUploadFailure();
+    }
+
+    private void refreshUploadFailure() {
         if (failedCandidates.isEmpty()) {
             lastUploadFailure.set(null);
         } else {
@@ -497,6 +510,7 @@ public final class SharedUploadScheduler implements AutoCloseable {
         committed.sort(Comparator.comparingLong(
             (SharedStorageEngine.UploadCandidate candidate) -> candidate.location().walOffset()
         ));
+        reconcileFailedCandidates(committed);
         List<SharedStorageEngine.UploadCandidate> available = committed.stream()
             .filter(candidate -> !reservedCandidates.contains(CandidateKey.from(candidate)))
             .toList();

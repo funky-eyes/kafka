@@ -209,6 +209,50 @@ class SharedUploadParallelismTest {
         }
     }
 
+    @Test
+    void failureStateClearsWhenFailedCandidateIsNoLongerLeaderOwned() throws Exception {
+        ControlledObjectStore objectStore = new ControlledObjectStore();
+        InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
+        try (SharedStorageEngine engine = engine("failure-role-reconcile")) {
+            append(engine, 0L, 9L, new byte[] {1, 2, 3});
+            SharedCommitProgress progress = leaderProgress(0L, 10L);
+            AtomicLong objectIds = new AtomicLong(200L);
+            SharedObjectUploader uploader = new SharedObjectUploader(
+                objectStore,
+                metadataStore,
+                new SharedObjectPacker(),
+                engine
+            );
+
+            try (SharedUploadScheduler scheduler = new SharedUploadScheduler(
+                engine,
+                progress,
+                uploader,
+                objectIds::getAndIncrement,
+                () -> 1_000L,
+                3L,
+                1_000L,
+                70,
+                2
+            )) {
+                CompletableFuture<Optional<SharedObjectMetadata>> failed = scheduler.tryUploadOnce();
+                assertTrue(objectStore.isPending(200L));
+                objectStore.failPut(200L, new IllegalStateException("leader upload failed"));
+                assertThrows(CompletionException.class, failed::join);
+                assertTrue(scheduler.uploadFailurePresent());
+
+                progress.onFollower(PARTITION);
+                assertTrue(scheduler.tryUploadOnce().get(10, TimeUnit.SECONDS).isEmpty());
+
+                assertFalse(
+                    scheduler.uploadFailurePresent(),
+                    "failure must clear after this broker no longer owns the failed upload candidate"
+                );
+                assertFalse(scheduler.lastFailure().isPresent());
+            }
+        }
+    }
+
     private SharedStorageEngine engine(String name) throws Exception {
         return new SharedStorageEngine(new FileSharedWal(tempDir.resolve(name), 1024 * 1024, 4096));
     }

@@ -38,7 +38,7 @@ At minimum collect and retain:
 | `ReservedUploadCandidates` | WAL candidates currently reserved for upload | Persistent non-zero with no progress indicates a stuck upload |
 | `UploadCandidateCount` | Eligible committed WAL candidates | Sustained growth indicates upload debt |
 | `EligibleUploadBytes` | Bytes eligible for remote publication | Primary upload backlog signal |
-| `UploadFailurePresent` | 1 while any failed WAL candidate remains unresolved | Page when persistent |
+| `UploadFailurePresent` | 1 while any failed WAL candidate remains eligible and unresolved | Page when persistent |
 | `MaintenanceFailurePresent` | 1 while checkpoint/reclaim maintenance remains failed | Critical because WAL cannot reclaim safely |
 
 The initial thresholds above are conservative release defaults. Replace them with measured SLO-derived thresholds after
