@@ -38,6 +38,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
+export SHARED_STORAGE_MINIO_STATE_DIR="${STATE_DIR}"
+export SHARED_STORAGE_MINIO_CACHE_DIR="${CACHE_DIR}"
+# Source the fixture without running its main command so pure validation helpers
+# can be exercised without downloading MinIO.
+# shellcheck source=shared_storage_minio_fixture.sh
+source "${FIXTURE}"
+
 case "$(uname -m)" in
   x86_64|amd64)
     platform="linux-amd64"
@@ -54,6 +61,21 @@ esac
 minio_bin="${CACHE_DIR}/${platform}/minio.${platform}.RELEASE.2025-07-23T15-54-02Z"
 pid_file="${STATE_DIR}/minio.pid"
 mkdir -p "$(dirname "${minio_bin}")" "${STATE_DIR}"
+
+cache_probe="${TMP}/cache-probe"
+cp /bin/sleep "${cache_probe}"
+chmod 0755 "${cache_probe}"
+cache_probe_sha="$(sha256sum "${cache_probe}" | awk '{print $1}')"
+
+binary_valid "${cache_probe}" "sleep (GNU coreutils)" "${cache_probe_sha}"
+if binary_valid "${cache_probe}" "sleep (GNU coreutils)"     "0000000000000000000000000000000000000000000000000000000000000000"; then
+  echo "Cache validation accepted an incorrect SHA-256" >&2
+  exit 1
+fi
+if binary_valid "${cache_probe}" "not-a-real-release" "${cache_probe_sha}"; then
+  echo "Cache validation accepted an incorrect release string" >&2
+  exit 1
+fi
 
 # Use a copied ELF executable so /proc/<pid>/exe resolves to the exact
 # path the fixture considers its MinIO binary without requiring network access.
@@ -96,4 +118,4 @@ if [ -e "${pid_file}" ]; then
 fi
 grep -Fq "Refusing to stop stale MinIO PID ${foreign_pid}" "${stderr_file}"
 
-echo "MinIO fixture PID ownership tests passed"
+echo "MinIO fixture integrity and PID ownership tests passed"
