@@ -599,11 +599,7 @@ public final class SharedUploadScheduler implements AutoCloseable {
         checkpointRemoteCommitsOnce();
         reclaimCheckpointedWalOnce();
         for (int index = 0; index < maxInflight; index++) {
-            tryScheduledUploadOnce().whenComplete((ignored, error) -> {
-                if (error != null) {
-                    lastUploadFailure.set(error);
-                }
-            });
+            tryScheduledUploadOnce();
         }
     }
 
