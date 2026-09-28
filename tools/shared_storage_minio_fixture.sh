@@ -44,13 +44,13 @@ case "$(uname -m)" in
 esac
 
 BIN_DIR="${CACHE_DIR}/${PLATFORM}"
-MINIO_RELEASE_FILE="minio.${MINIO_RELEASE}"
-MC_RELEASE_FILE="mc.${MC_RELEASE}"
+MINIO_RELEASE_FILE="minio.${PLATFORM}.${MINIO_RELEASE}"
+MC_RELEASE_FILE="mc.${PLATFORM}.${MC_RELEASE}"
 MINIO_BIN="${BIN_DIR}/${MINIO_RELEASE_FILE}"
 MC_BIN="${BIN_DIR}/${MC_RELEASE_FILE}"
 
-server_base_url="https://dl.min.io/server/minio/release/${PLATFORM}/archive"
-mc_base_url="https://dl.min.io/client/mc/release/${PLATFORM}/archive"
+server_base_url="https://github.com/minio/minio/releases/download/${MINIO_RELEASE}"
+mc_base_url="https://github.com/minio/mc/releases/download/${MC_RELEASE}"
 
 script_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
