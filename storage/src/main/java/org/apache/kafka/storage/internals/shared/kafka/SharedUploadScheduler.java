@@ -27,6 +27,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -79,10 +80,11 @@ public final class SharedUploadScheduler implements AutoCloseable {
     private final int maxInflight;
     private final AtomicInteger uploadsInProgress = new AtomicInteger();
     private final Set<CandidateKey> reservedCandidates = ConcurrentHashMap.newKeySet();
-    private final Map<CandidateKey, Throwable> failedCandidates = new ConcurrentHashMap<>();
+    private final Object uploadFailureLock = new Object();
+    private final Map<CandidateKey, Throwable> failedCandidates = new HashMap<>();
     private final AtomicBoolean closed = new AtomicBoolean();
-    private final AtomicReference<Throwable> lastUploadFailure = new AtomicReference<>();
     private final AtomicReference<Throwable> lastMaintenanceFailure = new AtomicReference<>();
+    private Throwable lastSchedulingFailure;
     private final AtomicReference<SelectionSummary> lastSelectionSummary = new AtomicReference<>();
     private final AtomicReference<PendingHead> pendingHead = new AtomicReference<>();
     private final Object uploadDrainMonitor = new Object();
@@ -256,6 +258,7 @@ public final class SharedUploadScheduler implements AutoCloseable {
             return synchronousFailure(e);
         }
         if (selection.candidates().isEmpty()) {
+            clearSchedulingFailure();
             pendingHead.set(null);
             releaseUploadSlot();
             return CompletableFuture.completedFuture(Optional.empty());
@@ -273,6 +276,7 @@ public final class SharedUploadScheduler implements AutoCloseable {
         } catch (RuntimeException e) {
             return synchronousFailure(e);
         }
+        clearSchedulingFailure();
         if (applyTriggerGate && !shouldUpload(selection, nowMs)) {
             releaseUploadSlot();
             return CompletableFuture.completedFuture(Optional.empty());
@@ -300,7 +304,9 @@ public final class SharedUploadScheduler implements AutoCloseable {
         } catch (RuntimeException e) {
             releaseReservation(selection.candidates());
             recordCandidateFailure(selection.candidates(), e);
-            return synchronousFailure(e);
+            releaseUploadSlot();
+            LOG.warn("Shared object upload failed before the asynchronous object PUT started", e);
+            return CompletableFuture.failedFuture(e);
         }
         return result.whenComplete((ignored, error) -> completeUpload(selection.candidates(), error));
     }
@@ -321,17 +327,19 @@ public final class SharedUploadScheduler implements AutoCloseable {
         List<SharedStorageEngine.UploadCandidate> candidates,
         Throwable error
     ) {
-        for (SharedStorageEngine.UploadCandidate candidate : candidates) {
-            failedCandidates.put(CandidateKey.from(candidate), error);
+        synchronized (uploadFailureLock) {
+            for (SharedStorageEngine.UploadCandidate candidate : candidates) {
+                failedCandidates.put(CandidateKey.from(candidate), error);
+            }
         }
-        lastUploadFailure.set(error);
     }
 
     private void clearCandidateFailure(List<SharedStorageEngine.UploadCandidate> candidates) {
-        for (SharedStorageEngine.UploadCandidate candidate : candidates) {
-            failedCandidates.remove(CandidateKey.from(candidate));
+        synchronized (uploadFailureLock) {
+            for (SharedStorageEngine.UploadCandidate candidate : candidates) {
+                failedCandidates.remove(CandidateKey.from(candidate));
+            }
         }
-        refreshUploadFailure();
     }
 
     private void reconcileFailedCandidates(List<SharedStorageEngine.UploadCandidate> committed) {
@@ -339,15 +347,14 @@ public final class SharedUploadScheduler implements AutoCloseable {
         for (SharedStorageEngine.UploadCandidate candidate : committed) {
             current.add(CandidateKey.from(candidate));
         }
-        failedCandidates.keySet().removeIf(candidate -> !current.contains(candidate));
-        refreshUploadFailure();
+        synchronized (uploadFailureLock) {
+            failedCandidates.keySet().removeIf(candidate -> !current.contains(candidate));
+        }
     }
 
-    private void refreshUploadFailure() {
-        if (failedCandidates.isEmpty()) {
-            lastUploadFailure.set(null);
-        } else {
-            lastUploadFailure.set(failedCandidates.values().iterator().next());
+    private void clearSchedulingFailure() {
+        synchronized (uploadFailureLock) {
+            lastSchedulingFailure = null;
         }
     }
 
@@ -406,7 +413,9 @@ public final class SharedUploadScheduler implements AutoCloseable {
     }
 
     private CompletableFuture<Optional<SharedObjectMetadata>> synchronousFailure(RuntimeException error) {
-        lastUploadFailure.set(error);
+        synchronized (uploadFailureLock) {
+            lastSchedulingFailure = error;
+        }
         releaseUploadSlot();
         LOG.warn("Shared upload scheduling failed before the asynchronous object PUT started", error);
         return CompletableFuture.failedFuture(error);
@@ -414,7 +423,15 @@ public final class SharedUploadScheduler implements AutoCloseable {
 
     public Optional<Throwable> lastFailure() {
         Throwable maintenance = lastMaintenanceFailure.get();
-        return Optional.ofNullable(maintenance != null ? maintenance : lastUploadFailure.get());
+        if (maintenance != null) {
+            return Optional.of(maintenance);
+        }
+        synchronized (uploadFailureLock) {
+            if (lastSchedulingFailure != null) {
+                return Optional.of(lastSchedulingFailure);
+            }
+            return failedCandidates.values().stream().findFirst();
+        }
     }
 
     int uploadsInProgress() {
@@ -436,7 +453,9 @@ public final class SharedUploadScheduler implements AutoCloseable {
     }
 
     boolean uploadFailurePresent() {
-        return lastUploadFailure.get() != null || !failedCandidates.isEmpty();
+        synchronized (uploadFailureLock) {
+            return lastSchedulingFailure != null || !failedCandidates.isEmpty();
+        }
     }
 
     boolean maintenanceFailurePresent() {

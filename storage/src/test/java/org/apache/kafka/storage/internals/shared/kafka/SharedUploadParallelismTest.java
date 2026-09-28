@@ -210,6 +210,69 @@ class SharedUploadParallelismTest {
     }
 
     @Test
+    void successfulParallelUploadDoesNotClearConcurrentSchedulingFailure() throws Exception {
+        ControlledObjectStore objectStore = new ControlledObjectStore();
+        InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
+        try (SharedStorageEngine engine = engine("parallel-scheduling-failure")) {
+            append(engine, 0L, 9L, new byte[] {1, 2, 3});
+            append(engine, 10L, 19L, new byte[] {4, 5, 6});
+            SharedCommitProgress progress = leaderProgress(0L, 20L);
+            AtomicLong objectIds = new AtomicLong(100L);
+            AtomicLong clockCalls = new AtomicLong();
+            SharedObjectUploader uploader = new SharedObjectUploader(
+                objectStore,
+                metadataStore,
+                new SharedObjectPacker(),
+                engine
+            );
+
+            try (SharedUploadScheduler scheduler = new SharedUploadScheduler(
+                engine,
+                progress,
+                uploader,
+                objectIds::getAndIncrement,
+                () -> {
+                    if (clockCalls.getAndIncrement() == 1L) {
+                        throw new IllegalStateException("simulated scheduler clock failure");
+                    }
+                    return 1_000L;
+                },
+                3L,
+                1_000L,
+                70,
+                2
+            )) {
+                CompletableFuture<Optional<SharedObjectMetadata>> first = scheduler.tryUploadOnce();
+                assertTrue(objectStore.isPending(100L));
+
+                CompletionException schedulingFailure = assertThrows(
+                    CompletionException.class,
+                    () -> scheduler.tryUploadOnce().join()
+                );
+                assertTrue(schedulingFailure.getCause() instanceof IllegalStateException);
+                assertTrue(scheduler.lastFailure().isPresent());
+
+                objectStore.completePut(100L);
+                first.get(10, TimeUnit.SECONDS).orElseThrow();
+
+                assertTrue(
+                    scheduler.lastFailure().isPresent(),
+                    "an unrelated upload success must not hide a newer scheduling failure"
+                );
+                assertTrue(scheduler.uploadFailurePresent());
+
+                CompletableFuture<Optional<SharedObjectMetadata>> second = scheduler.tryUploadOnce();
+                assertTrue(objectStore.isPending(101L));
+                objectStore.completePut(101L);
+                second.get(10, TimeUnit.SECONDS).orElseThrow();
+
+                assertFalse(scheduler.lastFailure().isPresent());
+                assertFalse(scheduler.uploadFailurePresent());
+            }
+        }
+    }
+
+    @Test
     void failureStateClearsWhenFailedCandidateIsNoLongerLeaderOwned() throws Exception {
         ControlledObjectStore objectStore = new ControlledObjectStore();
         InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
