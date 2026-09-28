@@ -82,7 +82,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 public class SharedStorageS3OutageKRaftIntegrationTest {
     private static final String TOPIC = "shared-wal-s3-outage";
     private static final String METADATA_TOPIC = "__shared_storage_metadata";
-    private static final String MINIO_CONTAINER_ENV = "SHARED_STORAGE_S3_CONTAINER";
+    private static final String MINIO_CONTROL_ENV = SharedStorageS3TestControl.CONTROL_ENV;
     private static final int WARMUP_RECORDS = 20;
     private static final int OUTAGE_RECORDS = 40;
     private static final int POST_FAILOVER_RECORDS = 20;
@@ -92,9 +92,9 @@ public class SharedStorageS3OutageKRaftIntegrationTest {
     @Test
     public void replicatedWalStaysAvailableThroughS3OutageAndLeaderFailover() throws Exception {
         String s3Endpoint = System.getenv("SHARED_STORAGE_S3_ENDPOINT");
-        String minioContainer = System.getenv(MINIO_CONTAINER_ENV);
+        String minioControl = System.getenv(MINIO_CONTROL_ENV);
         assumeTrue(s3Endpoint != null && !s3Endpoint.isBlank(), "S3/MinIO integration endpoint is not configured");
-        assumeTrue(minioContainer != null && !minioContainer.isBlank(), "MinIO container control is not configured");
+        assumeTrue(minioControl != null && !minioControl.isBlank(), "S3 fixture control is not configured");
         String bucket = environment("SHARED_STORAGE_S3_BUCKET", "kafka-shared-storage-s3-outage");
         String region = environment("SHARED_STORAGE_S3_REGION", "us-east-1");
         String keyPrefix = "s3-outage/" + UUID.randomUUID() + "/objects";
@@ -149,7 +149,7 @@ public class SharedStorageS3OutageKRaftIntegrationTest {
                         () -> "Old leader " + oldLeader + " never remotely committed warmup " + warmup
                     );
 
-                    stopContainer(minioContainer);
+                    SharedStorageS3TestControl.stop(minioControl);
                     minioStopped = true;
                     waitForMinioState(s3Endpoint, false);
                     System.out.println("S3_OUTAGE_STARTED oldLeader=" + oldLeader + " endpoint=" + s3Endpoint);
@@ -195,7 +195,7 @@ public class SharedStorageS3OutageKRaftIntegrationTest {
                     System.out.println("S3_OUTAGE_FAILOVER oldLeader=" + oldLeader +
                         " newLeader=" + newLeader + " postRange=" + postFailover);
 
-                    startContainer(minioContainer);
+                    SharedStorageS3TestControl.start(minioControl);
                     minioStopped = false;
                     waitForMinioState(s3Endpoint, true);
 
@@ -216,7 +216,7 @@ public class SharedStorageS3OutageKRaftIntegrationTest {
                 }
             } finally {
                 if (minioStopped) {
-                    startContainerIgnoringFailure(minioContainer);
+                    SharedStorageS3TestControl.startIgnoringFailure(minioControl);
                     waitForMinioStateIgnoringFailure(s3Endpoint, true);
                 }
             }
@@ -411,34 +411,6 @@ public class SharedStorageS3OutageKRaftIntegrationTest {
             expected.add(value(sequence));
         }
         assertEquals(expected, actual, "Acknowledged records must survive S3 outage and leader failover");
-    }
-
-    private static void stopContainer(String containerName) throws Exception {
-        docker("stop", "--time", "0", containerName);
-    }
-
-    private static void startContainer(String containerName) throws Exception {
-        docker("start", containerName);
-    }
-
-    private static void startContainerIgnoringFailure(String containerName) {
-        try {
-            startContainer(containerName);
-        } catch (Exception e) {
-            System.out.println("Unable to restart MinIO container " + containerName + ": " + e);
-        }
-    }
-
-    private static void docker(String... arguments) throws Exception {
-        List<String> command = new ArrayList<>(arguments.length + 1);
-        command.add("docker");
-        command.addAll(List.of(arguments));
-        Process process = new ProcessBuilder(command)
-            .redirectErrorStream(true)
-            .start();
-        assertTrue(process.waitFor(30, TimeUnit.SECONDS), "Docker command timed out: " + command);
-        String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-        assertEquals(0, process.exitValue(), () -> "Docker command failed: " + command + "\n" + output);
     }
 
     private static void waitForMinioState(String endpoint, boolean expectedReady) throws Exception {

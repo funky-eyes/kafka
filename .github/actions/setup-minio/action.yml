@@ -1,0 +1,22 @@
+name: Setup pinned MinIO fixture
+description: Download, verify, start, and initialize the pinned MinIO GA fixture
+inputs:
+  bucket:
+    description: Bucket to create before the test
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Cache pinned MinIO binaries
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/kafka-shared-storage-minio
+        key: shared-storage-minio-${{ runner.os }}-${{ runner.arch }}-server-2025-07-23-mc-2025-07-21
+
+    - name: Start pinned MinIO fixture
+      shell: bash
+      run: |
+        set -euo pipefail
+        "${GITHUB_WORKSPACE}/tools/shared_storage_minio_fixture.sh" start
+        "${GITHUB_WORKSPACE}/tools/shared_storage_minio_fixture.sh" wait-ready 60
+        "${GITHUB_WORKSPACE}/tools/shared_storage_minio_fixture.sh" mb "${{ inputs.bucket }}"
