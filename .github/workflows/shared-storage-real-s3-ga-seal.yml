@@ -74,8 +74,24 @@ jobs:
           deadline=$((SECONDS + 1200))
           attempt=0
 
+          verify_canonical_head() {
+            canonical_sha=$(
+              git ls-remote --exit-code origin "refs/heads/${EVIDENCE_BRANCH}" |
+                awk 'NR == 1 {print $1}'
+            )
+            if [ -z "${canonical_sha}" ]; then
+              echo "::error::Cannot resolve canonical evidence branch ${EVIDENCE_BRANCH}."
+              exit 1
+            fi
+            if [ "${canonical_sha}" != "${RELEASE_SHA}" ]; then
+              echo "::error::Canonical evidence branch ${EVIDENCE_BRANCH} moved to ${canonical_sha}; expected ${RELEASE_SHA}."
+              exit 1
+            fi
+          }
+
           while true; do
             attempt=$((attempt + 1))
+            verify_canonical_head
             rm -f shared-storage-ga-real-s3-manifest.md /tmp/shared-storage-ga-real-s3.out
 
             set +e
@@ -92,6 +108,7 @@ jobs:
             set -e
 
             if [ "${status}" -eq 0 ]; then
+              verify_canonical_head
               cat /tmp/shared-storage-ga-real-s3.out
               exit 0
             fi

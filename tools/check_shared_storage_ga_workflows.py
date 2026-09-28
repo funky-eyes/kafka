@@ -370,6 +370,14 @@ def main():
         errors.append(f"{REAL_S3_SEAL_WORKFLOW_NAME}: strict manifest must resolve the base evidence branch")
     if "ref: ${{ github.sha }}" not in real_s3_seal or "git rev-parse HEAD" not in real_s3_seal:
         errors.append(f"{REAL_S3_SEAL_WORKFLOW_NAME}: strict manifest must bind to the exact push candidate SHA")
+    if 'git ls-remote --exit-code origin "refs/heads/${EVIDENCE_BRANCH}"' not in real_s3_seal:
+        errors.append(
+            f"{REAL_S3_SEAL_WORKFLOW_NAME}: strict seal must verify the canonical evidence branch head"
+        )
+    if real_s3_seal.count("verify_canonical_head") < 3:
+        errors.append(
+            f"{REAL_S3_SEAL_WORKFLOW_NAME}: canonical branch head must be checked while waiting and immediately before PASS"
+        )
 
     try:
         real_s3_timeout_seconds = workflow_timeout_minutes(real_s3_text, real_s3_name) * 60

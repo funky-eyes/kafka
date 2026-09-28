@@ -147,8 +147,9 @@ policy; keep retention cleanup as a bucket lifecycle concern.
 
 ## 4. Trigger exact-candidate evidence
 
-First make sure the development branch is at the intended canonical candidate.
-Then move the dedicated evidence branch to that exact candidate.
+First make sure author normalization has completed and the development branch is
+at the intended canonical candidate. Then move the dedicated evidence branch to
+that exact candidate.
 
 Conceptually:
 
@@ -189,6 +190,13 @@ accepts only the automatic `push` run from the dedicated `*-real-s3` branch.
 A `workflow_dispatch` run remains useful for diagnostics, but it is not accepted
 as final release evidence because its bucket/region inputs are not part of the
 machine-verified release provenance.
+
+While the strict seal is waiting, it also resolves the canonical
+`shared-wal-s3-4.3.1` branch and requires that branch to remain at the same SHA
+as the dedicated Real S3 candidate. The check is repeated immediately before a
+PASS is emitted. If author normalization or any later update moves the canonical
+branch, the in-flight Real S3 seal fails closed and the evidence branch must be
+promoted again from the new canonical HEAD.
 
 ## 5. Expected compatibility proof
 
