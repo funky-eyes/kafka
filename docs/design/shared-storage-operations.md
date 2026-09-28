@@ -4,6 +4,11 @@ This runbook defines the minimum production operating procedure for the Shared S
 written around observable states and fail-safe actions. Do not bypass WAL, metadata, or remote-checkpoint safety
 barriers to recover capacity.
 
+
+### Redundant committed object cleanup
+
+Leader races may commit more than one physical S3 object for the same logical Kafka ranges. The remote index keeps the first physical read reference. Periodic object cleanup also removes a later COMMITTED object when none of its ranges are referenced. Cleanup deletes the physical object before tombstoning its metadata; a failed physical delete leaves the COMMIT intact so the next pass or broker restart can retry safely. Multi-range objects are retained whenever at least one logical range still references them.
+
 ## Production invariants
 
 Operators should treat the following as non-negotiable:

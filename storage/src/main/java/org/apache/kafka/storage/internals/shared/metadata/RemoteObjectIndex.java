@@ -183,6 +183,26 @@ public final class RemoteObjectIndex {
     }
 
     /**
+     * Returns whether any current logical remote range reads from the supplied physical object.
+     *
+     * <p>Equivalent physical duplicates deliberately keep the first published read reference. A committed object may
+     * therefore be authoritative metadata while no logical range still needs its physical bytes.</p>
+     */
+    public synchronized boolean referencesObject(long objectId) {
+        if (objectId <= 0) {
+            throw new IllegalArgumentException("objectId must be positive");
+        }
+        for (NavigableMap<Long, RangeReference> ranges : byPartition.values()) {
+            for (RangeReference reference : ranges.values()) {
+                if (reference.objectId() == objectId) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
      * Returns a per-partition generation that advances whenever the logical remote read view changes.
      *
      * <p>Callers can snapshot this while constructing a local logical view and later determine whether authoritative

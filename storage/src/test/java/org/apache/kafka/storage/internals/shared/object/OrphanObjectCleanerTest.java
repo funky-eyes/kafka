@@ -18,6 +18,7 @@ package org.apache.kafka.storage.internals.shared.object;
 
 import org.apache.kafka.storage.internals.shared.metadata.InMemoryObjectMetadataStore;
 import org.apache.kafka.storage.internals.shared.metadata.OffsetRange;
+import org.apache.kafka.storage.internals.shared.metadata.RemoteObjectIndex;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectRange;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
@@ -164,6 +165,122 @@ class OrphanObjectCleanerTest {
         assertEquals(1, cleaner.clean(10_000L).get());
         assertFalse(objects.contains(objectId));
         assertTrue(metadata.isCleanupClaimed(objectId));
+    }
+
+    @Test
+    void fullyRedundantCommittedObjectIsDeletedThenTombstoned() throws Exception {
+        InMemoryObjectStore objects = new InMemoryObjectStore();
+        InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
+        ActiveObjectUploads activeUploads = new ActiveObjectUploads();
+        RemoteObjectIndex index = new RemoteObjectIndex();
+
+        SharedObjectMetadata retained = metadata(201L);
+        SharedObjectMetadata redundant = metadata(202L);
+        metadata.prepare(retained.objectId(), 100L).get();
+        metadata.commit(retained).get();
+        metadata.prepare(redundant.objectId(), 101L).get();
+        metadata.commit(redundant).get();
+        objects.put(retained.objectId(), ByteBuffer.wrap(new byte[] {1})).get();
+        objects.put(redundant.objectId(), ByteBuffer.wrap(new byte[] {2})).get();
+
+        index.add(retained);
+        RemoteObjectIndex.PublicationResult duplicate = index.add(redundant);
+        assertFalse(duplicate.objectReferenced());
+
+        OrphanObjectCleaner cleaner = new OrphanObjectCleaner(objects, metadata, activeUploads, index);
+        assertEquals(1, cleaner.clean(1_000L).get());
+
+        assertTrue(objects.contains(retained.objectId()));
+        assertTrue(metadata.isCommitted(retained.objectId()));
+        assertFalse(objects.contains(redundant.objectId()));
+        assertFalse(metadata.isCommitted(redundant.objectId()));
+        assertTrue(index.referencesObject(retained.objectId()));
+        assertFalse(index.referencesObject(redundant.objectId()));
+    }
+
+    @Test
+    void failedRedundantCommittedDeleteRetainsCommitForRetry() throws Exception {
+        InMemoryObjectStore delegate = new InMemoryObjectStore();
+        AtomicBoolean failFirstDelete = new AtomicBoolean(true);
+        ObjectStore flakyObjects = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                return delegate.put(objectId, data);
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                return delegate.rangeRead(objectId, position, length);
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                if (objectId == 212L && failFirstDelete.compareAndSet(true, false)) {
+                    return CompletableFuture.failedFuture(new RuntimeException("redundant delete failure"));
+                }
+                return delegate.delete(objectId);
+            }
+        };
+        InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        SharedObjectMetadata retained = metadata(211L);
+        SharedObjectMetadata redundant = metadata(212L);
+        metadata.prepare(retained.objectId(), 100L).get();
+        metadata.commit(retained).get();
+        metadata.prepare(redundant.objectId(), 101L).get();
+        metadata.commit(redundant).get();
+        flakyObjects.put(retained.objectId(), ByteBuffer.wrap(new byte[] {1})).get();
+        flakyObjects.put(redundant.objectId(), ByteBuffer.wrap(new byte[] {2})).get();
+        index.add(retained);
+        index.add(redundant);
+
+        OrphanObjectCleaner cleaner =
+            new OrphanObjectCleaner(flakyObjects, metadata, new ActiveObjectUploads(), index);
+
+        ExecutionException failure = assertThrows(ExecutionException.class, () -> cleaner.clean(1_000L).get());
+        assertTrue(failure.getCause().getMessage().contains("redundant delete failure"));
+        assertTrue(metadata.isCommitted(redundant.objectId()));
+        assertTrue(delegate.contains(redundant.objectId()));
+
+        assertEquals(1, cleaner.clean(1_000L).get());
+        assertFalse(metadata.isCommitted(redundant.objectId()));
+        assertFalse(delegate.contains(redundant.objectId()));
+    }
+
+    @Test
+    void partiallyReferencedCommittedObjectIsNeverDeleted() throws Exception {
+        InMemoryObjectStore objects = new InMemoryObjectStore();
+        InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
+        RemoteObjectIndex index = new RemoteObjectIndex();
+
+        SharedPartitionId other = new SharedPartitionId(3L, 4L, 1);
+        SharedObjectMetadata retained = metadata(221L);
+        SharedObjectMetadata mixed = new SharedObjectMetadata(
+            222L,
+            20L,
+            99L,
+            List.of(
+                retained.ranges().get(0),
+                new SharedObjectRange(other, new OffsetRange(10L, 20L), 1, 10L, 10, 27L)
+            )
+        );
+        metadata.prepare(retained.objectId(), 100L).get();
+        metadata.commit(retained).get();
+        metadata.prepare(mixed.objectId(), 101L).get();
+        metadata.commit(mixed).get();
+        objects.put(retained.objectId(), ByteBuffer.wrap(new byte[] {1})).get();
+        objects.put(mixed.objectId(), ByteBuffer.wrap(new byte[] {2})).get();
+        index.add(retained);
+        RemoteObjectIndex.PublicationResult publication = index.add(mixed);
+        assertTrue(publication.objectReferenced());
+
+        OrphanObjectCleaner cleaner =
+            new OrphanObjectCleaner(objects, metadata, new ActiveObjectUploads(), index);
+        assertEquals(0, cleaner.clean(1_000L).get());
+
+        assertTrue(objects.contains(mixed.objectId()));
+        assertTrue(metadata.isCommitted(mixed.objectId()));
+        assertTrue(index.referencesObject(mixed.objectId()));
     }
 
     @Test
