@@ -28,6 +28,7 @@ on:
       - 'tools/test_promote_shared_storage_real_s3_evidence.py'
       - '.github/actions/setup-minio/**'
       - 'tools/shared_storage_minio_fixture.sh'
+      - 'tools/test_shared_storage_minio_fixture.sh'
   pull_request:
     paths:
       - '.github/workflows/shared-storage*.yml'
@@ -38,6 +39,7 @@ on:
       - 'tools/test_promote_shared_storage_real_s3_evidence.py'
       - '.github/actions/setup-minio/**'
       - 'tools/shared_storage_minio_fixture.sh'
+      - 'tools/test_shared_storage_minio_fixture.sh'
   workflow_dispatch:
 
 permissions:
@@ -58,6 +60,9 @@ jobs:
 
       - name: Test Real S3 evidence promotion rules
         run: python3 tools/test_promote_shared_storage_real_s3_evidence.py
+
+      - name: Test MinIO fixture process ownership
+        run: bash tools/test_shared_storage_minio_fixture.sh
 
       - name: Validate Shared Storage GA workflow graph
         run: python3 tools/check_shared_storage_ga_workflows.py
