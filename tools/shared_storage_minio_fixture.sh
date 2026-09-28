@@ -132,15 +132,20 @@ fixture_executable() {
   readlink -f "${MINIO_BIN}" 2>/dev/null || true
 }
 
-pid_is_fixture() {
+valid_pid() {
   local pid="$1"
-  local actual expected
   case "${pid}" in
     ''|*[!0-9]*)
       return 1
       ;;
   esac
-  [ "${pid}" -gt 1 ] || return 1
+  [ "${pid}" -gt 1 ]
+}
+
+pid_is_fixture() {
+  local pid="$1"
+  local actual expected
+  valid_pid "${pid}" || return 1
   kill -0 -- "${pid}" 2>/dev/null || return 1
   actual="$(process_executable "${pid}")"
   expected="$(fixture_executable)"
