@@ -16,6 +16,8 @@
  */
 package org.apache.kafka.storage.internals.shared.s3;
 
+import org.apache.kafka.storage.internals.shared.object.ObjectStore;
+
 import org.junit.jupiter.api.Test;
 
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
