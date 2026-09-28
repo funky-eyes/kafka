@@ -235,6 +235,13 @@ def main():
         workflows[name] = path
         texts[name] = text
 
+    for name, text in texts.items():
+        if "quay.io/minio/" in text:
+            errors.append(
+                f"{name}: shared-storage GA workflows must use the pinned public Docker Hub MinIO images, "
+                "not quay.io/minio"
+            )
+
     for source_dir in UNBUILT_ROOT_SHARED_SOURCE_DIRS:
         if not source_dir.exists():
             continue

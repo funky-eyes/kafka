@@ -109,7 +109,7 @@ jobs:
             --publish 9000:9000 \
             --env MINIO_ROOT_USER=minioadmin \
             --env MINIO_ROOT_PASSWORD=minioadmin123 \
-            quay.io/minio/minio:RELEASE.2025-07-23T15-54-02Z \
+            minio/minio:RELEASE.2025-07-23T15-54-02Z \
             server /data --address :9000
 
       - name: Wait for MinIO readiness
@@ -125,7 +125,7 @@ jobs:
 
       - name: Ensure MinIO bucket exists
         run: |
-          docker run --rm --network host --entrypoint /bin/sh quay.io/minio/mc:RELEASE.2025-07-21T05-28-08Z -c '
+          docker run --rm --network host --entrypoint /bin/sh minio/mc:RELEASE.2025-07-21T05-28-08Z -c '
             mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
             mc mb --ignore-existing local/kafka-shared-storage-acks-one >/dev/null
           '
@@ -217,7 +217,7 @@ jobs:
       - name: Show committed S3 objects
         if: always()
         run: |
-          docker run --rm --network host --entrypoint /bin/sh quay.io/minio/mc:RELEASE.2025-07-21T05-28-08Z -c '
+          docker run --rm --network host --entrypoint /bin/sh minio/mc:RELEASE.2025-07-21T05-28-08Z -c '
             mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
             mc ls --recursive local/kafka-shared-storage-acks-one || true
           ' | tee shared-storage-acks-one-objects.log
@@ -269,7 +269,7 @@ jobs:
             --publish 9000:9000 \
             --env MINIO_ROOT_USER=minioadmin \
             --env MINIO_ROOT_PASSWORD=minioadmin123 \
-            quay.io/minio/minio:RELEASE.2025-07-23T15-54-02Z \
+            minio/minio:RELEASE.2025-07-23T15-54-02Z \
             server /data --address :9000
 
       - name: Wait for MinIO readiness
@@ -285,7 +285,7 @@ jobs:
 
       - name: Ensure MinIO bucket exists
         run: |
-          docker run --rm --network host --entrypoint /bin/sh quay.io/minio/mc:RELEASE.2025-07-21T05-28-08Z -c '
+          docker run --rm --network host --entrypoint /bin/sh minio/mc:RELEASE.2025-07-21T05-28-08Z -c '
             mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
             mc mb --ignore-existing local/kafka-shared-storage-acks-one-dual-role >/dev/null
           '
@@ -371,7 +371,7 @@ jobs:
       - name: Show committed S3 objects
         if: always()
         run: |
-          docker run --rm --network host --entrypoint /bin/sh quay.io/minio/mc:RELEASE.2025-07-21T05-28-08Z -c '
+          docker run --rm --network host --entrypoint /bin/sh minio/mc:RELEASE.2025-07-21T05-28-08Z -c '
             mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
             mc ls --recursive local/kafka-shared-storage-acks-one-dual-role || true
           ' | tee shared-storage-acks-one-dual-role-objects.log
