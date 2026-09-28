@@ -45,6 +45,14 @@ export SHARED_STORAGE_MINIO_CACHE_DIR="${CACHE_DIR}"
 # shellcheck source=shared_storage_minio_fixture.sh
 source "${FIXTURE}"
 
+valid_pid "2"
+for invalid_pid in "" "0" "1" "-1" "abc" "12x"; do
+  if valid_pid "${invalid_pid}"; then
+    echo "PID validation accepted invalid value: '${invalid_pid}'" >&2
+    exit 1
+  fi
+done
+
 case "$(uname -m)" in
   x86_64|amd64)
     platform="linux-amd64"
