@@ -180,11 +180,17 @@ def path_is_selected(path, patterns):
     return selected
 
 
-def evidence_run_specs(name, evidence_branch):
+def evidence_run_specs(name, evidence_branch, real_s3_branch_push_only=False):
     if name == REAL_S3_REQUIRED:
+        branch_push = (
+            evidence_branch + REAL_S3_EVIDENCE_BRANCH_SUFFIX,
+            AUTOMATIC_EVIDENCE_EVENT,
+        )
+        if real_s3_branch_push_only:
+            return (branch_push,)
         return (
             (evidence_branch, REAL_S3_EVIDENCE_EVENT),
-            (evidence_branch + REAL_S3_EVIDENCE_BRANCH_SUFFIX, AUTOMATIC_EVIDENCE_EVENT),
+            branch_push,
         )
     return ((evidence_branch, AUTOMATIC_EVIDENCE_EVENT),)
 
@@ -387,10 +393,13 @@ def main():
     parser.add_argument("--output", default="shared-storage-ga-manifest.md")
     parser.add_argument("--require-real-s3", action="store_true")
     parser.add_argument("--require-real-s3-exact-sha", action="store_true")
+    parser.add_argument("--require-real-s3-branch-push", action="store_true")
     args = parser.parse_args()
 
     if args.require_real_s3_exact_sha and not args.require_real_s3:
         parser.error("--require-real-s3-exact-sha requires --require-real-s3")
+    if args.require_real_s3_branch_push and not args.require_real_s3:
+        parser.error("--require-real-s3-branch-push requires --require-real-s3")
     if not args.token:
         parser.error("--token or GITHUB_TOKEN is required")
 
@@ -410,7 +419,11 @@ def main():
 
     for name in required:
         workflow_path = EVIDENCE_WORKFLOW_PATHS[name]
-        run_specs = evidence_run_specs(name, args.evidence_branch)
+        run_specs = evidence_run_specs(
+            name,
+            args.evidence_branch,
+            real_s3_branch_push_only=args.require_real_s3_branch_push,
+        )
         workflow_text = github.workflow_text(target_sha, workflow_path)
         patterns = [] if name == REAL_S3_REQUIRED else push_path_patterns(workflow_text)
         extra_paths = (
@@ -513,6 +526,7 @@ def main():
         "- Automatic evidence event: `push`",
         "- Real S3 evidence events: `workflow_dispatch` on the evidence branch or `push` on the dedicated Real S3 evidence branch",
         f"- Exact Real S3 release SHA required: `{'yes' if args.require_real_s3_exact_sha else 'no'}`",
+        f"- Real S3 branch-push evidence required: `{'yes' if args.require_real_s3_branch_push else 'no'}`",
         f"- Result: **{'PASS' if not failures else 'BLOCKED'}**",
         "",
         "| Workflow | Gate | Run | Status | Evidence SHA | Evidence |",

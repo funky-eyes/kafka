@@ -184,7 +184,11 @@ The strict seal requires the Real S3 result in addition to the normal 19
 mandatory GA gates. It also requires the accepted Real S3 run to have
 `head_sha` equal to the exact pushed candidate SHA, so an older
 production-and-contract-equivalent success cannot satisfy a new evidence-branch
-push before that candidate's Real S3 run is registered.
+push before that candidate's Real S3 run is registered. The strict seal also
+accepts only the automatic `push` run from the dedicated `*-real-s3` branch.
+A `workflow_dispatch` run remains useful for diagnostics, but it is not accepted
+as final release evidence because its bucket/region inputs are not part of the
+machine-verified release provenance.
 
 ## 5. Expected compatibility proof
 
@@ -239,8 +243,9 @@ and KMS key policy when the bucket uses SSE-KMS.
 
 Do not claim real AWS S3 release compatibility until both are true:
 
-1. `Shared Storage Real S3 Compatibility` is successful for a
-   production- and contract-equivalent candidate.
-2. The strict GA manifest generated with `--require-real-s3` is PASS.
+1. `Shared Storage Real S3 Compatibility` is successful from the dedicated
+   Real S3 evidence branch for the exact release candidate SHA.
+2. The strict GA manifest generated with `--require-real-s3`,
+   `--require-real-s3-exact-sha`, and `--require-real-s3-branch-push` is PASS.
 
 A green MinIO-oriented 19/19 GA manifest by itself is not real AWS S3 evidence.

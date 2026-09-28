@@ -352,6 +352,10 @@ def main():
         errors.append(
             f"{REAL_S3_SEAL_WORKFLOW_NAME}: strict manifest must require Real S3 evidence from the exact candidate SHA"
         )
+    if "--require-real-s3-branch-push" not in real_s3_seal:
+        errors.append(
+            f"{REAL_S3_SEAL_WORKFLOW_NAME}: strict manifest must reject manual-dispatch Real S3 evidence"
+        )
     if "--evidence-branch" not in real_s3_seal:
         errors.append(f"{REAL_S3_SEAL_WORKFLOW_NAME}: strict manifest must resolve the base evidence branch")
     if "ref: ${{ github.sha }}" not in real_s3_seal or "git rev-parse HEAD" not in real_s3_seal:

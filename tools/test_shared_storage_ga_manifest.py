@@ -54,6 +54,16 @@ class EvidenceRunTest(unittest.TestCase):
             evidence_run_specs("Shared Storage", "release"),
         )
 
+    def test_real_s3_strict_branch_push_excludes_manual_dispatch(self):
+        self.assertEqual(
+            (("release" + REAL_S3_EVIDENCE_BRANCH_SUFFIX, "push"),),
+            evidence_run_specs(
+                REAL_S3_REQUIRED,
+                "release",
+                real_s3_branch_push_only=True,
+            ),
+        )
+
     def test_accepts_exact_workflow_event_repository_and_branch(self):
         run = {
             "event": "push",
