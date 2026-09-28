@@ -29,7 +29,7 @@ on:
         default: shared-wal-s3-4.3.1
         type: string
       require_real_s3:
-        description: Require real AWS S3 compatibility evidence
+        description: Require strict exact-candidate real AWS S3 release evidence
         required: true
         default: false
         type: boolean
@@ -72,7 +72,7 @@ jobs:
             --output shared-storage-ga-manifest.md
           )
           if [[ "${{ inputs.require_real_s3 }}" == "true" ]]; then
-            args+=(--require-real-s3)
+            args+=(--require-real-s3 --require-real-s3-exact-sha --require-real-s3-branch-push)
           fi
           python3 tools/shared_storage_ga_manifest.py "${args[@]}"
 

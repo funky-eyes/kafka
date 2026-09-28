@@ -531,6 +531,11 @@ def main():
         errors.append(f"{GA_RELEASE_WORKFLOW_NAME}: workflow consistency check must run before manifest evaluation")
     if "--evidence-branch" not in ga_release:
         errors.append(f"{GA_RELEASE_WORKFLOW_NAME}: release evidence must be explicitly branch-scoped")
+    strict_real_s3_args = "args+=(--require-real-s3 --require-real-s3-exact-sha --require-real-s3-branch-push)"
+    if strict_real_s3_args not in ga_release:
+        errors.append(
+            f"{GA_RELEASE_WORKFLOW_NAME}: require_real_s3 must enforce exact-SHA dedicated-branch push evidence"
+        )
 
     if "git rev-parse HEAD" not in ga_release or "--ref \"${{ steps.release-sha.outputs.sha }}\"" not in ga_release:
         errors.append(

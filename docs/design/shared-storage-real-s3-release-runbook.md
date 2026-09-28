@@ -256,4 +256,8 @@ Do not claim real AWS S3 release compatibility until both are true:
 2. The strict GA manifest generated with `--require-real-s3`,
    `--require-real-s3-exact-sha`, and `--require-real-s3-branch-push` is PASS.
 
+The manual `Shared Storage GA Release Gate` uses the same three strict flags
+whenever `require_real_s3=true`; it is not a weaker alternate path for making
+a Real S3 release claim.
+
 A green MinIO-oriented 19/19 GA manifest by itself is not real AWS S3 evidence.
