@@ -88,6 +88,52 @@ class RemoteObjectIndexTest {
     }
 
     @Test
+    void publicationResultMarksFullyRedundantPhysicalDuplicate() {
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        RemoteObjectIndex.PublicationResult first = index.add(object(10, 0, 100, 777));
+        RemoteObjectIndex.PublicationResult duplicate = index.add(object(11, 0, 100, 777));
+
+        assertTrue(first.readViewChanged());
+        assertTrue(first.objectReferenced());
+        assertFalse(duplicate.readViewChanged());
+        assertFalse(duplicate.objectReferenced());
+        assertEquals(10, index.find(PARTITION, 50).orElseThrow().objectId());
+    }
+
+    @Test
+    void publicationResultKeepsSamePhysicalObjectReplayReferenced() {
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(object(10, 0, 100, 777));
+
+        RemoteObjectIndex.PublicationResult replay = index.add(object(10, 0, 100, 777));
+
+        assertFalse(replay.readViewChanged());
+        assertTrue(replay.objectReferenced());
+    }
+
+    @Test
+    void publicationResultKeepsPartiallyRedundantMultiRangeObjectReferenced() {
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(object(10, PARTITION, 0, 100, 777));
+
+        SharedObjectMetadata mixed = new SharedObjectMetadata(
+            11,
+            200,
+            999,
+            List.of(
+                range(PARTITION, 0, 100, 777),
+                range(OTHER_PARTITION, 100, 200, 888)
+            )
+        );
+        RemoteObjectIndex.PublicationResult publication = index.add(mixed);
+
+        assertTrue(publication.readViewChanged());
+        assertTrue(publication.objectReferenced());
+        assertEquals(10, index.find(PARTITION, 50).orElseThrow().objectId());
+        assertEquals(11, index.find(OTHER_PARTITION, 150).orElseThrow().objectId());
+    }
+
+    @Test
     void shouldRejectPhysicalDuplicateWithDifferentLeaderEpoch() {
         RemoteObjectIndex index = new RemoteObjectIndex();
         index.add(object(10, 0, 100, 777));

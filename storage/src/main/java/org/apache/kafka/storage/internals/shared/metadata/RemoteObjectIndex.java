@@ -53,7 +53,7 @@ public final class RemoteObjectIndex {
      * Remote metadata commits are infrequent compared with reads, so serializing writers here is an acceptable cost;
      * readers remain lock-free over the concurrent range maps.</p>
      */
-    public synchronized void add(SharedObjectMetadata object) {
+    public synchronized PublicationResult add(SharedObjectMetadata object) {
         Objects.requireNonNull(object, "object");
         List<RangeReference> references = object.ranges().stream()
             .map(range -> new RangeReference(
@@ -63,7 +63,9 @@ public final class RemoteObjectIndex {
                 range
             ))
             .toList();
-        addReferences(references);
+        boolean readViewChanged = addReferences(references);
+        boolean objectReferenced = references.stream().anyMatch(this::isCurrentReference);
+        return new PublicationResult(readViewChanged, objectReferenced);
     }
 
     /**
@@ -78,7 +80,7 @@ public final class RemoteObjectIndex {
         addReferences(List.copyOf(references));
     }
 
-    private void addReferences(List<RangeReference> references) {
+    private boolean addReferences(List<RangeReference> references) {
         Map<SharedPartitionId, NavigableMap<Long, RangeReference>> stagedByPartition = new HashMap<>();
         List<RangeReference> updates = new ArrayList<>();
 
@@ -122,6 +124,16 @@ public final class RemoteObjectIndex {
         for (SharedPartitionId partition : changedPartitions) {
             revisions.computeIfAbsent(partition, ignored -> new AtomicLong()).incrementAndGet();
         }
+        return !changedPartitions.isEmpty();
+    }
+
+    private boolean isCurrentReference(RangeReference candidate) {
+        NavigableMap<Long, RangeReference> ranges = byPartition.get(candidate.range().partition());
+        if (ranges == null) {
+            return false;
+        }
+        RangeReference current = ranges.get(candidate.range().offsets().startOffset());
+        return current != null && current.objectId() == candidate.objectId();
     }
 
     private static RangeReference mergeEquivalentReference(RangeReference existing, RangeReference incoming) {
@@ -220,6 +232,12 @@ public final class RemoteObjectIndex {
     private static RemoteMetadataConflictException conflict(RangeReference existing, RangeReference incoming) {
         return new RemoteMetadataConflictException(
             "Conflicting remote Kafka ranges: existing=" + existing + ", incoming=" + incoming);
+    }
+
+    public record PublicationResult(
+        boolean readViewChanged,
+        boolean objectReferenced
+    ) {
     }
 
     public record RangeReference(
