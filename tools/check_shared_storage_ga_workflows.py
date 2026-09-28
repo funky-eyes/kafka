@@ -314,9 +314,12 @@ def main():
     real_s3_branch_suffix = constants["REAL_S3_EVIDENCE_BRANCH_SUFFIX"]
     real_s3_branches = set(re.findall(r"(?m)^\s+- ([^'\"\s][^\s]*|'[^']+'|\"[^\"]+\")\s*$", real_s3_push))
     normalized_real_s3_branches = {branch.strip("'\"") for branch in real_s3_branches}
-    if not any(branch.endswith(real_s3_branch_suffix) for branch in normalized_real_s3_branches):
+    if (
+        len(normalized_real_s3_branches) != 1
+        or not next(iter(normalized_real_s3_branches), "").endswith(real_s3_branch_suffix)
+    ):
         errors.append(
-            f"{real_s3_name}: push trigger must include a dedicated evidence branch ending in "
+            f"{real_s3_name}: push trigger must contain exactly one dedicated evidence branch ending in "
             f"{real_s3_branch_suffix!r}"
         )
     if "vars.SHARED_STORAGE_AWS_S3_BUCKET" not in real_s3_text:
@@ -340,9 +343,16 @@ def main():
         branch.strip("'\"")
         for branch in re.findall(r"(?m)^\s+- ([^'\"\s][^\s]*|'[^']+'|\"[^\"]+\")\s*$", real_s3_seal_push)
     )
-    if not any(branch.endswith(real_s3_branch_suffix) for branch in real_s3_seal_branches):
+    if (
+        len(real_s3_seal_branches) != 1
+        or not next(iter(real_s3_seal_branches), "").endswith(real_s3_branch_suffix)
+    ):
         errors.append(
-            f"{REAL_S3_SEAL_WORKFLOW_NAME}: push trigger must include the dedicated Real S3 evidence branch"
+            f"{REAL_S3_SEAL_WORKFLOW_NAME}: push trigger must contain exactly one dedicated Real S3 evidence branch"
+        )
+    if real_s3_seal_branches != normalized_real_s3_branches:
+        errors.append(
+            f"{REAL_S3_SEAL_WORKFLOW_NAME}: push branch must exactly match the Real S3 compatibility push branch"
         )
     if "actions: read" not in real_s3_seal:
         errors.append(f"{REAL_S3_SEAL_WORKFLOW_NAME}: actions: read permission is required")
