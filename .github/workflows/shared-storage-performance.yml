@@ -38,6 +38,8 @@ on:
       - 'core/src/main/java/kafka/server/builders/LogManagerBuilder.java'
       - 'core/src/test/java/kafka/server/SharedStoragePerformanceBaselineTest.java'
       - '.github/actions/setup-gradle/**'
+      - '.github/actions/setup-minio/**'
+      - 'tools/shared_storage_minio_fixture.sh'
       - '.github/workflows/shared-storage-performance.yml'
   workflow_dispatch:
     inputs:
@@ -80,34 +82,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Start MinIO
-        run: |
-          docker run -d --rm --network host \
-            --name kafka-shared-performance-minio \
-            --env MINIO_ROOT_USER=minioadmin \
-            --env MINIO_ROOT_PASSWORD=minioadmin123 \
-            minio/minio:RELEASE.2025-07-23T15-54-02Z \
-            server /data --address :9000
-
-      - name: Wait for MinIO readiness
-        run: |
-          for i in {1..60}; do
-            if curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null; then
-              exit 0
-            fi
-            sleep 1
-          done
-          docker logs kafka-shared-performance-minio
-          exit 1
-
-      - name: Ensure MinIO bucket exists
-        run: |
-          docker run --rm --network host --entrypoint /bin/sh \
-            minio/mc:RELEASE.2025-07-21T05-28-08Z -c '
-              mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
-              mc mb --ignore-existing local/kafka-shared-storage-performance
-            '
-
+      - name: Setup pinned MinIO fixture
+        uses: ./.github/actions/setup-minio
+        with:
+          bucket: kafka-shared-storage-performance
       - name: Setup Gradle
         uses: ./.github/actions/setup-gradle
         with:
@@ -148,4 +126,4 @@ jobs:
 
       - name: MinIO logs
         if: failure()
-        run: docker logs kafka-shared-performance-minio || true
+        run: "${GITHUB_WORKSPACE}/tools/shared_storage_minio_fixture.sh" logs || true

@@ -41,6 +41,8 @@ on:
       - 'core/src/main/java/kafka/server/builders/LogManagerBuilder.java'
       - 'core/src/test/java/kafka/server/SharedStorageKafkaClientFailoverE2ETest.java'
       - '.github/actions/setup-gradle/**'
+      - '.github/actions/setup-minio/**'
+      - 'tools/shared_storage_minio_fixture.sh'
       - '.github/workflows/shared-storage-kafka-client-failover.yml'
   pull_request:
     paths:
@@ -74,34 +76,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Start MinIO
-        run: |
-          docker run --detach \
-            --name kafka-shared-client-failover-minio \
-            --publish 9000:9000 \
-            --env MINIO_ROOT_USER=minioadmin \
-            --env MINIO_ROOT_PASSWORD=minioadmin123 \
-            minio/minio:RELEASE.2025-07-23T15-54-02Z \
-            server /data --address :9000
-
-      - name: Wait for MinIO readiness
-        run: |
-          for i in $(seq 1 60); do
-            if curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null; then
-              exit 0
-            fi
-            sleep 1
-          done
-          docker logs kafka-shared-client-failover-minio
-          exit 1
-
-      - name: Ensure MinIO bucket exists
-        run: |
-          docker run --rm --network host --entrypoint /bin/sh minio/mc:RELEASE.2025-07-21T05-28-08Z -c '
-            mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
-            mc mb --ignore-existing local/kafka-shared-storage-client-failover >/dev/null
-          '
-
+      - name: Setup pinned MinIO fixture
+        uses: ./.github/actions/setup-minio
+        with:
+          bucket: kafka-shared-storage-client-failover
       - name: Setup Gradle
         uses: ./.github/actions/setup-gradle
         with:
@@ -130,11 +108,7 @@ jobs:
       - name: Show client-failover S3 objects
         if: always()
         run: |
-          docker run --rm --network host --entrypoint /bin/sh minio/mc:RELEASE.2025-07-21T05-28-08Z -c '
-            mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
-            mc ls --recursive local/kafka-shared-storage-client-failover || true
-          ' | tee shared-storage-client-failover-objects.log
-
+          "${GITHUB_WORKSPACE}/tools/shared_storage_minio_fixture.sh" ls "kafka-shared-storage-client-failover" | tee shared-storage-client-failover-objects.log || true
       - name: Upload client-failover diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -150,4 +124,4 @@ jobs:
 
       - name: MinIO logs
         if: always()
-        run: docker logs kafka-shared-client-failover-minio || true
+        run: "${GITHUB_WORKSPACE}/tools/shared_storage_minio_fixture.sh" logs || true

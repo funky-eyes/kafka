@@ -38,6 +38,8 @@ on:
       - 'core/src/main/java/kafka/server/builders/LogManagerBuilder.java'
       - 'core/src/test/java/kafka/server/SharedStorageRollingUpgradeE2ETest.java'
       - '.github/actions/setup-gradle/**'
+      - '.github/actions/setup-minio/**'
+      - 'tools/shared_storage_minio_fixture.sh'
       - '.github/workflows/shared-storage-rolling-upgrade.yml'
   workflow_dispatch:
     inputs:
@@ -71,35 +73,10 @@ jobs:
           path: old-src
           persist-credentials: false
 
-      - name: Start MinIO
-        run: |
-          docker run --detach \
-            --name kafka-shared-minio-rolling-upgrade \
-            --publish 9000:9000 \
-            --env MINIO_ROOT_USER=minioadmin \
-            --env MINIO_ROOT_PASSWORD=minioadmin123 \
-            minio/minio:RELEASE.2025-07-23T15-54-02Z \
-            server /data --address :9000
-
-      - name: Wait for MinIO readiness
-        run: |
-          for i in $(seq 1 60); do
-            if curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null; then
-              exit 0
-            fi
-            sleep 1
-          done
-          docker logs kafka-shared-minio-rolling-upgrade
-          exit 1
-
-      - name: Ensure MinIO bucket exists
-        run: |
-          docker run --rm --network host --entrypoint /bin/sh \
-            minio/mc:RELEASE.2025-07-21T05-28-08Z -c '
-              mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
-              mc mb --ignore-existing local/kafka-shared-storage-rolling-upgrade >/dev/null
-            '
-
+      - name: Setup pinned MinIO fixture
+        uses: ./.github/actions/setup-minio
+        with:
+          bucket: kafka-shared-storage-rolling-upgrade
       - name: Setup Gradle
         uses: ./.github/actions/setup-gradle
         with:
@@ -194,12 +171,7 @@ jobs:
       - name: Record remote object evidence
         if: always()
         run: |
-          docker run --rm --network host --entrypoint /bin/sh \
-            minio/mc:RELEASE.2025-07-21T05-28-08Z -c '
-              mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
-              mc ls --recursive local/kafka-shared-storage-rolling-upgrade
-            ' | tee shared-storage-rolling-objects.log || true
-
+          "${GITHUB_WORKSPACE}/tools/shared_storage_minio_fixture.sh" ls "kafka-shared-storage-rolling-upgrade" | tee shared-storage-rolling-objects.log || true
       - name: Upload rolling-upgrade evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -220,4 +192,4 @@ jobs:
 
       - name: MinIO logs
         if: failure()
-        run: docker logs kafka-shared-minio-rolling-upgrade || true
+        run: "${GITHUB_WORKSPACE}/tools/shared_storage_minio_fixture.sh" logs || true

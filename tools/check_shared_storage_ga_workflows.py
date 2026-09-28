@@ -65,6 +65,8 @@ def manifest_constants():
             "REAL_S3_EVIDENCE_BRANCH_SUFFIX",
             "EVIDENCE_WORKFLOW_PATHS",
             "COMMON_EVIDENCE_CONTRACT_PATHS",
+            "MINIO_EVIDENCE_CONTRACT_PATHS",
+            "MINIO_EVIDENCE_NAMES",
             "EVIDENCE_EXTRA_CONTRACT_PATHS",
             "JAVA_PRODUCTION_PREFIXES",
             "PRODUCTION_PREFIXES",
@@ -78,6 +80,8 @@ def manifest_constants():
         "REAL_S3_EVIDENCE_BRANCH_SUFFIX",
         "EVIDENCE_WORKFLOW_PATHS",
         "COMMON_EVIDENCE_CONTRACT_PATHS",
+        "MINIO_EVIDENCE_CONTRACT_PATHS",
+        "MINIO_EVIDENCE_NAMES",
         "EVIDENCE_EXTRA_CONTRACT_PATHS",
         "JAVA_PRODUCTION_PREFIXES",
         "PRODUCTION_PREFIXES",
@@ -303,6 +307,8 @@ def main():
         gate_contract = common_contract | set(
             constants["EVIDENCE_EXTRA_CONTRACT_PATHS"].get(name, ())
         )
+        if name in constants["MINIO_EVIDENCE_NAMES"]:
+            gate_contract |= set(constants["MINIO_EVIDENCE_CONTRACT_PATHS"])
         for reference in sorted(local_action_references(text)):
             action_files = local_action_files(reference)
             if not action_files:
@@ -448,6 +454,13 @@ def main():
                     f"{workflows[name]}: push.paths does not cover GA common evidence contract path: "
                     f"{contract_path}"
                 )
+        if name in constants["MINIO_EVIDENCE_NAMES"]:
+            for contract_path in sorted(constants["MINIO_EVIDENCE_CONTRACT_PATHS"]):
+                if not path_is_triggered(contract_path, patterns):
+                    errors.append(
+                        f"{workflows[name]}: push.paths does not cover MinIO evidence contract path: "
+                        f"{contract_path}"
+                    )
         for production_path in sorted(constants["PRODUCTION_PATHS"]):
             if not path_is_triggered(production_path, patterns):
                 errors.append(

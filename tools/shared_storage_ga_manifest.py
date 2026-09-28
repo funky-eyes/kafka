@@ -91,6 +91,26 @@ COMMON_EVIDENCE_CONTRACT_PATHS = (
     "gradle/wrapper/gradle-wrapper.properties",
 )
 
+MINIO_EVIDENCE_CONTRACT_PATHS = (
+    ".github/actions/setup-minio/action.yml",
+    "tools/shared_storage_minio_fixture.sh",
+)
+
+MINIO_EVIDENCE_NAMES = (
+    "Shared Storage",
+    "Shared Storage acks=1 Durability Matrix",
+    "Shared Storage acks=all Durability Matrix",
+    "Shared Storage Upload Crash Points",
+    "Shared Storage Kafka Semantics and HA",
+    "Shared Storage Kafka Client Failover",
+    "Shared Storage KRaft Controller HA",
+    "Shared Storage Inflight Idempotent Produce",
+    "Shared Storage Kafka Multipart E2E",
+    "Shared Storage Topic Lifecycle",
+    "Shared Storage Performance Baseline",
+    "Shared Storage Rolling Upgrade",
+)
+
 EVIDENCE_EXTRA_CONTRACT_PATHS = {
     "Shared Storage Real S3 Compatibility": (
         "storage/shared-storage-s3/src/test/java/org/apache/kafka/storage/internals/shared/s3/"
@@ -429,6 +449,7 @@ def main():
         extra_paths = (
             COMMON_EVIDENCE_CONTRACT_PATHS
             + EVIDENCE_EXTRA_CONTRACT_PATHS.get(name, ())
+            + (MINIO_EVIDENCE_CONTRACT_PATHS if name in MINIO_EVIDENCE_NAMES else ())
         )
         if name != REAL_S3_REQUIRED and not patterns:
             raise RuntimeError(f"automatic evidence workflow {workflow_path} has no push path contract")

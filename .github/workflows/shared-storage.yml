@@ -60,6 +60,8 @@ on:
       - 'checkstyle/import-control-shared-storage-s3.xml'
       - 'settings.gradle'
       - '.github/actions/setup-gradle/**'
+      - '.github/actions/setup-minio/**'
+      - 'tools/shared_storage_minio_fixture.sh'
       - '.github/workflows/shared-storage.yml'
   pull_request:
     paths:
@@ -206,27 +208,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Start MinIO
-        run: |
-          docker run --detach \
-            --name kafka-shared-minio \
-            --publish 9000:9000 \
-            --env MINIO_ROOT_USER=minioadmin \
-            --env MINIO_ROOT_PASSWORD=minioadmin123 \
-            minio/minio:RELEASE.2025-07-23T15-54-02Z \
-            server /data --address :9000
-
-      - name: Wait for MinIO readiness
-        run: |
-          for i in $(seq 1 60); do
-            if curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null; then
-              exit 0
-            fi
-            sleep 1
-          done
-          docker logs kafka-shared-minio
-          exit 1
-
+      - name: Setup pinned MinIO fixture
+        uses: ./.github/actions/setup-minio
+        with:
+          bucket: kafka-shared-storage-e2e
       - name: Setup Gradle
         uses: ./.github/actions/setup-gradle
         with:
@@ -255,14 +240,6 @@ jobs:
             -x :storage:shared-storage-s3:spotbugsTest \
             --no-scan 2>&1 | tee shared-storage-minio-e2e.log
 
-      - name: Ensure MinIO bucket exists
-        shell: bash
-        run: |
-          docker run --rm --network host --entrypoint /bin/sh minio/mc:RELEASE.2025-07-21T05-28-08Z -c '
-            mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
-            mc mb --ignore-existing local/kafka-shared-storage-e2e >/dev/null
-          '
-
       - name: Run replicated WAL leader failover E2E
         shell: bash
         env:
@@ -282,11 +259,7 @@ jobs:
         if: always()
         shell: bash
         run: |
-          docker run --rm --network host --entrypoint /bin/sh minio/mc:RELEASE.2025-07-21T05-28-08Z -c '
-            mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
-            mc ls --recursive local/kafka-shared-storage-e2e || true
-          ' | tee shared-storage-minio-objects.log
-
+          "${GITHUB_WORKSPACE}/tools/shared_storage_minio_fixture.sh" ls "kafka-shared-storage-e2e" | tee shared-storage-minio-objects.log || true
       - name: Run S3 static analysis diagnostics
         if: always()
         continue-on-error: true
@@ -318,4 +291,4 @@ jobs:
 
       - name: MinIO logs
         if: always()
-        run: docker logs kafka-shared-minio || true
+        run: "${GITHUB_WORKSPACE}/tools/shared_storage_minio_fixture.sh" logs || true

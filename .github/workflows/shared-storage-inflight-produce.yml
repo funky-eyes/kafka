@@ -41,6 +41,8 @@ on:
       - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
       - 'core/src/test/java/kafka/server/SharedStorageInflightIdempotentProduceE2ETest.java'
       - '.github/actions/setup-gradle/**'
+      - '.github/actions/setup-minio/**'
+      - 'tools/shared_storage_minio_fixture.sh'
       - '.github/workflows/shared-storage-inflight-produce.yml'
   pull_request:
     paths:
@@ -72,34 +74,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Start MinIO
-        run: |
-          docker run --detach \
-            --name kafka-shared-inflight-minio \
-            --publish 9000:9000 \
-            --env MINIO_ROOT_USER=minioadmin \
-            --env MINIO_ROOT_PASSWORD=minioadmin123 \
-            minio/minio:RELEASE.2025-07-23T15-54-02Z \
-            server /data --address :9000
-
-      - name: Wait for MinIO readiness
-        run: |
-          for i in $(seq 1 60); do
-            if curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null; then
-              exit 0
-            fi
-            sleep 1
-          done
-          docker logs kafka-shared-inflight-minio
-          exit 1
-
-      - name: Ensure MinIO bucket exists
-        run: |
-          docker run --rm --network host --entrypoint /bin/sh minio/mc:RELEASE.2025-07-21T05-28-08Z -c '
-            mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
-            mc mb --ignore-existing local/kafka-shared-storage-inflight-produce >/dev/null
-          '
-
+      - name: Setup pinned MinIO fixture
+        uses: ./.github/actions/setup-minio
+        with:
+          bucket: kafka-shared-storage-inflight-produce
       - name: Setup Gradle
         uses: ./.github/actions/setup-gradle
         with:
@@ -128,11 +106,7 @@ jobs:
       - name: Show inflight-produce S3 objects
         if: always()
         run: |
-          docker run --rm --network host --entrypoint /bin/sh minio/mc:RELEASE.2025-07-21T05-28-08Z -c '
-            mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
-            mc ls --recursive local/kafka-shared-storage-inflight-produce || true
-          ' | tee shared-storage-inflight-produce-objects.log
-
+          "${GITHUB_WORKSPACE}/tools/shared_storage_minio_fixture.sh" ls "kafka-shared-storage-inflight-produce" | tee shared-storage-inflight-produce-objects.log || true
       - name: Upload inflight-produce diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -148,6 +122,4 @@ jobs:
 
       - name: MinIO logs
         if: always()
-        run: docker logs kafka-shared-inflight-minio || true
-
-# exact-tree verification trigger
+        run: "${GITHUB_WORKSPACE}/tools/shared_storage_minio_fixture.sh" logs || true

@@ -42,6 +42,8 @@ on:
       - 'storage/src/main/**'
       - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
       - '.github/actions/setup-gradle/**'
+      - '.github/actions/setup-minio/**'
+      - 'tools/shared_storage_minio_fixture.sh'
       - '.github/workflows/shared-storage-acks-one.yml'
   pull_request:
     paths:
@@ -102,34 +104,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Start MinIO
-        run: |
-          docker run --detach \
-            --name kafka-shared-minio-acks-one \
-            --publish 9000:9000 \
-            --env MINIO_ROOT_USER=minioadmin \
-            --env MINIO_ROOT_PASSWORD=minioadmin123 \
-            minio/minio:RELEASE.2025-07-23T15-54-02Z \
-            server /data --address :9000
-
-      - name: Wait for MinIO readiness
-        run: |
-          for i in $(seq 1 60); do
-            if curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null; then
-              exit 0
-            fi
-            sleep 1
-          done
-          docker logs kafka-shared-minio-acks-one
-          exit 1
-
-      - name: Ensure MinIO bucket exists
-        run: |
-          docker run --rm --network host --entrypoint /bin/sh minio/mc:RELEASE.2025-07-21T05-28-08Z -c '
-            mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
-            mc mb --ignore-existing local/kafka-shared-storage-acks-one >/dev/null
-          '
-
+      - name: Setup pinned MinIO fixture
+        uses: ./.github/actions/setup-minio
+        with:
+          bucket: kafka-shared-storage-acks-one
       - name: Setup Gradle
         uses: ./.github/actions/setup-gradle
         with:
@@ -217,11 +195,7 @@ jobs:
       - name: Show committed S3 objects
         if: always()
         run: |
-          docker run --rm --network host --entrypoint /bin/sh minio/mc:RELEASE.2025-07-21T05-28-08Z -c '
-            mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
-            mc ls --recursive local/kafka-shared-storage-acks-one || true
-          ' | tee shared-storage-acks-one-objects.log
-
+          "${GITHUB_WORKSPACE}/tools/shared_storage_minio_fixture.sh" ls "kafka-shared-storage-acks-one" | tee shared-storage-acks-one-objects.log || true
       - name: Upload RF${{ matrix.rf }} diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -242,54 +216,16 @@ jobs:
 
       - name: MinIO logs
         if: always()
-        run: docker logs kafka-shared-minio-acks-one || true
-
-  acks-one-dual-role-sigkill-matrix:
-    needs: acks-one-preflight
-    name: acks=1 RF${{ matrix.rf }} broker+controller SIGKILL
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        rf:
-          - 1
-          - 2
-          - 3
-    steps:
+        run: "${GITHUB_WORKSPACE}/tools/shared_storage_minio_fixture.sh" logs || true
       - name: Checkout code
         uses: actions/checkout@v5
         with:
           persist-credentials: false
 
-      - name: Start MinIO
-        run: |
-          docker run --detach \
-            --name kafka-shared-minio-acks-one-dual-role \
-            --publish 9000:9000 \
-            --env MINIO_ROOT_USER=minioadmin \
-            --env MINIO_ROOT_PASSWORD=minioadmin123 \
-            minio/minio:RELEASE.2025-07-23T15-54-02Z \
-            server /data --address :9000
-
-      - name: Wait for MinIO readiness
-        run: |
-          for i in $(seq 1 60); do
-            if curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null; then
-              exit 0
-            fi
-            sleep 1
-          done
-          docker logs kafka-shared-minio-acks-one-dual-role
-          exit 1
-
-      - name: Ensure MinIO bucket exists
-        run: |
-          docker run --rm --network host --entrypoint /bin/sh minio/mc:RELEASE.2025-07-21T05-28-08Z -c '
-            mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
-            mc mb --ignore-existing local/kafka-shared-storage-acks-one-dual-role >/dev/null
-          '
-
+      - name: Setup pinned MinIO fixture
+        uses: ./.github/actions/setup-minio
+        with:
+          bucket: kafka-shared-storage-acks-one-dual-role
       - name: Setup Gradle
         uses: ./.github/actions/setup-gradle
         with:
@@ -371,11 +307,7 @@ jobs:
       - name: Show committed S3 objects
         if: always()
         run: |
-          docker run --rm --network host --entrypoint /bin/sh minio/mc:RELEASE.2025-07-21T05-28-08Z -c '
-            mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
-            mc ls --recursive local/kafka-shared-storage-acks-one-dual-role || true
-          ' | tee shared-storage-acks-one-dual-role-objects.log
-
+          "${GITHUB_WORKSPACE}/tools/shared_storage_minio_fixture.sh" ls "kafka-shared-storage-acks-one-dual-role" | tee shared-storage-acks-one-dual-role-objects.log || true
       - name: Upload RF${{ matrix.rf }} dual-role diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -396,4 +328,4 @@ jobs:
 
       - name: MinIO logs
         if: always()
-        run: docker logs kafka-shared-minio-acks-one-dual-role || true
+        run: "${GITHUB_WORKSPACE}/tools/shared_storage_minio_fixture.sh" logs || true
