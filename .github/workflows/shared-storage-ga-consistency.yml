@@ -36,6 +36,8 @@ on:
       - 'tools/test_shared_storage_ga_manifest.py'
       - 'tools/promote_shared_storage_real_s3_evidence.py'
       - 'tools/test_promote_shared_storage_real_s3_evidence.py'
+      - '.github/actions/setup-minio/**'
+      - 'tools/shared_storage_minio_fixture.sh'
   workflow_dispatch:
 
 permissions:
