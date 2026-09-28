@@ -239,12 +239,21 @@ def main():
         workflows[name] = path
         texts[name] = text
 
-    for name, text in texts.items():
-        if "quay.io/minio/" in text:
+    for name in constants["MINIO_EVIDENCE_NAMES"]:
+        text = texts.get(name)
+        if text is None:
+            continue
+        if "uses: ./.github/actions/setup-minio" not in text:
             errors.append(
-                f"{name}: shared-storage GA workflows must use the pinned public Docker Hub MinIO images, "
-                "not quay.io/minio"
+                f"{name}: shared-storage MinIO GA workflows must use the registry-independent "
+                "./.github/actions/setup-minio fixture"
             )
+        for image_reference in ("quay.io/minio/", "docker.io/minio/", "minio/minio", "minio/mc"):
+            if image_reference in text:
+                errors.append(
+                    f"{name}: shared-storage MinIO GA workflows must not depend on registry image "
+                    f"{image_reference!r}; use ./.github/actions/setup-minio"
+                )
 
     for source_dir in UNBUILT_ROOT_SHARED_SOURCE_DIRS:
         if not source_dir.exists():
