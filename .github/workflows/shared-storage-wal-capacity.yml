@@ -41,6 +41,8 @@ on:
       - 'storage/shared-storage-s3/src/main/**'
       - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
       - '.github/actions/setup-gradle/**'
+      - '.github/actions/setup-minio/**'
+      - 'tools/shared_storage_minio_fixture.sh'
       - '.github/workflows/shared-storage-wal-capacity.yml'
   pull_request:
     paths:
@@ -70,34 +72,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Start MinIO
-        run: |
-          docker run --detach \
-            --name kafka-shared-minio-wal-capacity \
-            --publish 9000:9000 \
-            --env MINIO_ROOT_USER=minioadmin \
-            --env MINIO_ROOT_PASSWORD=minioadmin123 \
-            minio/minio:RELEASE.2025-07-23T15-54-02Z \
-            server /data --address :9000
-
-      - name: Wait for MinIO readiness
-        run: |
-          for i in $(seq 1 60); do
-            if curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null; then
-              exit 0
-            fi
-            sleep 1
-          done
-          docker logs kafka-shared-minio-wal-capacity
-          exit 1
-
-      - name: Ensure MinIO bucket exists
-        run: |
-          docker run --rm --network host --entrypoint /bin/sh minio/mc:RELEASE.2025-07-21T05-28-08Z -c '
-            mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
-            mc mb --ignore-existing local/kafka-shared-storage-wal-capacity >/dev/null
-          '
-
+      - name: Setup pinned MinIO fixture
+        uses: ./.github/actions/setup-minio
+        with:
+          bucket: kafka-shared-storage-wal-capacity
       - name: Setup Gradle
         uses: ./.github/actions/setup-gradle
         with:
@@ -113,7 +91,7 @@ jobs:
           SHARED_STORAGE_S3_ENDPOINT: http://127.0.0.1:9000
           SHARED_STORAGE_S3_REGION: us-east-1
           SHARED_STORAGE_S3_BUCKET: kafka-shared-storage-wal-capacity
-          SHARED_STORAGE_S3_CONTAINER: kafka-shared-minio-wal-capacity
+          SHARED_STORAGE_S3_CONTROL: ${{ github.workspace }}/tools/shared_storage_minio_fixture.sh
         run: |
           set -o pipefail
           ./gradlew :core:test \
@@ -152,23 +130,12 @@ jobs:
       - name: Ensure MinIO is running for diagnostics
         if: always()
         run: |
-          docker start kafka-shared-minio-wal-capacity >/dev/null 2>&1 || true
-          for i in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null; then
-              exit 0
-            fi
-            sleep 1
-          done
-          exit 0
-
+          "${GITHUB_WORKSPACE}/tools/shared_storage_minio_fixture.sh" start
+          "${GITHUB_WORKSPACE}/tools/shared_storage_minio_fixture.sh" wait-ready 30 || true
       - name: Show committed S3 objects
         if: always()
         run: |
-          docker run --rm --network host --entrypoint /bin/sh minio/mc:RELEASE.2025-07-21T05-28-08Z -c '
-            mc alias set local http://127.0.0.1:9000 minioadmin minioadmin123 >/dev/null &&
-            mc ls --recursive local/kafka-shared-storage-wal-capacity || true
-          ' | tee shared-storage-wal-capacity-objects.log
-
+          "${GITHUB_WORKSPACE}/tools/shared_storage_minio_fixture.sh" ls "kafka-shared-storage-wal-capacity" | tee shared-storage-wal-capacity-objects.log || true
       - name: Upload diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -186,4 +153,5 @@ jobs:
 
       - name: MinIO logs
         if: always()
-        run: docker logs kafka-shared-minio-wal-capacity || true
+        run: |
+          "${GITHUB_WORKSPACE}/tools/shared_storage_minio_fixture.sh" logs || true

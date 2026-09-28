@@ -100,14 +100,18 @@ MINIO_EVIDENCE_NAMES = (
     "Shared Storage",
     "Shared Storage acks=1 Durability Matrix",
     "Shared Storage acks=all Durability Matrix",
+    "Shared Storage WAL Capacity",
+    "Shared Storage S3 Outage",
     "Shared Storage Upload Crash Points",
     "Shared Storage Kafka Semantics and HA",
     "Shared Storage Kafka Client Failover",
     "Shared Storage KRaft Controller HA",
+    "Shared Storage Local State Loss Recovery",
     "Shared Storage Inflight Idempotent Produce",
     "Shared Storage Kafka Multipart E2E",
     "Shared Storage Topic Lifecycle",
     "Shared Storage Performance Baseline",
+    "Shared Storage Soak and Chaos",
     "Shared Storage Rolling Upgrade",
 )
 
