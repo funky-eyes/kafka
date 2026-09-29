@@ -119,8 +119,31 @@ install_fixture() {
 
 pid_value() {
   if [ -f "${PID_FILE}" ]; then
-    cat "${PID_FILE}"
+    awk 'NF {print $1; exit}' "${PID_FILE}"
   fi
+}
+
+pid_start_value() {
+  if [ -f "${PID_FILE}" ]; then
+    awk 'NF >= 2 {print $2; exit}' "${PID_FILE}"
+  fi
+}
+
+process_start_time() {
+  local pid="$1"
+  [ -r "/proc/${pid}/stat" ] || return 1
+  awk '{print $22}' "/proc/${pid}/stat"
+}
+
+write_pid_identity() {
+  local pid="$1"
+  local start_time
+  start_time="$(process_start_time "${pid}")" || return 1
+  printf '%s %s\n' "${pid}" "${start_time}" > "${PID_FILE}"
+}
+
+clear_pid_identity() {
+  clear_pid_identity
 }
 
 process_executable() {
@@ -144,12 +167,18 @@ valid_pid() {
 
 pid_is_fixture() {
   local pid="$1"
-  local actual expected
+  local actual expected actual_start expected_start
   valid_pid "${pid}" || return 1
   kill -0 -- "${pid}" 2>/dev/null || return 1
   actual="$(process_executable "${pid}")"
   expected="$(fixture_executable)"
-  [ -n "${actual}" ] && [ -n "${expected}" ] && [ "${actual}" = "${expected}" ]
+  [ -n "${actual}" ] && [ -n "${expected}" ] && [ "${actual}" = "${expected}" ] || return 1
+
+  expected_start="$(pid_start_value)"
+  if [ -n "${expected_start}" ]; then
+    actual_start="$(process_start_time "${pid}")" || return 1
+    [ "${actual_start}" = "${expected_start}" ] || return 1
+  fi
 }
 
 is_running() {
@@ -164,7 +193,7 @@ discard_stale_pid() {
   [ -n "${pid}" ] || return
   if ! pid_is_fixture "${pid}"; then
     echo "Discarding stale MinIO PID file: pid=${pid}" >&2
-    rm -f "${PID_FILE}"
+    clear_pid_identity
   fi
 }
 
@@ -199,7 +228,13 @@ start_server() {
       --address "${ADDRESS}" \
       --console-address "${CONSOLE_ADDRESS}" \
       >> "${LOG_FILE}" 2>&1 &
-  echo "$!" > "${PID_FILE}"
+  local minio_pid="$!"
+  if ! write_pid_identity "${minio_pid}"; then
+    kill -- "${minio_pid}" 2>/dev/null || true
+    wait "${minio_pid}" 2>/dev/null || true
+    echo "Unable to record MinIO process identity for pid ${minio_pid}" >&2
+    return 1
+  fi
 }
 
 stop_server() {
@@ -210,14 +245,14 @@ stop_server() {
   fi
   if ! pid_is_fixture "${pid}"; then
     echo "Refusing to stop stale MinIO PID ${pid}: process does not belong to this fixture" >&2
-    rm -f "${PID_FILE}"
+    clear_pid_identity
     return
   fi
 
   kill -- "${pid}" 2>/dev/null || true
   for _ in $(seq 1 50); do
     if ! pid_is_fixture "${pid}"; then
-      rm -f "${PID_FILE}"
+      clear_pid_identity
       return
     fi
     sleep 0.1
@@ -232,7 +267,7 @@ stop_server() {
     fi
     sleep 0.1
   done
-  rm -f "${PID_FILE}"
+  clear_pid_identity
 }
 
 ready() {
