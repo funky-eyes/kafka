@@ -24,6 +24,7 @@ CACHE_DIR="${TMP}/cache"
 
 owned_pid=""
 foreign_pid=""
+transition_pid=""
 
 cleanup() {
   if [ -n "${owned_pid}" ]; then
@@ -33,6 +34,10 @@ cleanup() {
   if [ -n "${foreign_pid}" ]; then
     kill "${foreign_pid}" 2>/dev/null || true
     wait "${foreign_pid}" 2>/dev/null || true
+  fi
+  if [ -n "${transition_pid}" ]; then
+    kill "${transition_pid}" 2>/dev/null || true
+    wait "${transition_pid}" 2>/dev/null || true
   fi
   rm -rf "${TMP}"
 }
@@ -120,6 +125,17 @@ fi
 # path the fixture considers its MinIO binary without requiring network access.
 cp /bin/sleep "${minio_bin}"
 chmod 0755 "${minio_bin}"
+
+bash -c 'sleep 0.2; exec "$1" 60' _ "${minio_bin}" &
+transition_pid="$!"
+wait_for_fixture_exec "${transition_pid}"
+if [ "$(process_executable "${transition_pid}")" != "$(fixture_executable)" ]; then
+  echo "Fixture exec wait returned before process became the pinned binary" >&2
+  exit 1
+fi
+kill "${transition_pid}" 2>/dev/null || true
+wait "${transition_pid}" 2>/dev/null || true
+transition_pid=""
 
 fixture() {
   env \
