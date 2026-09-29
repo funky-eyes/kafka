@@ -151,6 +151,23 @@ printf '%s %s\n' "${owned_pid}" "${owned_start}" > "${pid_file}"
 
 fixture status | grep -Fq "running pid=${owned_pid}"
 
+# A PID without the process start-time token is legacy/stale state and must not
+# be trusted even when it points at the expected executable.
+printf '%s\n' "${owned_pid}" > "${pid_file}"
+if fixture status >/dev/null 2>&1; then
+  echo "Fixture status accepted PID state without a start-time token" >&2
+  exit 1
+fi
+missing_token_err="${TMP}/missing-token-stop.err"
+fixture stop 2>"${missing_token_err}"
+if ! kill -0 "${owned_pid}" 2>/dev/null; then
+  echo "Fixture stop killed process whose PID state lacked a start-time token" >&2
+  exit 1
+fi
+grep -Fq "Refusing to stop stale MinIO PID ${owned_pid}" "${missing_token_err}"
+
+printf '%s %s\n' "${owned_pid}" "${owned_start}" > "${pid_file}"
+
 # The same executable path and PID are not enough: a mismatched start-time token
 # simulates a reused PID and must fail closed without killing the live process.
 printf '%s %s\n' "${owned_pid}" "$((owned_start + 1))" > "${pid_file}"
