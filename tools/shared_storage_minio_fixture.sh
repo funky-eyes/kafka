@@ -143,7 +143,7 @@ write_pid_identity() {
 }
 
 clear_pid_identity() {
-  clear_pid_identity
+  rm -f "${PID_FILE}"
 }
 
 process_executable() {
