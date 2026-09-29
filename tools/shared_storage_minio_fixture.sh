@@ -309,11 +309,14 @@ stop_server() {
   fi
   for _ in $(seq 1 20); do
     if ! pid_is_fixture "${pid}"; then
-      break
+      clear_pid_identity
+      return
     fi
     sleep 0.1
   done
-  clear_pid_identity
+
+  echo "MinIO fixture process ${pid} did not stop after SIGKILL" >&2
+  return 1
 }
 
 ready() {
