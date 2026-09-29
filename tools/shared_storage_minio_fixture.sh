@@ -88,8 +88,7 @@ download_verified() {
   fi
 
   mkdir -p "$(dirname "${destination}")"
-  temporary="${destination}.download"
-  rm -f "${temporary}"
+  temporary="$(mktemp "${destination}.download.XXXXXX")" || return 1
 
   if ! curl --fail --location --silent --show-error \
       --retry 5 --retry-all-errors --connect-timeout 20 \
@@ -161,8 +160,7 @@ write_pid_identity() {
   local pid="$1"
   local start_time temporary
   start_time="$(process_start_time "${pid}")" || return 1
-  temporary="${PID_FILE}.tmp.$"
-  rm -f "${temporary}"
+  temporary="$(mktemp "${PID_FILE}.tmp.XXXXXX")" || return 1
   if ! printf '%s %s\n' "${pid}" "${start_time}" > "${temporary}"; then
     rm -f "${temporary}"
     return 1
