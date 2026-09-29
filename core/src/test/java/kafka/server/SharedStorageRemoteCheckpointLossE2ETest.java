@@ -92,7 +92,7 @@ public class SharedStorageRemoteCheckpointLossE2ETest {
     private static final String METADATA_TOPIC = "__shared_storage_metadata";
     private static final String REMOTE_CHECKPOINT_FILE = "remote-object-ranges.checkpoint";
     private static final String RING_WAL_FILE = "shared-ring.wal";
-    private static final String MINIO_CONTAINER_ENV = "SHARED_STORAGE_S3_CONTAINER";
+    private static final String MINIO_CONTROL_ENV = "SHARED_STORAGE_S3_CONTROL";
     private static final int BROKERS = 3;
     private static final int PARTITIONS = 3;
     private static final int PREFIX_CHUNKS = 3;
@@ -106,9 +106,9 @@ public class SharedStorageRemoteCheckpointLossE2ETest {
     @Test
     public void clusterRecoversRemotePrefixWhenCheckpointIsLostButWalTailSurvives() throws Exception {
         String s3Endpoint = System.getenv("SHARED_STORAGE_S3_ENDPOINT");
-        String minioContainer = System.getenv(MINIO_CONTAINER_ENV);
+        String minioControl = System.getenv(MINIO_CONTROL_ENV);
         assumeTrue(s3Endpoint != null && !s3Endpoint.isBlank(), "S3/MinIO integration endpoint is not configured");
-        assumeTrue(minioContainer != null && !minioContainer.isBlank(), "MinIO container control is not configured");
+        assumeTrue(minioControl != null && !minioControl.isBlank(), "MinIO fixture control is not configured");
         String bucket = environment("SHARED_STORAGE_S3_BUCKET", "kafka-shared-storage-local-state-loss");
         String region = environment("SHARED_STORAGE_S3_REGION", "us-east-1");
 
@@ -179,7 +179,7 @@ public class SharedStorageRemoteCheckpointLossE2ETest {
                     consumeAndAssert(bootstrapServers, nextSequence);
 
                     int[] remotePrefixEnd = nextSequence.clone();
-                    stopContainer(minioContainer);
+                    stopMinio(minioControl);
                     minioStopped = true;
                     waitForMinioState(s3Endpoint, false);
 
@@ -217,7 +217,7 @@ public class SharedStorageRemoteCheckpointLossE2ETest {
                 }
                 System.out.println("REMOTE_CHECKPOINT_LOSS_WAL_PRESERVED brokers=" + BROKERS);
 
-                startContainer(minioContainer);
+                startMinio(minioControl);
                 minioStopped = false;
                 waitForMinioState(s3Endpoint, true);
 
@@ -257,7 +257,7 @@ public class SharedStorageRemoteCheckpointLossE2ETest {
                     Arrays.toString(nextSequence));
             } finally {
                 if (minioStopped) {
-                    startContainerIgnoringFailure(minioContainer);
+                    startMinioIgnoringFailure(minioControl);
                     waitForMinioStateIgnoringFailure(s3Endpoint, true);
                 }
             }
@@ -536,32 +536,30 @@ public class SharedStorageRemoteCheckpointLossE2ETest {
         );
     }
 
-    private static void stopContainer(String containerName) throws Exception {
-        docker("stop", "--time", "0", containerName);
+    private static void stopMinio(String minioControl) throws Exception {
+        runMinioControl(minioControl, "stop");
     }
 
-    private static void startContainer(String containerName) throws Exception {
-        docker("start", containerName);
+    private static void startMinio(String minioControl) throws Exception {
+        runMinioControl(minioControl, "start");
     }
 
-    private static void startContainerIgnoringFailure(String containerName) {
+    private static void startMinioIgnoringFailure(String minioControl) {
         try {
-            startContainer(containerName);
+            startMinio(minioControl);
         } catch (Exception e) {
-            System.out.println("Unable to restart MinIO container " + containerName + ": " + e);
+            System.out.println("Unable to restart MinIO fixture with " + minioControl + ": " + e);
         }
     }
 
-    private static void docker(String... arguments) throws Exception {
-        List<String> command = new ArrayList<>(arguments.length + 1);
-        command.add("docker");
-        command.addAll(List.of(arguments));
+    private static void runMinioControl(String minioControl, String operation) throws Exception {
+        List<String> command = List.of(minioControl, operation);
         Process process = new ProcessBuilder(command)
             .redirectErrorStream(true)
             .start();
-        assertTrue(process.waitFor(30, TimeUnit.SECONDS), "Docker command timed out: " + command);
+        assertTrue(process.waitFor(30, TimeUnit.SECONDS), "MinIO fixture control timed out: " + command);
         String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-        assertEquals(0, process.exitValue(), () -> "Docker command failed: " + command + "\n" + output);
+        assertEquals(0, process.exitValue(), () -> "MinIO fixture control failed: " + command + "\n" + output);
     }
 
     private static void waitForMinioState(String endpoint, boolean expectedReady) throws Exception {
