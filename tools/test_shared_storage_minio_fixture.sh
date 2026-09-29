@@ -107,7 +107,7 @@ if PATH="${fake_bin}:${PATH}" download_verified     "https://example.invalid/min
   echo "Failed MinIO fixture download unexpectedly succeeded" >&2
   exit 1
 fi
-if [ -e "${download_target}.download" ]; then
+if compgen -G "${download_target}.download.*" >/dev/null; then
   echo "Failed MinIO fixture download left a partial file behind" >&2
   exit 1
 fi
@@ -147,7 +147,11 @@ fixture() {
 "${minio_bin}" 60 &
 owned_pid="$!"
 owned_start="$(process_start_time "${owned_pid}")"
-printf '%s %s\n' "${owned_pid}" "${owned_start}" > "${pid_file}"
+write_pid_identity "${owned_pid}"
+if compgen -G "${pid_file}.tmp.*" >/dev/null; then
+  echo "PID identity publication left a temporary file behind" >&2
+  exit 1
+fi
 
 fixture status | grep -Fq "running pid=${owned_pid}"
 
@@ -166,7 +170,7 @@ if ! kill -0 "${owned_pid}" 2>/dev/null; then
 fi
 grep -Fq "Refusing to stop stale MinIO PID ${owned_pid}" "${missing_token_err}"
 
-printf '%s %s\n' "${owned_pid}" "${owned_start}" > "${pid_file}"
+write_pid_identity "${owned_pid}"
 
 # The same executable path and PID are not enough: a mismatched start-time token
 # simulates a reused PID and must fail closed without killing the live process.
@@ -183,7 +187,7 @@ if ! kill -0 "${owned_pid}" 2>/dev/null; then
 fi
 grep -Fq "Refusing to stop stale MinIO PID ${owned_pid}" "${stale_token_err}"
 
-printf '%s %s\n' "${owned_pid}" "${owned_start}" > "${pid_file}"
+write_pid_identity "${owned_pid}"
 fixture stop
 if kill -0 "${owned_pid}" 2>/dev/null; then
   echo "Fixture stop did not terminate its owned process ${owned_pid}" >&2
