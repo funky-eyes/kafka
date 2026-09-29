@@ -220,10 +220,9 @@ pid_is_fixture() {
   [ -n "${actual}" ] && [ -n "${expected}" ] && [ "${actual}" = "${expected}" ] || return 1
 
   expected_start="$(pid_start_value)"
-  if [ -n "${expected_start}" ]; then
-    actual_start="$(process_start_time "${pid}")" || return 1
-    [ "${actual_start}" = "${expected_start}" ] || return 1
-  fi
+  [ -n "${expected_start}" ] || return 1
+  actual_start="$(process_start_time "${pid}")" || return 1
+  [ "${actual_start}" = "${expected_start}" ] || return 1
 }
 
 is_running() {
