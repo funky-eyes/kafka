@@ -135,8 +135,26 @@ pid_start_value() {
 
 process_start_time() {
   local pid="$1"
+  local stat rest start_time
   [ -r "/proc/${pid}/stat" ] || return 1
-  awk '{print $22}' "/proc/${pid}/stat"
+  stat="$(cat "/proc/${pid}/stat")" || return 1
+  case "${stat}" in
+    *") "*)
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  rest="${stat##*) }"
+  set -- ${rest}
+  [ "$#" -ge 20 ] || return 1
+  start_time="${20}"
+  case "${start_time}" in
+    ''|*[!0-9]*)
+      return 1
+      ;;
+  esac
+  printf '%s\n' "${start_time}"
 }
 
 write_pid_identity() {
