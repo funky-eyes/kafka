@@ -76,6 +76,37 @@ chmod 0755 "${cache_probe}"
 cache_probe_sha="$(sha256sum "${cache_probe}" | awk '{print $1}')"
 
 binary_valid "${cache_probe}" "sleep (GNU coreutils)" "${cache_probe_sha}"
+
+fake_bin="${TMP}/fake-bin"
+mkdir -p "${fake_bin}"
+cat > "${fake_bin}/curl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+output=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output" ]; then
+    output="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+[ -n "${output}" ] || exit 2
+printf 'partial-download' > "${output}"
+exit 22
+EOF
+chmod 0755 "${fake_bin}/curl"
+
+download_target="${TMP}/failed-download"
+if PATH="${fake_bin}:${PATH}" download_verified     "https://example.invalid/minio" "${download_target}" "fake-release"     "0000000000000000000000000000000000000000000000000000000000000000"; then
+  echo "Failed MinIO fixture download unexpectedly succeeded" >&2
+  exit 1
+fi
+if [ -e "${download_target}.download" ]; then
+  echo "Failed MinIO fixture download left a partial file behind" >&2
+  exit 1
+fi
+
 if binary_valid "${cache_probe}" "sleep (GNU coreutils)"     "0000000000000000000000000000000000000000000000000000000000000000"; then
   echo "Cache validation accepted an incorrect SHA-256" >&2
   exit 1
