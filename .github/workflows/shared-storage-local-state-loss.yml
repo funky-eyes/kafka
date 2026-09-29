@@ -151,6 +151,10 @@ jobs:
         run: |
           set +e
           set -o pipefail
+          if [ -z "${SHARED_STORAGE_S3_CONTROL:-}" ] || [ ! -x "${SHARED_STORAGE_S3_CONTROL}" ]; then
+            echo "setup-minio did not export an executable SHARED_STORAGE_S3_CONTROL" >&2
+            exit 1
+          fi
           ./gradlew :core:test \
             --tests 'kafka.server.SharedStorageLocalStateLossE2ETest' \
             -x :core:checkstyleMain \
