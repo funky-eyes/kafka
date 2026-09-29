@@ -235,7 +235,7 @@ is_running() {
 discard_stale_pid() {
   local pid
   pid="$(pid_value)"
-  [ -n "${pid}" ] || return
+  [ -n "${pid}" ] || return 0
   if ! pid_is_fixture "${pid}"; then
     echo "Discarding stale MinIO PID file: pid=${pid}" >&2
     clear_pid_identity
