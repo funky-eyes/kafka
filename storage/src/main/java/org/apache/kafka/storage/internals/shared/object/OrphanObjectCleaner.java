@@ -83,13 +83,30 @@ public final class OrphanObjectCleaner {
                 new IllegalArgumentException("cutoffCreatedTimeMs must be non-negative"));
         }
 
+        Map<Long, ObjectMetadataStore.PreparedObject> alreadyClaimed = alreadyClaimedObjects();
+        Map<Long, ObjectMetadataStore.PreparedObject> candidates =
+            preparedCleanupCandidates(cutoffCreatedTimeMs, alreadyClaimed);
+
+        CompletableFuture<Integer> result = CompletableFuture.completedFuture(0);
+        result = deleteAlreadyClaimed(result, alreadyClaimed);
+        result = claimAndDeleteCandidates(result, candidates);
+        return deleteRedundantCommittedObjects(result);
+    }
+
+    private Map<Long, ObjectMetadataStore.PreparedObject> alreadyClaimedObjects() {
         Map<Long, ObjectMetadataStore.PreparedObject> alreadyClaimed = new LinkedHashMap<>();
         for (ObjectMetadataStore.PreparedObject object : metadataStore.cleanupClaimedObjects()) {
             if (!activeUploads.contains(object.objectId())) {
                 alreadyClaimed.put(object.objectId(), object);
             }
         }
+        return alreadyClaimed;
+    }
 
+    private Map<Long, ObjectMetadataStore.PreparedObject> preparedCleanupCandidates(
+        long cutoffCreatedTimeMs,
+        Map<Long, ObjectMetadataStore.PreparedObject> alreadyClaimed
+    ) {
         Map<Long, ObjectMetadataStore.PreparedObject> candidates = new LinkedHashMap<>();
         for (ObjectMetadataStore.PreparedObject object : metadataStore.preparedObjects()) {
             if (object.createdTimeMs() <= cutoffCreatedTimeMs
@@ -98,20 +115,38 @@ public final class OrphanObjectCleaner {
                 candidates.put(object.objectId(), object);
             }
         }
+        return candidates;
+    }
 
-        CompletableFuture<Integer> result = CompletableFuture.completedFuture(0);
+    private CompletableFuture<Integer> deleteAlreadyClaimed(
+        CompletableFuture<Integer> result,
+        Map<Long, ObjectMetadataStore.PreparedObject> alreadyClaimed
+    ) {
         for (ObjectMetadataStore.PreparedObject claimed : alreadyClaimed.values()) {
             result = result.thenCompose(count -> deleteClaimed(claimed.objectId()).thenApply(ignored -> count + 1));
         }
+        return result;
+    }
+
+    private CompletableFuture<Integer> claimAndDeleteCandidates(
+        CompletableFuture<Integer> result,
+        Map<Long, ObjectMetadataStore.PreparedObject> candidates
+    ) {
         for (ObjectMetadataStore.PreparedObject candidate : candidates.values()) {
             result = result.thenCompose(count -> claimAndDelete(candidate).thenApply(deleted -> count + (deleted ? 1 : 0)));
         }
-        if (remoteIndex != null) {
-            for (SharedObjectMetadata committed : metadataStore.committedObjects()) {
-                if (!activeUploads.contains(committed.objectId()) && !remoteIndex.referencesObject(committed.objectId())) {
-                    result = result.thenCompose(count ->
-                        deleteRedundantCommitted(committed.objectId()).thenApply(deleted -> count + (deleted ? 1 : 0)));
-                }
+        return result;
+    }
+
+    private CompletableFuture<Integer> deleteRedundantCommittedObjects(CompletableFuture<Integer> result) {
+        if (remoteIndex == null) {
+            return result;
+        }
+
+        for (SharedObjectMetadata committed : metadataStore.committedObjects()) {
+            if (!activeUploads.contains(committed.objectId()) && !remoteIndex.referencesObject(committed.objectId())) {
+                result = result.thenCompose(count ->
+                    deleteRedundantCommitted(committed.objectId()).thenApply(deleted -> count + (deleted ? 1 : 0)));
             }
         }
         return result;
