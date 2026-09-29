@@ -183,6 +183,23 @@ fixture_executable() {
   readlink -f "${MINIO_BIN}" 2>/dev/null || true
 }
 
+wait_for_fixture_exec() {
+  local pid="$1"
+  local actual expected
+  expected="$(fixture_executable)"
+  [ -n "${expected}" ] || return 1
+
+  for _ in $(seq 1 50); do
+    kill -0 -- "${pid}" 2>/dev/null || return 1
+    actual="$(process_executable "${pid}")"
+    if [ -n "${actual}" ] && [ "${actual}" = "${expected}" ]; then
+      return
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
 valid_pid() {
   local pid="$1"
   case "${pid}" in
@@ -257,10 +274,11 @@ start_server() {
       --console-address "${CONSOLE_ADDRESS}" \
       >> "${LOG_FILE}" 2>&1 &
   local minio_pid="$!"
-  if ! write_pid_identity "${minio_pid}"; then
+  if ! wait_for_fixture_exec "${minio_pid}" || ! write_pid_identity "${minio_pid}"; then
     kill -- "${minio_pid}" 2>/dev/null || true
     wait "${minio_pid}" 2>/dev/null || true
-    echo "Unable to record MinIO process identity for pid ${minio_pid}" >&2
+    clear_pid_identity
+    echo "Unable to establish MinIO process identity for pid ${minio_pid}" >&2
     return 1
   fi
 }
