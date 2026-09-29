@@ -137,9 +137,15 @@ process_start_time() {
 
 write_pid_identity() {
   local pid="$1"
-  local start_time
+  local start_time temporary
   start_time="$(process_start_time "${pid}")" || return 1
-  printf '%s %s\n' "${pid}" "${start_time}" > "${PID_FILE}"
+  temporary="${PID_FILE}.tmp.$"
+  rm -f "${temporary}"
+  if ! printf '%s %s\n' "${pid}" "${start_time}" > "${temporary}"; then
+    rm -f "${temporary}"
+    return 1
+  fi
+  mv "${temporary}" "${PID_FILE}"
 }
 
 clear_pid_identity() {
