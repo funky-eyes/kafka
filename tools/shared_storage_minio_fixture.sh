@@ -91,9 +91,13 @@ download_verified() {
   temporary="${destination}.download"
   rm -f "${temporary}"
 
-  curl --fail --location --silent --show-error \
-    --retry 5 --retry-all-errors --connect-timeout 20 \
-    --output "${temporary}" "${url}"
+  if ! curl --fail --location --silent --show-error \
+      --retry 5 --retry-all-errors --connect-timeout 20 \
+      --output "${temporary}" "${url}"; then
+    rm -f "${temporary}"
+    echo "Failed to download MinIO fixture asset: ${url}" >&2
+    return 1
+  fi
 
   actual="$(sha256sum "${temporary}" | awk '{print $1}')"
   if [ "${actual}" != "${expected_sha256}" ]; then
