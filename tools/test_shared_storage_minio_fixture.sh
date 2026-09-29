@@ -99,9 +99,27 @@ fixture() {
 
 "${minio_bin}" 60 &
 owned_pid="$!"
-echo "${owned_pid}" > "${pid_file}"
+owned_start="$(process_start_time "${owned_pid}")"
+printf '%s %s\n' "${owned_pid}" "${owned_start}" > "${pid_file}"
 
 fixture status | grep -Fq "running pid=${owned_pid}"
+
+# The same executable path and PID are not enough: a mismatched start-time token
+# simulates a reused PID and must fail closed without killing the live process.
+printf '%s %s\n' "${owned_pid}" "$((owned_start + 1))" > "${pid_file}"
+if fixture status >/dev/null 2>&1; then
+  echo "Fixture status accepted a mismatched process start-time token" >&2
+  exit 1
+fi
+stale_token_err="${TMP}/stale-token-stop.err"
+fixture stop 2>"${stale_token_err}"
+if ! kill -0 "${owned_pid}" 2>/dev/null; then
+  echo "Fixture stop killed process with mismatched start-time token" >&2
+  exit 1
+fi
+grep -Fq "Refusing to stop stale MinIO PID ${owned_pid}" "${stale_token_err}"
+
+printf '%s %s\n' "${owned_pid}" "${owned_start}" > "${pid_file}"
 fixture stop
 if kill -0 "${owned_pid}" 2>/dev/null; then
   echo "Fixture stop did not terminate its owned process ${owned_pid}" >&2
