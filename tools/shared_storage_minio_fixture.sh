@@ -167,7 +167,10 @@ write_pid_identity() {
     rm -f "${temporary}"
     return 1
   fi
-  mv "${temporary}" "${PID_FILE}"
+  if ! mv "${temporary}" "${PID_FILE}"; then
+    rm -f "${temporary}"
+    return 1
+  fi
 }
 
 clear_pid_identity() {
