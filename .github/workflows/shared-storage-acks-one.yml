@@ -218,38 +218,27 @@ jobs:
         if: always()
         run: |
           "${GITHUB_WORKSPACE}/tools/shared_storage_minio_fixture.sh" logs || true
-      - name: Checkout code
-        uses: actions/checkout@v5
-        with:
-          persist-credentials: false
 
-      - name: Setup pinned MinIO fixture
-        uses: ./.github/actions/setup-minio
-        with:
-          bucket: kafka-shared-storage-acks-one-dual-role
-      - name: Setup Gradle
-        uses: ./.github/actions/setup-gradle
-        with:
-          java-version: 25
-          gradle-cache-read-only: true
-
-      - name: Stage dual-role broker runtime
+      - name: Reset MinIO fixture for dual-role phase
         shell: bash
         run: |
-          set -o pipefail
-          ./gradlew \
-            :core:jar \
-            :core:copyDependantLibs \
-            :tools:jar \
-            :tools:copyDependantLibs \
-            :storage:shared-storage-s3:stageProcessRuntime \
-            :core:compileTestJava \
-            --no-scan 2>&1 | tee shared-storage-acks-one-dual-role-build.log
+          set -euo pipefail
+          "${GITHUB_WORKSPACE}/tools/shared_storage_minio_fixture.sh" stop
+          "${GITHUB_WORKSPACE}/tools/shared_storage_minio_fixture.sh" start
+          "${GITHUB_WORKSPACE}/tools/shared_storage_minio_fixture.sh" wait-ready 60
+          "${GITHUB_WORKSPACE}/tools/shared_storage_minio_fixture.sh" mb "kafka-shared-storage-acks-one-dual-role"
+
+      - name: Reuse staged runtime for dual-role broker gate
+        shell: bash
+        run: |
+          set -euo pipefail
           test -d storage/shared-storage-s3/build/process-runtime
           find storage/shared-storage-s3/build/process-runtime -maxdepth 1 -type f -printf '%f\n' | sort \
             > shared-storage-acks-one-dual-role-runtime.txt
           grep -q '^kafka-shared-storage-s3-' shared-storage-acks-one-dual-role-runtime.txt
           grep -q '^s3-' shared-storage-acks-one-dual-role-runtime.txt
+          printf '%s\n' 'Reusing runtime compiled and staged by the dedicated-controller phase.' \
+            > shared-storage-acks-one-dual-role-build.log
 
       - name: Run RF${{ matrix.rf }} broker+controller SIGKILL gate
         shell: bash

@@ -30,6 +30,7 @@ import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.config.TopicConfig;
+import org.apache.kafka.common.errors.NotLeaderOrFollowerException;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
@@ -56,6 +57,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.UUID;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
@@ -442,15 +444,34 @@ public class SharedStorageAcksOneReplicatedSigkillTest {
     }
 
     private static RecordMetadata produceOne(String bootstrapServers) throws Exception {
-        KafkaProducer<String, String> producer = producer(bootstrapServers);
-        try {
-            RecordMetadata metadata = producer.send(
-                new ProducerRecord<>(TOPIC, 0, "0", value(0))
-            ).get(30, TimeUnit.SECONDS);
-            producer.flush();
-            return metadata;
-        } finally {
-            producer.close(Duration.ofSeconds(5));
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        int attempt = 0;
+        while (true) {
+            attempt++;
+            KafkaProducer<String, String> producer = producer(bootstrapServers);
+            try {
+                RecordMetadata metadata = producer.send(
+                    new ProducerRecord<>(TOPIC, 0, "0", value(0))
+                ).get(10, TimeUnit.SECONDS);
+                producer.flush();
+                if (attempt > 1) {
+                    System.out.println("ACKS1_REPLICATED_INITIAL_PRODUCE_READY attempts=" + attempt);
+                }
+                return metadata;
+            } catch (ExecutionException e) {
+                if (!(e.getCause() instanceof NotLeaderOrFollowerException) ||
+                    System.nanoTime() >= deadlineNanos) {
+                    throw e;
+                }
+                System.out.println(
+                    "ACKS1_REPLICATED_INITIAL_PRODUCE_RETRY attempt=" + attempt +
+                        " error=" + e.getCause().getClass().getSimpleName()
+                );
+            } finally {
+                producer.close(Duration.ofSeconds(5));
+            }
+
+            Thread.sleep(250L);
         }
     }
 

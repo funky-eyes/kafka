@@ -142,7 +142,8 @@ public class SharedStoragePerformanceBaselineTest {
                     "calibration",
                     false,
                     warmupRecords,
-                    records
+                    records,
+                    "lz4"
                 );
                 BenchmarkResult sharedCalibration = calibration.shared();
                 BenchmarkResult classicCalibration = calibration.classic();
@@ -158,7 +159,8 @@ public class SharedStoragePerformanceBaselineTest {
                         "repetition-" + repetition,
                         sharedFirst,
                         warmupRecords,
-                        records
+                        records,
+                        "lz4"
                     );
                     BenchmarkResult classic = pair.classic();
                     BenchmarkResult shared = pair.shared();
@@ -178,6 +180,18 @@ public class SharedStoragePerformanceBaselineTest {
                         records
                     );
                 }
+
+                // Preserve an uncompressed data-path diagnostic without silently redefining the established GA
+                // threshold. This exposes the true WAL/fsync cost for ~50 MiB logical input while the release gate
+                // remains comparable with its historical LZ4 workload and unchanged thresholds.
+                RawProduceDiagnostic raw = rawProduceDiagnostic(
+                    admin,
+                    bootstrapServers,
+                    brokerIds,
+                    warmupRecords,
+                    records
+                );
+                printRawProduceDiagnostic(raw, records, warmupRecords);
             }
         }
 
@@ -326,7 +340,8 @@ public class SharedStoragePerformanceBaselineTest {
         String pairId,
         boolean sharedFirst,
         int warmupRecords,
-        int records
+        int records,
+        String compressionType
     ) throws Exception {
         String sharedTopic = "shared-performance-shared-" + pairId;
         String classicTopic = "classic-performance-classic-" + pairId;
@@ -339,7 +354,8 @@ public class SharedStoragePerformanceBaselineTest {
 
         ProduceMeasurement classicProduce;
         ProduceMeasurement sharedProduce;
-        try (KafkaProducer<byte[], byte[]> producer = new KafkaProducer<>(producerProperties(bootstrapServers))) {
+        try (KafkaProducer<byte[], byte[]> producer =
+                 new KafkaProducer<>(producerProperties(bootstrapServers, compressionType))) {
             warmPairedProducePaths(producer, classicTopic, sharedTopic, warmupRecords);
             waitForSharedBackgroundIdle(brokerIds);
 
@@ -385,16 +401,89 @@ public class SharedStoragePerformanceBaselineTest {
         double classicConsume;
         double sharedConsume;
         if (sharedFirst) {
-            sharedConsume = consume(bootstrapServers, sharedTopic, warmupRecords, records);
-            classicConsume = consume(bootstrapServers, classicTopic, warmupRecords, records);
+            sharedConsume = consumeHot(bootstrapServers, sharedTopic, warmupRecords, records);
+            classicConsume = consumeHot(bootstrapServers, classicTopic, warmupRecords, records);
         } else {
-            classicConsume = consume(bootstrapServers, classicTopic, warmupRecords, records);
-            sharedConsume = consume(bootstrapServers, sharedTopic, warmupRecords, records);
+            classicConsume = consumeHot(bootstrapServers, classicTopic, warmupRecords, records);
+            sharedConsume = consumeHot(bootstrapServers, sharedTopic, warmupRecords, records);
         }
 
         BenchmarkResult classic = benchmarkResult(classicProduce, classicConsume);
         BenchmarkResult shared = benchmarkResult(sharedProduce, sharedConsume);
         return new BenchmarkPair(classic, shared);
+    }
+
+    private static RawProduceDiagnostic rawProduceDiagnostic(
+        Admin admin,
+        String bootstrapServers,
+        List<Integer> brokerIds,
+        int warmupRecords,
+        int records
+    ) throws Exception {
+        String sharedTopic = "shared-performance-shared-uncompressed-diagnostic";
+        String classicTopic = "classic-performance-classic-uncompressed-diagnostic";
+        Map<String, String> topicConfigs = Map.of(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2");
+        admin.createTopics(List.of(
+            new NewTopic(sharedTopic, PARTITIONS, (short) 3).configs(topicConfigs),
+            new NewTopic(classicTopic, PARTITIONS, (short) 3).configs(topicConfigs)
+        )).all().get(30, TimeUnit.SECONDS);
+        waitForTopicReady(admin, List.of(sharedTopic, classicTopic));
+
+        try (KafkaProducer<byte[], byte[]> producer =
+                 new KafkaProducer<>(producerProperties(bootstrapServers, "none"))) {
+            warmPairedProducePaths(producer, classicTopic, sharedTopic, warmupRecords);
+            waitForSharedBackgroundIdle(brokerIds);
+            ProduceMeasurement classic = produce(
+                producer,
+                classicTopic,
+                warmupRecords,
+                records,
+                false,
+                brokerIds
+            );
+            ProduceMeasurement shared = produce(
+                producer,
+                sharedTopic,
+                warmupRecords,
+                records,
+                true,
+                brokerIds
+            );
+            waitForSharedBackgroundIdle(brokerIds);
+            return new RawProduceDiagnostic(classic, shared);
+        }
+    }
+
+    private static void printRawProduceDiagnostic(
+        RawProduceDiagnostic diagnostic,
+        int records,
+        int warmupRecords
+    ) {
+        ProduceMeasurement classic = diagnostic.classic();
+        ProduceMeasurement shared = diagnostic.shared();
+        double ratio = shared.recordsPerSecond() / classic.recordsPerSecond();
+        WalDurabilitySnapshot wal = shared.walDurability();
+        System.out.printf(
+            "SHARED_STORAGE_PERF_UNCOMPRESSED_DIAGNOSTIC classicProduce=%.2f sharedProduce=%.2f " +
+                "classicProduceMs=%.3f sharedProduceMs=%.3f produceRatio=%.4f records=%d warmupRecords=%d " +
+                "walBatches=%d walGroups=%d walGroupsPerBatch=%.3f walBarrierMs=%.3f " +
+                "walDataForceMs=%.3f walCheckpointForceMs=%.3f walDurableBytes=%d walBarrierShare=%.4f%n",
+            classic.recordsPerSecond(),
+            shared.recordsPerSecond(),
+            classic.elapsedNanos() / 1_000_000.0d,
+            shared.elapsedNanos() / 1_000_000.0d,
+            ratio,
+            records,
+            warmupRecords,
+            wal.durabilityBatchCount(),
+            wal.durableAppendGroupCount(),
+            wal.groupsPerBatch(),
+            wal.durabilityBarrierNanos() / 1_000_000.0d,
+            wal.durabilityDataForceNanos() / 1_000_000.0d,
+            wal.durabilityCheckpointForceNanos() / 1_000_000.0d,
+            wal.durableBytes(),
+            wal.barrierShareOf(shared.elapsedNanos())
+        );
     }
 
     private static BenchmarkResult benchmarkResult(ProduceMeasurement produce, double consumeRate) {
@@ -484,18 +573,14 @@ public class SharedStoragePerformanceBaselineTest {
         awaitSends(futures);
     }
 
-    private static Properties producerProperties(String bootstrapServers) {
+    private static Properties producerProperties(String bootstrapServers, String compressionType) {
         Properties properties = new Properties();
         properties.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
         properties.put(ProducerConfig.ACKS_CONFIG, "all");
         properties.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
         properties.put(ProducerConfig.LINGER_MS_CONFIG, 5);
         properties.put(ProducerConfig.BATCH_SIZE_CONFIG, 64 * 1024);
-        // The benchmark payload is intentionally deterministic and highly repetitive. Compressing it would collapse
-        // roughly 50 MiB of logical input to only a few MiB and make the sub-100ms sample dominated by lifecycle/JIT
-        // noise instead of the storage data path. Keep the performance gate uncompressed and compare the same bytes
-        // through classic and shared routing.
-        properties.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, "none");
+        properties.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, compressionType);
         properties.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class);
         properties.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class);
         return properties;
@@ -567,7 +652,7 @@ public class SharedStoragePerformanceBaselineTest {
         }
     }
 
-    private static double consume(
+    private static double consumeHot(
         String bootstrapServers,
         String topic,
         int warmupRecords,
@@ -611,17 +696,39 @@ public class SharedStoragePerformanceBaselineTest {
                 consumer.seek(partition, warmupEndOffset(partition.partition(), warmupRecords));
             }
 
-            long started = System.nanoTime();
-            long deadline = started + TimeUnit.SECONDS.toNanos(120);
-            while (consumed < records && System.nanoTime() < deadline) {
-                consumed = Math.addExact(consumed, consumer.poll(Duration.ofMillis(250)).count());
+            // The workflow contract is a hot-read ratio. Warm exactly the range that will be measured, then seek back
+            // to the same per-partition boundary for timing. Classic and shared paths receive identical treatment.
+            consumeExactly(consumer, records, "hot-read precondition");
+            for (TopicPartition partition : partitions) {
+                consumer.seek(partition, warmupEndOffset(partition.partition(), warmupRecords));
             }
+
+            long started = System.nanoTime();
+            consumed = consumeExactly(consumer, records, "timed hot read");
             elapsedNanos = System.nanoTime() - started;
         }
         if (consumed != records) {
             throw new AssertionError("Expected " + records + " records but consumed " + consumed);
         }
         return recordsPerSecond(records, elapsedNanos);
+    }
+
+    private static long consumeExactly(
+        KafkaConsumer<byte[], byte[]> consumer,
+        int records,
+        String phase
+    ) {
+        long consumed = 0L;
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(120);
+        while (consumed < records && System.nanoTime() < deadline) {
+            consumed = Math.addExact(consumed, consumer.poll(Duration.ofMillis(250)).count());
+        }
+        if (consumed != records) {
+            throw new AssertionError(
+                "Expected " + records + " records during " + phase + " but consumed " + consumed
+            );
+        }
+        return consumed;
     }
 
     private static long warmupEndOffset(int partition, int warmupRecords) {
@@ -786,6 +893,12 @@ public class SharedStoragePerformanceBaselineTest {
         double recordsPerSecond,
         long elapsedNanos,
         WalDurabilitySnapshot walDurability
+    ) {
+    }
+
+    private record RawProduceDiagnostic(
+        ProduceMeasurement classic,
+        ProduceMeasurement shared
     ) {
     }
 
