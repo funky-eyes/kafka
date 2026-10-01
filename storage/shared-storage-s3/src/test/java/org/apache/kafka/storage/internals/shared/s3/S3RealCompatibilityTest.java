@@ -28,20 +28,22 @@ import java.util.Arrays;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * Compatibility proof against the real AWS S3 service rather than an S3-compatible emulator.
  *
  * <p>The test deliberately leaves endpoint override empty and path-style access disabled. This exercises the AWS SDK
- * default endpoint resolution, TLS, virtual-hosted bucket addressing, workload credentials, Range GET semantics and
- * the known-size streaming multipart path used by the production Shared Object uploader.</p>
+ * default endpoint resolution, TLS, virtual-hosted bucket addressing, workload credentials, Range GET semantics,
+ * successful multipart completion and multipart abort on a truncated source.</p>
  */
 @Timeout(value = 5, unit = TimeUnit.MINUTES)
 class S3RealCompatibilityTest {
@@ -94,6 +96,23 @@ class S3RealCompatibilityTest {
 
                 assertEquals(0, store.rangeRead(2L, 0L, 0).get(60, TimeUnit.SECONDS).remaining());
 
+                ExecutionException truncatedMultipart = assertThrows(
+                    ExecutionException.class,
+                    () -> store.put(
+                        3L,
+                        firstPart.length + (long) MULTIPART_TAIL_BYTES,
+                        partSource(firstPart)
+                    ).get(120, TimeUnit.SECONDS)
+                );
+                IllegalArgumentException truncatedSource =
+                    assertInstanceOf(IllegalArgumentException.class, truncatedMultipart.getCause());
+                assertTrue(truncatedSource.getMessage().contains("ended early"));
+                assertEquals(
+                    0,
+                    truncatedSource.getSuppressed().length,
+                    "AWS S3 multipart abort must succeed without a suppressed cleanup failure"
+                );
+
                 store.delete(1L).get(60, TimeUnit.SECONDS);
                 CompletionException deletedRead = assertThrows(
                     CompletionException.class,
@@ -102,7 +121,7 @@ class S3RealCompatibilityTest {
                 S3Exception deleted = assertInstanceOf(S3Exception.class, deletedRead.getCause());
                 assertEquals(404, deleted.statusCode());
             } finally {
-                deleteObjects(store, 1L, 2L);
+                deleteObjects(store, 1L, 2L, 3L);
             }
         }
     }
