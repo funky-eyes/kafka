@@ -19,7 +19,6 @@ package org.apache.kafka.storage.internals.shared.kafka;
 import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
 import org.apache.kafka.storage.internals.shared.metadata.InMemoryObjectMetadataStore;
 import org.apache.kafka.storage.internals.shared.metadata.OffsetRange;
-import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectRange;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
@@ -28,20 +27,19 @@ import org.apache.kafka.storage.internals.shared.object.ObjectStore;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectPacker;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectUploader;
 import org.apache.kafka.storage.internals.shared.wal.FileSharedWal;
-import org.apache.kafka.storage.internals.shared.wal.WalLocation;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -220,25 +218,211 @@ class SharedUploadSchedulerTest {
     }
 
     @Test
-    void boundsObjectSelectionByCommitMetadataRangeBudget() {
-        List<SharedStorageEngine.UploadCandidate> candidates = new ArrayList<>();
-        for (int index = 0; index <= SharedMetadataRecordCodec.MAX_COMMITTED_OBJECT_RANGES; index++) {
-            long offset = index;
-            candidates.add(new SharedStorageEngine.UploadCandidate(
-                P0,
-                new OffsetRange(offset, offset + 1L),
-                new WalLocation(index * 1024L, 1024, 3, offset, offset)
-            ));
+    void mergesMultipleCandidatesAcrossPartitionsInPhysicalWalOrder() throws Exception {
+        InMemoryObjectStore objectStore = new InMemoryObjectStore();
+        InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
+        try (SharedStorageEngine engine = engine("cross-partition-k-way")) {
+            append(engine, P0, 0L, 9L, new byte[] {1});
+            append(engine, P1, 20L, 29L, new byte[] {2});
+            append(engine, P0, 10L, 19L, new byte[] {3});
+            append(engine, P1, 30L, 39L, new byte[] {4});
+
+            SharedCommitProgress progress = new SharedCommitProgress();
+            progress.onLogLoaded(P0, 0L);
+            progress.onLogLoaded(P1, 20L);
+            progress.onHighWatermarkUpdated(P0, 20L);
+            progress.onHighWatermarkUpdated(P1, 40L);
+            progress.onLeader(P0);
+            progress.onLeader(P1);
+
+            try (SharedUploadScheduler scheduler = scheduler(engine, progress, objectStore, metadataStore, 1024L)) {
+                List<SharedStorageEngine.UploadCandidate> selected = scheduler.selectCandidates();
+
+                assertEquals(4, selected.size());
+                assertEquals(
+                    List.of(P0, P1, P0, P1),
+                    selected.stream().map(SharedStorageEngine.UploadCandidate::partition).toList()
+                );
+                assertEquals(
+                    List.of(
+                        new OffsetRange(0L, 10L),
+                        new OffsetRange(20L, 30L),
+                        new OffsetRange(10L, 20L),
+                        new OffsetRange(30L, 40L)
+                    ),
+                    selected.stream().map(SharedStorageEngine.UploadCandidate::offsets).toList()
+                );
+                assertTrue(
+                    java.util.stream.IntStream.range(1, selected.size())
+                        .allMatch(index ->
+                            selected.get(index - 1).location().walOffset() <
+                                selected.get(index).location().walOffset())
+                );
+            }
         }
+    }
 
-        List<SharedStorageEngine.UploadCandidate> selected =
-            SharedUploadScheduler.selectTargetBounded(candidates, Long.MAX_VALUE);
+    @Test
+    void concurrentUploadSelectionSkipsReservedHeadInPhysicalWalOrder() throws Exception {
+        InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
+        CountDownLatch firstPutStarted = new CountDownLatch(1);
+        CompletableFuture<Void> firstPut = new CompletableFuture<>();
+        AtomicInteger putCalls = new AtomicInteger();
+        ObjectStore objectStore = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                if (putCalls.getAndIncrement() == 0) {
+                    firstPutStarted.countDown();
+                    return firstPut;
+                }
+                return CompletableFuture.completedFuture(null);
+            }
 
-        assertEquals(SharedMetadataRecordCodec.MAX_COMMITTED_OBJECT_RANGES, selected.size());
-        assertEquals(
-            SharedMetadataRecordCodec.MAX_COMMITTED_OBJECT_RANGES - 1L,
-            selected.get(selected.size() - 1).offsets().startOffset()
-        );
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return CompletableFuture.completedFuture(null);
+            }
+        };
+
+        try (SharedStorageEngine engine = engine("reserved-k-way")) {
+            append(engine, P0, 0L, 9L, new byte[] {1});
+            append(engine, P1, 20L, 29L, new byte[] {2});
+            append(engine, P0, 10L, 19L, new byte[] {3});
+
+            SharedCommitProgress progress = new SharedCommitProgress();
+            progress.onLogLoaded(P0, 0L);
+            progress.onLogLoaded(P1, 20L);
+            progress.onHighWatermarkUpdated(P0, 20L);
+            progress.onHighWatermarkUpdated(P1, 30L);
+            progress.onLeader(P0);
+            progress.onLeader(P1);
+
+            AtomicLong objectIds = new AtomicLong(100L);
+            SharedObjectUploader uploader = new SharedObjectUploader(
+                objectStore,
+                metadataStore,
+                new SharedObjectPacker(),
+                engine
+            );
+            SharedUploadScheduler scheduler = new SharedUploadScheduler(
+                engine,
+                progress,
+                uploader,
+                objectIds::getAndIncrement,
+                () -> 1_000L,
+                1L,
+                SharedUploadScheduler.DEFAULT_MAX_LINGER_MS,
+                SharedUploadScheduler.DEFAULT_WAL_PRESSURE_PERCENT,
+                2
+            );
+            try {
+                CompletableFuture<Optional<SharedObjectMetadata>> firstUpload = scheduler.tryUploadOnce();
+                assertTrue(firstPutStarted.await(10, TimeUnit.SECONDS), "First object PUT did not start");
+                assertEquals(1, scheduler.reservedCandidateCount());
+                assertEquals(1, scheduler.uploadsInProgress());
+
+                SharedObjectMetadata second = scheduler.tryUploadOnce()
+                    .get(10, TimeUnit.SECONDS)
+                    .orElseThrow();
+                assertEquals(1, second.ranges().size());
+                assertEquals(P1, second.ranges().get(0).partition());
+                assertEquals(new OffsetRange(20L, 30L), second.ranges().get(0).offsets());
+
+                firstPut.complete(null);
+                SharedObjectMetadata first = firstUpload.get(10, TimeUnit.SECONDS).orElseThrow();
+                assertEquals(P0, first.ranges().get(0).partition());
+                assertEquals(new OffsetRange(0L, 10L), first.ranges().get(0).offsets());
+                assertEquals(0, scheduler.reservedCandidateCount());
+                assertEquals(0, scheduler.uploadsInProgress());
+            } finally {
+                firstPut.complete(null);
+                scheduler.close();
+            }
+        }
+    }
+
+    @Test
+    void completingOlderInflightUploadDoesNotResetNextCandidateLingerAge() throws Exception {
+        InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
+        CountDownLatch firstPutStarted = new CountDownLatch(1);
+        CompletableFuture<Void> firstPut = new CompletableFuture<>();
+        AtomicInteger putCalls = new AtomicInteger();
+        ObjectStore objectStore = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                if (putCalls.getAndIncrement() == 0) {
+                    firstPutStarted.countDown();
+                    return firstPut;
+                }
+                return CompletableFuture.completedFuture(null);
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return CompletableFuture.completedFuture(null);
+            }
+        };
+
+        try (SharedStorageEngine engine = engine("linger-inflight")) {
+            append(engine, P0, 0L, 9L, new byte[] {1, 2, 3, 4, 5, 6});
+            append(engine, P0, 10L, 19L, new byte[] {7, 8, 9, 10, 11, 12});
+            SharedCommitProgress progress = leaderProgress(P0, 0L, 20L);
+
+            AtomicLong nowMs = new AtomicLong();
+            AtomicLong objectIds = new AtomicLong(100L);
+            SharedObjectUploader uploader = new SharedObjectUploader(
+                objectStore,
+                metadataStore,
+                new SharedObjectPacker(),
+                engine
+            );
+            SharedUploadScheduler scheduler = new SharedUploadScheduler(
+                engine,
+                progress,
+                uploader,
+                objectIds::getAndIncrement,
+                nowMs::get,
+                10L,
+                100L,
+                100,
+                2
+            );
+            try {
+                assertTrue(scheduler.tryScheduledUploadOnce().get(10, TimeUnit.SECONDS).isEmpty());
+
+                nowMs.set(100L);
+                CompletableFuture<Optional<SharedObjectMetadata>> firstUpload =
+                    scheduler.tryScheduledUploadOnce();
+                assertTrue(firstPutStarted.await(10, TimeUnit.SECONDS), "First linger-triggered PUT did not start");
+
+                // With A reserved, B becomes the new pending head at t=100 but has not lingered long enough yet.
+                assertTrue(scheduler.tryScheduledUploadOnce().get(10, TimeUnit.SECONDS).isEmpty());
+
+                firstPut.complete(null);
+                SharedObjectMetadata first = firstUpload.get(10, TimeUnit.SECONDS).orElseThrow();
+                assertEquals(new OffsetRange(0L, 10L), first.ranges().get(0).offsets());
+
+                // Completing A must not clear B's pending timestamp. B has now aged 100ms and must upload.
+                nowMs.set(200L);
+                SharedObjectMetadata second = scheduler.tryScheduledUploadOnce()
+                    .get(10, TimeUnit.SECONDS)
+                    .orElseThrow();
+                assertEquals(new OffsetRange(10L, 20L), second.ranges().get(0).offsets());
+            } finally {
+                firstPut.complete(null);
+                scheduler.close();
+            }
+        }
     }
 
     @Test

@@ -317,12 +317,25 @@ public final class SharedUploadScheduler implements AutoCloseable {
         releaseReservation(candidates);
         if (error == null) {
             clearCandidateFailure(candidates);
-            pendingHead.set(null);
+            clearCompletedPendingHead(candidates);
         } else {
             recordCandidateFailure(candidates, error);
             LOG.warn("Shared object upload failed", error);
         }
         releaseUploadSlot();
+    }
+
+    private void clearCompletedPendingHead(List<SharedStorageEngine.UploadCandidate> candidates) {
+        PendingHead current = pendingHead.get();
+        if (current == null) {
+            return;
+        }
+        for (SharedStorageEngine.UploadCandidate candidate : candidates) {
+            if (current.matches(candidate)) {
+                pendingHead.compareAndSet(current, null);
+                return;
+            }
+        }
     }
 
     private void recordCandidateFailure(
@@ -592,29 +605,6 @@ public final class SharedUploadScheduler implements AutoCloseable {
         ));
 
         return new CandidateSelection(List.copyOf(selected), selectedBytes);
-    }
-
-    static List<SharedStorageEngine.UploadCandidate> selectTargetBounded(
-        List<SharedStorageEngine.UploadCandidate> committed,
-        long targetObjectBytes
-    ) {
-        List<SharedStorageEngine.UploadCandidate> selected = new ArrayList<>();
-        long selectedBytes = 0L;
-        for (SharedStorageEngine.UploadCandidate candidate : committed) {
-            if (selected.size() >= SharedMetadataRecordCodec.MAX_COMMITTED_OBJECT_RANGES) {
-                break;
-            }
-            int payloadBytes = candidate.location().payloadLength();
-            if (!selected.isEmpty() && selectedBytes + payloadBytes > targetObjectBytes) {
-                break;
-            }
-            selected.add(candidate);
-            selectedBytes = Math.addExact(selectedBytes, payloadBytes);
-            if (selectedBytes >= targetObjectBytes) {
-                break;
-            }
-        }
-        return List.copyOf(selected);
     }
 
     private void logSelectionSummary(SelectionSummary summary) {

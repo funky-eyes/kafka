@@ -326,46 +326,48 @@ public class SharedStoragePerformanceBaselineTest {
                 waitForTopicReady(admin, List.of(sharedTopic, classicTopic));
             }
 
-            warmPairedProducePaths(bootstrapServers, classicTopic, sharedTopic, warmupRecords);
-            waitForSharedBackgroundIdle(brokerIds);
-
             ProduceMeasurement classicProduce;
             ProduceMeasurement sharedProduce;
-            if (sharedFirst) {
-                sharedProduce = produce(
-                    bootstrapServers,
-                    sharedTopic,
-                    warmupRecords,
-                    records,
-                    true,
-                    brokerIds
-                );
+            try (KafkaProducer<byte[], byte[]> producer = new KafkaProducer<>(producerProperties(bootstrapServers))) {
+                warmPairedProducePaths(producer, classicTopic, sharedTopic, warmupRecords);
                 waitForSharedBackgroundIdle(brokerIds);
-                classicProduce = produce(
-                    bootstrapServers,
-                    classicTopic,
-                    warmupRecords,
-                    records,
-                    false,
-                    brokerIds
-                );
-            } else {
-                classicProduce = produce(
-                    bootstrapServers,
-                    classicTopic,
-                    warmupRecords,
-                    records,
-                    false,
-                    brokerIds
-                );
-                sharedProduce = produce(
-                    bootstrapServers,
-                    sharedTopic,
-                    warmupRecords,
-                    records,
-                    true,
-                    brokerIds
-                );
+
+                if (sharedFirst) {
+                    sharedProduce = produce(
+                        producer,
+                        sharedTopic,
+                        warmupRecords,
+                        records,
+                        true,
+                        brokerIds
+                    );
+                    waitForSharedBackgroundIdle(brokerIds);
+                    classicProduce = produce(
+                        producer,
+                        classicTopic,
+                        warmupRecords,
+                        records,
+                        false,
+                        brokerIds
+                    );
+                } else {
+                    classicProduce = produce(
+                        producer,
+                        classicTopic,
+                        warmupRecords,
+                        records,
+                        false,
+                        brokerIds
+                    );
+                    sharedProduce = produce(
+                        producer,
+                        sharedTopic,
+                        warmupRecords,
+                        records,
+                        true,
+                        brokerIds
+                    );
+                }
             }
 
             waitForSharedBackgroundIdle(brokerIds);
@@ -453,26 +455,23 @@ public class SharedStoragePerformanceBaselineTest {
     }
 
     private static void warmPairedProducePaths(
-        String bootstrapServers,
+        KafkaProducer<byte[], byte[]> producer,
         String classicTopic,
         String sharedTopic,
         int warmupRecords
     ) throws Exception {
-        Properties properties = producerProperties(bootstrapServers);
         byte[] payload = payload();
         List<Future<RecordMetadata>> futures = new ArrayList<>(Math.multiplyExact(warmupRecords, 2));
-        try (KafkaProducer<byte[], byte[]> producer = new KafkaProducer<>(properties)) {
-            producer.partitionsFor(classicTopic);
-            producer.partitionsFor(sharedTopic);
-            for (int index = 0; index < warmupRecords; index++) {
-                byte[] key = recordKey(index);
-                int partition = index % PARTITIONS;
-                futures.add(producer.send(new ProducerRecord<>(classicTopic, partition, key, payload)));
-                futures.add(producer.send(new ProducerRecord<>(sharedTopic, partition, key, payload)));
-            }
-            producer.flush();
-            awaitSends(futures);
+        producer.partitionsFor(classicTopic);
+        producer.partitionsFor(sharedTopic);
+        for (int index = 0; index < warmupRecords; index++) {
+            byte[] key = recordKey(index);
+            int partition = index % PARTITIONS;
+            futures.add(producer.send(new ProducerRecord<>(classicTopic, partition, key, payload)));
+            futures.add(producer.send(new ProducerRecord<>(sharedTopic, partition, key, payload)));
         }
+        producer.flush();
+        awaitSends(futures);
     }
 
     private static Properties producerProperties(String bootstrapServers) {
@@ -495,36 +494,31 @@ public class SharedStoragePerformanceBaselineTest {
     }
 
     private static ProduceMeasurement produce(
-        String bootstrapServers,
+        KafkaProducer<byte[], byte[]> producer,
         String topic,
         int warmupRecords,
         int records,
         boolean sharedStorage,
         List<Integer> brokerIds
     ) throws Exception {
-        Properties properties = producerProperties(bootstrapServers);
         byte[] payload = payload();
 
-        long elapsedNanos;
-        try (KafkaProducer<byte[], byte[]> producer = new KafkaProducer<>(properties)) {
-            // Producer construction and metadata discovery are lifecycle costs, not steady-state append throughput.
-            producer.partitionsFor(topic);
-
-            WalDurabilitySnapshot before = sharedStorage
-                ? walDurabilitySnapshot(brokerIds)
-                : WalDurabilitySnapshot.EMPTY;
-            long started = System.nanoTime();
-            awaitSends(sendRecords(producer, topic, warmupRecords, records, payload));
-            elapsedNanos = System.nanoTime() - started;
-            WalDurabilitySnapshot after = sharedStorage
-                ? walDurabilitySnapshot(brokerIds)
-                : WalDurabilitySnapshot.EMPTY;
-            return new ProduceMeasurement(
-                recordsPerSecond(records, elapsedNanos),
-                elapsedNanos,
-                after.deltaFrom(before)
-            );
-        }
+        // The paired warmup keeps this producer's metadata, broker connections and accumulator lifecycle hot.
+        // Only the measured send+flush interval below contributes to steady-state append throughput.
+        WalDurabilitySnapshot before = sharedStorage
+            ? walDurabilitySnapshot(brokerIds)
+            : WalDurabilitySnapshot.EMPTY;
+        long started = System.nanoTime();
+        awaitSends(sendRecords(producer, topic, warmupRecords, records, payload));
+        long elapsedNanos = System.nanoTime() - started;
+        WalDurabilitySnapshot after = sharedStorage
+            ? walDurabilitySnapshot(brokerIds)
+            : WalDurabilitySnapshot.EMPTY;
+        return new ProduceMeasurement(
+            recordsPerSecond(records, elapsedNanos),
+            elapsedNanos,
+            after.deltaFrom(before)
+        );
     }
 
     private static List<Future<RecordMetadata>> sendRecords(
