@@ -137,9 +137,11 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
     private void initialize() throws Exception {
         createTopicIfNeeded();
         validateTopic();
-        replayInitialImage();
-        // initTransactions fences an older allocator using the same clusterId + brokerId transactional.id.
+        // Fence an older allocator before capturing the replay end offset. Otherwise the old broker can reserve a
+        // higher sequence after our snapshot but before initTransactions() fences it, allowing this incarnation to
+        // reserve the same object-ID block from a stale image.
         sequenceProducer.initTransactions();
+        replayInitialImage();
         image.markReady();
         startLiveConsumer();
     }
