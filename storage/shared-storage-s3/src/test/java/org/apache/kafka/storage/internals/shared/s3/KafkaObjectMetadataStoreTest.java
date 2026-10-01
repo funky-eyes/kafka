@@ -26,9 +26,12 @@ import java.io.IOException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class KafkaObjectMetadataStoreTest {
@@ -87,6 +90,33 @@ class KafkaObjectMetadataStoreTest {
         assertFalse(waiter.get(10, TimeUnit.SECONDS));
         consumerThread.join(10_000L);
         assertFalse(consumerThread.isAlive());
+    }
+
+    @Test
+    void lateAppliedOffsetWaiterFailsAfterConsumerFailure() throws Exception {
+        KafkaObjectMetadataStore.AppliedOffsetTracker tracker =
+            new KafkaObjectMetadataStore.AppliedOffsetTracker();
+        RuntimeException consumerFailure = new RuntimeException("consumer failed");
+
+        tracker.fail(consumerFailure);
+        CompletableFuture<Void> lateWaiter = tracker.awaitApplied(42L);
+
+        ExecutionException failure = assertThrows(
+            ExecutionException.class,
+            () -> lateWaiter.get(10, TimeUnit.SECONDS)
+        );
+        assertSame(consumerFailure, failure.getCause());
+    }
+
+    @Test
+    void appliedOffsetRemainsSuccessfulAfterLaterConsumerFailure() throws Exception {
+        KafkaObjectMetadataStore.AppliedOffsetTracker tracker =
+            new KafkaObjectMetadataStore.AppliedOffsetTracker();
+
+        tracker.markApplied(42L);
+        tracker.fail(new RuntimeException("consumer failed"));
+
+        tracker.awaitApplied(42L).get(10, TimeUnit.SECONDS);
     }
 
     @Test

@@ -78,10 +78,7 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
     private final KafkaConsumer<byte[], byte[]> consumer;
     private final SharedMetadataImage image;
     private final AtomicBoolean closed = new AtomicBoolean();
-    private final Object appliedOffsetLock = new Object();
-    private final NavigableMap<Long, List<CompletableFuture<Void>>> appliedOffsetWaiters = new TreeMap<>();
-
-    private long appliedOffset = -1L;
+    private final AppliedOffsetTracker appliedOffsets = new AppliedOffsetTracker();
     private volatile Thread consumerThread;
 
     private KafkaObjectMetadataStore(
@@ -282,38 +279,15 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
     }
 
     private void markApplied(long offset) {
-        List<CompletableFuture<Void>> completed = new ArrayList<>();
-        synchronized (appliedOffsetLock) {
-            if (offset > appliedOffset) {
-                appliedOffset = offset;
-            }
-            while (!appliedOffsetWaiters.isEmpty() && appliedOffsetWaiters.firstKey() <= appliedOffset) {
-                completed.addAll(appliedOffsetWaiters.pollFirstEntry().getValue());
-            }
-        }
-        completed.forEach(waiter -> waiter.complete(null));
+        appliedOffsets.markApplied(offset);
     }
 
     private CompletableFuture<Void> awaitApplied(long offset) {
-        synchronized (appliedOffsetLock) {
-            if (appliedOffset >= offset) {
-                return CompletableFuture.completedFuture(null);
-            }
-            CompletableFuture<Void> waiter = new CompletableFuture<>();
-            appliedOffsetWaiters.computeIfAbsent(offset, ignored -> new ArrayList<>()).add(waiter);
-            return waiter;
-        }
+        return appliedOffsets.awaitApplied(offset);
     }
 
     private void failAppliedOffsetWaiters(Throwable cause) {
-        List<CompletableFuture<Void>> failed = new ArrayList<>();
-        synchronized (appliedOffsetLock) {
-            for (Map.Entry<Long, List<CompletableFuture<Void>>> entry : appliedOffsetWaiters.entrySet()) {
-                failed.addAll(entry.getValue());
-            }
-            appliedOffsetWaiters.clear();
-        }
-        failed.forEach(waiter -> waiter.completeExceptionally(cause));
+        appliedOffsets.fail(cause);
     }
 
     @Override
@@ -496,6 +470,56 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
         }
         if (closeFailure != null) {
             throw closeFailure;
+        }
+    }
+
+    static final class AppliedOffsetTracker {
+        private final NavigableMap<Long, List<CompletableFuture<Void>>> waiters = new TreeMap<>();
+        private long appliedOffset = -1L;
+        private Throwable terminalFailure;
+
+        void markApplied(long offset) {
+            List<CompletableFuture<Void>> completed = new ArrayList<>();
+            synchronized (this) {
+                if (offset > appliedOffset) {
+                    appliedOffset = offset;
+                }
+                while (!waiters.isEmpty() && waiters.firstKey() <= appliedOffset) {
+                    completed.addAll(waiters.pollFirstEntry().getValue());
+                }
+            }
+            completed.forEach(waiter -> waiter.complete(null));
+        }
+
+        CompletableFuture<Void> awaitApplied(long offset) {
+            synchronized (this) {
+                if (appliedOffset >= offset) {
+                    return CompletableFuture.completedFuture(null);
+                }
+                if (terminalFailure != null) {
+                    return CompletableFuture.failedFuture(terminalFailure);
+                }
+                CompletableFuture<Void> waiter = new CompletableFuture<>();
+                waiters.computeIfAbsent(offset, ignored -> new ArrayList<>()).add(waiter);
+                return waiter;
+            }
+        }
+
+        void fail(Throwable cause) {
+            Objects.requireNonNull(cause, "cause");
+            List<CompletableFuture<Void>> failed = new ArrayList<>();
+            Throwable failure;
+            synchronized (this) {
+                if (terminalFailure == null) {
+                    terminalFailure = cause;
+                }
+                failure = terminalFailure;
+                for (List<CompletableFuture<Void>> offsetWaiters : waiters.values()) {
+                    failed.addAll(offsetWaiters);
+                }
+                waiters.clear();
+            }
+            failed.forEach(waiter -> waiter.completeExceptionally(failure));
         }
     }
 
