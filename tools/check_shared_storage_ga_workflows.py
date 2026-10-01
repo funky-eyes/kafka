@@ -29,6 +29,8 @@ MANIFEST = ROOT / "tools" / "shared_storage_ga_manifest.py"
 MAIN_WORKFLOW_NAME = "Shared Storage"
 GA_RELEASE_WORKFLOW_NAME = "Shared Storage GA Release Gate"
 REAL_S3_SEAL_WORKFLOW_NAME = "Shared Storage Real S3 GA Seal"
+AUTHOR_WORKFLOW_NAME = "Normalize Shared Storage Author"
+CANONICAL_EVIDENCE_BRANCH = "shared-wal-s3-4.3.1"
 UNBUILT_ROOT_SHARED_SOURCE_DIRS = (
     ROOT / "src" / "main" / "java" / "org" / "apache" / "kafka" / "storage" / "internals" / "shared",
     ROOT / "src" / "test" / "java" / "org" / "apache" / "kafka" / "storage" / "internals" / "shared",
@@ -560,6 +562,30 @@ def main():
         text = texts.get(name, "")
         if "workflow_dispatch:" not in text:
             errors.append(f"{name}: release evidence workflow must support workflow_dispatch")
+
+    author_workflow = texts.get(AUTHOR_WORKFLOW_NAME, "")
+    author_push = event_block(author_workflow, "push")
+    author_branches = {
+        branch.strip("'\"")
+        for branch in re.findall(
+            r"(?m)^\s+- ([^'\"\s][^\s]*|'[^']+'|\"[^\"]+\")\s*$",
+            author_push,
+        )
+    }
+    if author_branches != {CANONICAL_EVIDENCE_BRANCH}:
+        errors.append(
+            f"{AUTHOR_WORKFLOW_NAME}: push branches must be exactly {CANONICAL_EVIDENCE_BRANCH!r}; "
+            "author normalization must not introduce a staging publication path"
+        )
+    if "github.actor != 'github-actions[bot]'" not in author_workflow:
+        errors.append(f"{AUTHOR_WORKFLOW_NAME}: GitHub Actions bot rewrite fence is required")
+    if "--force-with-lease=" not in author_workflow:
+        errors.append(f"{AUTHOR_WORKFLOW_NAME}: normalized branch rewrite must use force-with-lease")
+    if "shared-wal-s3-4.3.1-staging" in author_workflow:
+        errors.append(
+            f"{AUTHOR_WORKFLOW_NAME}: staging ingress is forbidden because GITHUB_TOKEN pushes do not "
+            "retrigger push-based GA evidence workflows"
+        )
 
     ga_consistency = texts.get("Shared Storage GA Workflow Consistency", "")
     ga_consistency_push_paths = event_path_patterns(ga_consistency, "push")

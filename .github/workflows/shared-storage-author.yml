@@ -13,13 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 name: Normalize Shared Storage Author
 
 on:
   push:
     branches:
       - shared-wal-s3-4.3.1
-      - shared-wal-s3-4.3.1-staging
 
 permissions:
   actions: read
@@ -29,7 +29,7 @@ jobs:
   normalize-author:
     if: github.actor != 'github-actions[bot]'
     concurrency:
-      group: shared-storage-author-publish
+      group: shared-storage-author-normalize-${{ github.ref }}
       cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -37,101 +37,84 @@ jobs:
       - name: Checkout complete development history
         uses: actions/checkout@v5
         with:
-          ref: ${{ github.ref_name }}
+          ref: shared-wal-s3-4.3.1
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Normalize development commit identity and publish canonical branch
+      - name: Normalize development commit identity
         shell: bash
         env:
           BASE_SHA: 26b251a451ce941d3d7a55e6487bcb7f16b5ad48
           TARGET_NAME: Jianbin Chen
           TARGET_EMAIL: jianbin@apache.org
-          SOURCE_BRANCH: ${{ github.ref_name }}
           TARGET_BRANCH: shared-wal-s3-4.3.1
-          STAGING_BRANCH: shared-wal-s3-4.3.1-staging
         run: |
           set -euo pipefail
 
-          git fetch --no-tags origin "${SOURCE_BRANCH}" "${TARGET_BRANCH}"
-          source_head=$(git rev-parse "origin/${SOURCE_BRANCH}")
-          target_head=$(git rev-parse "origin/${TARGET_BRANCH}")
-          git checkout -B "${SOURCE_BRANCH}" "origin/${SOURCE_BRANCH}"
-
-          if [ "${SOURCE_BRANCH}" = "${TARGET_BRANCH}" ]; then
-            if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
-              git fetch --no-tags origin "${BASE_SHA}"
-            fi
-            normalize_base="${BASE_SHA}"
-          else
-            if [ "${SOURCE_BRANCH}" != "${STAGING_BRANCH}" ]; then
-              echo "Unexpected shared-storage author source branch: ${SOURCE_BRANCH}"
-              exit 1
-            fi
-            if ! git merge-base --is-ancestor "${target_head}" HEAD; then
-              echo "Staging branch must be based on the current canonical head ${target_head}."
-              exit 1
-            fi
-            normalize_base="${target_head}"
+          git fetch --no-tags origin "${TARGET_BRANCH}"
+          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            git fetch --no-tags origin "${BASE_SHA}"
           fi
+          git checkout -B "${TARGET_BRANCH}" "origin/${TARGET_BRANCH}"
+          remote_head=$(git rev-parse "origin/${TARGET_BRANCH}")
 
           oldest_bad=""
           while read -r commit; do
-            [ -n "${commit}" ] || continue
             author_email=$(git show -s --format='%ae' "${commit}")
             committer_email=$(git show -s --format='%ce' "${commit}")
-            if [ "${author_email}" != "${TARGET_EMAIL}" ] ||                [ "${committer_email}" != "${TARGET_EMAIL}" ]; then
+            if [ "${author_email}" != "${TARGET_EMAIL}" ] || \
+               [ "${committer_email}" != "${TARGET_EMAIL}" ]; then
               oldest_bad="${commit}"
               break
             fi
-          done < <(git rev-list --reverse "${normalize_base}..HEAD")
+          done < <(git rev-list --reverse "${BASE_SHA}..HEAD")
 
-          if [ -n "${oldest_bad}" ]; then
-            rebase_base=$(git rev-parse "${oldest_bad}^")
-            git config user.name "${TARGET_NAME}"
-            git config user.email "${TARGET_EMAIL}"
+          if [ -z "${oldest_bad}" ]; then
+            echo "All development commits already use ${TARGET_EMAIL}."
+            exit 0
+          fi
 
-            cat > /tmp/normalize-shared-storage-author.sh <<'SCRIPT'
+          rebase_base=$(git rev-parse "${oldest_bad}^")
+          git config user.name "${TARGET_NAME}"
+          git config user.email "${TARGET_EMAIL}"
+
+          cat > /tmp/normalize-shared-storage-author.sh <<'SCRIPT'
           #!/usr/bin/env bash
           set -euo pipefail
           current_author=$(git show -s --format='%ae' HEAD)
           current_committer=$(git show -s --format='%ce' HEAD)
-          if [ "${current_author}" != "${TARGET_EMAIL}" ] ||              [ "${current_committer}" != "${TARGET_EMAIL}" ]; then
-            GIT_COMMITTER_NAME="${TARGET_NAME}"             GIT_COMMITTER_EMAIL="${TARGET_EMAIL}"               git commit --amend --no-edit --allow-empty                 --author="${TARGET_NAME} <${TARGET_EMAIL}>"
+          if [ "${current_author}" != "${TARGET_EMAIL}" ] || \
+             [ "${current_committer}" != "${TARGET_EMAIL}" ]; then
+            GIT_COMMITTER_NAME="${TARGET_NAME}" \
+            GIT_COMMITTER_EMAIL="${TARGET_EMAIL}" \
+              git commit --amend --no-edit --allow-empty \
+                --author="${TARGET_NAME} <${TARGET_EMAIL}>"
           fi
           SCRIPT
-            chmod +x /tmp/normalize-shared-storage-author.sh
-            export TARGET_NAME TARGET_EMAIL
+          chmod +x /tmp/normalize-shared-storage-author.sh
+          export TARGET_NAME TARGET_EMAIL
 
-            git rebase --rebase-merges               --exec /tmp/normalize-shared-storage-author.sh               "${rebase_base}"
-          fi
+          git rebase --rebase-merges \
+            --exec /tmp/normalize-shared-storage-author.sh \
+            "${rebase_base}"
 
-          bad_emails=$(git log "${normalize_base}..HEAD" --format='%ae%n%ce' |             grep -vFx "${TARGET_EMAIL}" || true)
+          bad_emails=$(git log "${BASE_SHA}..HEAD" --format='%ae%n%ce' | \
+            grep -vFx "${TARGET_EMAIL}" || true)
           if [ -n "${bad_emails}" ]; then
             echo "Unexpected development commit identities remain:"
             printf '%s\n' "${bad_emails}"
             exit 1
           fi
 
-          normalized_head=$(git rev-parse HEAD)
-          git log "${normalize_base}..HEAD" --format='%h %an <%ae> / %cn <%ce>'
+          git log "${BASE_SHA}..HEAD" --format='%h %an <%ae> / %cn <%ce>'
 
-          if [ "${SOURCE_BRANCH}" = "${TARGET_BRANCH}" ]; then
-            if [ "${normalized_head}" = "${source_head}" ]; then
-              echo "Canonical branch already uses ${TARGET_EMAIL}; no rewrite required."
-              exit 0
-            fi
-            git push               --force-with-lease="refs/heads/${TARGET_BRANCH}:${source_head}"               origin "HEAD:${TARGET_BRANCH}"
-            exit 0
-          fi
-
-          # The staging branch is the write ingress for agent/API commits. Publish only the normalized
-          # history to the canonical evidence branch so expensive GA workflows see one production push.
-          git push             --force-with-lease="refs/heads/${TARGET_BRANCH}:${target_head}"             origin "HEAD:${TARGET_BRANCH}"
-
-          # Keep staging aligned with the normalized canonical head. This bot-authored push is ignored by
-          # the job-level actor fence, preventing a normalization loop.
-          git push             --force-with-lease="refs/heads/${SOURCE_BRANCH}:${source_head}"             origin "HEAD:${SOURCE_BRANCH}"
+          # The initiating external/API push already starts every push-triggered GA gate.
+          # This rewrite deliberately uses GITHUB_TOKEN: GitHub suppresses push workflows created by that token,
+          # preventing a second expensive CI fan-out. The GA manifest binds evidence by production + gate contract
+          # fingerprints, so the normalized SHA can safely reuse evidence from the initiating push.
+          git push \
+            --force-with-lease="refs/heads/${TARGET_BRANCH}:${remote_head}" \
+            origin "HEAD:${TARGET_BRANCH}"
 
   seal-ga-evidence:
     name: Seal GA evidence for normalized branch

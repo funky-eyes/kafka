@@ -39,6 +39,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -426,6 +427,48 @@ class SharedUploadSchedulerTest {
     }
 
     @Test
+    void boundedSelectionPreservesByteTargetTriggerEvidence() throws Exception {
+        InMemoryObjectStore objectStore = new InMemoryObjectStore();
+        InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
+        try (SharedStorageEngine engine = engine("byte-target-overflow")) {
+            append(engine, P0, 0L, 9L, new byte[] {1, 2, 3, 4, 5, 6});
+            append(engine, P0, 10L, 19L, new byte[] {7, 8, 9, 10, 11, 12});
+
+            SharedCommitProgress progress = leaderProgress(P0, 0L, 20L);
+            AtomicLong objectIds = new AtomicLong(100L);
+            SharedObjectUploader uploader = new SharedObjectUploader(
+                objectStore,
+                metadataStore,
+                new SharedObjectPacker(),
+                engine
+            );
+            try (SharedUploadScheduler scheduler = new SharedUploadScheduler(
+                engine,
+                progress,
+                uploader,
+                objectIds::getAndIncrement,
+                () -> 0L,
+                10L,
+                60_000L,
+                100,
+                1
+            )) {
+                SharedObjectMetadata metadata = scheduler.tryScheduledUploadOnce()
+                    .get(10, TimeUnit.SECONDS)
+                    .orElseThrow();
+
+                assertEquals(1, metadata.ranges().size(),
+                    "The overflowing candidate must remain for the next object");
+                assertEquals(new OffsetRange(0L, 10L), metadata.ranges().get(0).offsets());
+                assertTrue(
+                    scheduler.eligibleUploadBytes() >= 10L,
+                    "Observed eligible bytes must retain proof that backlog crossed the byte trigger"
+                );
+            }
+        }
+    }
+
+    @Test
     void permitsSingleOversizedBatchSoUploadCannotStallForever() throws Exception {
         InMemoryObjectStore objectStore = new InMemoryObjectStore();
         InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
@@ -556,6 +599,54 @@ class SharedUploadSchedulerTest {
                 progress.onFollower(P0);
                 assertTrue(scheduler.selectCandidates().isEmpty());
                 assertFalse(scheduler.uploadFailurePresent());
+            }
+        }
+    }
+
+    @Test
+    void revalidatesLeadershipAfterSelectionBeforeStartingUpload() throws Exception {
+        InMemoryObjectStore objectStore = new InMemoryObjectStore();
+        InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
+        try (SharedStorageEngine engine = engine("selection-leadership-fence")) {
+            append(engine, P0, 0L, 9L, new byte[] {1, 2, 3});
+            SharedCommitProgress progress = leaderProgress(P0, 0L, 10L);
+            AtomicInteger objectIdCalls = new AtomicInteger();
+            AtomicBoolean demoteOnTimeRead = new AtomicBoolean(true);
+            SharedObjectUploader uploader = new SharedObjectUploader(
+                objectStore,
+                metadataStore,
+                new SharedObjectPacker(),
+                engine
+            );
+            try (SharedUploadScheduler scheduler = new SharedUploadScheduler(
+                engine,
+                progress,
+                uploader,
+                () -> {
+                    objectIdCalls.incrementAndGet();
+                    return 100L;
+                },
+                () -> {
+                    if (demoteOnTimeRead.getAndSet(false)) {
+                        progress.onFollower(P0);
+                    }
+                    return 1_000L;
+                },
+                1024L
+            )) {
+                assertTrue(scheduler.tryUploadOnce().get(10, TimeUnit.SECONDS).isEmpty());
+                assertEquals(0, objectIdCalls.get(),
+                    "A stale leadership selection must be rejected before allocating an object ID");
+                assertEquals(0, scheduler.reservedCandidateCount());
+                assertEquals(0, scheduler.uploadsInProgress());
+                assertFalse(objectStore.contains(100L));
+
+                progress.onLeader(P0);
+                SharedObjectMetadata retry = scheduler.tryUploadOnce()
+                    .get(10, TimeUnit.SECONDS)
+                    .orElseThrow();
+                assertEquals(100L, retry.objectId());
+                assertTrue(objectStore.contains(100L));
             }
         }
     }

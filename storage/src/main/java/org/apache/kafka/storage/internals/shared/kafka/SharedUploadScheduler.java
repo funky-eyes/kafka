@@ -287,7 +287,52 @@ public final class SharedUploadScheduler implements AutoCloseable {
             releaseUploadSlot();
             return CompletableFuture.completedFuture(Optional.empty());
         }
+        if (!selectionStillCurrent(selection.candidates())) {
+            releaseReservation(selection.candidates());
+            releaseUploadSlot();
+            return CompletableFuture.completedFuture(Optional.empty());
+        }
         return startUpload(selection, nowMs);
+    }
+
+    private boolean selectionStillCurrent(List<SharedStorageEngine.UploadCandidate> candidates) {
+        Map<SharedPartitionId, SharedCommitProgress.PartitionProgress> currentProgress = commitProgress.snapshot();
+        Map<SharedPartitionId, CandidateEndpoints> endpoints = new HashMap<>();
+        for (SharedStorageEngine.UploadCandidate candidate : candidates) {
+            endpoints.compute(candidate.partition(), (ignored, current) ->
+                current == null
+                    ? new CandidateEndpoints(candidate, candidate)
+                    : new CandidateEndpoints(current.first(), candidate)
+            );
+        }
+
+        for (Map.Entry<SharedPartitionId, CandidateEndpoints> entry : endpoints.entrySet()) {
+            SharedCommitProgress.PartitionProgress progress = currentProgress.get(entry.getKey());
+            if (progress == null || !progress.isLeader() ||
+                progress.highWatermark() <= progress.logStartOffset()) {
+                return false;
+            }
+
+            CandidateEndpoints selected = entry.getValue();
+            if (!engine.isUploadCandidateCurrent(
+                selected.first(),
+                progress.logStartOffset(),
+                progress.highWatermark()
+            )) {
+                return false;
+            }
+            // Kafka truncation removes a suffix. If any later selected batch was replaced after selection, the last
+            // selected batch for that partition must also have been removed/replaced. Checking first + last therefore
+            // fences log-start movement and destructive WAL changes without re-looking-up every selected range.
+            if (selected.last() != selected.first() && !engine.isUploadCandidateCurrent(
+                selected.last(),
+                progress.logStartOffset(),
+                progress.highWatermark()
+            )) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private CompletableFuture<Optional<SharedObjectMetadata>> startUpload(
@@ -572,6 +617,7 @@ public final class SharedUploadScheduler implements AutoCloseable {
             Math.min(SharedMetadataRecordCodec.MAX_COMMITTED_OBJECT_RANGES, 256)
         );
         long selectedBytes = 0L;
+        long observedEligibleBytes = 0L;
         while (!heads.isEmpty() &&
             selected.size() < SharedMetadataRecordCodec.MAX_COMMITTED_OBJECT_RANGES) {
             CursorHead head = heads.poll();
@@ -585,10 +631,15 @@ public final class SharedUploadScheduler implements AutoCloseable {
             int payloadBytes = candidate.location().payloadLength();
             long nextSelectedBytes = Math.addExact(selectedBytes, payloadBytes);
             if (!selected.isEmpty() && nextSelectedBytes > targetObjectBytes) {
+                // The overflowing candidate is intentionally not retained in this object, but it still proves that
+                // currently eligible backlog has crossed the byte trigger. Preserve that lower-bound evidence so
+                // bounded selection does not accidentally turn a size-triggered upload into a linger-triggered one.
+                observedEligibleBytes = nextSelectedBytes;
                 break;
             }
             selected.add(candidate);
             selectedBytes = nextSelectedBytes;
+            observedEligibleBytes = selectedBytes;
             if (selectedBytes >= targetObjectBytes) {
                 break;
             }
@@ -599,12 +650,12 @@ public final class SharedUploadScheduler implements AutoCloseable {
             leaderPartitions,
             openCommitWindows,
             selected.size(),
-            selectedBytes,
+            observedEligibleBytes,
             reservedCandidates.size(),
             uploadsInProgress.get()
         ));
 
-        return new CandidateSelection(List.copyOf(selected), selectedBytes);
+        return new CandidateSelection(List.copyOf(selected), observedEligibleBytes);
     }
 
     private void logSelectionSummary(SelectionSummary summary) {
@@ -705,6 +756,12 @@ public final class SharedUploadScheduler implements AutoCloseable {
     private record CandidateSelection(
         List<SharedStorageEngine.UploadCandidate> candidates,
         long totalEligibleBytes
+    ) {
+    }
+
+    private record CandidateEndpoints(
+        SharedStorageEngine.UploadCandidate first,
+        SharedStorageEngine.UploadCandidate last
     ) {
     }
 

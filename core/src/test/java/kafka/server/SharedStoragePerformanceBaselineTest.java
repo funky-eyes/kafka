@@ -100,50 +100,85 @@ public class SharedStoragePerformanceBaselineTest {
         String bucket = environment("SHARED_STORAGE_S3_BUCKET", "kafka-shared-storage-performance");
         String region = environment("SHARED_STORAGE_S3_REGION", "us-east-1");
 
-        // Warm both routed data paths once before collecting samples so JVM/JIT cold-start does not contaminate
-        // the first paired ratio. Classic runs first in calibration so no shared upload backlog can precede it.
-        BenchmarkPair calibration = benchmarkPair(
-            false,
-            endpoint,
-            region,
-            bucket,
-            warmupRecords,
-            records
-        );
-        BenchmarkResult sharedCalibration = calibration.shared();
-        BenchmarkResult classicCalibration = calibration.classic();
-        printCalibration(sharedCalibration, classicCalibration, records, warmupRecords);
-
         List<Double> produceRatios = new ArrayList<>(repetitions);
         List<Double> consumeRatios = new ArrayList<>(repetitions);
-        for (int repetition = 0; repetition < repetitions; repetition++) {
-            boolean sharedFirst = (repetition & 1) != 0;
-            String order = sharedFirst ? "shared-classic" : "classic-shared";
-            BenchmarkPair pair = benchmarkPair(
-                sharedFirst,
-                endpoint,
-                region,
-                bucket,
-                warmupRecords,
-                records
-            );
-            BenchmarkResult classic = pair.classic();
-            BenchmarkResult shared = pair.shared();
+        TestKitNodes nodes = new TestKitNodes.Builder()
+            .setNumBrokerNodes(3)
+            .setNumControllerNodes(1)
+            .setNumDisksPerBroker(1)
+            .build();
+        KafkaClusterTestKit.Builder builder = new KafkaClusterTestKit.Builder(nodes)
+            .setConfigProp("storage.extension.class",
+                "org.apache.kafka.storage.internals.shared.s3.S3SharedStorageExtension")
+            .setConfigProp("shared.storage.topic.pattern", "shared-performance-shared-.*")
+            .setConfigProp("shared.storage.wal.engine", "ring")
+            .setConfigProp("shared.storage.wal.capacity.bytes", 128L * 1024 * 1024)
+            .setConfigProp("shared.storage.object.target.bytes", 4L * 1024 * 1024)
+            .setConfigProp("shared.storage.upload.interval.ms", 100L)
+            .setConfigProp("shared.storage.upload.max.linger.ms", 1_000L)
+            .setConfigProp("shared.storage.metadata.replication.factor", 3)
+            .setConfigProp("shared.storage.metadata.min.insync.replicas", 2)
+            .setConfigProp("shared.storage.s3.endpoint", endpoint)
+            .setConfigProp("shared.storage.s3.region", region)
+            .setConfigProp("shared.storage.s3.bucket", bucket)
+            .setConfigProp("shared.storage.s3.key.prefix", "performance/" + UUID.randomUUID() + "/objects")
+            .setConfigProp("shared.storage.s3.path.style", true)
+            .setConfigProp("shared.storage.s3.io.threads", 4);
 
-            double produceRatio = shared.produceRecordsPerSecond() / classic.produceRecordsPerSecond();
-            double consumeRatio = shared.consumeRecordsPerSecond() / classic.consumeRecordsPerSecond();
-            produceRatios.add(produceRatio);
-            consumeRatios.add(consumeRatio);
+        // Keep one broker/controller lifecycle for calibration and every measured pair. Fresh topic pairs isolate
+        // logical data while all repetitions share the same JVM/JIT, broker startup and storage-extension lifecycle.
+        try (KafkaClusterTestKit cluster = builder.build()) {
+            cluster.format();
+            cluster.startup();
+            cluster.waitForReadyBrokers();
+            String bootstrapServers = cluster.bootstrapServers();
+            List<Integer> brokerIds = List.copyOf(cluster.brokers().keySet());
+            try (Admin admin = cluster.admin()) {
+                // Warm both routed data paths once before collecting samples. Classic runs first in calibration.
+                BenchmarkPair calibration = benchmarkPair(
+                    admin,
+                    bootstrapServers,
+                    brokerIds,
+                    "calibration",
+                    false,
+                    warmupRecords,
+                    records
+                );
+                BenchmarkResult sharedCalibration = calibration.shared();
+                BenchmarkResult classicCalibration = calibration.classic();
+                printCalibration(sharedCalibration, classicCalibration, records, warmupRecords);
 
-            printSample(
-                repetition + 1,
-                order,
-                classic,
-                shared,
-                produceRatio,
-                consumeRatio,
-                records
-            );
+                for (int repetition = 0; repetition < repetitions; repetition++) {
+                    boolean sharedFirst = (repetition & 1) != 0;
+                    String order = sharedFirst ? "shared-classic" : "classic-shared";
+                    BenchmarkPair pair = benchmarkPair(
+                        admin,
+                        bootstrapServers,
+                        brokerIds,
+                        "repetition-" + repetition,
+                        sharedFirst,
+                        warmupRecords,
+                        records
+                    );
+                    BenchmarkResult classic = pair.classic();
+                    BenchmarkResult shared = pair.shared();
+
+                    double produceRatio = shared.produceRecordsPerSecond() / classic.produceRecordsPerSecond();
+                    double consumeRatio = shared.consumeRecordsPerSecond() / classic.consumeRecordsPerSecond();
+                    produceRatios.add(produceRatio);
+                    consumeRatios.add(consumeRatio);
+
+                    printSample(
+                        repetition + 1,
+                        order,
+                        classic,
+                        shared,
+                        produceRatio,
+                        consumeRatio,
+                        records
+                    );
+                }
+            }
         }
 
         double medianProduceRatio = median(produceRatios);
@@ -279,112 +314,81 @@ public class SharedStoragePerformanceBaselineTest {
     }
 
     private static BenchmarkPair benchmarkPair(
+        Admin admin,
+        String bootstrapServers,
+        List<Integer> brokerIds,
+        String pairId,
         boolean sharedFirst,
-        String endpoint,
-        String region,
-        String bucket,
         int warmupRecords,
         int records
     ) throws Exception {
-        TestKitNodes nodes = new TestKitNodes.Builder()
-            .setNumBrokerNodes(3)
-            .setNumControllerNodes(1)
-            .setNumDisksPerBroker(1)
-            .build();
-        String sharedTopic = "shared-performance-shared";
-        String classicTopic = "classic-performance-classic";
-        KafkaClusterTestKit.Builder builder = new KafkaClusterTestKit.Builder(nodes)
-            .setConfigProp("storage.extension.class",
-                "org.apache.kafka.storage.internals.shared.s3.S3SharedStorageExtension")
-            .setConfigProp("shared.storage.topic.pattern", sharedTopic)
-            .setConfigProp("shared.storage.wal.engine", "ring")
-            .setConfigProp("shared.storage.wal.capacity.bytes", 128L * 1024 * 1024)
-            .setConfigProp("shared.storage.object.target.bytes", 4L * 1024 * 1024)
-            .setConfigProp("shared.storage.upload.interval.ms", 100L)
-            .setConfigProp("shared.storage.upload.max.linger.ms", 1_000L)
-            .setConfigProp("shared.storage.metadata.replication.factor", 3)
-            .setConfigProp("shared.storage.metadata.min.insync.replicas", 2)
-            .setConfigProp("shared.storage.s3.endpoint", endpoint)
-            .setConfigProp("shared.storage.s3.region", region)
-            .setConfigProp("shared.storage.s3.bucket", bucket)
-            .setConfigProp("shared.storage.s3.key.prefix", "performance/" + UUID.randomUUID() + "/objects")
-            .setConfigProp("shared.storage.s3.path.style", true)
-            .setConfigProp("shared.storage.s3.io.threads", 4);
+        String sharedTopic = "shared-performance-shared-" + pairId;
+        String classicTopic = "classic-performance-classic-" + pairId;
+        Map<String, String> topicConfigs = Map.of(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2");
+        admin.createTopics(List.of(
+            new NewTopic(sharedTopic, PARTITIONS, (short) 3).configs(topicConfigs),
+            new NewTopic(classicTopic, PARTITIONS, (short) 3).configs(topicConfigs)
+        )).all().get(30, TimeUnit.SECONDS);
+        waitForTopicReady(admin, List.of(sharedTopic, classicTopic));
 
-        try (KafkaClusterTestKit cluster = builder.build()) {
-            cluster.format();
-            cluster.startup();
-            cluster.waitForReadyBrokers();
-            String bootstrapServers = cluster.bootstrapServers();
-            List<Integer> brokerIds = List.copyOf(cluster.brokers().keySet());
-            try (Admin admin = cluster.admin()) {
-                Map<String, String> topicConfigs = Map.of(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2");
-                admin.createTopics(List.of(
-                    new NewTopic(sharedTopic, PARTITIONS, (short) 3).configs(topicConfigs),
-                    new NewTopic(classicTopic, PARTITIONS, (short) 3).configs(topicConfigs)
-                )).all().get(30, TimeUnit.SECONDS);
-                waitForTopicReady(admin, List.of(sharedTopic, classicTopic));
-            }
-
-            ProduceMeasurement classicProduce;
-            ProduceMeasurement sharedProduce;
-            try (KafkaProducer<byte[], byte[]> producer = new KafkaProducer<>(producerProperties(bootstrapServers))) {
-                warmPairedProducePaths(producer, classicTopic, sharedTopic, warmupRecords);
-                waitForSharedBackgroundIdle(brokerIds);
-
-                if (sharedFirst) {
-                    sharedProduce = produce(
-                        producer,
-                        sharedTopic,
-                        warmupRecords,
-                        records,
-                        true,
-                        brokerIds
-                    );
-                    waitForSharedBackgroundIdle(brokerIds);
-                    classicProduce = produce(
-                        producer,
-                        classicTopic,
-                        warmupRecords,
-                        records,
-                        false,
-                        brokerIds
-                    );
-                } else {
-                    classicProduce = produce(
-                        producer,
-                        classicTopic,
-                        warmupRecords,
-                        records,
-                        false,
-                        brokerIds
-                    );
-                    sharedProduce = produce(
-                        producer,
-                        sharedTopic,
-                        warmupRecords,
-                        records,
-                        true,
-                        brokerIds
-                    );
-                }
-            }
-
+        ProduceMeasurement classicProduce;
+        ProduceMeasurement sharedProduce;
+        try (KafkaProducer<byte[], byte[]> producer = new KafkaProducer<>(producerProperties(bootstrapServers))) {
+            warmPairedProducePaths(producer, classicTopic, sharedTopic, warmupRecords);
             waitForSharedBackgroundIdle(brokerIds);
-            double classicConsume;
-            double sharedConsume;
-            if (sharedFirst) {
-                sharedConsume = consume(bootstrapServers, sharedTopic, warmupRecords, records);
-                classicConsume = consume(bootstrapServers, classicTopic, warmupRecords, records);
-            } else {
-                classicConsume = consume(bootstrapServers, classicTopic, warmupRecords, records);
-                sharedConsume = consume(bootstrapServers, sharedTopic, warmupRecords, records);
-            }
 
-            BenchmarkResult classic = benchmarkResult(classicProduce, classicConsume);
-            BenchmarkResult shared = benchmarkResult(sharedProduce, sharedConsume);
-            return new BenchmarkPair(classic, shared);
+            if (sharedFirst) {
+                sharedProduce = produce(
+                    producer,
+                    sharedTopic,
+                    warmupRecords,
+                    records,
+                    true,
+                    brokerIds
+                );
+                waitForSharedBackgroundIdle(brokerIds);
+                classicProduce = produce(
+                    producer,
+                    classicTopic,
+                    warmupRecords,
+                    records,
+                    false,
+                    brokerIds
+                );
+            } else {
+                classicProduce = produce(
+                    producer,
+                    classicTopic,
+                    warmupRecords,
+                    records,
+                    false,
+                    brokerIds
+                );
+                sharedProduce = produce(
+                    producer,
+                    sharedTopic,
+                    warmupRecords,
+                    records,
+                    true,
+                    brokerIds
+                );
+            }
         }
+
+        waitForSharedBackgroundIdle(brokerIds);
+        double classicConsume;
+        double sharedConsume;
+        if (sharedFirst) {
+            sharedConsume = consume(bootstrapServers, sharedTopic, warmupRecords, records);
+            classicConsume = consume(bootstrapServers, classicTopic, warmupRecords, records);
+        } else {
+            classicConsume = consume(bootstrapServers, classicTopic, warmupRecords, records);
+            sharedConsume = consume(bootstrapServers, sharedTopic, warmupRecords, records);
+        }
+
+        BenchmarkResult classic = benchmarkResult(classicProduce, classicConsume);
+        BenchmarkResult shared = benchmarkResult(sharedProduce, sharedConsume);
+        return new BenchmarkPair(classic, shared);
     }
 
     private static BenchmarkResult benchmarkResult(ProduceMeasurement produce, double consumeRate) {
