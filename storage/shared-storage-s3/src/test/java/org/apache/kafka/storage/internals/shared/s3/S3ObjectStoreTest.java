@@ -159,6 +159,40 @@ class S3ObjectStoreTest {
     }
 
     @Test
+    void closeFailsAndClosesQueuedPartSourceDiscardedByShutdownNow() throws Exception {
+        S3ObjectStoreConfig config = S3ObjectStoreConfig.from(Map.of(
+            S3ObjectStoreConfig.BUCKET_CONFIG, "shared-data"
+        ));
+        QueuedDiscardExecutor executor = new QueuedDiscardExecutor();
+        S3ObjectStore store = new S3ObjectStore(config, S3ObjectStore.buildClient(config), executor);
+        AtomicBoolean sourceClosed = new AtomicBoolean();
+        ObjectStore.PartSource source = new ObjectStore.PartSource() {
+            @Override
+            public ByteBuffer nextPart() {
+                return ByteBuffer.wrap(new byte[] {1});
+            }
+
+            @Override
+            public void close() {
+                sourceClosed.set(true);
+            }
+        };
+
+        CompletableFuture<Void> future = store.put(1L, 1L, source);
+        assertFalse(future.isDone(), "queued S3 operation must remain pending before shutdown");
+
+        store.close();
+
+        assertTrue(sourceClosed.get(), "shutdownNow-discarded PartSource must be closed");
+        ExecutionException failure = assertThrows(
+            ExecutionException.class,
+            () -> future.get(10, TimeUnit.SECONDS)
+        );
+        IllegalStateException closed = assertInstanceOf(IllegalStateException.class, failure.getCause());
+        assertTrue(closed.getMessage().contains("closed"));
+    }
+
+    @Test
     void waitsForIoExecutorToTerminateBeforeClosingClientResources() throws Exception {
         ExecutorService executor = Executors.newSingleThreadExecutor();
         CountDownLatch started = new CountDownLatch(1);
@@ -334,6 +368,50 @@ class S3ObjectStoreTest {
     private static String environment(String name, String defaultValue) {
         String value = System.getenv(name);
         return value == null || value.isBlank() ? defaultValue : value;
+    }
+
+    private static final class QueuedDiscardExecutor extends AbstractExecutorService {
+        private final AtomicReference<Runnable> queued = new AtomicReference<>();
+        private final AtomicBoolean shutdownRequested = new AtomicBoolean();
+        private final AtomicBoolean terminated = new AtomicBoolean();
+
+        @Override
+        public void shutdown() {
+            shutdownRequested.set(true);
+        }
+
+        @Override
+        public List<Runnable> shutdownNow() {
+            shutdownRequested.set(true);
+            terminated.set(true);
+            Runnable task = queued.getAndSet(null);
+            return task == null ? List.of() : List.of(task);
+        }
+
+        @Override
+        public boolean isShutdown() {
+            return shutdownRequested.get();
+        }
+
+        @Override
+        public boolean isTerminated() {
+            return terminated.get();
+        }
+
+        @Override
+        public boolean awaitTermination(long timeout, TimeUnit unit) {
+            return terminated.get();
+        }
+
+        @Override
+        public void execute(Runnable command) {
+            if (shutdownRequested.get()) {
+                throw new RejectedExecutionException("executor is shut down");
+            }
+            if (!queued.compareAndSet(null, command)) {
+                throw new RejectedExecutionException("executor already has a queued command");
+            }
+        }
     }
 
     private static final class CloseRaceExecutor extends AbstractExecutorService {

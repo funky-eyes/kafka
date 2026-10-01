@@ -398,52 +398,38 @@ public final class S3ObjectStore implements ObjectStore {
         return submitAsync(() -> {
             operation.run();
             return null;
-        });
+        }, () -> { });
     }
 
     private CompletableFuture<Void> runAsync(PartSource source, Runnable operation) {
+        return submitAsync(() -> {
+            operation.run();
+            return null;
+        }, source::close);
+    }
+
+    private <T> CompletableFuture<T> supplyAsync(Supplier<T> operation) {
+        return submitAsync(operation, () -> { });
+    }
+
+    private <T> CompletableFuture<T> submitAsync(Supplier<T> operation, Runnable onDiscard) {
+        Objects.requireNonNull(operation, "operation");
+        Objects.requireNonNull(onDiscard, "onDiscard");
+        CompletableFuture<T> result = new CompletableFuture<>();
+        QueuedOperation<T> queued = new QueuedOperation<>(operation, onDiscard, result);
         if (closed.get()) {
-            IllegalStateException failure = new IllegalStateException("S3 object store is closed");
-            closeRejectedSource(source, failure);
-            return CompletableFuture.failedFuture(failure);
+            queued.discard(new IllegalStateException("S3 object store is closed"));
+            return result;
         }
         try {
-            return CompletableFuture.runAsync(operation, ioExecutor);
+            ioExecutor.execute(queued);
         } catch (RejectedExecutionException e) {
             RuntimeException failure = closed.get()
                 ? new IllegalStateException("S3 object store is closed", e)
                 : e;
-            closeRejectedSource(source, failure);
-            return CompletableFuture.failedFuture(failure);
+            queued.discard(failure);
         }
-    }
-
-    private static void closeRejectedSource(PartSource source, Throwable failure) {
-        try {
-            source.close();
-        } catch (RuntimeException closeFailure) {
-            failure.addSuppressed(closeFailure);
-        }
-    }
-
-    private <T> CompletableFuture<T> supplyAsync(Supplier<T> operation) {
-        return submitAsync(operation);
-    }
-
-    private <T> CompletableFuture<T> submitAsync(Supplier<T> operation) {
-        if (closed.get()) {
-            return CompletableFuture.failedFuture(new IllegalStateException("S3 object store is closed"));
-        }
-        try {
-            return CompletableFuture.supplyAsync(operation, ioExecutor);
-        } catch (RejectedExecutionException e) {
-            if (closed.get()) {
-                return CompletableFuture.failedFuture(
-                    new IllegalStateException("S3 object store is closed", e)
-                );
-            }
-            return CompletableFuture.failedFuture(e);
-        }
+        return result;
     }
 
     static S3Client buildClient(S3ObjectStoreConfig config) {
@@ -498,13 +484,60 @@ public final class S3ObjectStore implements ObjectStore {
         while (!executor.isTerminated()) {
             try {
                 if (!executor.awaitTermination(CLOSE_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
-                    executor.shutdownNow();
+                    discardQueuedOperations(executor.shutdownNow());
                 }
             } catch (InterruptedException e) {
                 interrupted = true;
-                executor.shutdownNow();
+                discardQueuedOperations(executor.shutdownNow());
             }
         }
         return interrupted;
+    }
+
+    private static void discardQueuedOperations(List<Runnable> queued) {
+        for (Runnable task : queued) {
+            if (task instanceof QueuedOperation<?> operation) {
+                operation.discard(
+                    new IllegalStateException("S3 object store is closed before queued operation started")
+                );
+            }
+        }
+    }
+
+    private static final class QueuedOperation<T> implements Runnable {
+        private final Supplier<T> operation;
+        private final Runnable onDiscard;
+        private final CompletableFuture<T> result;
+        private final AtomicBoolean claimed = new AtomicBoolean();
+
+        private QueuedOperation(Supplier<T> operation, Runnable onDiscard, CompletableFuture<T> result) {
+            this.operation = operation;
+            this.onDiscard = onDiscard;
+            this.result = result;
+        }
+
+        @Override
+        public void run() {
+            if (!claimed.compareAndSet(false, true)) {
+                return;
+            }
+            try {
+                result.complete(operation.get());
+            } catch (Throwable t) {
+                result.completeExceptionally(t);
+            }
+        }
+
+        private void discard(Throwable failure) {
+            if (!claimed.compareAndSet(false, true)) {
+                return;
+            }
+            try {
+                onDiscard.run();
+            } catch (Throwable closeFailure) {
+                failure.addSuppressed(closeFailure);
+            }
+            result.completeExceptionally(failure);
+        }
     }
 }
