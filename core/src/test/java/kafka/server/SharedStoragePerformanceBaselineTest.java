@@ -211,6 +211,7 @@ public class SharedStoragePerformanceBaselineTest {
     ) {
         System.out.printf(
             "SHARED_STORAGE_PERF_LIFECYCLE_CALIBRATION sharedProduce=%.2f classicProduce=%.2f " +
+                "sharedProduceMs=%.3f classicProduceMs=%.3f " +
                 "sharedConsume=%.2f classicConsume=%.2f records=%d warmupRecords=%d " +
                 "walBatches=%d walGroups=%d walGroupsPerBatch=%.3f walBarrierMs=%.3f " +
                 "walAvgBarrierMicros=%.3f walDataForceMs=%.3f walCheckpointForceMs=%.3f " +
@@ -223,6 +224,8 @@ public class SharedStoragePerformanceBaselineTest {
                 "walInterArrivalLe250=%.3f walInterArrivalLe500=%.3f walInterArrivalLe1000=%.3f%n",
             shared.produceRecordsPerSecond(),
             classic.produceRecordsPerSecond(),
+            shared.produceElapsedNanos() / 1_000_000.0d,
+            classic.produceElapsedNanos() / 1_000_000.0d,
             shared.consumeRecordsPerSecond(),
             classic.consumeRecordsPerSecond(),
             records,
@@ -266,6 +269,7 @@ public class SharedStoragePerformanceBaselineTest {
     ) {
         System.out.printf(
             "SHARED_STORAGE_PERF_SAMPLE repetition=%d order=%s classicProduce=%.2f sharedProduce=%.2f " +
+                "classicProduceMs=%.3f sharedProduceMs=%.3f " +
                 "produceRatio=%.4f classicConsume=%.2f sharedConsume=%.2f consumeRatio=%.4f records=%d " +
                 "walBatches=%d walGroups=%d walGroupsPerBatch=%.3f walBarrierMs=%.3f " +
                 "walAvgBarrierMicros=%.3f walDataForceMs=%.3f walCheckpointForceMs=%.3f " +
@@ -280,6 +284,8 @@ public class SharedStoragePerformanceBaselineTest {
             order,
             classic.produceRecordsPerSecond(),
             shared.produceRecordsPerSecond(),
+            classic.produceElapsedNanos() / 1_000_000.0d,
+            shared.produceElapsedNanos() / 1_000_000.0d,
             produceRatio,
             classic.consumeRecordsPerSecond(),
             shared.consumeRecordsPerSecond(),
@@ -485,7 +491,11 @@ public class SharedStoragePerformanceBaselineTest {
         properties.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
         properties.put(ProducerConfig.LINGER_MS_CONFIG, 5);
         properties.put(ProducerConfig.BATCH_SIZE_CONFIG, 64 * 1024);
-        properties.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, "lz4");
+        // The benchmark payload is intentionally deterministic and highly repetitive. Compressing it would collapse
+        // roughly 50 MiB of logical input to only a few MiB and make the sub-100ms sample dominated by lifecycle/JIT
+        // noise instead of the storage data path. Keep the performance gate uncompressed and compare the same bytes
+        // through classic and shared routing.
+        properties.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, "none");
         properties.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class);
         properties.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class);
         return properties;

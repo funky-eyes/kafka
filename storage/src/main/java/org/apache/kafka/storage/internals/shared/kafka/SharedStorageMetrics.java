@@ -190,6 +190,9 @@ public final class SharedStorageMetrics implements AutoCloseable {
             () -> schedulerInt(SharedUploadScheduler::reservedCandidateCount),
             tags
         );
+        // These retain their original metric names for dashboard compatibility. Since candidate selection is bounded,
+        // positive values are a selected/observed lower bound rather than an exact total backlog. Zero remains exact
+        // and is used by the performance/evidence idle gate.
         metricsGroup.newGauge(
             "UploadCandidateCount",
             () -> schedulerInt(SharedUploadScheduler::uploadCandidateCount),

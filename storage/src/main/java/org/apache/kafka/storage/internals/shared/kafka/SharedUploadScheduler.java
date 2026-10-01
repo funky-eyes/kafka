@@ -287,7 +287,7 @@ public final class SharedUploadScheduler implements AutoCloseable {
             releaseUploadSlot();
             return CompletableFuture.completedFuture(Optional.empty());
         }
-        if (!selectionStillCurrent(selection.candidates())) {
+        if (!selectionStillCurrent(selection)) {
             releaseReservation(selection.candidates());
             releaseUploadSlot();
             return CompletableFuture.completedFuture(Optional.empty());
@@ -295,10 +295,10 @@ public final class SharedUploadScheduler implements AutoCloseable {
         return startUpload(selection, nowMs);
     }
 
-    private boolean selectionStillCurrent(List<SharedStorageEngine.UploadCandidate> candidates) {
+    private boolean selectionStillCurrent(CandidateSelection selection) {
         Map<SharedPartitionId, SharedCommitProgress.PartitionProgress> currentProgress = commitProgress.snapshot();
         Map<SharedPartitionId, CandidateEndpoints> endpoints = new HashMap<>();
-        for (SharedStorageEngine.UploadCandidate candidate : candidates) {
+        for (SharedStorageEngine.UploadCandidate candidate : selection.candidates()) {
             endpoints.compute(candidate.partition(), (ignored, current) ->
                 current == null
                     ? new CandidateEndpoints(candidate, candidate)
@@ -307,28 +307,29 @@ public final class SharedUploadScheduler implements AutoCloseable {
         }
 
         for (Map.Entry<SharedPartitionId, CandidateEndpoints> entry : endpoints.entrySet()) {
-            SharedCommitProgress.PartitionProgress progress = currentProgress.get(entry.getKey());
+            SharedPartitionId partition = entry.getKey();
+            SharedCommitProgress.PartitionProgress progress = currentProgress.get(partition);
             if (progress == null || !progress.isLeader() ||
                 progress.highWatermark() <= progress.logStartOffset()) {
                 return false;
             }
 
-            CandidateEndpoints selected = entry.getValue();
-            if (!engine.isUploadCandidateCurrent(
-                selected.first(),
-                progress.logStartOffset(),
-                progress.highWatermark()
-            )) {
+            Long expectedRemoteRevision = selection.remoteRevisions().get(partition);
+            if (expectedRemoteRevision == null || engine.remoteRevision(partition) != expectedRemoteRevision) {
+                // Remote coverage can contain holes and may advance out of order across leader races. A revision
+                // change means selection observed an older logical remote view; discard the whole object and rescan.
                 return false;
             }
-            // Kafka truncation removes a suffix. If any later selected batch was replaced after selection, the last
-            // selected batch for that partition must also have been removed/replaced. Checking first + last therefore
-            // fences log-start movement and destructive WAL changes without re-looking-up every selected range.
-            if (selected.last() != selected.first() && !engine.isUploadCandidateCurrent(
-                selected.last(),
-                progress.logStartOffset(),
-                progress.highWatermark()
-            )) {
+            Long expectedWalRevision = selection.walMutationRevisions().get(partition);
+            if (expectedWalRevision == null || engine.walMutationRevision(partition) != expectedWalRevision) {
+                // Tail appends do not change this revision. Any truncate, replacement, reclamation or clear does,
+                // including a middle-range replacement that first/last candidate checks alone cannot detect.
+                return false;
+            }
+
+            CandidateEndpoints selected = entry.getValue();
+            if (selected.first().location().lastOffset() < progress.logStartOffset() ||
+                selected.last().location().lastOffset() >= progress.highWatermark()) {
                 return false;
             }
         }
@@ -524,14 +525,27 @@ public final class SharedUploadScheduler implements AutoCloseable {
         return reservedCandidates.size();
     }
 
+    /**
+     * Returns the bounded candidate count from the most recent selection scan.
+     *
+     * <p>A positive value is not the total backlog size because selection stops at the current object byte/range
+     * budget. Zero is exact: the scan found no currently selectable candidate after leader, coverage and reservation
+     * filtering.</p>
+     */
     int uploadCandidateCount() {
         SelectionSummary summary = lastSelectionSummary.get();
-        return summary == null ? 0 : summary.candidateCount();
+        return summary == null ? 0 : summary.selectedCandidateCount();
     }
 
+    /**
+     * Returns the bytes observed by the most recent bounded selection scan.
+     *
+     * <p>A positive value is a lower bound, not the total eligible backlog. Zero is exact and is therefore safe for
+     * the shared-background idle gate.</p>
+     */
     long eligibleUploadBytes() {
         SelectionSummary summary = lastSelectionSummary.get();
-        return summary == null ? 0L : summary.eligibleBytes();
+        return summary == null ? 0L : summary.observedEligibleBytes();
     }
 
     boolean uploadFailurePresent() {
@@ -591,6 +605,8 @@ public final class SharedUploadScheduler implements AutoCloseable {
         PriorityQueue<CursorHead> heads = new PriorityQueue<>(
             Comparator.comparingLong(head -> head.candidate().location().walOffset())
         );
+        Map<SharedPartitionId, Long> remoteRevisions = new HashMap<>();
+        Map<SharedPartitionId, Long> walMutationRevisions = new HashMap<>();
         int leaderPartitions = 0;
         int openCommitWindows = 0;
         for (Map.Entry<SharedPartitionId, SharedCommitProgress.PartitionProgress> entry : snapshot.entrySet()) {
@@ -603,6 +619,8 @@ public final class SharedUploadScheduler implements AutoCloseable {
                 continue;
             }
             openCommitWindows++;
+            remoteRevisions.put(entry.getKey(), engine.remoteRevision(entry.getKey()));
+            walMutationRevisions.put(entry.getKey(), engine.walMutationRevision(entry.getKey()));
             SharedStorageEngine.UploadCandidateCursor cursor = engine.uploadCandidateCursor(
                 entry.getKey(),
                 progress.logStartOffset(),
@@ -655,7 +673,12 @@ public final class SharedUploadScheduler implements AutoCloseable {
             uploadsInProgress.get()
         ));
 
-        return new CandidateSelection(List.copyOf(selected), observedEligibleBytes);
+        return new CandidateSelection(
+            List.copyOf(selected),
+            observedEligibleBytes,
+            Map.copyOf(remoteRevisions),
+            Map.copyOf(walMutationRevisions)
+        );
     }
 
     private void logSelectionSummary(SelectionSummary summary) {
@@ -663,12 +686,12 @@ public final class SharedUploadScheduler implements AutoCloseable {
         if (!summary.equals(previous)) {
             LOG.info(
                 "Shared upload gate state changed: trackedPartitions={}, leaders={}, openCommitWindows={}, " +
-                    "candidates={}, eligibleBytes={}, reservedCandidates={}, uploadsInProgress={}",
+                    "selectedCandidates={}, observedEligibleBytes={}, reservedCandidates={}, uploadsInProgress={}",
                 summary.trackedPartitions(),
                 summary.leaderPartitions(),
                 summary.openCommitWindows(),
-                summary.candidateCount(),
-                summary.eligibleBytes(),
+                summary.selectedCandidateCount(),
+                summary.observedEligibleBytes(),
                 summary.reservedCandidateCount(),
                 summary.uploadsInProgress()
             );
@@ -755,7 +778,9 @@ public final class SharedUploadScheduler implements AutoCloseable {
 
     private record CandidateSelection(
         List<SharedStorageEngine.UploadCandidate> candidates,
-        long totalEligibleBytes
+        long totalEligibleBytes,
+        Map<SharedPartitionId, Long> remoteRevisions,
+        Map<SharedPartitionId, Long> walMutationRevisions
     ) {
     }
 
@@ -812,8 +837,8 @@ public final class SharedUploadScheduler implements AutoCloseable {
         int trackedPartitions,
         int leaderPartitions,
         int openCommitWindows,
-        int candidateCount,
-        long eligibleBytes,
+        int selectedCandidateCount,
+        long observedEligibleBytes,
         int reservedCandidateCount,
         int uploadsInProgress
     ) {

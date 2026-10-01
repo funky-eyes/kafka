@@ -377,7 +377,9 @@ class SharedUploadSchedulerTest {
         try (SharedStorageEngine engine = engine("linger-inflight")) {
             append(engine, P0, 0L, 9L, new byte[] {1, 2, 3, 4, 5, 6});
             append(engine, P0, 10L, 19L, new byte[] {7, 8, 9, 10, 11, 12});
-            SharedCommitProgress progress = leaderProgress(P0, 0L, 20L);
+            // Start with only A committed. If B were already eligible, the bounded byte-trigger evidence would
+            // correctly force an immediate upload because A+B exceeds the 10-byte target, bypassing linger entirely.
+            SharedCommitProgress progress = leaderProgress(P0, 0L, 10L);
 
             AtomicLong nowMs = new AtomicLong();
             AtomicLong objectIds = new AtomicLong(100L);
@@ -406,7 +408,9 @@ class SharedUploadSchedulerTest {
                     scheduler.tryScheduledUploadOnce();
                 assertTrue(firstPutStarted.await(10, TimeUnit.SECONDS), "First linger-triggered PUT did not start");
 
-                // With A reserved, B becomes the new pending head at t=100 but has not lingered long enough yet.
+                // Commit B only after A is already reserved/in flight. B becomes the new pending head at t=100
+                // without changing the byte-trigger contract for A's first linger-triggered upload.
+                progress.onHighWatermarkUpdated(P0, 20L);
                 assertTrue(scheduler.tryScheduledUploadOnce().get(10, TimeUnit.SECONDS).isEmpty());
 
                 firstPut.complete(null);
@@ -647,6 +651,123 @@ class SharedUploadSchedulerTest {
                     .orElseThrow();
                 assertEquals(100L, retry.objectId());
                 assertTrue(objectStore.contains(100L));
+            }
+        }
+    }
+
+    @Test
+    void revalidatesRemoteCoverageRevisionAfterSelection() throws Exception {
+        InMemoryObjectStore objectStore = new InMemoryObjectStore();
+        InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
+        try (SharedStorageEngine engine = engine("selection-remote-revision-fence")) {
+            append(engine, P0, 0L, 9L, new byte[] {1});
+            append(engine, P0, 10L, 19L, new byte[] {2});
+            append(engine, P0, 20L, 29L, new byte[] {3});
+            SharedCommitProgress progress = leaderProgress(P0, 0L, 30L);
+
+            AtomicInteger objectIdCalls = new AtomicInteger();
+            AtomicBoolean publishMiddleOnTimeRead = new AtomicBoolean(true);
+            SharedObjectUploader uploader = new SharedObjectUploader(
+                objectStore,
+                metadataStore,
+                new SharedObjectPacker(),
+                engine
+            );
+            try (SharedUploadScheduler scheduler = new SharedUploadScheduler(
+                engine,
+                progress,
+                uploader,
+                () -> {
+                    objectIdCalls.incrementAndGet();
+                    return 100L;
+                },
+                () -> {
+                    if (publishMiddleOnTimeRead.getAndSet(false)) {
+                        SharedStorageEngine.UploadCandidate middle =
+                            engine.uploadCandidates(P0, 0L, 30L).get(1);
+                        engine.commitRemoteObject(new SharedObjectMetadata(
+                            200L,
+                            middle.location().payloadLength(),
+                            123L,
+                            List.of(new SharedObjectRange(
+                                P0,
+                                middle.offsets(),
+                                middle.location().leaderEpoch(),
+                                0,
+                                middle.location().payloadLength(),
+                                123L
+                            ))
+                        ));
+                    }
+                    return 1_000L;
+                },
+                1024L
+            )) {
+                assertTrue(scheduler.tryUploadOnce().get(10, TimeUnit.SECONDS).isEmpty());
+                assertEquals(0, objectIdCalls.get(),
+                    "A remote-view revision change must invalidate selection before object allocation");
+                assertEquals(0, scheduler.reservedCandidateCount());
+                assertEquals(0, scheduler.uploadsInProgress());
+
+                SharedObjectMetadata retry = scheduler.tryUploadOnce()
+                    .get(10, TimeUnit.SECONDS)
+                    .orElseThrow();
+                assertEquals(100L, retry.objectId());
+                assertEquals(2, retry.ranges().size());
+                assertEquals(
+                    List.of(new OffsetRange(0L, 10L), new OffsetRange(20L, 30L)),
+                    retry.ranges().stream().map(SharedObjectRange::offsets).toList()
+                );
+            }
+        }
+    }
+
+    @Test
+    void revalidatesWalMutationRevisionAfterSelection() throws Exception {
+        InMemoryObjectStore objectStore = new InMemoryObjectStore();
+        InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
+        try (SharedStorageEngine engine = engine("selection-wal-revision-fence")) {
+            append(engine, P0, 0L, 9L, new byte[] {1});
+            append(engine, P0, 10L, 19L, new byte[] {2});
+            append(engine, P0, 20L, 29L, new byte[] {3});
+            SharedCommitProgress progress = leaderProgress(P0, 0L, 30L);
+
+            AtomicInteger objectIdCalls = new AtomicInteger();
+            AtomicBoolean replaceMiddleOnTimeRead = new AtomicBoolean(true);
+            SharedObjectUploader uploader = new SharedObjectUploader(
+                objectStore,
+                metadataStore,
+                new SharedObjectPacker(),
+                engine
+            );
+            try (SharedUploadScheduler scheduler = new SharedUploadScheduler(
+                engine,
+                progress,
+                uploader,
+                () -> {
+                    objectIdCalls.incrementAndGet();
+                    return 100L;
+                },
+                () -> {
+                    if (replaceMiddleOnTimeRead.getAndSet(false)) {
+                        engine.appendData(
+                            P0,
+                            9,
+                            10L,
+                            19L,
+                            ByteBuffer.wrap(new byte[] {9})
+                        ).join();
+                    }
+                    return 1_000L;
+                },
+                1024L
+            )) {
+                assertTrue(scheduler.tryUploadOnce().get(10, TimeUnit.SECONDS).isEmpty());
+                assertEquals(0, objectIdCalls.get(),
+                    "A destructive WAL-index mutation must invalidate selection before object allocation");
+                assertEquals(0, scheduler.reservedCandidateCount());
+                assertEquals(0, scheduler.uploadsInProgress());
+                assertFalse(objectStore.contains(100L));
             }
         }
     }

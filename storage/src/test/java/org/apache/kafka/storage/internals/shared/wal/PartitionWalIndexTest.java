@@ -56,6 +56,25 @@ class PartitionWalIndexTest {
     }
 
     @Test
+    void mutationRevisionIgnoresTailAppendsButFencesDestructiveChanges() {
+        PartitionWalIndex index = new PartitionWalIndex();
+        WalPartitionKey key = new WalPartitionKey(1L, 2L, 3);
+
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 0, 9, new byte[]{1}), new WalAppendResult(1, 0, 100));
+        long afterFirstAppend = index.mutationRevision(key);
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 10, 19, new byte[]{2}), new WalAppendResult(1, 100, 100));
+        assertEquals(afterFirstAppend, index.mutationRevision(key),
+            "Ordinary tail appends must not invalidate active upload selection");
+
+        index.apply(WalRecord.data(1L, 2L, 3, 8, 0, 9, new byte[]{3}), new WalAppendResult(1, 200, 100));
+        long afterReplacement = index.mutationRevision(key);
+        assertTrue(afterReplacement > afterFirstAppend);
+
+        index.truncate(key, 10L);
+        assertTrue(index.mutationRevision(key) > afterReplacement);
+    }
+
+    @Test
     void shouldWalkPartitionRangesWithoutMaterializingBacklog() {
         PartitionWalIndex index = new PartitionWalIndex();
         WalPartitionKey key = new WalPartitionKey(1L, 2L, 3);

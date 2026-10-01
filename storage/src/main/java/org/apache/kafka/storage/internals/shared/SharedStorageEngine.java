@@ -461,6 +461,16 @@ public final class SharedStorageEngine implements AutoCloseable {
      * Tests whether a previously selected candidate still names the current local WAL generation and remains eligible
      * under the supplied Kafka commit window.
      */
+    public long remoteRevision(SharedPartitionId partition) {
+        Objects.requireNonNull(partition, "partition");
+        return remoteIndex.revision(partition);
+    }
+
+    public long walMutationRevision(SharedPartitionId partition) {
+        Objects.requireNonNull(partition, "partition");
+        return walIndex.mutationRevision(walKey(partition));
+    }
+
     public boolean isUploadCandidateCurrent(
         UploadCandidate candidate,
         long logStartOffset,

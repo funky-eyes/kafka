@@ -23,6 +23,7 @@ import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentNavigableMap;
 import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * In-memory logical index from Kafka partition offsets to broker-wide logical WAL addresses.
@@ -31,6 +32,7 @@ import java.util.concurrent.ConcurrentSkipListMap;
 public final class PartitionWalIndex {
     private final ConcurrentHashMap<WalPartitionKey, ConcurrentNavigableMap<Long, WalLocation>> locations =
         new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<WalPartitionKey, AtomicLong> mutationRevisions = new ConcurrentHashMap<>();
 
     public void apply(WalRecord record, WalAppendResult appendResult) {
         WalPartitionKey key = WalPartitionKey.of(record);
@@ -45,8 +47,17 @@ public final class PartitionWalIndex {
             record.firstOffset(),
             record.lastOffset()
         );
-        locations.computeIfAbsent(key, ignored -> new ConcurrentSkipListMap<>())
-            .put(record.firstOffset(), location);
+        ConcurrentNavigableMap<Long, WalLocation> partitionLocations =
+            locations.computeIfAbsent(key, ignored -> new ConcurrentSkipListMap<>());
+        Map.Entry<Long, WalLocation> floor = partitionLocations.floorEntry(record.firstOffset());
+        Map.Entry<Long, WalLocation> ceiling = partitionLocations.ceilingEntry(record.firstOffset());
+        boolean destructiveMutation =
+            (floor != null && floor.getValue().lastOffset() >= record.firstOffset()) ||
+                ceiling != null;
+        WalLocation previous = partitionLocations.put(record.firstOffset(), location);
+        if (destructiveMutation || (previous != null && !previous.equals(location))) {
+            bumpMutationRevision(key);
+        }
     }
 
     public Optional<WalLocation> find(WalPartitionKey key, long offset) {
@@ -114,6 +125,8 @@ public final class PartitionWalIndex {
         if (truncateOffset < 0) {
             throw new IllegalArgumentException("truncateOffset must be non-negative");
         }
+        // A TRUNCATE is a generation fence even when it currently removes no indexed entry.
+        bumpMutationRevision(key);
         ConcurrentNavigableMap<Long, WalLocation> partitionLocations = locations.get(key);
         if (partitionLocations == null) {
             return;
@@ -140,11 +153,16 @@ public final class PartitionWalIndex {
         }
         for (Map.Entry<WalPartitionKey, ConcurrentNavigableMap<Long, WalLocation>> partition : locations.entrySet()) {
             ConcurrentNavigableMap<Long, WalLocation> partitionLocations = partition.getValue();
+            boolean changed = false;
             for (Map.Entry<Long, WalLocation> entry : partitionLocations.entrySet()) {
                 WalLocation location = entry.getValue();
-                if (location.walOffset() < walOffsetExclusive) {
-                    partitionLocations.remove(entry.getKey(), location);
+                if (location.walOffset() < walOffsetExclusive &&
+                    partitionLocations.remove(entry.getKey(), location)) {
+                    changed = true;
                 }
+            }
+            if (changed) {
+                bumpMutationRevision(partition.getKey());
             }
             if (partitionLocations.isEmpty()) {
                 locations.remove(partition.getKey(), partitionLocations);
@@ -162,7 +180,22 @@ public final class PartitionWalIndex {
 
     /** Clears every indexed WAL address before replaying the surviving logical recovery window. */
     public void clear() {
+        locations.keySet().forEach(this::bumpMutationRevision);
         locations.clear();
+    }
+
+    /**
+     * Returns a generation that changes only when existing logical WAL index state is destructively replaced or
+     * removed. Ordinary tail appends deliberately do not advance this revision so active producers cannot starve
+     * bounded upload selection.
+     */
+    public long mutationRevision(WalPartitionKey key) {
+        AtomicLong revision = mutationRevisions.get(key);
+        return revision == null ? 0L : revision.get();
+    }
+
+    private void bumpMutationRevision(WalPartitionKey key) {
+        mutationRevisions.computeIfAbsent(key, ignored -> new AtomicLong()).incrementAndGet();
     }
 
     public int partitionCount() {
