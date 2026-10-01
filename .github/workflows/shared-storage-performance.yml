@@ -72,6 +72,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: shared-storage-performance-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   relative-performance:
     runs-on: ubuntu-latest

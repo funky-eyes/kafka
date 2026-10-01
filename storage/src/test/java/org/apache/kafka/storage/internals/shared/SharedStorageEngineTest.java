@@ -36,6 +36,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SharedStorageEngineTest {
@@ -103,6 +104,32 @@ class SharedStorageEngineTest {
                 engine.uploadCandidates(PARTITION, 100, 120).stream()
                     .map(SharedStorageEngine.UploadCandidate::offsets).toList());
             assertTrue(engine.readLocal(PARTITION, 110).isEmpty());
+        }
+    }
+
+    @Test
+    void uploadCandidateCursorStreamsCurrentMissingRanges() throws Exception {
+        try (SharedStorageEngine engine = engine("candidate-cursor")) {
+            append(engine, 100, 109, 1);
+            append(engine, 110, 119, 2);
+            append(engine, 120, 129, 3);
+            engine.commitRemoteObject(object(10, 100, 110, 111));
+
+            SharedStorageEngine.UploadCandidateCursor cursor =
+                engine.uploadCandidateCursor(PARTITION, 105, 130);
+
+            SharedStorageEngine.UploadCandidate second = cursor.next().orElseThrow();
+            assertEquals(new OffsetRange(110, 120), second.offsets());
+            assertTrue(engine.isUploadCandidateCurrent(second, 105, 130));
+
+            SharedStorageEngine.UploadCandidate third = cursor.next().orElseThrow();
+            assertEquals(new OffsetRange(120, 130), third.offsets());
+            assertTrue(cursor.next().isEmpty());
+
+            engine.commitRemoteObject(object(11, 110, 120, 222));
+            assertFalse(engine.isUploadCandidateCurrent(second, 105, 130),
+                "authoritative remote coverage must invalidate failed-candidate evidence");
+            assertTrue(engine.isUploadCandidateCurrent(third, 105, 130));
         }
     }
 

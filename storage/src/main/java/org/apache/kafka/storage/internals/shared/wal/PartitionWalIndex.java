@@ -65,6 +65,43 @@ public final class PartitionWalIndex {
         return Optional.empty();
     }
 
+    /**
+     * Returns the first logical range that contains {@code offset}, or the next range after a gap.
+     *
+     * <p>This is the bounded-memory cursor primitive used by shared-object scheduling. Unlike {@link #ranges}, it does
+     * not materialize the partition's complete WAL backlog.</p>
+     */
+    public Optional<WalLocation> rangeAtOrAfter(WalPartitionKey key, long offset) {
+        if (offset < 0) {
+            throw new IllegalArgumentException("offset must be non-negative");
+        }
+        ConcurrentNavigableMap<Long, WalLocation> partitionLocations = locations.get(key);
+        if (partitionLocations == null) {
+            return Optional.empty();
+        }
+        Map.Entry<Long, WalLocation> floor = partitionLocations.floorEntry(offset);
+        if (floor != null && floor.getValue().lastOffset() >= offset) {
+            return Optional.of(floor.getValue());
+        }
+        Map.Entry<Long, WalLocation> ceiling = partitionLocations.ceilingEntry(offset);
+        return ceiling == null ? Optional.empty() : Optional.of(ceiling.getValue());
+    }
+
+    /**
+     * Returns the next logical range after the supplied Kafka batch start offset without copying later ranges.
+     */
+    public Optional<WalLocation> rangeAfter(WalPartitionKey key, long firstOffset) {
+        if (firstOffset < 0) {
+            throw new IllegalArgumentException("firstOffset must be non-negative");
+        }
+        ConcurrentNavigableMap<Long, WalLocation> partitionLocations = locations.get(key);
+        if (partitionLocations == null) {
+            return Optional.empty();
+        }
+        Map.Entry<Long, WalLocation> higher = partitionLocations.higherEntry(firstOffset);
+        return higher == null ? Optional.empty() : Optional.of(higher.getValue());
+    }
+
     public List<WalLocation> ranges(WalPartitionKey key) {
         ConcurrentNavigableMap<Long, WalLocation> partitionLocations = locations.get(key);
         if (partitionLocations == null) {

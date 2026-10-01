@@ -33,6 +33,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.PriorityQueue;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -82,7 +83,7 @@ public final class SharedUploadScheduler implements AutoCloseable {
     private final AtomicInteger uploadsInProgress = new AtomicInteger();
     private final Set<CandidateKey> reservedCandidates = ConcurrentHashMap.newKeySet();
     private final Object uploadFailureLock = new Object();
-    private final Map<CandidateKey, Throwable> failedCandidates = new HashMap<>();
+    private final Map<CandidateKey, FailedCandidate> failedCandidates = new HashMap<>();
     private final AtomicBoolean closed = new AtomicBoolean();
     private final AtomicReference<Throwable> lastMaintenanceFailure = new AtomicReference<>();
     private Throwable lastSchedulingFailure;
@@ -330,7 +331,10 @@ public final class SharedUploadScheduler implements AutoCloseable {
     ) {
         synchronized (uploadFailureLock) {
             for (SharedStorageEngine.UploadCandidate candidate : candidates) {
-                failedCandidates.put(CandidateKey.from(candidate), error);
+                failedCandidates.put(
+                    CandidateKey.from(candidate),
+                    new FailedCandidate(candidate, error)
+                );
             }
         }
     }
@@ -343,13 +347,29 @@ public final class SharedUploadScheduler implements AutoCloseable {
         }
     }
 
-    private void reconcileFailedCandidates(List<SharedStorageEngine.UploadCandidate> committed) {
-        Set<CandidateKey> current = ConcurrentHashMap.newKeySet();
-        for (SharedStorageEngine.UploadCandidate candidate : committed) {
-            current.add(CandidateKey.from(candidate));
-        }
+    /**
+     * Reconciles upload failure evidence without relying on the current bounded selection window.
+     *
+     * <p>A failed candidate can sit beyond the next object's byte/range budget, so absence from a bounded scan says
+     * nothing about whether that failure is still live. Validate each failed key against the current leader snapshot,
+     * WAL generation and remote coverage instead.</p>
+     */
+    private void reconcileFailedCandidates(
+        Map<SharedPartitionId, SharedCommitProgress.PartitionProgress> snapshot
+    ) {
         synchronized (uploadFailureLock) {
-            failedCandidates.keySet().removeIf(candidate -> !current.contains(candidate));
+            failedCandidates.entrySet().removeIf(entry -> {
+                SharedCommitProgress.PartitionProgress progress = snapshot.get(entry.getKey().partition());
+                if (progress == null || !progress.isLeader() ||
+                    progress.highWatermark() <= progress.logStartOffset()) {
+                    return true;
+                }
+                return !engine.isUploadCandidateCurrent(
+                    entry.getValue().candidate(),
+                    progress.logStartOffset(),
+                    progress.highWatermark()
+                );
+            });
         }
     }
 
@@ -434,7 +454,7 @@ public final class SharedUploadScheduler implements AutoCloseable {
             if (lastSchedulingFailure != null) {
                 return Optional.of(lastSchedulingFailure);
             }
-            return failedCandidates.values().stream().findFirst();
+            return failedCandidates.values().stream().map(FailedCandidate::error).findFirst();
         }
     }
 
@@ -510,7 +530,9 @@ public final class SharedUploadScheduler implements AutoCloseable {
 
     private CandidateSelection selectCandidateBatch() {
         Map<SharedPartitionId, SharedCommitProgress.PartitionProgress> snapshot = commitProgress.snapshot();
-        List<SharedStorageEngine.UploadCandidate> committed = new ArrayList<>();
+        PriorityQueue<CursorHead> heads = new PriorityQueue<>(
+            Comparator.comparingLong(head -> head.candidate().location().walOffset())
+        );
         int leaderPartitions = 0;
         int openCommitWindows = 0;
         for (Map.Entry<SharedPartitionId, SharedCommitProgress.PartitionProgress> entry : snapshot.entrySet()) {
@@ -523,47 +545,53 @@ public final class SharedUploadScheduler implements AutoCloseable {
                 continue;
             }
             openCommitWindows++;
-            committed.addAll(engine.uploadCandidates(
+            SharedStorageEngine.UploadCandidateCursor cursor = engine.uploadCandidateCursor(
                 entry.getKey(),
                 progress.logStartOffset(),
                 progress.highWatermark()
-            ));
+            );
+            cursor.next().ifPresent(candidate -> heads.add(new CursorHead(cursor, candidate)));
         }
 
-        committed.sort(Comparator.comparingLong(
-            (SharedStorageEngine.UploadCandidate candidate) -> candidate.location().walOffset()
-        ));
-        reconcileFailedCandidates(committed);
-        List<SharedStorageEngine.UploadCandidate> available = committed.stream()
-            .filter(candidate -> !reservedCandidates.contains(CandidateKey.from(candidate)))
-            .toList();
+        reconcileFailedCandidates(snapshot);
 
-        long totalEligibleBytes = totalEligibleBytes(available);
+        List<SharedStorageEngine.UploadCandidate> selected = new ArrayList<>(
+            Math.min(SharedMetadataRecordCodec.MAX_COMMITTED_OBJECT_RANGES, 256)
+        );
+        long selectedBytes = 0L;
+        while (!heads.isEmpty() &&
+            selected.size() < SharedMetadataRecordCodec.MAX_COMMITTED_OBJECT_RANGES) {
+            CursorHead head = heads.poll();
+            SharedStorageEngine.UploadCandidate candidate = head.candidate();
+            head.cursor().next().ifPresent(next -> heads.add(new CursorHead(head.cursor(), next)));
+
+            if (reservedCandidates.contains(CandidateKey.from(candidate))) {
+                continue;
+            }
+
+            int payloadBytes = candidate.location().payloadLength();
+            long nextSelectedBytes = Math.addExact(selectedBytes, payloadBytes);
+            if (!selected.isEmpty() && nextSelectedBytes > targetObjectBytes) {
+                break;
+            }
+            selected.add(candidate);
+            selectedBytes = nextSelectedBytes;
+            if (selectedBytes >= targetObjectBytes) {
+                break;
+            }
+        }
+
         logSelectionSummary(new SelectionSummary(
             snapshot.size(),
             leaderPartitions,
             openCommitWindows,
-            available.size(),
-            totalEligibleBytes,
+            selected.size(),
+            selectedBytes,
             reservedCandidates.size(),
             uploadsInProgress.get()
         ));
 
-        if (available.isEmpty()) {
-            return new CandidateSelection(List.of(), 0L);
-        }
-        return new CandidateSelection(
-            selectTargetBounded(available, targetObjectBytes),
-            totalEligibleBytes
-        );
-    }
-
-    private static long totalEligibleBytes(List<SharedStorageEngine.UploadCandidate> candidates) {
-        long total = 0L;
-        for (SharedStorageEngine.UploadCandidate candidate : candidates) {
-            total = Math.addExact(total, candidate.location().payloadLength());
-        }
-        return total;
+        return new CandidateSelection(List.copyOf(selected), selectedBytes);
     }
 
     static List<SharedStorageEngine.UploadCandidate> selectTargetBounded(
@@ -687,6 +715,18 @@ public final class SharedUploadScheduler implements AutoCloseable {
     private record CandidateSelection(
         List<SharedStorageEngine.UploadCandidate> candidates,
         long totalEligibleBytes
+    ) {
+    }
+
+    private record CursorHead(
+        SharedStorageEngine.UploadCandidateCursor cursor,
+        SharedStorageEngine.UploadCandidate candidate
+    ) {
+    }
+
+    private record FailedCandidate(
+        SharedStorageEngine.UploadCandidate candidate,
+        Throwable error
     ) {
     }
 

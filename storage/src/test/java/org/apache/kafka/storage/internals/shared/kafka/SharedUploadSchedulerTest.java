@@ -21,6 +21,7 @@ import org.apache.kafka.storage.internals.shared.metadata.InMemoryObjectMetadata
 import org.apache.kafka.storage.internals.shared.metadata.OffsetRange;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
+import org.apache.kafka.storage.internals.shared.metadata.SharedObjectRange;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 import org.apache.kafka.storage.internals.shared.object.InMemoryObjectStore;
 import org.apache.kafka.storage.internals.shared.object.ObjectStore;
@@ -255,6 +256,122 @@ class SharedUploadSchedulerTest {
 
                 assertEquals(1, metadata.ranges().size());
                 assertEquals(new OffsetRange(0L, 10L), metadata.ranges().get(0).offsets());
+            }
+        }
+    }
+
+    @Test
+    void reconcilesFailedCandidateAgainstCurrentValidityInsteadOfBoundedScan() throws Exception {
+        InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
+        ObjectStore failingStore = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                return CompletableFuture.failedFuture(new IllegalStateException("simulated PUT failure"));
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return CompletableFuture.completedFuture(null);
+            }
+        };
+
+        try (SharedStorageEngine engine = engine("failure-reconcile")) {
+            append(engine, P0, 0L, 9L, new byte[] {1, 2, 3});
+            append(engine, P0, 10L, 19L, new byte[] {4, 5, 6});
+            SharedCommitProgress progress = leaderProgress(P0, 0L, 20L);
+            SharedObjectUploader uploader = new SharedObjectUploader(
+                failingStore,
+                metadataStore,
+                new SharedObjectPacker(),
+                engine
+            );
+            try (SharedUploadScheduler scheduler = new SharedUploadScheduler(
+                engine,
+                progress,
+                uploader,
+                () -> 100L,
+                () -> 1_000L,
+                3L
+            )) {
+                assertThrows(CompletionException.class, () -> scheduler.tryUploadOnce().join());
+                assertTrue(scheduler.uploadFailurePresent());
+
+                SharedStorageEngine.UploadCandidate failed =
+                    engine.uploadCandidates(P0, 0L, 20L).get(0);
+                engine.commitRemoteObject(new SharedObjectMetadata(
+                    200L,
+                    failed.location().payloadLength(),
+                    123L,
+                    List.of(new SharedObjectRange(
+                        P0,
+                        failed.offsets(),
+                        failed.location().leaderEpoch(),
+                        0,
+                        failed.location().payloadLength(),
+                        123L
+                    ))
+                ));
+
+                // Selection now starts at the later backlog item. Reconciliation must still inspect the failed key
+                // directly rather than preserving or clearing it based on membership in this bounded selection.
+                scheduler.selectCandidates();
+                assertFalse(scheduler.uploadFailurePresent());
+                assertEquals(
+                    new OffsetRange(10L, 20L),
+                    scheduler.selectCandidates().get(0).offsets()
+                );
+            }
+        }
+    }
+
+    @Test
+    void clearsFailedCandidateWhenPartitionLosesLeadership() throws Exception {
+        InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
+        ObjectStore failingStore = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                return CompletableFuture.failedFuture(new IllegalStateException("simulated PUT failure"));
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return CompletableFuture.completedFuture(null);
+            }
+        };
+
+        try (SharedStorageEngine engine = engine("failure-demotion")) {
+            append(engine, P0, 0L, 9L, new byte[] {1});
+            SharedCommitProgress progress = leaderProgress(P0, 0L, 10L);
+            SharedObjectUploader uploader = new SharedObjectUploader(
+                failingStore,
+                metadataStore,
+                new SharedObjectPacker(),
+                engine
+            );
+            try (SharedUploadScheduler scheduler = new SharedUploadScheduler(
+                engine,
+                progress,
+                uploader,
+                () -> 100L,
+                () -> 1_000L,
+                1024L
+            )) {
+                assertThrows(CompletionException.class, () -> scheduler.tryUploadOnce().join());
+                assertTrue(scheduler.uploadFailurePresent());
+
+                progress.onFollower(P0);
+                assertTrue(scheduler.selectCandidates().isEmpty());
+                assertFalse(scheduler.uploadFailurePresent());
             }
         }
     }

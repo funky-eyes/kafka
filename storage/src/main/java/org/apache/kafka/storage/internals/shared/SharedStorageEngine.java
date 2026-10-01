@@ -426,33 +426,137 @@ public final class SharedStorageEngine implements AutoCloseable {
         }
     }
 
-    public List<UploadCandidate> uploadCandidates(
+    /**
+     * Opens a lazy cursor over committed, locally present ranges that still need remote coverage.
+     *
+     * <p>The cursor advances one WAL-index entry at a time and therefore keeps transient memory independent from the
+     * partition backlog size. Each step briefly crosses the WAL maintenance fence so reclamation can continue between
+     * cursor advances.</p>
+     */
+    public UploadCandidateCursor uploadCandidateCursor(
         SharedPartitionId partition,
         long logStartOffset,
         long highWatermark
     ) {
         Objects.requireNonNull(partition, "partition");
+        validateUploadWindow(logStartOffset, highWatermark);
+        return new UploadCandidateCursor(partition, logStartOffset, highWatermark);
+    }
+
+    public List<UploadCandidate> uploadCandidates(
+        SharedPartitionId partition,
+        long logStartOffset,
+        long highWatermark
+    ) {
+        UploadCandidateCursor cursor = uploadCandidateCursor(partition, logStartOffset, highWatermark);
+        List<UploadCandidate> result = new ArrayList<>();
+        Optional<UploadCandidate> candidate;
+        while ((candidate = cursor.next()).isPresent()) {
+            result.add(candidate.get());
+        }
+        return List.copyOf(result);
+    }
+
+    /**
+     * Tests whether a previously selected candidate still names the current local WAL generation and remains eligible
+     * under the supplied Kafka commit window.
+     */
+    public boolean isUploadCandidateCurrent(
+        UploadCandidate candidate,
+        long logStartOffset,
+        long highWatermark
+    ) {
+        Objects.requireNonNull(candidate, "candidate");
+        validateUploadWindow(logStartOffset, highWatermark);
+        if (logStartOffset == highWatermark) {
+            return false;
+        }
+
+        synchronized (walMaintenanceLock) {
+            Optional<WalLocation> current =
+                walIndex.find(walKey(candidate.partition()), candidate.offsets().startOffset());
+            if (current.isEmpty() || !current.get().equals(candidate.location())) {
+                return false;
+            }
+            WalLocation location = current.get();
+            if (location.lastOffset() < logStartOffset || location.lastOffset() >= highWatermark) {
+                return false;
+            }
+            OffsetRange logicalRange =
+                new OffsetRange(location.firstOffset(), Math.addExact(location.lastOffset(), 1));
+            return logicalRange.equals(candidate.offsets()) &&
+                !remoteIndex.coverage(candidate.partition()).covers(logicalRange);
+        }
+    }
+
+    private static void validateUploadWindow(long logStartOffset, long highWatermark) {
         if (logStartOffset < 0 || highWatermark < logStartOffset) {
             throw new IllegalArgumentException(
                 "Invalid Kafka commit window [" + logStartOffset + ", " + highWatermark + ")");
         }
-        if (logStartOffset == highWatermark) {
-            return List.of();
+    }
+
+    public final class UploadCandidateCursor {
+        private final SharedPartitionId partition;
+        private final long logStartOffset;
+        private final long highWatermark;
+        private final WalPartitionKey walKey;
+        private boolean first = true;
+        private boolean exhausted;
+        private long previousFirstOffset = -1L;
+        private long previousWalOffset = -1L;
+
+        private UploadCandidateCursor(
+            SharedPartitionId partition,
+            long logStartOffset,
+            long highWatermark
+        ) {
+            this.partition = partition;
+            this.logStartOffset = logStartOffset;
+            this.highWatermark = highWatermark;
+            this.walKey = walKey(partition);
+            this.exhausted = logStartOffset == highWatermark;
         }
 
-        synchronized (walMaintenanceLock) {
-            List<UploadCandidate> result = new ArrayList<>();
-            for (WalLocation location : walIndex.ranges(walKey(partition))) {
-                if (location.lastOffset() < logStartOffset || location.lastOffset() >= highWatermark) {
+        public Optional<UploadCandidate> next() {
+            while (!exhausted) {
+                Optional<WalLocation> next;
+                synchronized (walMaintenanceLock) {
+                    next = first
+                        ? walIndex.rangeAtOrAfter(walKey, logStartOffset)
+                        : walIndex.rangeAfter(walKey, previousFirstOffset);
+                }
+                first = false;
+                if (next.isEmpty()) {
+                    exhausted = true;
+                    return Optional.empty();
+                }
+
+                WalLocation location = next.get();
+                previousFirstOffset = location.firstOffset();
+                if (location.lastOffset() < logStartOffset) {
                     continue;
                 }
+                if (location.lastOffset() >= highWatermark) {
+                    exhausted = true;
+                    return Optional.empty();
+                }
+                if (previousWalOffset >= 0L && location.walOffset() <= previousWalOffset) {
+                    throw new IllegalStateException(
+                        "Partition WAL order moved backwards for " + partition +
+                            ": previousWalOffset=" + previousWalOffset +
+                            ", currentWalOffset=" + location.walOffset()
+                    );
+                }
+                previousWalOffset = location.walOffset();
+
                 OffsetRange logicalRange =
                     new OffsetRange(location.firstOffset(), Math.addExact(location.lastOffset(), 1));
                 if (!remoteIndex.coverage(partition).covers(logicalRange)) {
-                    result.add(new UploadCandidate(partition, logicalRange, location));
+                    return Optional.of(new UploadCandidate(partition, logicalRange, location));
                 }
             }
-            return List.copyOf(result);
+            return Optional.empty();
         }
     }
 

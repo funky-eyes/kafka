@@ -54,4 +54,24 @@ class PartitionWalIndexTest {
         assertEquals(3, location.segmentId());
         assertEquals(4, location.leaderEpoch());
     }
+
+    @Test
+    void shouldWalkPartitionRangesWithoutMaterializingBacklog() {
+        PartitionWalIndex index = new PartitionWalIndex();
+        WalPartitionKey key = new WalPartitionKey(1L, 2L, 3);
+
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 10, 19, new byte[]{1}), new WalAppendResult(1, 0, 100));
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 30, 39, new byte[]{2}), new WalAppendResult(1, 100, 100));
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 40, 49, new byte[]{3}), new WalAppendResult(1, 200, 100));
+
+        WalLocation containing = index.rangeAtOrAfter(key, 15L).orElseThrow();
+        assertEquals(10L, containing.firstOffset());
+
+        WalLocation afterGap = index.rangeAtOrAfter(key, 20L).orElseThrow();
+        assertEquals(30L, afterGap.firstOffset());
+
+        WalLocation next = index.rangeAfter(key, 30L).orElseThrow();
+        assertEquals(40L, next.firstOffset());
+        assertTrue(index.rangeAfter(key, 40L).isEmpty());
+    }
 }
