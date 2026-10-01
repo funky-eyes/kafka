@@ -18,6 +18,7 @@ package org.apache.kafka.storage.internals.shared.object;
 
 import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
 import org.apache.kafka.storage.internals.shared.metadata.OffsetRange;
+import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectRange;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
@@ -102,6 +103,11 @@ public final class SharedObjectPacker {
         Objects.requireNonNull(engine, "engine");
         if (candidates.isEmpty()) {
             throw new IllegalArgumentException("candidates must not be empty");
+        }
+        if (candidates.size() > SharedMetadataRecordCodec.MAX_COMMITTED_OBJECT_RANGES) {
+            throw new IllegalArgumentException(
+                "candidate count " + candidates.size() + " exceeds metadata range limit " +
+                    SharedMetadataRecordCodec.MAX_COMMITTED_OBJECT_RANGES);
         }
 
         List<BatchPlan> batches = batchPlans(candidates);

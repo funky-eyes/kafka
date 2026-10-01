@@ -49,6 +49,10 @@ class SharedMetadataClientConfigurationTest {
         assertEquals("SASL_SSL", producer.get(CommonClientConfigs.SECURITY_PROTOCOL_CONFIG));
         assertEquals("all", producer.get(ProducerConfig.ACKS_CONFIG));
         assertEquals(true, producer.get(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG));
+        assertEquals(
+            SharedMetadataClientConfiguration.MIN_METADATA_MESSAGE_BYTES,
+            producer.get(ProducerConfig.MAX_REQUEST_SIZE_CONFIG)
+        );
         assertEquals("read_committed", config.consumerProperties().get(ConsumerConfig.ISOLATION_LEVEL_CONFIG));
         assertTrue(config.sequenceProducerProperties()
             .get(ProducerConfig.TRANSACTIONAL_ID_CONFIG)
@@ -120,6 +124,28 @@ class SharedMetadataClientConfigurationTest {
             config.newMetadataTopic().configs().get(TopicConfig.CLEANUP_POLICY_CONFIG)
         );
         assertEquals("1", config.newMetadataTopic().configs().get(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG));
+        assertEquals(
+            Integer.toString(SharedMetadataClientConfiguration.MIN_METADATA_MESSAGE_BYTES),
+            config.newMetadataTopic().configs().get(TopicConfig.MAX_MESSAGE_BYTES_CONFIG)
+        );
+    }
+
+    @Test
+    void rejectsMetadataProducerRequestBudgetBelowCommitEnvelope() {
+        Endpoint endpoint = new Endpoint("PLAINTEXT", SecurityProtocol.PLAINTEXT, "localhost", 9092);
+        SharedMetadataClientConfiguration config = SharedMetadataClientConfiguration.from(context(
+            List.of(endpoint),
+            Map.of(
+                SharedMetadataClientConfiguration.CLIENT_PREFIX + ProducerConfig.MAX_REQUEST_SIZE_CONFIG,
+                SharedMetadataClientConfiguration.MIN_METADATA_MESSAGE_BYTES - 1
+            )
+        ));
+
+        IllegalArgumentException failure = assertThrows(
+            IllegalArgumentException.class,
+            config::producerProperties
+        );
+        assertTrue(failure.getMessage().contains(ProducerConfig.MAX_REQUEST_SIZE_CONFIG));
     }
 
     @Test

@@ -17,6 +17,7 @@
 package org.apache.kafka.storage.internals.shared.kafka;
 
 import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
+import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectUploader;
@@ -381,6 +382,9 @@ public final class SharedUploadScheduler implements AutoCloseable {
         if (selection.totalEligibleBytes() >= targetObjectBytes) {
             return true;
         }
+        if (selection.candidates().size() >= SharedMetadataRecordCodec.MAX_COMMITTED_OBJECT_RANGES) {
+            return true;
+        }
         if (walPressureReached()) {
             return true;
         }
@@ -548,7 +552,10 @@ public final class SharedUploadScheduler implements AutoCloseable {
         if (available.isEmpty()) {
             return new CandidateSelection(List.of(), 0L);
         }
-        return new CandidateSelection(selectTargetBounded(available), totalEligibleBytes);
+        return new CandidateSelection(
+            selectTargetBounded(available, targetObjectBytes),
+            totalEligibleBytes
+        );
     }
 
     private static long totalEligibleBytes(List<SharedStorageEngine.UploadCandidate> candidates) {
@@ -559,12 +566,16 @@ public final class SharedUploadScheduler implements AutoCloseable {
         return total;
     }
 
-    private List<SharedStorageEngine.UploadCandidate> selectTargetBounded(
-        List<SharedStorageEngine.UploadCandidate> committed
+    static List<SharedStorageEngine.UploadCandidate> selectTargetBounded(
+        List<SharedStorageEngine.UploadCandidate> committed,
+        long targetObjectBytes
     ) {
         List<SharedStorageEngine.UploadCandidate> selected = new ArrayList<>();
         long selectedBytes = 0L;
         for (SharedStorageEngine.UploadCandidate candidate : committed) {
+            if (selected.size() >= SharedMetadataRecordCodec.MAX_COMMITTED_OBJECT_RANGES) {
+                break;
+            }
             int payloadBytes = candidate.location().payloadLength();
             if (!selected.isEmpty() && selectedBytes + payloadBytes > targetObjectBytes) {
                 break;

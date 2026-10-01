@@ -19,6 +19,7 @@ package org.apache.kafka.storage.internals.shared.kafka;
 import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
 import org.apache.kafka.storage.internals.shared.metadata.InMemoryObjectMetadataStore;
 import org.apache.kafka.storage.internals.shared.metadata.OffsetRange;
+import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 import org.apache.kafka.storage.internals.shared.object.InMemoryObjectStore;
@@ -26,12 +27,15 @@ import org.apache.kafka.storage.internals.shared.object.ObjectStore;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectPacker;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectUploader;
 import org.apache.kafka.storage.internals.shared.wal.FileSharedWal;
+import org.apache.kafka.storage.internals.shared.wal.WalLocation;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -212,6 +216,28 @@ class SharedUploadSchedulerTest {
                 assertTrue(objectStore.contains(metadata.objectId()));
             }
         }
+    }
+
+    @Test
+    void boundsObjectSelectionByCommitMetadataRangeBudget() {
+        List<SharedStorageEngine.UploadCandidate> candidates = new ArrayList<>();
+        for (int index = 0; index <= SharedMetadataRecordCodec.MAX_COMMITTED_OBJECT_RANGES; index++) {
+            long offset = index;
+            candidates.add(new SharedStorageEngine.UploadCandidate(
+                P0,
+                new OffsetRange(offset, offset + 1L),
+                new WalLocation(index * 1024L, 1024, 3, offset, offset)
+            ));
+        }
+
+        List<SharedStorageEngine.UploadCandidate> selected =
+            SharedUploadScheduler.selectTargetBounded(candidates, Long.MAX_VALUE);
+
+        assertEquals(SharedMetadataRecordCodec.MAX_COMMITTED_OBJECT_RANGES, selected.size());
+        assertEquals(
+            SharedMetadataRecordCodec.MAX_COMMITTED_OBJECT_RANGES - 1L,
+            selected.get(selected.size() - 1).offsets().startOffset()
+        );
     }
 
     @Test

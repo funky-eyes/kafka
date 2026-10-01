@@ -45,6 +45,14 @@ public final class SharedMetadataRecordCodec {
     private static final int COMMITTED_OBJECT_HEADER_BYTES = Long.BYTES + Long.BYTES + Integer.BYTES;
     private static final int RANGE_BYTES = Long.BYTES + Long.BYTES + Integer.BYTES + Integer.BYTES +
         Long.BYTES + Long.BYTES + Long.BYTES + Integer.BYTES + Long.BYTES;
+
+    /**
+     * Caps one COMMIT value below the standard 1 MiB Kafka producer/topic envelope. With the current 60-byte range
+     * encoding this leaves more than 64 KiB for the record batch and request envelope.
+     */
+    public static final int MAX_COMMITTED_OBJECT_RANGES = 16 * 1024;
+    public static final int MAX_COMMITTED_OBJECT_VALUE_BYTES =
+        VALUE_HEADER_BYTES + COMMITTED_OBJECT_HEADER_BYTES + MAX_COMMITTED_OBJECT_RANGES * RANGE_BYTES;
     private static final long SEQUENCE_LIMIT_EXCLUSIVE = BrokerObjectId.MAX_SEQUENCE + 1L;
 
     private SharedMetadataRecordCodec() {
@@ -135,9 +143,15 @@ public final class SharedMetadataRecordCodec {
         if (metadata.objectId() <= 0) {
             throw new IllegalArgumentException("metadata objectId must be positive");
         }
+        int rangeCount = metadata.ranges().size();
+        if (rangeCount > MAX_COMMITTED_OBJECT_RANGES) {
+            throw new IllegalArgumentException(
+                "shared object range count " + rangeCount + " exceeds metadata limit " +
+                    MAX_COMMITTED_OBJECT_RANGES);
+        }
         int rangeBytes;
         try {
-            rangeBytes = Math.multiplyExact(metadata.ranges().size(), RANGE_BYTES);
+            rangeBytes = Math.multiplyExact(rangeCount, RANGE_BYTES);
         } catch (ArithmeticException e) {
             throw new IllegalArgumentException("too many shared object ranges", e);
         }

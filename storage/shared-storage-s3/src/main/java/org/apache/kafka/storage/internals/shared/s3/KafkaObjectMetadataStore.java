@@ -232,6 +232,12 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
                 SharedMetadataClientConfiguration.TOPIC_NAME + " min.insync.replicas " + minIsr +
                     " is below required " + configuration.minInSyncReplicas());
         }
+        int maxMessageBytes = Integer.parseInt(requiredConfig(topicConfig, TopicConfig.MAX_MESSAGE_BYTES_CONFIG));
+        if (maxMessageBytes < SharedMetadataClientConfiguration.MIN_METADATA_MESSAGE_BYTES) {
+            throw new IllegalStateException(
+                SharedMetadataClientConfiguration.TOPIC_NAME + " max.message.bytes " + maxMessageBytes +
+                    " is below required " + SharedMetadataClientConfiguration.MIN_METADATA_MESSAGE_BYTES);
+        }
     }
 
     private static String requiredConfig(Config config, String name) {

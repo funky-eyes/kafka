@@ -48,6 +48,7 @@ public final class SharedMetadataClientConfiguration {
 
     public static final short DEFAULT_REPLICATION_FACTOR = 3;
     public static final int DEFAULT_MIN_ISR = 2;
+    static final int MIN_METADATA_MESSAGE_BYTES = 1024 * 1024;
 
     private final Map<String, Object> commonClientProperties;
     private final short replicationFactor;
@@ -124,6 +125,17 @@ public final class SharedMetadataClientConfiguration {
         result.putIfAbsent(ProducerConfig.CLIENT_ID_CONFIG, "shared-storage-metadata-producer-" + brokerId);
         result.putIfAbsent(ProducerConfig.ACKS_CONFIG, "all");
         result.putIfAbsent(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
+        int maxRequestSize = positiveInt(
+            result.get(ProducerConfig.MAX_REQUEST_SIZE_CONFIG),
+            MIN_METADATA_MESSAGE_BYTES,
+            CLIENT_PREFIX + ProducerConfig.MAX_REQUEST_SIZE_CONFIG
+        );
+        if (maxRequestSize < MIN_METADATA_MESSAGE_BYTES) {
+            throw new IllegalArgumentException(
+                CLIENT_PREFIX + ProducerConfig.MAX_REQUEST_SIZE_CONFIG + " must be at least " +
+                    MIN_METADATA_MESSAGE_BYTES);
+        }
+        result.put(ProducerConfig.MAX_REQUEST_SIZE_CONFIG, maxRequestSize);
         result.putIfAbsent(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class);
         result.putIfAbsent(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class);
         return result;
@@ -154,7 +166,8 @@ public final class SharedMetadataClientConfiguration {
         return new NewTopic(TOPIC_NAME, 1, replicationFactor)
             .configs(Map.of(
                 TopicConfig.CLEANUP_POLICY_CONFIG, TopicConfig.CLEANUP_POLICY_COMPACT,
-                TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, Integer.toString(minInSyncReplicas)
+                TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, Integer.toString(minInSyncReplicas),
+                TopicConfig.MAX_MESSAGE_BYTES_CONFIG, Integer.toString(MIN_METADATA_MESSAGE_BYTES)
             ));
     }
 

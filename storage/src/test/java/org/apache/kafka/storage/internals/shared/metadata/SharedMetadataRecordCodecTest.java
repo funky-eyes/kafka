@@ -19,12 +19,14 @@ package org.apache.kafka.storage.internals.shared.metadata;
 import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
+import java.util.Collections;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SharedMetadataRecordCodecTest {
     @Test
@@ -124,6 +126,28 @@ class SharedMetadataRecordCodecTest {
         );
 
         assertEquals(exclusiveLimit, value.reservedExclusiveSequence());
+    }
+
+    @Test
+    void boundsCommittedObjectMetadataBelowDefaultKafkaMessageEnvelope() {
+        assertEquals(983_063, SharedMetadataRecordCodec.MAX_COMMITTED_OBJECT_VALUE_BYTES);
+        assertTrue(SharedMetadataRecordCodec.MAX_COMMITTED_OBJECT_VALUE_BYTES < 1024 * 1024);
+
+        long objectId = BrokerObjectId.compose(2, 10L);
+        SharedObjectMetadata base = metadata(objectId);
+        SharedObjectMetadata tooManyRanges = new SharedObjectMetadata(
+            objectId,
+            base.objectSize(),
+            base.objectChecksum(),
+            Collections.nCopies(
+                SharedMetadataRecordCodec.MAX_COMMITTED_OBJECT_RANGES + 1,
+                base.ranges().get(0)
+            )
+        );
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> SharedMetadataRecordCodec.committedObjectValue(tooManyRanges)
+        );
     }
 
     @Test
