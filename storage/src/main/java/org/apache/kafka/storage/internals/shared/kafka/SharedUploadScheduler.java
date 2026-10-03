@@ -318,61 +318,99 @@ public final class SharedUploadScheduler implements AutoCloseable {
 
     private boolean selectionStillCurrent(CandidateSelection selection, boolean validateByteTriggerWitness) {
         Map<SharedPartitionId, SharedCommitProgress.PartitionProgress> currentProgress = commitProgress.snapshot();
+        if (!selectedCandidatesStillCurrent(selection, currentProgress)) {
+            return false;
+        }
+        return !validateByteTriggerWitness || byteTriggerWitnessStillCurrent(selection, currentProgress);
+    }
+
+    private boolean selectedCandidatesStillCurrent(
+        CandidateSelection selection,
+        Map<SharedPartitionId, SharedCommitProgress.PartitionProgress> currentProgress
+    ) {
+        Map<SharedPartitionId, CandidateEndpoints> endpoints = selectedCandidateEndpoints(selection.candidates());
+        for (Map.Entry<SharedPartitionId, CandidateEndpoints> entry : endpoints.entrySet()) {
+            SharedPartitionId partition = entry.getKey();
+            SharedCommitProgress.PartitionProgress progress = currentProgress.get(partition);
+            if (!partitionProgressAllowsSelection(progress)) {
+                return false;
+            }
+            if (!selectionRevisionsStillCurrent(selection, partition)) {
+                return false;
+            }
+            if (!selectedEndpointsWithinCommitWindow(entry.getValue(), progress)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private Map<SharedPartitionId, CandidateEndpoints> selectedCandidateEndpoints(
+        List<SharedStorageEngine.UploadCandidate> candidates
+    ) {
         Map<SharedPartitionId, CandidateEndpoints> endpoints = new HashMap<>();
-        for (SharedStorageEngine.UploadCandidate candidate : selection.candidates()) {
+        for (SharedStorageEngine.UploadCandidate candidate : candidates) {
             endpoints.compute(candidate.partition(), (ignored, current) ->
                 current == null
                     ? new CandidateEndpoints(candidate, candidate)
                     : new CandidateEndpoints(current.first(), candidate)
             );
         }
+        return endpoints;
+    }
 
-        for (Map.Entry<SharedPartitionId, CandidateEndpoints> entry : endpoints.entrySet()) {
-            SharedPartitionId partition = entry.getKey();
-            SharedCommitProgress.PartitionProgress progress = currentProgress.get(partition);
-            if (progress == null || !progress.isLeader() ||
-                progress.highWatermark() <= progress.logStartOffset()) {
-                return false;
-            }
+    private boolean partitionProgressAllowsSelection(SharedCommitProgress.PartitionProgress progress) {
+        return progress != null &&
+            progress.isLeader() &&
+            progress.highWatermark() > progress.logStartOffset();
+    }
 
-            Long expectedRemoteRevision = selection.remoteRevisions().get(partition);
-            if (expectedRemoteRevision == null || engine.remoteRevision(partition) != expectedRemoteRevision) {
-                // Remote coverage can contain holes and may advance out of order across leader races. A revision
-                // change means selection observed an older logical remote view; discard the whole object and rescan.
-                return false;
-            }
-            Long expectedWalRevision = selection.walMutationRevisions().get(partition);
-            if (expectedWalRevision == null || engine.walMutationRevision(partition) != expectedWalRevision) {
-                // Tail appends do not change this revision. Any truncate, replacement, reclamation or clear does,
-                // including a middle-range replacement that first/last candidate checks alone cannot detect.
-                return false;
-            }
-
-            CandidateEndpoints selected = entry.getValue();
-            if (selected.first().location().lastOffset() < progress.logStartOffset() ||
-                selected.last().location().lastOffset() >= progress.highWatermark()) {
-                return false;
-            }
+    private boolean selectionRevisionsStillCurrent(
+        CandidateSelection selection,
+        SharedPartitionId partition
+    ) {
+        Long expectedRemoteRevision = selection.remoteRevisions().get(partition);
+        if (expectedRemoteRevision == null || engine.remoteRevision(partition) != expectedRemoteRevision) {
+            // Remote coverage can contain holes and may advance out of order across leader races. A revision
+            // change means selection observed an older logical remote view; discard the whole object and rescan.
+            return false;
         }
+        Long expectedWalRevision = selection.walMutationRevisions().get(partition);
+        if (expectedWalRevision == null || engine.walMutationRevision(partition) != expectedWalRevision) {
+            // Tail appends do not change this revision. Any truncate, replacement, reclamation or clear does,
+            // including a middle-range replacement that first/last candidate checks alone cannot detect.
+            return false;
+        }
+        return true;
+    }
 
+    private boolean selectedEndpointsWithinCommitWindow(
+        CandidateEndpoints selected,
+        SharedCommitProgress.PartitionProgress progress
+    ) {
+        return selected.first().location().lastOffset() >= progress.logStartOffset() &&
+            selected.last().location().lastOffset() < progress.highWatermark();
+    }
+
+    private boolean byteTriggerWitnessStillCurrent(
+        CandidateSelection selection,
+        Map<SharedPartitionId, SharedCommitProgress.PartitionProgress> currentProgress
+    ) {
         // Bounded byte selection can cross targetObjectBytes only because of one excluded overflow candidate.
         // When the trigger gate used that proof, fence the witness too so concurrent remote publication or another
         // in-flight upload cannot turn the selected prefix into an unexpectedly small object.
         Optional<SharedStorageEngine.UploadCandidate> byteTriggerWitness = selection.byteTriggerWitness();
-        if (validateByteTriggerWitness && byteTriggerWitness.isPresent()) {
-            SharedStorageEngine.UploadCandidate witness = byteTriggerWitness.get();
-            SharedCommitProgress.PartitionProgress progress = currentProgress.get(witness.partition());
-            if (progress == null || !progress.isLeader() ||
-                progress.highWatermark() <= progress.logStartOffset() ||
-                !engine.isUploadCandidateCurrent(
-                    witness,
-                    progress.logStartOffset(),
-                    progress.highWatermark()
-                )) {
-                return false;
-            }
+        if (byteTriggerWitness.isEmpty()) {
+            return true;
         }
-        return true;
+        SharedStorageEngine.UploadCandidate witness = byteTriggerWitness.get();
+        SharedCommitProgress.PartitionProgress progress = currentProgress.get(witness.partition());
+        return partitionProgressAllowsSelection(progress) &&
+            engine.isUploadCandidateCurrent(
+                witness,
+                progress.logStartOffset(),
+                progress.highWatermark()
+            );
     }
 
     private CompletableFuture<Optional<SharedObjectMetadata>> startUpload(
