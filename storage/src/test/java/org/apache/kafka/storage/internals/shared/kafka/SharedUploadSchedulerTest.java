@@ -553,6 +553,59 @@ class SharedUploadSchedulerTest {
     }
 
     @Test
+    void holdsByteTriggerWitnessReservationThroughUploadStart() throws Exception {
+        InMemoryObjectStore objectStore = new InMemoryObjectStore();
+        InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
+        try (SharedStorageEngine engine = engine("byte-trigger-witness-reservation")) {
+            append(engine, P0, 0L, 9L, new byte[] {1, 2, 3, 4, 5, 6});
+            append(engine, P1, 0L, 9L, new byte[] {7, 8, 9, 10, 11, 12});
+
+            SharedCommitProgress progress = leaderProgress(P0, 0L, 10L);
+            progress.onLogLoaded(P1, 0L);
+            progress.onHighWatermarkUpdated(P1, 10L);
+            progress.onLeader(P1);
+
+            AtomicInteger reservationsAtObjectIdAllocation = new AtomicInteger();
+            AtomicReference<SharedUploadScheduler> schedulerRef = new AtomicReference<>();
+            SharedObjectUploader uploader = new SharedObjectUploader(
+                objectStore,
+                metadataStore,
+                new SharedObjectPacker(),
+                engine
+            );
+            SharedUploadScheduler scheduler = new SharedUploadScheduler(
+                engine,
+                progress,
+                uploader,
+                () -> {
+                    reservationsAtObjectIdAllocation.set(schedulerRef.get().reservedCandidateCount());
+                    return 100L;
+                },
+                () -> 1_000L,
+                10L,
+                60_000L,
+                100,
+                2
+            );
+            schedulerRef.set(scheduler);
+            try (scheduler) {
+                SharedObjectMetadata uploaded = scheduler.tryScheduledUploadOnce()
+                    .get(10, TimeUnit.SECONDS)
+                    .orElseThrow();
+
+                assertEquals(2, reservationsAtObjectIdAllocation.get(),
+                    "The selected range and excluded overflow witness must both be fenced through upload start");
+                assertEquals(
+                    List.of(new OffsetRange(0L, 10L)),
+                    uploaded.ranges().stream().map(SharedObjectRange::offsets).toList()
+                );
+                assertEquals(0, scheduler.reservedCandidateCount(),
+                    "The trigger witness lease must be released once the upload has started");
+            }
+        }
+    }
+
+    @Test
     void permitsSingleOversizedBatchSoUploadCannotStallForever() throws Exception {
         InMemoryObjectStore objectStore = new InMemoryObjectStore();
         InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();

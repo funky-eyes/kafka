@@ -287,12 +287,31 @@ public final class SharedUploadScheduler implements AutoCloseable {
             releaseUploadSlot();
             return CompletableFuture.completedFuture(Optional.empty());
         }
+
+        CandidateKey byteTriggerWitnessReservation = null;
+        if (applyTriggerGate && selection.byteTriggerWitness().isPresent()) {
+            byteTriggerWitnessReservation = CandidateKey.from(selection.byteTriggerWitness().get());
+            if (!reservedCandidates.add(byteTriggerWitnessReservation)) {
+                releaseReservation(selection.candidates());
+                releaseUploadSlot();
+                return CompletableFuture.completedFuture(Optional.empty());
+            }
+        }
+
         if (!selectionStillCurrent(selection, applyTriggerGate)) {
+            if (byteTriggerWitnessReservation != null) {
+                reservedCandidates.remove(byteTriggerWitnessReservation);
+            }
             releaseReservation(selection.candidates());
             releaseUploadSlot();
             return CompletableFuture.completedFuture(Optional.empty());
         }
-        return startUpload(selection, nowMs);
+
+        CompletableFuture<Optional<SharedObjectMetadata>> result = startUpload(selection, nowMs);
+        if (byteTriggerWitnessReservation != null) {
+            reservedCandidates.remove(byteTriggerWitnessReservation);
+        }
+        return result;
     }
 
     private boolean selectionStillCurrent(CandidateSelection selection, boolean validateByteTriggerWitness) {
@@ -340,9 +359,6 @@ public final class SharedUploadScheduler implements AutoCloseable {
         Optional<SharedStorageEngine.UploadCandidate> byteTriggerWitness = selection.byteTriggerWitness();
         if (validateByteTriggerWitness && byteTriggerWitness.isPresent()) {
             SharedStorageEngine.UploadCandidate witness = byteTriggerWitness.get();
-            if (reservedCandidates.contains(CandidateKey.from(witness))) {
-                return false;
-            }
             SharedCommitProgress.PartitionProgress progress = currentProgress.get(witness.partition());
             if (progress == null || !progress.isLeader() ||
                 progress.highWatermark() <= progress.logStartOffset() ||
