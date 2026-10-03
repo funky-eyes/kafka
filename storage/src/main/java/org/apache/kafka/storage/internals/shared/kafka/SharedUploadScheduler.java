@@ -261,7 +261,9 @@ public final class SharedUploadScheduler implements AutoCloseable {
         }
         if (selection.candidates().isEmpty()) {
             clearSchedulingFailure();
-            pendingHead.set(null);
+            if (!selection.eligibleCandidateObserved()) {
+                pendingHead.set(null);
+            }
             releaseUploadSlot();
             return CompletableFuture.completedFuture(Optional.empty());
         }
@@ -673,12 +675,14 @@ public final class SharedUploadScheduler implements AutoCloseable {
         );
         long selectedBytes = 0L;
         long observedEligibleBytes = 0L;
+        boolean eligibleCandidateObserved = false;
         SharedStorageEngine.UploadCandidate byteTriggerWitness = null;
         while (!heads.isEmpty() &&
             selected.size() < SharedMetadataRecordCodec.MAX_COMMITTED_OBJECT_RANGES) {
             CursorHead head = heads.poll();
             SharedStorageEngine.UploadCandidate candidate = head.candidate();
             head.cursor().next().ifPresent(next -> heads.add(new CursorHead(head.cursor(), next)));
+            eligibleCandidateObserved = true;
 
             if (reservedCandidates.contains(CandidateKey.from(candidate))) {
                 continue;
@@ -715,6 +719,7 @@ public final class SharedUploadScheduler implements AutoCloseable {
         return new CandidateSelection(
             List.copyOf(selected),
             observedEligibleBytes,
+            eligibleCandidateObserved,
             Optional.ofNullable(byteTriggerWitness),
             Map.copyOf(remoteRevisions),
             Map.copyOf(walMutationRevisions)
@@ -819,6 +824,7 @@ public final class SharedUploadScheduler implements AutoCloseable {
     private record CandidateSelection(
         List<SharedStorageEngine.UploadCandidate> candidates,
         long totalEligibleBytes,
+        boolean eligibleCandidateObserved,
         Optional<SharedStorageEngine.UploadCandidate> byteTriggerWitness,
         Map<SharedPartitionId, Long> remoteRevisions,
         Map<SharedPartitionId, Long> walMutationRevisions

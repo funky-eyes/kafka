@@ -432,6 +432,84 @@ class SharedUploadSchedulerTest {
     }
 
     @Test
+    void reservedOnlyScanDoesNotResetFailedUploadLingerAge() throws Exception {
+        InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
+        AtomicInteger putCalls = new AtomicInteger();
+        CountDownLatch firstPutStarted = new CountDownLatch(1);
+        CompletableFuture<Void> firstPut = new CompletableFuture<>();
+        ObjectStore objectStore = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                if (putCalls.getAndIncrement() == 0) {
+                    firstPutStarted.countDown();
+                    return firstPut;
+                }
+                return CompletableFuture.completedFuture(null);
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return CompletableFuture.completedFuture(null);
+            }
+        };
+
+        try (SharedStorageEngine engine = engine("reserved-only-linger")) {
+            append(engine, P0, 0L, 9L, new byte[] {1, 2, 3});
+            SharedCommitProgress progress = leaderProgress(P0, 0L, 10L);
+            AtomicLong nowMs = new AtomicLong();
+            AtomicLong objectIds = new AtomicLong(100L);
+            SharedObjectUploader uploader = new SharedObjectUploader(
+                objectStore,
+                metadataStore,
+                new SharedObjectPacker(),
+                engine
+            );
+            SharedUploadScheduler scheduler = new SharedUploadScheduler(
+                engine,
+                progress,
+                uploader,
+                objectIds::getAndIncrement,
+                nowMs::get,
+                1024L,
+                100L,
+                100,
+                2
+            );
+            try {
+                assertTrue(scheduler.tryScheduledUploadOnce().get(10, TimeUnit.SECONDS).isEmpty());
+
+                nowMs.set(100L);
+                CompletableFuture<Optional<SharedObjectMetadata>> failedUpload =
+                    scheduler.tryScheduledUploadOnce();
+                assertTrue(firstPutStarted.await(10, TimeUnit.SECONDS), "First PUT did not start");
+
+                // A second inflight scan sees the same eligible candidate only through its reservation. That is not
+                // equivalent to the backlog disappearing and must not reset the original linger timestamp.
+                assertTrue(scheduler.tryScheduledUploadOnce().get(10, TimeUnit.SECONDS).isEmpty());
+
+                firstPut.completeExceptionally(new IllegalStateException("simulated PUT failure"));
+                assertThrows(CompletionException.class, failedUpload::join);
+
+                SharedObjectMetadata retry = scheduler.tryScheduledUploadOnce()
+                    .get(10, TimeUnit.SECONDS)
+                    .orElseThrow();
+                assertEquals(101L, retry.objectId(),
+                    "The failed candidate must remain immediately retryable at its already-expired linger age");
+                assertEquals(new OffsetRange(0L, 10L), retry.ranges().get(0).offsets());
+                assertEquals(2, putCalls.get());
+            } finally {
+                firstPut.complete(null);
+                scheduler.close();
+            }
+        }
+    }
+
+    @Test
     void boundedSelectionPreservesByteTargetTriggerEvidence() throws Exception {
         InMemoryObjectStore objectStore = new InMemoryObjectStore();
         InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
