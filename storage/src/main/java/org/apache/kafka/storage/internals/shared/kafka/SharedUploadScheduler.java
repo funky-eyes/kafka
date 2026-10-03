@@ -287,7 +287,7 @@ public final class SharedUploadScheduler implements AutoCloseable {
             releaseUploadSlot();
             return CompletableFuture.completedFuture(Optional.empty());
         }
-        if (!selectionStillCurrent(selection)) {
+        if (!selectionStillCurrent(selection, applyTriggerGate)) {
             releaseReservation(selection.candidates());
             releaseUploadSlot();
             return CompletableFuture.completedFuture(Optional.empty());
@@ -295,7 +295,7 @@ public final class SharedUploadScheduler implements AutoCloseable {
         return startUpload(selection, nowMs);
     }
 
-    private boolean selectionStillCurrent(CandidateSelection selection) {
+    private boolean selectionStillCurrent(CandidateSelection selection, boolean validateByteTriggerWitness) {
         Map<SharedPartitionId, SharedCommitProgress.PartitionProgress> currentProgress = commitProgress.snapshot();
         Map<SharedPartitionId, CandidateEndpoints> endpoints = new HashMap<>();
         for (SharedStorageEngine.UploadCandidate candidate : selection.candidates()) {
@@ -330,6 +330,27 @@ public final class SharedUploadScheduler implements AutoCloseable {
             CandidateEndpoints selected = entry.getValue();
             if (selected.first().location().lastOffset() < progress.logStartOffset() ||
                 selected.last().location().lastOffset() >= progress.highWatermark()) {
+                return false;
+            }
+        }
+
+        // Bounded byte selection can cross targetObjectBytes only because of one excluded overflow candidate.
+        // When the trigger gate used that proof, fence the witness too so concurrent remote publication or another
+        // in-flight upload cannot turn the selected prefix into an unexpectedly small object.
+        Optional<SharedStorageEngine.UploadCandidate> byteTriggerWitness = selection.byteTriggerWitness();
+        if (validateByteTriggerWitness && byteTriggerWitness.isPresent()) {
+            SharedStorageEngine.UploadCandidate witness = byteTriggerWitness.get();
+            if (reservedCandidates.contains(CandidateKey.from(witness))) {
+                return false;
+            }
+            SharedCommitProgress.PartitionProgress progress = currentProgress.get(witness.partition());
+            if (progress == null || !progress.isLeader() ||
+                progress.highWatermark() <= progress.logStartOffset() ||
+                !engine.isUploadCandidateCurrent(
+                    witness,
+                    progress.logStartOffset(),
+                    progress.highWatermark()
+                )) {
                 return false;
             }
         }
@@ -636,6 +657,7 @@ public final class SharedUploadScheduler implements AutoCloseable {
         );
         long selectedBytes = 0L;
         long observedEligibleBytes = 0L;
+        SharedStorageEngine.UploadCandidate byteTriggerWitness = null;
         while (!heads.isEmpty() &&
             selected.size() < SharedMetadataRecordCodec.MAX_COMMITTED_OBJECT_RANGES) {
             CursorHead head = heads.poll();
@@ -653,6 +675,7 @@ public final class SharedUploadScheduler implements AutoCloseable {
                 // currently eligible backlog has crossed the byte trigger. Preserve that lower-bound evidence so
                 // bounded selection does not accidentally turn a size-triggered upload into a linger-triggered one.
                 observedEligibleBytes = nextSelectedBytes;
+                byteTriggerWitness = candidate;
                 break;
             }
             selected.add(candidate);
@@ -676,6 +699,7 @@ public final class SharedUploadScheduler implements AutoCloseable {
         return new CandidateSelection(
             List.copyOf(selected),
             observedEligibleBytes,
+            Optional.ofNullable(byteTriggerWitness),
             Map.copyOf(remoteRevisions),
             Map.copyOf(walMutationRevisions)
         );
@@ -779,6 +803,7 @@ public final class SharedUploadScheduler implements AutoCloseable {
     private record CandidateSelection(
         List<SharedStorageEngine.UploadCandidate> candidates,
         long totalEligibleBytes,
+        Optional<SharedStorageEngine.UploadCandidate> byteTriggerWitness,
         Map<SharedPartitionId, Long> remoteRevisions,
         Map<SharedPartitionId, Long> walMutationRevisions
     ) {

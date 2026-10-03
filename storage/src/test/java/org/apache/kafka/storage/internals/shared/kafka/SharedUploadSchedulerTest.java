@@ -473,6 +473,86 @@ class SharedUploadSchedulerTest {
     }
 
     @Test
+    void revalidatesCrossPartitionByteTriggerWitnessBeforeStartingUpload() throws Exception {
+        InMemoryObjectStore objectStore = new InMemoryObjectStore();
+        InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
+        try (SharedStorageEngine engine = engine("byte-trigger-witness-fence")) {
+            append(engine, P0, 0L, 9L, new byte[] {1, 2, 3, 4, 5, 6});
+            append(engine, P1, 0L, 9L, new byte[] {7, 8, 9, 10, 11, 12});
+
+            SharedCommitProgress progress = leaderProgress(P0, 0L, 10L);
+            progress.onLogLoaded(P1, 0L);
+            progress.onHighWatermarkUpdated(P1, 10L);
+            progress.onLeader(P1);
+
+            SharedStorageEngine.UploadCandidate overflowWitness =
+                engine.uploadCandidates(P1, 0L, 10L).get(0);
+            AtomicBoolean coverWitnessOnTimeRead = new AtomicBoolean(true);
+            AtomicInteger objectIdCalls = new AtomicInteger();
+            AtomicLong nowMs = new AtomicLong();
+            SharedObjectUploader uploader = new SharedObjectUploader(
+                objectStore,
+                metadataStore,
+                new SharedObjectPacker(),
+                engine
+            );
+            try (SharedUploadScheduler scheduler = new SharedUploadScheduler(
+                engine,
+                progress,
+                uploader,
+                () -> {
+                    objectIdCalls.incrementAndGet();
+                    return 100L;
+                },
+                () -> {
+                    if (coverWitnessOnTimeRead.getAndSet(false)) {
+                        engine.commitRemoteObject(new SharedObjectMetadata(
+                            200L,
+                            overflowWitness.location().payloadLength(),
+                            123L,
+                            List.of(new SharedObjectRange(
+                                P1,
+                                overflowWitness.offsets(),
+                                overflowWitness.location().leaderEpoch(),
+                                0,
+                                overflowWitness.location().payloadLength(),
+                                123L
+                            ))
+                        ));
+                    }
+                    return nowMs.get();
+                },
+                10L,
+                60_000L,
+                100,
+                1
+            )) {
+                assertTrue(
+                    scheduler.tryScheduledUploadOnce().get(10, TimeUnit.SECONDS).isEmpty(),
+                    "A stale cross-partition overflow witness must not trigger a smaller object"
+                );
+                assertEquals(0, objectIdCalls.get(),
+                    "Witness revalidation must happen before allocating an object ID");
+                assertFalse(objectStore.contains(100L));
+                assertEquals(0, scheduler.reservedCandidateCount());
+                assertEquals(0, scheduler.uploadsInProgress());
+
+                // P1 is now remotely covered, so P0 alone is below the byte target and must wait for linger.
+                assertTrue(scheduler.tryScheduledUploadOnce().get(10, TimeUnit.SECONDS).isEmpty());
+                nowMs.set(60_000L);
+                SharedObjectMetadata delayed = scheduler.tryScheduledUploadOnce()
+                    .get(10, TimeUnit.SECONDS)
+                    .orElseThrow();
+                assertEquals(100L, delayed.objectId());
+                assertEquals(
+                    List.of(new OffsetRange(0L, 10L)),
+                    delayed.ranges().stream().map(SharedObjectRange::offsets).toList()
+                );
+            }
+        }
+    }
+
+    @Test
     void permitsSingleOversizedBatchSoUploadCannotStallForever() throws Exception {
         InMemoryObjectStore objectStore = new InMemoryObjectStore();
         InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
