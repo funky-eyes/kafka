@@ -567,6 +567,7 @@ class SharedUploadSchedulerTest {
             progress.onLeader(P1);
 
             AtomicInteger reservationsAtObjectIdAllocation = new AtomicInteger();
+            AtomicBoolean competingUploadObserved = new AtomicBoolean();
             AtomicReference<SharedUploadScheduler> schedulerRef = new AtomicReference<>();
             SharedObjectUploader uploader = new SharedObjectUploader(
                 objectStore,
@@ -580,6 +581,12 @@ class SharedUploadSchedulerTest {
                 uploader,
                 () -> {
                     reservationsAtObjectIdAllocation.set(schedulerRef.get().reservedCandidateCount());
+                    Optional<SharedObjectMetadata> competing = schedulerRef.get()
+                        .tryUploadOnce()
+                        .join();
+                    competingUploadObserved.set(true);
+                    assertTrue(competing.isEmpty(),
+                        "A concurrent upload must not claim the trigger witness before the first upload starts");
                     return 100L;
                 },
                 () -> 1_000L,
@@ -594,6 +601,8 @@ class SharedUploadSchedulerTest {
                     .get(10, TimeUnit.SECONDS)
                     .orElseThrow();
 
+                assertTrue(competingUploadObserved.get(),
+                    "The deterministic competing upload must execute inside the upload-start fence");
                 assertEquals(2, reservationsAtObjectIdAllocation.get(),
                     "The selected range and excluded overflow witness must both be fenced through upload start");
                 assertEquals(
