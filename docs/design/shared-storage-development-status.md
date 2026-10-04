@@ -7,8 +7,8 @@ This document is the durable development checkpoint for the Kafka 4.3.1 shared-s
 - Repository: `funky-eyes/kafka`
 - Branch: `shared-wal-s3-4.3.1`
 - Kafka baseline: 4.3.1
-- Latest canonical checkpoint before this document update: `b0a59bbd3f0f2fcead544f34a7e389c4b2733367`
-- Shared Storage production fingerprint: `ff65cda02e7f9424e03ec655f2f9f0ec755cfa0b93b7bdf63c6f132554185514`
+- Latest sealed canonical checkpoint before this document update: `8750281b46708bd1144fb1d23adfcd07c7b7f9f1`
+- Shared Storage production fingerprint: `afaf9f57ec8ea89ecd123e920a9a1c044e7724309a3ec15f751473494df3c488`
 - Production files fingerprinted by the GA manifest: 100
 - Canonical author/committer identity: `Jianbin Chen <jianbin@apache.org>`
 
@@ -163,10 +163,10 @@ Do not start an additional Ring WAL group-commit/durability-barrier optimization
 
 ## GA evidence status
 
-The machine-generated normalized-branch GA manifest for canonical release checkpoint `b0a59bbd3f0f2fcead544f34a7e389c4b2733367` reports:
+The machine-generated normalized-branch GA manifest for canonical release checkpoint `8750281b46708bd1144fb1d23adfcd07c7b7f9f1` reports:
 
 - Result: **PASS**
-- Production fingerprint: `ff65cda02e7f9424e03ec655f2f9f0ec755cfa0b93b7bdf63c6f132554185514`
+- Production fingerprint: `afaf9f57ec8ea89ecd123e920a9a1c044e7724309a3ec15f751473494df3c488`
 - Production files fingerprinted: **100**
 - Mandatory gates: **19/19 PASS**
 
@@ -192,7 +192,7 @@ The mandatory set includes:
 - soak and chaos;
 - rolling upgrade.
 
-The normalized-branch seal workflow evaluates the canonical branch HEAD and uploads `shared-storage-normalized-ga-manifest`. The latest seal completed successfully after the corrected paired performance gate and the full RF1/RF2/RF3 `acks=1` durability matrix passed. Specialized runtime workflows are now prevented by the GA consistency checker from directly owning global Core Checkstyle/SpotBugs tasks; those checks remain owned by the main Shared Storage workflow, avoiding unrelated test-source changes blocking runtime evidence.
+The normalized-branch seal workflow evaluates the canonical branch HEAD and uploads `shared-storage-normalized-ga-manifest`. Author-normalization run `#633` sealed `8750281b46708bd1144fb1d23adfcd07c7b7f9f1` successfully after all 19 mandatory workflows for the tree-equivalent evidence commit `1869b86995c199ac4d9e7c40e2eb9c0483df7af8` reached terminal success. Specialized runtime workflows are prevented by the GA consistency checker from directly owning global Core Checkstyle/SpotBugs tasks; those checks remain owned by the main Shared Storage workflow, avoiding unrelated test-source changes blocking runtime evidence.
 
 Evidence lookup is lazy by Actions page and stops at the newest production+contract-equivalent run rather than preloading up to ten pages for every gate. Obsolete seal jobs are bounded by their own cancel-in-progress concurrency group and no longer block author normalization.
 
@@ -212,7 +212,7 @@ The code path is ready for pre-merge evidence. Operational AWS/GitHub setup is d
 
 Pointing that dedicated evidence branch at the exact candidate SHA triggers the branch-local workflow without requiring the workflow file to exist on the repository default branch. The GA manifest accepts the run only when repository, workflow name/path, event, evidence branch, production fingerprint, and real-S3 gate contract all match.
 
-The dedicated Real S3 evidence branch `shared-wal-s3-4.3.1-real-s3` has now been created at candidate `055a4780d4404517f6f48709664c5f1b20dbbe0d`. Its first compatibility run (`35943806986`) reached the protected environment and failed in the configuration preflight before any AWS credential or S3 operation was attempted. The branch-trigger bucket variable `SHARED_STORAGE_AWS_S3_BUCKET` was empty, and the OIDC role secret `SHARED_STORAGE_AWS_ROLE_ARN` was also unavailable to the job environment.
+The dedicated Real S3 evidence branch `shared-wal-s3-4.3.1-real-s3` most recently points at `09ec49346e7185dba0ada2d256ab99d6577760ba`. Its latest compatibility run (`36386483814`) again reached the protected environment and failed in the configuration preflight before any AWS credential or S3 operation was attempted; the companion strict seal run (`36386483689`) therefore also failed while waiting for acceptable Real S3 evidence. The branch-trigger bucket variable `SHARED_STORAGE_AWS_S3_BUCKET` was empty, and the OIDC role secret `SHARED_STORAGE_AWS_ROLE_ARN` was also unavailable to the job environment.
 
 This is an external release-environment blocker rather than a Shared Storage code failure. Configure those two values in the `shared-storage-aws-s3` protected environment (and optionally `SHARED_STORAGE_AWS_S3_REGION`), then trigger a fresh run from the dedicated evidence branch. Do not claim AWS S3 release compatibility until that run succeeds and a `require_real_s3=true` manifest accepts it.
 
