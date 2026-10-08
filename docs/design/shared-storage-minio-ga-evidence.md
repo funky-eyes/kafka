@@ -32,15 +32,18 @@ Reuse test principles, not implementation internals.
 | --- | --- | --- |
 | S3 API | PUT, Range GET, zero-length range, DELETE and 404 after deletion | Shared Storage MinIO |
 | Multipart | 5 MiB boundary read, ordered source close, successful complete, abort and no partial object | Shared Storage MinIO |
+| Physical orphan cleanup | PREPARED cleanup, late PUT reclaimed, COMMITTED object survives, active upload is fenced, physical HEAD and object listing | Shared Storage MinIO |
 | Replicated Kafka | Three-broker KRaft, committed remote coverage and failover | Shared Storage MinIO |
 | Semantics | Kafka producer/consumer parity, acks and offset ordering | Semantics and durability |
 | Recovery | WAL crash, upload crash, local-state loss, restart and replay | Specialized recovery |
 | Lifecycle | Topic delete/recreate, partition expansion, DeleteRecords | Topic lifecycle |
 | Readiness | Rolling upgrades, performance and soak/chaos | Required hardening gates |
 
-The MinIO job runs `S3ObjectStoreTest` and `S3MultipartObjectStoreTest`
-against its pinned fixture in a single Gradle invocation. Its JUnit result
-guard rejects missing, failed, skipped or duplicate mandatory cases. This
+The MinIO job runs `S3ObjectStoreTest`, `S3MultipartObjectStoreTest` and
+`S3OrphanObjectCleanerIntegrationTest` against its pinned fixture in a single
+Gradle invocation. Its JUnit result guard rejects missing, failed, skipped or
+duplicate mandatory cases. The orphan cleaner tests use per-test random
+prefixes and assert MinIO's physical HEAD/list results after deletion. This
 prevents an absent `SHARED_STORAGE_S3_ENDPOINT` from turning into a green
 build through JUnit `assumeTrue`.
 

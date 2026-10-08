@@ -36,7 +36,10 @@ Until those workflows exist and pass for the candidate production tree, the GA m
 The release workflow defaults to **`require_real_s3=false`**. This GA scope is
 **pinned MinIO and MinIO-backed S3-compatible storage**, proven by the required 19-gate
 correctness/hardening manifest. The MinIO E2E explicitly exercises PUT, Range GET, DELETE,
-multipart completion, multipart abort and absence of partial objects. Missing or skipped
+multipart completion, multipart abort and absence of partial objects. The
+MinIO integration suite also verifies orphan-claim cleanup, reclamation
+after a late PUT, committed-object preservation, and active-upload fences
+against physical MinIO object HEAD/list operations. Missing or skipped
 mandatory MinIO integration tests block the gate. See
 [MinIO GA evidence](shared-storage-minio-ga-evidence.md) for comparisons with AutoMQ and Aiven.
 

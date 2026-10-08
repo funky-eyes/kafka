@@ -321,6 +321,7 @@ def release_real_s3_default(text):
 MINIO_REQUIRED_TEST_SELECTIONS = (
     "--tests 'org.apache.kafka.storage.internals.shared.s3.S3ObjectStoreTest'",
     "--tests 'org.apache.kafka.storage.internals.shared.s3.S3MultipartObjectStoreTest'",
+    "--tests 'org.apache.kafka.storage.internals.shared.s3.S3OrphanObjectCleanerIntegrationTest'",
 )
 MINIO_TEST_RESULT_CHECK = (
     "python3 tools/check_shared_storage_minio_test_results.py "

@@ -28,6 +28,11 @@ REQUIRED_CASES = {
         "shouldPullKnownSizeMultipartSourceInOrderAndPublishOneObject",
         "shouldAbortKnownSizeMultipartAndCloseSourceWhenSourceEndsEarly",
     },
+    "S3OrphanObjectCleanerIntegrationTest": {
+        "claimedOrphanIsDeletedAgainAfterLatePut",
+        "committedObjectRemainsPhysicallyReadableAfterCleanup",
+        "activePreparedUploadIsProtectedUntilUploadEnds",
+    },
 }
 
 
@@ -82,7 +87,8 @@ def main():
         for error in errors:
             print("- " + error, file=sys.stderr)
         return 1
-    print("MinIO JUnit evidence: PASS (3 required S3 object/multipart cases executed, 0 skipped)")
+    case_count = sum(len(methods) for methods in REQUIRED_CASES.values())
+    print(f"MinIO JUnit evidence: PASS ({case_count} required S3 cases executed, 0 skipped)")
     return 0
 
 

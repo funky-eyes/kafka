@@ -208,7 +208,7 @@ jobs:
           java-version: 25
           gradle-cache-read-only: true
 
-      - name: Exercise S3 PUT, Range, DELETE and multipart abort against MinIO
+      - name: Exercise S3 API, multipart and physical orphan cleanup against MinIO
         shell: bash
         env:
           AWS_ACCESS_KEY_ID: minioadmin
@@ -223,6 +223,7 @@ jobs:
             :storage:shared-storage-s3:test \
             --tests 'org.apache.kafka.storage.internals.shared.s3.S3ObjectStoreTest' \
             --tests 'org.apache.kafka.storage.internals.shared.s3.S3MultipartObjectStoreTest' \
+            --tests 'org.apache.kafka.storage.internals.shared.s3.S3OrphanObjectCleanerIntegrationTest' \
             -x :storage:shared-storage-s3:checkstyleMain \
             -x :storage:shared-storage-s3:checkstyleTest \
             -x :storage:shared-storage-s3:spotbugsMain \

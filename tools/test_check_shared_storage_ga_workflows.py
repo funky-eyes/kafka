@@ -181,6 +181,7 @@ class MinIOEvidenceOwnershipTest(unittest.TestCase):
 """
         missing = missing_minio_evidence_requirements(workflow)
         self.assertTrue(any("S3MultipartObjectStoreTest" in item for item in missing))
+        self.assertTrue(any("S3OrphanObjectCleanerIntegrationTest" in item for item in missing))
         self.assertTrue(any("check_shared_storage_minio_test_results.py" in item for item in missing))
 
     def test_accepts_complete_minio_contract(self):
@@ -192,6 +193,7 @@ class MinIOEvidenceOwnershipTest(unittest.TestCase):
           SHARED_STORAGE_S3_ENDPOINT: http://127.0.0.1:9000
           --tests 'org.apache.kafka.storage.internals.shared.s3.S3ObjectStoreTest'
           --tests 'org.apache.kafka.storage.internals.shared.s3.S3MultipartObjectStoreTest'
+          --tests 'org.apache.kafka.storage.internals.shared.s3.S3OrphanObjectCleanerIntegrationTest'
           python3 tools/check_shared_storage_minio_test_results.py storage/shared-storage-s3/build/test-results/test
 """
         self.assertEqual([], missing_minio_evidence_requirements(workflow))
