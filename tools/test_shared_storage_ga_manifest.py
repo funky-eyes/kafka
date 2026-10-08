@@ -393,7 +393,7 @@ class ProductionFingerprintTest(unittest.TestCase):
 
 class SourceEvidenceRunStateTest(unittest.TestCase):
     @staticmethod
-    def run(name, path, status, conclusion, sha="source-sha"):
+    def make_run(name, path, status, conclusion, sha="source-sha"):
         return {
             "event": "push",
             "name": name,
@@ -407,7 +407,7 @@ class SourceEvidenceRunStateTest(unittest.TestCase):
         }
 
     def test_reports_pending_required_source_run(self):
-        run = self.run(
+        run = self.make_run(
             "Shared Storage Local State Loss Recovery",
             ".github/workflows/shared-storage-local-state-loss.yml",
             "in_progress",
@@ -423,13 +423,13 @@ class SourceEvidenceRunStateTest(unittest.TestCase):
         self.assertEqual([], failed)
 
     def test_reports_terminal_failure_without_waiting_for_other_runs(self):
-        failed_run = self.run(
+        failed_run = self.make_run(
             "Shared Storage Upload Crash Points",
             ".github/workflows/shared-storage-upload-crash.yml",
             "completed",
             "failure",
         )
-        running = self.run(
+        running = self.make_run(
             "Shared Storage Rolling Upgrade",
             ".github/workflows/shared-storage-rolling-upgrade.yml",
             "in_progress",
@@ -445,13 +445,13 @@ class SourceEvidenceRunStateTest(unittest.TestCase):
         self.assertEqual([failed_run], failed)
 
     def test_ignores_non_evidence_and_wrong_source_sha_runs(self):
-        consistency = self.run(
+        consistency = self.make_run(
             "Shared Storage GA Workflow Consistency",
             ".github/workflows/shared-storage-ga-consistency.yml",
             "in_progress",
             None,
         )
-        wrong_sha = self.run(
+        wrong_sha = self.make_run(
             "Shared Storage Local State Loss Recovery",
             ".github/workflows/shared-storage-local-state-loss.yml",
             "in_progress",
