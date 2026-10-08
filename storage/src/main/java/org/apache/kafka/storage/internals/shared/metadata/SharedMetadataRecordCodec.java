@@ -249,36 +249,48 @@ public final class SharedMetadataRecordCodec {
             throw corruption("unsupported metadata value version " + version);
         }
         byte type = buffer.get();
-        if (key.type() == KeyType.OBJECT) {
-            if (type == OBJECT_PREPARED) {
-                return new PreparedObjectValue(decodeCreatedTime(buffer, "prepared object value"));
-            }
-            if (type == OBJECT_COMMITTED) {
-                return decodeCommittedObject(key.id(), buffer);
-            }
-            throw corruption("object key has incompatible value type " + type);
+        return switch (key.type()) {
+            case OBJECT -> decodeObjectValue(key.id(), type, buffer);
+            case OBJECT_CLEANUP -> decodeObjectCleanupValue(type, buffer);
+            case PARTITION_LOG_START -> decodePartitionLogStartValue(type, buffer);
+            case BROKER_SEQUENCE -> decodeBrokerSequenceValue(type, buffer);
+        };
+    }
+
+    private static MetadataValue decodeObjectValue(long objectId, byte type, ByteBuffer buffer) {
+        if (type == OBJECT_PREPARED) {
+            return new PreparedObjectValue(decodeCreatedTime(buffer, "prepared object value"));
         }
-        if (key.type() == KeyType.OBJECT_CLEANUP) {
-            long createdTimeMs = decodeCreatedTime(buffer, "object cleanup value");
-            if (type == OBJECT_CLEANUP_CLAIMED) {
-                return new CleanupClaimedValue(createdTimeMs);
-            }
-            if (type == OBJECT_CLEANUP_DELETED) {
-                return new CleanupDeletedValue(createdTimeMs);
-            }
-            throw corruption("object cleanup key has incompatible value type " + type);
+        if (type == OBJECT_COMMITTED) {
+            return decodeCommittedObject(objectId, buffer);
         }
-        if (key.type() == KeyType.PARTITION_LOG_START) {
-            if (type != PARTITION_LOG_START_ADVANCED) {
-                throw corruption("partition log-start key has incompatible value type " + type);
-            }
-            requireRemaining(buffer, Long.BYTES, "partition log-start value");
-            long startOffset = buffer.getLong();
-            if (startOffset < 0L) {
-                throw corruption("partition log-start value contains negative offset " + startOffset);
-            }
-            return new PartitionLogStartValue(startOffset);
+        throw corruption("object key has incompatible value type " + type);
+    }
+
+    private static MetadataValue decodeObjectCleanupValue(byte type, ByteBuffer buffer) {
+        long createdTimeMs = decodeCreatedTime(buffer, "object cleanup value");
+        if (type == OBJECT_CLEANUP_CLAIMED) {
+            return new CleanupClaimedValue(createdTimeMs);
         }
+        if (type == OBJECT_CLEANUP_DELETED) {
+            return new CleanupDeletedValue(createdTimeMs);
+        }
+        throw corruption("object cleanup key has incompatible value type " + type);
+    }
+
+    private static MetadataValue decodePartitionLogStartValue(byte type, ByteBuffer buffer) {
+        if (type != PARTITION_LOG_START_ADVANCED) {
+            throw corruption("partition log-start key has incompatible value type " + type);
+        }
+        requireRemaining(buffer, Long.BYTES, "partition log-start value");
+        long startOffset = buffer.getLong();
+        if (startOffset < 0L) {
+            throw corruption("partition log-start value contains negative offset " + startOffset);
+        }
+        return new PartitionLogStartValue(startOffset);
+    }
+
+    private static MetadataValue decodeBrokerSequenceValue(byte type, ByteBuffer buffer) {
         if (type != BROKER_SEQUENCE_RESERVED) {
             throw corruption("broker sequence key has incompatible value type " + type);
         }
