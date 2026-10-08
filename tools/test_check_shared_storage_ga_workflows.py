@@ -20,6 +20,7 @@ from check_shared_storage_ga_workflows import (
     foreign_evidence_workflow_triggers,
     full_manifest_after_source_wait_loop,
     redundant_runtime_staging_test_compiles,
+    release_real_s3_default,
     workflow_job_blocks,
 )
 
@@ -138,6 +139,34 @@ class ManifestWaitLoopTest(unittest.TestCase):
                 "python3 tools/shared_storage_ga_manifest.py",
             )
         )
+
+
+class ReleaseScopeDefaultTest(unittest.TestCase):
+    def test_strict_aws_s3_is_default(self):
+        workflow = """on:
+  workflow_dispatch:
+    inputs:
+      release_ref:
+        default: main
+      require_real_s3:
+        description: Strict release mode
+        required: true
+        default: true
+        type: boolean
+"""
+        self.assertEqual("true", release_real_s3_default(workflow))
+
+    def test_rejects_minio_only_default_and_missing_scope(self):
+        workflow = """on:
+  workflow_dispatch:
+    inputs:
+      require_real_s3:
+        required: true
+        default: false
+        type: boolean
+"""
+        self.assertEqual("false", release_real_s3_default(workflow))
+        self.assertIsNone(release_real_s3_default("jobs:\n  validate:\n    runs-on: ubuntu-latest\n"))
 
 
 class WorkflowJobBlockTest(unittest.TestCase):

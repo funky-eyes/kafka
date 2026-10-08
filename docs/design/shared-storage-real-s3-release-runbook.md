@@ -257,9 +257,11 @@ Do not claim real AWS S3 release compatibility until both are true:
 2. The strict GA manifest generated with `--require-real-s3`,
    `--require-real-s3-exact-sha`, and `--require-real-s3-branch-push` is PASS.
 
-The manual `Shared Storage GA Release Gate` uses the same three strict flags
-whenever `require_real_s3=true`; it is not a weaker alternate path for making
-a Real S3 release claim.
+The manual `Shared Storage GA Release Gate` now defaults to `require_real_s3=true` and uses the same
+three strict flags. An operator may deliberately choose `require_real_s3=false` for a
+**MinIO-only preflight**, but the job name and summary then explicitly state that it is
+**not AWS S3 GA certification**. A non-strict run must never be used as an alternate
+path to make a Real S3 release claim.
 
 Both the Real S3 compatibility workflow and the strict seal require their audit
 artifacts to exist before the workflow can finish green. A PASS therefore

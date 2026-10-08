@@ -302,6 +302,22 @@ def full_manifest_after_source_wait_loop(text, source_wait_token, full_manifest_
     return loop_end >= 0 and full_manifest_index > loop_end
 
 
+def release_real_s3_default(text):
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if line != "      require_real_s3:":
+            continue
+        values = []
+        for candidate in lines[index + 1 :]:
+            if not candidate.startswith("        "):
+                break
+            match = re.fullmatch(r"        default:\s*(true|false)\s*", candidate)
+            if match:
+                values.append(match.group(1))
+        return values[0] if len(values) == 1 else None
+    return None
+
+
 def workflow_job_blocks(text):
     jobs_match = re.search(r"(?ms)^jobs:\s*\n(.*)\Z", text)
     if jobs_match is None:
@@ -883,6 +899,21 @@ def main():
         )
 
     ga_release = texts.get(GA_RELEASE_WORKFLOW_NAME, "")
+    if release_real_s3_default(ga_release) != "true":
+        errors.append(
+            f"{GA_RELEASE_WORKFLOW_NAME}: strict exact-candidate Real S3 must be the default; "
+            "MinIO-only preflight requires explicit opt-out"
+        )
+    for scope_marker in (
+        "Strict AWS S3 GA evidence",
+        "MinIO-only preflight evidence",
+        "MinIO-only preflight (NOT AWS S3 GA)",
+    ):
+        if scope_marker not in ga_release:
+            errors.append(
+                f"{GA_RELEASE_WORKFLOW_NAME}: evidence scope must be explicit in job name/summary: "
+                + scope_marker
+            )
     if "actions: read" not in ga_release:
         errors.append(f"{GA_RELEASE_WORKFLOW_NAME}: actions: read permission is required")
     if "tools/check_shared_storage_ga_workflows.py" not in ga_release:

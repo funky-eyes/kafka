@@ -33,8 +33,11 @@ The GA gate currently requires these hardening workflows in addition to the corr
 
 Until those workflows exist and pass for the candidate production tree, the GA manifest must remain **BLOCKED**.
 
-Real AWS S3 compatibility is selectable with `require_real_s3=true`. Keep it optional for MinIO-only deployments;
-enable it for a release that claims AWS S3 as a supported production object store.
+The release workflow defaults to **`require_real_s3=true`**, so an unattended/default GA release evaluation
+requires exact-candidate AWS S3 evidence. Select `require_real_s3=false` only for an explicitly
+**MinIO-only preflight**: its workflow job and job summary identify this reduced scope, and a green result
+does **not** certify AWS S3 production compatibility. The underlying manifest intentionally continues to
+support both scopes; only the strict mode is sufficient for a release that claims AWS S3 support.
 
 
 ## Evidence ownership

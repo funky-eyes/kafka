@@ -29,9 +29,9 @@ on:
         default: shared-wal-s3-4.3.1
         type: string
       require_real_s3:
-        description: Require strict exact-candidate real AWS S3 release evidence
+        description: Require exact-SHA AWS S3 evidence (disable only for MinIO-only preflight; not AWS S3 GA)
         required: true
-        default: false
+        default: true
         type: boolean
 
 permissions:
@@ -40,7 +40,7 @@ permissions:
 
 jobs:
   ga-evidence-manifest:
-    name: Build GA evidence manifest
+    name: ${{ inputs.require_real_s3 && 'Strict AWS S3 GA evidence' || 'MinIO-only preflight evidence' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -59,6 +59,21 @@ jobs:
 
       - name: Validate GA workflow consistency
         run: python3 tools/check_shared_storage_ga_workflows.py
+
+      - name: Declare release evidence scope
+        shell: bash
+        env:
+          REQUIRE_REAL_S3: ${{ inputs.require_real_s3 }}
+        run: |
+          set -euo pipefail
+          if [ "${REQUIRE_REAL_S3}" = "true" ]; then
+            echo "## Strict AWS S3 GA release evidence" >> "${GITHUB_STEP_SUMMARY}"
+            echo "Requires same-SHA AWS S3 compatibility from the dedicated evidence branch." >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "::warning::MinIO-only evidence is not an AWS S3 GA release certification."
+            echo "## MinIO-only preflight (NOT AWS S3 GA)" >> "${GITHUB_STEP_SUMMARY}"
+            echo "This run does not certify production AWS S3 compatibility." >> "${GITHUB_STEP_SUMMARY}"
+          fi
 
       - name: Evaluate release criteria
         env:
