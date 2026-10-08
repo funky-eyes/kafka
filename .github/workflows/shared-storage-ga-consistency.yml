@@ -22,6 +22,7 @@ on:
     paths:
       - '.github/workflows/shared-storage*.yml'
       - 'tools/shared_storage_ga_manifest.py'
+      - 'tools/shared_storage_ga_source_runs.py'
       - 'tools/check_shared_storage_ga_workflows.py'
       - 'tools/test_shared_storage_ga_manifest.py'
       - 'tools/test_check_shared_storage_ga_workflows.py'
@@ -34,6 +35,7 @@ on:
     paths:
       - '.github/workflows/shared-storage*.yml'
       - 'tools/shared_storage_ga_manifest.py'
+      - 'tools/shared_storage_ga_source_runs.py'
       - 'tools/check_shared_storage_ga_workflows.py'
       - 'tools/test_shared_storage_ga_manifest.py'
       - 'tools/test_check_shared_storage_ga_workflows.py'
@@ -59,6 +61,9 @@ jobs:
 
       - name: Test GA manifest evidence rules
         run: python3 tools/test_shared_storage_ga_manifest.py
+
+      - name: Check GA source-run waiter syntax
+        run: python3 -m py_compile tools/shared_storage_ga_source_runs.py
 
       - name: Test Real S3 evidence promotion rules
         run: python3 tools/test_promote_shared_storage_real_s3_evidence.py

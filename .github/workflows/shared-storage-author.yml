@@ -147,49 +147,55 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           EVIDENCE_BRANCH: shared-wal-s3-4.3.1
+          SOURCE_SHA: ${{ github.sha }}
           RELEASE_SHA: ${{ steps.release-sha.outputs.sha }}
         run: |
           set -euo pipefail
           deadline=$((SECONDS + 1200))
-          attempt=0
+          source_attempt=0
 
           while true; do
-            attempt=$((attempt + 1))
-            rm -f shared-storage-ga-manifest.md /tmp/shared-storage-ga-manifest.out
-
+            source_attempt=$((source_attempt + 1))
             set +e
-            python3 tools/shared_storage_ga_manifest.py \
+            python3 tools/shared_storage_ga_source_runs.py \
               --repo "${{ github.repository }}" \
-              --ref "${RELEASE_SHA}" \
-              --evidence-branch "${EVIDENCE_BRANCH}" \
-              --output shared-storage-ga-manifest.md \
-              > /tmp/shared-storage-ga-manifest.out 2>&1
-            status=$?
+              --branch "${EVIDENCE_BRANCH}" \
+              --sha "${SOURCE_SHA}" \
+              > /tmp/shared-storage-source-runs.out 2>&1
+            source_status=$?
             set -e
+            cat /tmp/shared-storage-source-runs.out
 
-            if [ "${status}" -eq 0 ]; then
-              cat /tmp/shared-storage-ga-manifest.out
-              exit 0
+            if [ "${source_status}" -eq 0 ]; then
+              break
             fi
-
-            echo "GA evidence attempt ${attempt} is not terminal-green yet."
-            if [ -f shared-storage-ga-manifest.md ]; then
-              grep -E '\| (MISSING|PENDING|FAIL) \|' shared-storage-ga-manifest.md || true
-              if grep -Fq '| FAIL |' shared-storage-ga-manifest.md; then
-                cat /tmp/shared-storage-ga-manifest.out
-                exit "${status}"
-              fi
-            else
-              cat /tmp/shared-storage-ga-manifest.out
+            if [ "${source_status}" -eq 2 ]; then
+              echo "Source-SHA evidence has a terminal failure; evaluating the full manifest now."
+              break
             fi
-
+            if [ "${source_status}" -ne 1 ]; then
+              exit "${source_status}"
+            fi
             if [ "${SECONDS}" -ge "${deadline}" ]; then
-              echo "Timed out waiting for Shared Storage GA evidence to become terminal."
-              cat /tmp/shared-storage-ga-manifest.out
-              exit "${status}"
+              echo "Source-SHA evidence wait reached the deadline; evaluating the full manifest now."
+              break
             fi
+            echo "Source-SHA evidence attempt ${source_attempt} is still active."
             sleep 15
           done
+
+          rm -f shared-storage-ga-manifest.md /tmp/shared-storage-ga-manifest.out
+          set +e
+          python3 tools/shared_storage_ga_manifest.py \
+            --repo "${{ github.repository }}" \
+            --ref "${RELEASE_SHA}" \
+            --evidence-branch "${EVIDENCE_BRANCH}" \
+            --output shared-storage-ga-manifest.md \
+            > /tmp/shared-storage-ga-manifest.out 2>&1
+          status=$?
+          set -e
+          cat /tmp/shared-storage-ga-manifest.out
+          exit "${status}"
 
       - name: Upload normalized-branch GA manifest
         if: always()

@@ -25,6 +25,7 @@ from shared_storage_ga_manifest import (
     evidence_run_specs,
     is_branch_evidence_run,
     is_production_path,
+    source_evidence_run_state,
     path_is_selected,
     push_path_patterns,
 )
@@ -388,6 +389,84 @@ class ProductionFingerprintTest(unittest.TestCase):
         self.assertEqual(2, first_count)
         self.assertEqual(2, second_count)
         self.assertNotEqual(first_fp, second_fp)
+
+
+class SourceEvidenceRunStateTest(unittest.TestCase):
+    @staticmethod
+    def run(name, path, status, conclusion, sha="source-sha"):
+        return {
+            "event": "push",
+            "name": name,
+            "path": path,
+            "head_repository": {"full_name": "apache/kafka"},
+            "head_branch": "release",
+            "head_sha": sha,
+            "status": status,
+            "conclusion": conclusion,
+            "run_number": 123,
+        }
+
+    def test_reports_pending_required_source_run(self):
+        run = self.run(
+            "Shared Storage Local State Loss Recovery",
+            ".github/workflows/shared-storage-local-state-loss.yml",
+            "in_progress",
+            None,
+        )
+        pending, failed = source_evidence_run_state(
+            [run],
+            "apache/kafka",
+            "release",
+            "source-sha",
+        )
+        self.assertEqual([run], pending)
+        self.assertEqual([], failed)
+
+    def test_reports_terminal_failure_without_waiting_for_other_runs(self):
+        failed_run = self.run(
+            "Shared Storage Upload Crash Points",
+            ".github/workflows/shared-storage-upload-crash.yml",
+            "completed",
+            "failure",
+        )
+        running = self.run(
+            "Shared Storage Rolling Upgrade",
+            ".github/workflows/shared-storage-rolling-upgrade.yml",
+            "in_progress",
+            None,
+        )
+        pending, failed = source_evidence_run_state(
+            [failed_run, running],
+            "apache/kafka",
+            "release",
+            "source-sha",
+        )
+        self.assertEqual([running], pending)
+        self.assertEqual([failed_run], failed)
+
+    def test_ignores_non_evidence_and_wrong_source_sha_runs(self):
+        consistency = self.run(
+            "Shared Storage GA Workflow Consistency",
+            ".github/workflows/shared-storage-ga-consistency.yml",
+            "in_progress",
+            None,
+        )
+        wrong_sha = self.run(
+            "Shared Storage Local State Loss Recovery",
+            ".github/workflows/shared-storage-local-state-loss.yml",
+            "in_progress",
+            None,
+            sha="older-sha",
+        )
+        self.assertEqual(
+            ([], []),
+            source_evidence_run_state(
+                [consistency, wrong_sha],
+                "apache/kafka",
+                "release",
+                "source-sha",
+            ),
+        )
 
 
 if __name__ == "__main__":

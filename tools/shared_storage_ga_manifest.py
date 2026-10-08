@@ -389,6 +389,34 @@ def is_branch_evidence_run(
     )
 
 
+def source_evidence_run_state(runs, repo, branch, source_sha):
+    required = set(CORE_REQUIRED + GA_HARDENING_REQUIRED)
+    relevant = []
+    for run in runs:
+        name = run.get("name")
+        if name not in required:
+            continue
+        if not is_branch_evidence_run(
+            run,
+            repo,
+            branch,
+            name,
+            EVIDENCE_WORKFLOW_PATHS[name],
+            AUTOMATIC_EVIDENCE_EVENT,
+            source_sha,
+        ):
+            continue
+        relevant.append(run)
+
+    pending = [run for run in relevant if run.get("status") != "completed"]
+    failed = [
+        run
+        for run in relevant
+        if run.get("status") == "completed" and run.get("conclusion") != "success"
+    ]
+    return pending, failed
+
+
 def run_url(repo, run):
     run_id = run.get("id")
     return f"https://github.com/{repo}/actions/runs/{run_id}" if run_id else ""

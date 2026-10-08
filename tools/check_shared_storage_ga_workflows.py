@@ -801,6 +801,12 @@ def main():
             f"{AUTHOR_WORKFLOW_NAME}: staging ingress is forbidden because GITHUB_TOKEN pushes do not "
             "retrigger push-based GA evidence workflows"
         )
+    if "SOURCE_SHA: ${{ github.sha }}" not in author_workflow:
+        errors.append(f"{AUTHOR_WORKFLOW_NAME}: normalized seal must retain the triggering source SHA")
+    if "python3 tools/shared_storage_ga_source_runs.py" not in author_workflow:
+        errors.append(
+            f"{AUTHOR_WORKFLOW_NAME}: seal must cheaply wait for source-SHA evidence before the full manifest"
+        )
 
     ga_consistency = texts.get("Shared Storage GA Workflow Consistency", "")
     ga_consistency_push_paths = event_path_patterns(ga_consistency, "push")
@@ -808,6 +814,7 @@ def main():
         "tools/promote_shared_storage_real_s3_evidence.py",
         "tools/test_promote_shared_storage_real_s3_evidence.py",
         "tools/test_check_shared_storage_ga_workflows.py",
+        "tools/shared_storage_ga_source_runs.py",
     ):
         if not (ROOT / consistency_path).is_file():
             errors.append(f"GA consistency dependency is missing: {consistency_path}")
