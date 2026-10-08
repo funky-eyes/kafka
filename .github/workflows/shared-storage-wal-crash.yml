@@ -99,7 +99,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          ./gradlew :storage:test --no-scan \
+          ./gradlew :storage:test \
             --tests 'org.apache.kafka.storage.internals.shared.wal.FileSharedWalTest' \
             --tests 'org.apache.kafka.storage.internals.shared.wal.FileSharedWalCrashWindowTest' \
             --tests 'org.apache.kafka.storage.internals.shared.wal.RotatingFileSharedWalTest' \
@@ -107,6 +107,11 @@ jobs:
             --tests 'org.apache.kafka.storage.internals.shared.wal.RemoteCoverageWalReclaimPolicyTest' \
             --tests 'org.apache.kafka.storage.internals.shared.metadata.LocalRemoteObjectCheckpointTest' \
             --tests 'org.apache.kafka.storage.internals.shared.metadata.RemoteObjectIndexTest' \
+            -x :storage:checkstyleMain \
+            -x :storage:checkstyleTest \
+            -x :storage:spotbugsMain \
+            -x :storage:spotbugsTest \
+            --no-scan \
             2>&1 | tee shared-storage-wal-crash.log
 
       - name: Upload crash-window diagnostics

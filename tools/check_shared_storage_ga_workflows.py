@@ -50,6 +50,31 @@ GLOBAL_CORE_VERIFICATION_TASKS = (
     ":core:spotbugsTest",
 )
 
+FOCUSED_STORAGE_EXCLUSIONS = (
+    "-x :storage:checkstyleMain",
+    "-x :storage:checkstyleTest",
+    "-x :storage:spotbugsMain",
+    "-x :storage:spotbugsTest",
+)
+
+FOCUSED_S3_EXCLUSIONS = (
+    "-x :storage:shared-storage-s3:checkstyleMain",
+    "-x :storage:shared-storage-s3:checkstyleTest",
+    "-x :storage:shared-storage-s3:spotbugsMain",
+    "-x :storage:shared-storage-s3:spotbugsTest",
+)
+
+GLOBAL_STORAGE_VERIFICATION_TASKS = (
+    ":storage:checkstyleMain",
+    ":storage:checkstyleTest",
+    ":storage:spotbugsMain",
+    ":storage:spotbugsTest",
+    ":storage:shared-storage-s3:checkstyleMain",
+    ":storage:shared-storage-s3:checkstyleTest",
+    ":storage:shared-storage-s3:spotbugsMain",
+    ":storage:shared-storage-s3:spotbugsTest",
+)
+
 
 def manifest_constants():
     tree = ast.parse(MANIFEST.read_text(encoding="utf-8"), filename=str(MANIFEST))
@@ -216,14 +241,40 @@ def focused_core_test_blocks(text):
     return blocks
 
 
-def standalone_core_verification_tasks(text):
+def focused_gradle_test_blocks(text, task):
+    lines = text.splitlines()
+    blocks = []
+    index = 0
+    prefix = f"./gradlew {task}"
+    while index < len(lines):
+        if lines[index].strip().startswith(prefix):
+            block = []
+            while index < len(lines):
+                block.append(lines[index])
+                if not lines[index].rstrip().endswith("\\"):
+                    break
+                index += 1
+            blocks.append("\n".join(block))
+        index += 1
+    return blocks
+
+
+def standalone_verification_tasks(text, tasks):
     invoked = set()
     for line in text.splitlines():
         stripped = line.strip()
-        for task in GLOBAL_CORE_VERIFICATION_TASKS:
+        for task in tasks:
             if task in stripped and f"-x {task}" not in stripped:
                 invoked.add(task)
     return invoked
+
+
+def standalone_core_verification_tasks(text):
+    return standalone_verification_tasks(text, GLOBAL_CORE_VERIFICATION_TASKS)
+
+
+def standalone_storage_verification_tasks(text):
+    return standalone_verification_tasks(text, GLOBAL_STORAGE_VERIFICATION_TASKS)
 
 
 def main():
@@ -555,6 +606,27 @@ def main():
             if missing:
                 errors.append(
                     f"{path}: focused :core:test must exclude global Core verification tasks: "
+                    + ", ".join(missing)
+                )
+
+        standalone_storage_checks = standalone_storage_verification_tasks(texts[name])
+        if standalone_storage_checks:
+            errors.append(
+                f"{path}: specialized runtime gate must not invoke global Storage verification tasks directly: "
+                + ", ".join(sorted(standalone_storage_checks))
+            )
+        for block in focused_gradle_test_blocks(texts[name], ":storage:test"):
+            missing = [token for token in FOCUSED_STORAGE_EXCLUSIONS if token not in block]
+            if missing:
+                errors.append(
+                    f"{path}: focused :storage:test must exclude global Storage verification tasks: "
+                    + ", ".join(missing)
+                )
+        for block in focused_gradle_test_blocks(texts[name], ":storage:shared-storage-s3:test"):
+            missing = [token for token in FOCUSED_S3_EXCLUSIONS if token not in block]
+            if missing:
+                errors.append(
+                    f"{path}: focused :storage:shared-storage-s3:test must exclude global S3 verification tasks: "
                     + ", ".join(missing)
                 )
 

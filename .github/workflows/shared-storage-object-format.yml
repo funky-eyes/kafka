@@ -96,6 +96,10 @@ jobs:
             --tests 'org.apache.kafka.storage.internals.shared.object.SharedObjectStreamingPackerTest' \
             --tests 'org.apache.kafka.storage.internals.shared.object.SharedObjectStreamingUploaderTest' \
             --tests 'org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadataTest' \
+            -x :storage:checkstyleMain \
+            -x :storage:checkstyleTest \
+            -x :storage:spotbugsMain \
+            -x :storage:spotbugsTest \
             --no-scan 2>&1 | tee shared-storage-object-format.log
 
           result_dir='storage/build/test-results/test'

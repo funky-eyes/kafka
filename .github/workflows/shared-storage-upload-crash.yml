@@ -126,6 +126,10 @@ jobs:
           set -o pipefail
           ./gradlew :storage:shared-storage-s3:test \
             --tests 'org.apache.kafka.storage.internals.shared.s3.S3SharedStorageUploadCrashE2ETest' \
+            -x :storage:shared-storage-s3:checkstyleMain \
+            -x :storage:shared-storage-s3:checkstyleTest \
+            -x :storage:shared-storage-s3:spotbugsMain \
+            -x :storage:shared-storage-s3:spotbugsTest \
             --no-scan 2>&1 | tee shared-storage-upload-crash-e2e.log
 
           result_xml="$(find storage/shared-storage-s3/build/test-results build/junit-xml \

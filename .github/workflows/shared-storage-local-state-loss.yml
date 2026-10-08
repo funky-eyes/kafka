@@ -113,6 +113,10 @@ jobs:
           ./gradlew :storage:test \
             --tests 'org.apache.kafka.storage.internals.shared.kafka.SharedLogSegmentRemoteRecoveryTest' \
             --tests 'org.apache.kafka.storage.internals.shared.kafka.SharedUnifiedLogFactoryTest' \
+            -x :storage:checkstyleMain \
+            -x :storage:checkstyleTest \
+            -x :storage:spotbugsMain \
+            -x :storage:spotbugsTest \
             --no-scan
           ./gradlew :core:test \
             --tests 'kafka.server.ReplicaFetcherThreadRecoveryTest' \

@@ -110,10 +110,18 @@ jobs:
             --tests 'org.apache.kafka.storage.internals.shared.kafka.SharedUnifiedLogFactoryTest' \
             --tests 'org.apache.kafka.storage.internals.shared.kafka.SharedStorageWalFactoryTest' \
             --tests 'org.apache.kafka.storage.internals.shared.kafka.SharedStorageExtensionWalRuntimeTest' \
+            -x :storage:checkstyleMain \
+            -x :storage:checkstyleTest \
+            -x :storage:spotbugsMain \
+            -x :storage:spotbugsTest \
             --no-scan 2>&1 | tee shared-storage-ring-wal-correctness.log
 
           ./gradlew :storage:shared-storage-s3:test \
             --tests 'org.apache.kafka.storage.internals.shared.s3.S3SharedStorageWalFactoryTest' \
+            -x :storage:shared-storage-s3:checkstyleMain \
+            -x :storage:shared-storage-s3:checkstyleTest \
+            -x :storage:shared-storage-s3:spotbugsMain \
+            -x :storage:shared-storage-s3:spotbugsTest \
             --no-scan 2>&1 | tee -a shared-storage-ring-wal-correctness.log
 
           storage_result_dir='storage/build/test-results/test'
