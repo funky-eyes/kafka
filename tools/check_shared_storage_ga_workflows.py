@@ -277,6 +277,20 @@ def standalone_storage_verification_tasks(text):
     return standalone_verification_tasks(text, GLOBAL_STORAGE_VERIFICATION_TASKS)
 
 
+def workflow_job_blocks(text):
+    jobs_match = re.search(r"(?ms)^jobs:\s*\n(.*)\Z", text)
+    if jobs_match is None:
+        return {}
+    jobs_text = jobs_match.group(1)
+    matches = list(re.finditer(r"(?m)^  ([A-Za-z0-9_-]+):\s*$", jobs_text))
+    blocks = {}
+    for index, match in enumerate(matches):
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(jobs_text)
+        blocks[match.group(1)] = jobs_text[start:end]
+    return blocks
+
+
 def main():
     constants = manifest_constants()
     workflow_files = sorted(WORKFLOW_DIR.glob("shared-storage*.yml"))
@@ -591,6 +605,63 @@ def main():
                     f"{path}: test selector {selector} is not covered by push.paths; "
                     f"resolved source(s): {', '.join(sorted(sources))}"
                 )
+
+    main_jobs = workflow_job_blocks(texts.get(MAIN_WORKFLOW_NAME, ""))
+    static_owner = main_jobs.get("storage-tests", "")
+    if not static_owner:
+        errors.append(f"{MAIN_WORKFLOW_NAME}: storage-tests job must own global static analysis")
+    else:
+        owner_specs = (
+            (":core:test", FOCUSED_CORE_EXCLUSIONS, "Core"),
+            (":storage:test", FOCUSED_STORAGE_EXCLUSIONS, "Storage"),
+            (":storage:shared-storage-s3:test", FOCUSED_S3_EXCLUSIONS, "S3"),
+        )
+        for task, exclusions, label in owner_specs:
+            blocks = focused_gradle_test_blocks(static_owner, task)
+            owners = [
+                block
+                for block in blocks
+                if not any(token in block for token in exclusions)
+            ]
+            if len(owners) != 1:
+                errors.append(
+                    f"{MAIN_WORKFLOW_NAME}: storage-tests must contain exactly one {label} static-analysis owner "
+                    f"through {task}; found {len(owners)}"
+                )
+            for block in blocks:
+                if block in owners:
+                    continue
+                missing = [token for token in exclusions if token not in block]
+                if missing:
+                    errors.append(
+                        f"{MAIN_WORKFLOW_NAME}: additional {task} runtime commands in storage-tests must "
+                        "exclude global static analysis: " + ", ".join(missing)
+                    )
+
+    for job_name, job_text in main_jobs.items():
+        if job_name == "storage-tests":
+            continue
+        direct_checks = (
+            standalone_core_verification_tasks(job_text)
+            | standalone_storage_verification_tasks(job_text)
+        )
+        if direct_checks:
+            errors.append(
+                f"{MAIN_WORKFLOW_NAME}: {job_name} must not invoke global static analysis directly: "
+                + ", ".join(sorted(direct_checks))
+            )
+        for task, exclusions, label in (
+            (":core:test", FOCUSED_CORE_EXCLUSIONS, "Core"),
+            (":storage:test", FOCUSED_STORAGE_EXCLUSIONS, "Storage"),
+            (":storage:shared-storage-s3:test", FOCUSED_S3_EXCLUSIONS, "S3"),
+        ):
+            for block in focused_gradle_test_blocks(job_text, task):
+                missing = [token for token in exclusions if token not in block]
+                if missing:
+                    errors.append(
+                        f"{MAIN_WORKFLOW_NAME}: {job_name} focused {task} must exclude global {label} "
+                        "verification tasks: " + ", ".join(missing)
+                    )
 
     for name, path in workflows.items():
         if name == MAIN_WORKFLOW_NAME:
