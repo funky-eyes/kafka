@@ -26,6 +26,36 @@ The workflow writes only below:
 
 Each run uses a new UUID and deletes its test objects in cleanup.
 
+### Read-only configuration preflight
+
+From a local checkout, use an authenticated GitHub CLI session with permission
+to read this repository's Environment metadata:
+
+```bash
+python3 tools/check_shared_storage_real_s3_environment.py
+```
+
+The command only queries GitHub Environment variables and **secret names**.
+It neither reads secret values nor modifies GitHub/AWS. A zero exit status
+means the bucket variable is non-empty and the role secret name exists; it
+**does not** prove the role's secret value, IAM trust/policies or working AWS access.
+
+To configure missing values from an authorized local session:
+
+```bash
+gh variable set SHARED_STORAGE_AWS_S3_BUCKET \
+  --repo funky-eyes/kafka --env shared-storage-aws-s3 --body "${EVIDENCE_BUCKET}"
+gh variable set SHARED_STORAGE_AWS_S3_REGION \
+  --repo funky-eyes/kafka --env shared-storage-aws-s3 --body "${AWS_REGION}"
+gh secret set SHARED_STORAGE_AWS_ROLE_ARN \
+  --repo funky-eyes/kafka --env shared-storage-aws-s3
+```
+
+Supply `EVIDENCE_BUCKET` and `AWS_REGION` from your AWS administrator, and
+enter the approved role ARN at the interactive `gh secret set` prompt.
+Avoid placing any sensitive value in command-line arguments or CI logs.
+The region variable is optional; the workflow defaults to `us-east-1`.
+
 ### Environment protection
 
 The workflow job references a GitHub Environment. For the standard GitHub OIDC

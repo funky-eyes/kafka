@@ -882,6 +882,8 @@ def main():
         "tools/test_promote_shared_storage_real_s3_evidence.py",
         "tools/test_check_shared_storage_ga_workflows.py",
         "tools/shared_storage_ga_source_runs.py",
+        "tools/check_shared_storage_real_s3_environment.py",
+        "tools/test_check_shared_storage_real_s3_environment.py",
     ):
         if not (ROOT / consistency_path).is_file():
             errors.append(f"GA consistency dependency is missing: {consistency_path}")
@@ -896,6 +898,10 @@ def main():
     if "python3 tools/test_check_shared_storage_ga_workflows.py" not in ga_consistency:
         errors.append(
             "Shared Storage GA Workflow Consistency: workflow checker unit tests must run"
+        )
+    if "python3 tools/test_check_shared_storage_real_s3_environment.py" not in ga_consistency:
+        errors.append(
+            "Shared Storage GA Workflow Consistency: Real S3 Environment metadata tests must run"
         )
 
     ga_release = texts.get(GA_RELEASE_WORKFLOW_NAME, "")

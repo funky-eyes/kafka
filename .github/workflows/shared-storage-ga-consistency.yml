@@ -26,6 +26,8 @@ on:
       - 'tools/check_shared_storage_ga_workflows.py'
       - 'tools/test_shared_storage_ga_manifest.py'
       - 'tools/test_check_shared_storage_ga_workflows.py'
+      - 'tools/check_shared_storage_real_s3_environment.py'
+      - 'tools/test_check_shared_storage_real_s3_environment.py'
       - 'tools/promote_shared_storage_real_s3_evidence.py'
       - 'tools/test_promote_shared_storage_real_s3_evidence.py'
       - '.github/actions/setup-minio/**'
@@ -39,6 +41,8 @@ on:
       - 'tools/check_shared_storage_ga_workflows.py'
       - 'tools/test_shared_storage_ga_manifest.py'
       - 'tools/test_check_shared_storage_ga_workflows.py'
+      - 'tools/check_shared_storage_real_s3_environment.py'
+      - 'tools/test_check_shared_storage_real_s3_environment.py'
       - 'tools/promote_shared_storage_real_s3_evidence.py'
       - 'tools/test_promote_shared_storage_real_s3_evidence.py'
       - '.github/actions/setup-minio/**'
@@ -67,6 +71,9 @@ jobs:
 
       - name: Test Real S3 evidence promotion rules
         run: python3 tools/test_promote_shared_storage_real_s3_evidence.py
+
+      - name: Test Real S3 Environment metadata preflight
+        run: python3 tools/test_check_shared_storage_real_s3_environment.py
 
       - name: Test GA workflow checker rules
         run: python3 tools/test_check_shared_storage_ga_workflows.py
