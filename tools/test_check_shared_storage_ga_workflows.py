@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements. See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License. You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import unittest
+
+from check_shared_storage_ga_workflows import (
+    foreign_evidence_workflow_triggers,
+    redundant_runtime_staging_test_compiles,
+    workflow_job_blocks,
+)
+
+
+class WorkflowTriggerOwnershipTest(unittest.TestCase):
+    def test_rejects_exact_foreign_workflow_trigger(self):
+        text = """on:
+  push:
+    paths:
+      - '.github/workflows/shared-storage-local-state-loss.yml'
+      - '.github/workflows/shared-storage-upload-crash.yml'
+"""
+        evidence_paths = {
+            ".github/workflows/shared-storage-local-state-loss.yml",
+            ".github/workflows/shared-storage-upload-crash.yml",
+        }
+        self.assertEqual(
+            [".github/workflows/shared-storage-upload-crash.yml"],
+            foreign_evidence_workflow_triggers(
+                text,
+                ".github/workflows/shared-storage-local-state-loss.yml",
+                evidence_paths,
+                "push",
+            ),
+        )
+
+    def test_accepts_own_workflow_trigger(self):
+        text = """on:
+  push:
+    paths:
+      - '.github/workflows/shared-storage-local-state-loss.yml'
+      - 'storage/src/main/**'
+"""
+        evidence_paths = {
+            ".github/workflows/shared-storage-local-state-loss.yml",
+            ".github/workflows/shared-storage-upload-crash.yml",
+        }
+        self.assertEqual(
+            [],
+            foreign_evidence_workflow_triggers(
+                text,
+                ".github/workflows/shared-storage-local-state-loss.yml",
+                evidence_paths,
+                "push",
+            ),
+        )
+
+    def test_rejects_foreign_workflow_wildcard(self):
+        text = """on:
+  pull_request:
+    paths:
+      - '.github/workflows/shared-storage*.yml'
+"""
+        evidence_paths = {
+            ".github/workflows/shared-storage-local-state-loss.yml",
+            ".github/workflows/shared-storage-upload-crash.yml",
+        }
+        self.assertEqual(
+            [".github/workflows/shared-storage-upload-crash.yml"],
+            foreign_evidence_workflow_triggers(
+                text,
+                ".github/workflows/shared-storage-local-state-loss.yml",
+                evidence_paths,
+                "pull_request",
+            ),
+        )
+
+
+class RuntimeStagingOwnershipTest(unittest.TestCase):
+    def test_rejects_test_compile_in_runtime_staging_workflow(self):
+        text = """./gradlew \\
+  :storage:shared-storage-s3:stageProcessRuntime \\
+  :core:compileTestJava \\
+  --no-scan
+"""
+        self.assertEqual(
+            [":core:compileTestJava"],
+            redundant_runtime_staging_test_compiles(text),
+        )
+
+    def test_ignores_test_compile_without_runtime_staging(self):
+        self.assertEqual(
+            [],
+            redundant_runtime_staging_test_compiles(
+                "./gradlew :core:compileTestJava --no-scan"
+            ),
+        )
+
+
+class WorkflowJobBlockTest(unittest.TestCase):
+    def test_splits_top_level_jobs_without_absorbing_next_job(self):
+        text = """jobs:
+  storage-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo storage
+  minio-environment:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo minio
+"""
+        blocks = workflow_job_blocks(text)
+        self.assertEqual({"storage-tests", "minio-environment"}, set(blocks))
+        self.assertIn("echo storage", blocks["storage-tests"])
+        self.assertNotIn("echo minio", blocks["storage-tests"])
+        self.assertIn("echo minio", blocks["minio-environment"])
+
+
+if __name__ == "__main__":
+    unittest.main()

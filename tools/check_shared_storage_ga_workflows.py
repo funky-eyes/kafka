@@ -307,6 +307,26 @@ def workflow_job_blocks(text):
     return blocks
 
 
+def foreign_evidence_workflow_triggers(text, own_workflow_path, evidence_workflow_paths, event_name):
+    patterns = event_path_patterns(text, event_name)
+    return sorted(
+        workflow_path
+        for workflow_path in evidence_workflow_paths
+        if workflow_path != own_workflow_path
+        and path_is_triggered(workflow_path, patterns)
+    )
+
+
+def redundant_runtime_staging_test_compiles(text):
+    if ":storage:shared-storage-s3:stageProcessRuntime" not in text:
+        return []
+    return [
+        task
+        for task in RUNTIME_STAGING_REDUNDANT_TEST_COMPILE_TASKS
+        if task in text
+    ]
+
+
 def main():
     constants = manifest_constants()
     workflow_files = sorted(WORKFLOW_DIR.glob("shared-storage*.yml"))
@@ -544,12 +564,11 @@ def main():
         own_workflow_path = constants["EVIDENCE_WORKFLOW_PATHS"].get(name)
         evidence_workflow_paths = set(constants["EVIDENCE_WORKFLOW_PATHS"].values())
         for event_name in ("push", "pull_request"):
-            event_patterns = event_path_patterns(texts[name], event_name)
-            foreign_workflows = sorted(
-                workflow_path
-                for workflow_path in evidence_workflow_paths
-                if workflow_path != own_workflow_path
-                and path_is_triggered(workflow_path, event_patterns)
+            foreign_workflows = foreign_evidence_workflow_triggers(
+                texts[name],
+                own_workflow_path,
+                evidence_workflow_paths,
+                event_name,
             )
             if foreign_workflows:
                 errors.append(
@@ -641,13 +660,7 @@ def main():
 
     for name, path in workflows.items():
         text = texts[name]
-        if ":storage:shared-storage-s3:stageProcessRuntime" not in text:
-            continue
-        redundant_test_compiles = [
-            task
-            for task in RUNTIME_STAGING_REDUNDANT_TEST_COMPILE_TASKS
-            if task in text
-        ]
+        redundant_test_compiles = redundant_runtime_staging_test_compiles(text)
         if redundant_test_compiles:
             errors.append(
                 f"{path}: runtime staging must not compile test classes explicitly; "
@@ -791,19 +804,24 @@ def main():
 
     ga_consistency = texts.get("Shared Storage GA Workflow Consistency", "")
     ga_consistency_push_paths = event_path_patterns(ga_consistency, "push")
-    for promotion_path in (
+    for consistency_path in (
         "tools/promote_shared_storage_real_s3_evidence.py",
         "tools/test_promote_shared_storage_real_s3_evidence.py",
+        "tools/test_check_shared_storage_ga_workflows.py",
     ):
-        if not (ROOT / promotion_path).is_file():
-            errors.append(f"Real S3 promotion tooling is missing: {promotion_path}")
-        if promotion_path not in ga_consistency_push_paths:
+        if not (ROOT / consistency_path).is_file():
+            errors.append(f"GA consistency dependency is missing: {consistency_path}")
+        if consistency_path not in ga_consistency_push_paths:
             errors.append(
-                f"Shared Storage GA Workflow Consistency: push.paths must cover {promotion_path}"
+                f"Shared Storage GA Workflow Consistency: push.paths must cover {consistency_path}"
             )
     if "python3 tools/test_promote_shared_storage_real_s3_evidence.py" not in ga_consistency:
         errors.append(
             "Shared Storage GA Workflow Consistency: Real S3 promotion unit tests must run"
+        )
+    if "python3 tools/test_check_shared_storage_ga_workflows.py" not in ga_consistency:
+        errors.append(
+            "Shared Storage GA Workflow Consistency: workflow checker unit tests must run"
         )
 
     ga_release = texts.get(GA_RELEASE_WORKFLOW_NAME, "")
