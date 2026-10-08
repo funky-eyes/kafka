@@ -43,6 +43,10 @@ class SharedMetadataImageTest {
         assertThrows(IllegalStateException.class, image::preparedObjects);
         assertThrows(IllegalStateException.class, image::cleanupClaimedObjects);
         assertThrows(IllegalStateException.class, () -> image.brokerReservedExclusiveSequence(1));
+        assertThrows(
+            IllegalStateException.class,
+            () -> image.partitionLogStartOffset(new SharedPartitionId(11L, 12L, 0))
+        );
 
         image.markReady();
         assertEquals(SharedMetadataImage.State.READY, image.state());
@@ -318,6 +322,68 @@ class SharedMetadataImageTest {
         tombstoneImage.apply(key, SharedMetadataRecordCodec.brokerSequenceValue(200L));
         tombstoneImage.markReady();
         assertThrows(IllegalStateException.class, () -> tombstoneImage.apply(key, null));
+    }
+
+    @Test
+    void partitionLogStartIsMonotonicAndIsolatedByImmutableTopicIdAndPartition() {
+        SharedPartitionId partition = new SharedPartitionId(11L, 12L, 0);
+        byte[] key = SharedMetadataRecordCodec.partitionLogStartKey(partition);
+        SharedMetadataImage image = new SharedMetadataImage();
+        image.apply(key, SharedMetadataRecordCodec.partitionLogStartValue(10L));
+        image.apply(key, SharedMetadataRecordCodec.partitionLogStartValue(10L));
+        image.apply(key, SharedMetadataRecordCodec.partitionLogStartValue(20L));
+        image.markReady();
+
+        assertEquals(20L, image.partitionLogStartOffset(partition));
+        assertEquals(0L, image.partitionLogStartOffset(new SharedPartitionId(11L, 12L, 1)));
+        assertEquals(0L, image.partitionLogStartOffset(new SharedPartitionId(11L, 13L, 0)));
+
+        SharedMetadataImage compacted = new SharedMetadataImage();
+        compacted.apply(key, SharedMetadataRecordCodec.partitionLogStartValue(20L));
+        compacted.markReady();
+        assertEquals(20L, compacted.partitionLogStartOffset(partition));
+    }
+
+    @Test
+    void partitionLogStartRollbackOrTombstoneFailsMetadataImageClosed() {
+        SharedPartitionId partition = new SharedPartitionId(1L, 2L, 0);
+        byte[] key = SharedMetadataRecordCodec.partitionLogStartKey(partition);
+        SharedMetadataImage regression = new SharedMetadataImage();
+        regression.apply(key, SharedMetadataRecordCodec.partitionLogStartValue(50L));
+        regression.markReady();
+        assertThrows(
+            IllegalStateException.class,
+            () -> regression.apply(key, SharedMetadataRecordCodec.partitionLogStartValue(49L))
+        );
+        assertEquals(SharedMetadataImage.State.FAILED, regression.state());
+        assertThrows(IllegalStateException.class, () -> regression.partitionLogStartOffset(partition));
+
+        SharedMetadataImage tombstone = new SharedMetadataImage();
+        tombstone.apply(key, SharedMetadataRecordCodec.partitionLogStartValue(50L));
+        tombstone.markReady();
+        assertThrows(IllegalStateException.class, () -> tombstone.apply(key, null));
+        assertEquals(SharedMetadataImage.State.FAILED, tombstone.state());
+    }
+
+    @Test
+    void replayingLogStartMetadataDoesNotEvictCommittedObjects() {
+        SharedPartitionId partition = new SharedPartitionId(11L, 12L, 0);
+        long objectId = BrokerObjectId.compose(6, 60L);
+        SharedObjectMetadata object = metadata(objectId, 900L);
+        List<SharedObjectMetadata> published = new ArrayList<>();
+        SharedMetadataImage image = new SharedMetadataImage(published::add);
+        image.apply(
+            SharedMetadataRecordCodec.partitionLogStartKey(partition),
+            SharedMetadataRecordCodec.partitionLogStartValue(10L)
+        );
+        image.apply(
+            SharedMetadataRecordCodec.objectKey(objectId),
+            SharedMetadataRecordCodec.committedObjectValue(object)
+        );
+        image.markReady();
+        assertEquals(10L, image.partitionLogStartOffset(partition));
+        assertEquals(List.of(object), image.committedObjects());
+        assertEquals(List.of(object), published);
     }
 
     @Test

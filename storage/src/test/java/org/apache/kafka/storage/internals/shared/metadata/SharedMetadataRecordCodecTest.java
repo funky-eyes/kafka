@@ -52,6 +52,59 @@ class SharedMetadataRecordCodecTest {
     }
 
     @Test
+    void roundTripsPermanentPartitionLogStartKeyAndValue() {
+        SharedPartitionId partition = new SharedPartitionId(11L, 22L, 3);
+        byte[] encoded = SharedMetadataRecordCodec.partitionLogStartKey(partition);
+        SharedMetadataRecordCodec.MetadataKey key = SharedMetadataRecordCodec.decodeKey(encoded);
+        assertEquals(21, encoded.length);
+        assertEquals(SharedMetadataRecordCodec.KeyType.PARTITION_LOG_START, key.type());
+        assertEquals(partition, key.partition());
+        assertEquals(0L, key.id());
+
+        var value = assertInstanceOf(
+            SharedMetadataRecordCodec.PartitionLogStartValue.class,
+            SharedMetadataRecordCodec.decodeValue(key, SharedMetadataRecordCodec.partitionLogStartValue(42L))
+        );
+        assertEquals(42L, value.startOffset());
+        assertEquals(0L, assertInstanceOf(
+            SharedMetadataRecordCodec.PartitionLogStartValue.class,
+            SharedMetadataRecordCodec.decodeValue(key, SharedMetadataRecordCodec.partitionLogStartValue(0L))
+        ).startOffset());
+
+        assertThrows(IllegalArgumentException.class, () -> SharedMetadataRecordCodec.partitionLogStartValue(-1L));
+        assertThrows(IllegalArgumentException.class, () -> new SharedMetadataRecordCodec.MetadataKey(
+            SharedMetadataRecordCodec.KeyType.PARTITION_LOG_START, 0L
+        ));
+    }
+
+    @Test
+    void rejectsCorruptPartitionLogStartKeyAndValue() {
+        byte[] keyBytes = SharedMetadataRecordCodec.partitionLogStartKey(new SharedPartitionId(1L, 2L, 0));
+        var key = SharedMetadataRecordCodec.decodeKey(keyBytes);
+        assertThrows(IllegalArgumentException.class, () -> SharedMetadataRecordCodec.decodeKey(new byte[] {4, 1}));
+
+        byte[] invalidPartition = keyBytes.clone();
+        ByteBuffer.wrap(invalidPartition).putInt(invalidPartition.length - Integer.BYTES, -1);
+        assertThrows(IllegalArgumentException.class, () -> SharedMetadataRecordCodec.decodeKey(invalidPartition));
+        assertThrows(IllegalArgumentException.class, () -> SharedMetadataRecordCodec.decodeValue(
+            key, SharedMetadataRecordCodec.brokerSequenceValue(5L)
+        ));
+
+        byte[] negative = SharedMetadataRecordCodec.partitionLogStartValue(5L);
+        ByteBuffer.wrap(negative).putLong(Short.BYTES + Byte.BYTES, -1L);
+        assertThrows(IllegalArgumentException.class, () -> SharedMetadataRecordCodec.decodeValue(key, negative));
+
+        byte[] extra = ByteBuffer.allocate(12)
+            .put(SharedMetadataRecordCodec.partitionLogStartValue(5L))
+            .put((byte) 1)
+            .array();
+        assertThrows(IllegalArgumentException.class, () -> SharedMetadataRecordCodec.decodeValue(key, extra));
+        byte[] unsupported = SharedMetadataRecordCodec.partitionLogStartValue(5L);
+        ByteBuffer.wrap(unsupported).putShort((short) 99);
+        assertThrows(IllegalArgumentException.class, () -> SharedMetadataRecordCodec.decodeValue(key, unsupported));
+    }
+
+    @Test
     void roundTripsPrepareCommitAndTombstoneValues() {
         long objectId = BrokerObjectId.compose(3, 44L);
         SharedMetadataRecordCodec.MetadataKey key = SharedMetadataRecordCodec.decodeKey(

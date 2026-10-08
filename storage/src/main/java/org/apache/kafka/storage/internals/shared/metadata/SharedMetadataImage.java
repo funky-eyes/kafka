@@ -22,6 +22,7 @@ import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCo
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.CommittedObjectValue;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.MetadataKey;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.MetadataValue;
+import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.PartitionLogStartValue;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.PreparedObjectValue;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.TombstoneValue;
 
@@ -50,6 +51,7 @@ public final class SharedMetadataImage {
     private final Map<Long, SharedObjectMetadata> committedObjects = new HashMap<>();
     private final Map<Long, CleanupObject> cleanupObjects = new HashMap<>();
     private final Map<Integer, Long> brokerSequenceWatermarks = new HashMap<>();
+    private final Map<SharedPartitionId, Long> partitionLogStarts = new HashMap<>();
     private final Consumer<SharedObjectMetadata> committedObjectListener;
     private State state = State.RECOVERING;
     private Throwable failure;
@@ -73,6 +75,7 @@ public final class SharedMetadataImage {
                 case OBJECT -> applyObject(key.id(), value);
                 case OBJECT_CLEANUP -> applyCleanup(key.id(), value);
                 case BROKER_SEQUENCE -> applyBrokerSequence(Math.toIntExact(key.id()), value);
+                case PARTITION_LOG_START -> applyPartitionLogStart(key.partition(), value);
             }
         } catch (RuntimeException | Error replayFailure) {
             markFailed(replayFailure);
@@ -203,6 +206,21 @@ public final class SharedMetadataImage {
         brokerSequenceWatermarks.put(brokerId, candidate);
     }
 
+    private void applyPartitionLogStart(SharedPartitionId partition, MetadataValue value) {
+        if (!(value instanceof PartitionLogStartValue advance)) {
+            // A compacted-topic tombstone would erase the last known retirement fence.
+            throw corruption("partition " + partition + " log-start fence must never be tombstoned");
+        }
+        long candidate = advance.startOffset();
+        Long current = partitionLogStarts.get(partition);
+        if (current != null && candidate < current) {
+            throw corruption(
+                "partition " + partition + " log-start offset moved backwards from " + current + " to " + candidate
+            );
+        }
+        partitionLogStarts.put(partition, candidate);
+    }
+
     public synchronized void markReady() {
         if (state == State.FAILED) {
             throw failedState();
@@ -282,6 +300,18 @@ public final class SharedMetadataImage {
                 "brokerId must be in [0, " + BrokerObjectId.MAX_BROKER_ID + "]: " + brokerId);
         }
         return brokerSequenceWatermarks.getOrDefault(brokerId, INITIAL_SEQUENCE);
+    }
+
+    /**
+     * Returns the latest replayed lower offset bound for a specific immutable topic ID and partition.
+     *
+     * <p>This is metadata only. It must not be used to evict a remote range or delete S3 data until
+     * durable writer fencing, reader quiescence, and range retirement are implemented.</p>
+     */
+    public synchronized long partitionLogStartOffset(SharedPartitionId partition) {
+        requireReady();
+        Objects.requireNonNull(partition, "partition");
+        return partitionLogStarts.getOrDefault(partition, 0L);
     }
 
     private void requireReady() {

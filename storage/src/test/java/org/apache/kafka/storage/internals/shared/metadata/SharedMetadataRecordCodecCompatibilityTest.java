@@ -77,6 +77,28 @@ class SharedMetadataRecordCodecCompatibilityTest {
     }
 
     @Test
+    void fixesPermanentPartitionLogStartKeyAndValueBytes() {
+        SharedPartitionId partition = new SharedPartitionId(
+            0x0102030405060708L, 0x1112131415161718L, 3
+        );
+        assertEncoding(
+            "040102030405060708111213141516171800000003",
+            SharedMetadataRecordCodec.partitionLogStartKey(partition)
+        );
+        assertEncoding("000106000000000000002a", SharedMetadataRecordCodec.partitionLogStartValue(42L));
+
+        var key = SharedMetadataRecordCodec.decodeKey(
+            bytes("040102030405060708111213141516171800000003")
+        );
+        assertEquals(SharedMetadataRecordCodec.KeyType.PARTITION_LOG_START, key.type());
+        assertEquals(partition, key.partition());
+        assertEquals(42L, assertInstanceOf(
+            SharedMetadataRecordCodec.PartitionLogStartValue.class,
+            SharedMetadataRecordCodec.decodeValue(key, bytes("000106000000000000002a"))
+        ).startOffset());
+    }
+
+    @Test
     void readsGaV1GoldenRecords() {
         SharedMetadataRecordCodec.MetadataKey objectKey = SharedMetadataRecordCodec.decodeKey(
             bytes("010102030405060708")

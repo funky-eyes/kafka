@@ -32,7 +32,9 @@ public final class SharedMetadataRecordCodec {
     private static final byte OBJECT_KEY = 1;
     private static final byte BROKER_SEQUENCE_KEY = 2;
     private static final byte OBJECT_CLEANUP_KEY = 3;
+    private static final byte PARTITION_LOG_START_KEY = 4;
     private static final int OBJECT_KEY_BYTES = Byte.BYTES + Long.BYTES;
+    private static final int PARTITION_LOG_START_KEY_BYTES = Byte.BYTES + 2 * Long.BYTES + Integer.BYTES;
     private static final int BROKER_SEQUENCE_KEY_BYTES = Byte.BYTES + Integer.BYTES;
 
     private static final short VALUE_VERSION = 1;
@@ -41,6 +43,7 @@ public final class SharedMetadataRecordCodec {
     private static final byte BROKER_SEQUENCE_RESERVED = 3;
     private static final byte OBJECT_CLEANUP_CLAIMED = 4;
     private static final byte OBJECT_CLEANUP_DELETED = 5;
+    private static final byte PARTITION_LOG_START_ADVANCED = 6;
     private static final int VALUE_HEADER_BYTES = Short.BYTES + Byte.BYTES;
     private static final int COMMITTED_OBJECT_HEADER_BYTES = Long.BYTES + Long.BYTES + Integer.BYTES;
     private static final int RANGE_BYTES = Long.BYTES + Long.BYTES + Integer.BYTES + Integer.BYTES +
@@ -80,6 +83,23 @@ public final class SharedMetadataRecordCodec {
             .array();
     }
 
+    /**
+     * Permanent compacted key for a partition's logical log-start watermark.
+     *
+     * <p>The topic UUID halves are part of the key so a deleted topic cannot retire data belonging to
+     * a different incarnation created with the same human-readable topic name. This is a read-only
+     * protocol reservation: writers and physical reclamation are intentionally not enabled yet.</p>
+     */
+    public static byte[] partitionLogStartKey(SharedPartitionId partition) {
+        Objects.requireNonNull(partition, "partition");
+        return ByteBuffer.allocate(PARTITION_LOG_START_KEY_BYTES)
+            .put(PARTITION_LOG_START_KEY)
+            .putLong(partition.topicIdHigh())
+            .putLong(partition.topicIdLow())
+            .putInt(partition.partition())
+            .array();
+    }
+
     public static byte[] brokerSequenceKey(int brokerId) {
         validateBrokerId(brokerId);
         return ByteBuffer.allocate(BROKER_SEQUENCE_KEY_BYTES)
@@ -102,6 +122,18 @@ public final class SharedMetadataRecordCodec {
                 throw corruption("object key contains non-positive objectId " + objectId);
             }
             return new MetadataKey(type == OBJECT_KEY ? KeyType.OBJECT : KeyType.OBJECT_CLEANUP, objectId);
+        }
+        if (type == PARTITION_LOG_START_KEY) {
+            requireLength(keyBytes.length, PARTITION_LOG_START_KEY_BYTES, "partition log-start key");
+            long topicIdHigh = buffer.getLong();
+            long topicIdLow = buffer.getLong();
+            int partitionId = buffer.getInt();
+            if (partitionId < 0) {
+                throw corruption("partition log-start key contains negative partition " + partitionId);
+            }
+            return new MetadataKey(
+                KeyType.PARTITION_LOG_START, 0L, new SharedPartitionId(topicIdHigh, topicIdLow, partitionId)
+            );
         }
         if (type == BROKER_SEQUENCE_KEY) {
             requireLength(keyBytes.length, BROKER_SEQUENCE_KEY_BYTES, "broker sequence key");
@@ -176,6 +208,23 @@ public final class SharedMetadataRecordCodec {
         return buffer.array();
     }
 
+    /**
+     * Durable inclusive logical log-start offset, not permission to delete physical objects.
+     *
+     * <p>Before emission is enabled, all brokers must understand the record and agree on an
+     * authoritative monotonic writer fence. Replaying the value must never itself delete S3 bytes.</p>
+     */
+    public static byte[] partitionLogStartValue(long startOffset) {
+        if (startOffset < 0L) {
+            throw new IllegalArgumentException("partition log-start offset must be non-negative");
+        }
+        return ByteBuffer.allocate(VALUE_HEADER_BYTES + Long.BYTES)
+            .putShort(VALUE_VERSION)
+            .put(PARTITION_LOG_START_ADVANCED)
+            .putLong(startOffset)
+            .array();
+    }
+
     public static byte[] brokerSequenceValue(long reservedExclusiveSequence) {
         validateReservedExclusiveSequence(reservedExclusiveSequence);
         return ByteBuffer.allocate(VALUE_HEADER_BYTES + Long.BYTES)
@@ -218,6 +267,17 @@ public final class SharedMetadataRecordCodec {
                 return new CleanupDeletedValue(createdTimeMs);
             }
             throw corruption("object cleanup key has incompatible value type " + type);
+        }
+        if (key.type() == KeyType.PARTITION_LOG_START) {
+            if (type != PARTITION_LOG_START_ADVANCED) {
+                throw corruption("partition log-start key has incompatible value type " + type);
+            }
+            requireRemaining(buffer, Long.BYTES, "partition log-start value");
+            long startOffset = buffer.getLong();
+            if (startOffset < 0L) {
+                throw corruption("partition log-start value contains negative offset " + startOffset);
+            }
+            return new PartitionLogStartValue(startOffset);
         }
         if (type != BROKER_SEQUENCE_RESERVED) {
             throw corruption("broker sequence key has incompatible value type " + type);
@@ -367,12 +427,20 @@ public final class SharedMetadataRecordCodec {
     public enum KeyType {
         OBJECT,
         OBJECT_CLEANUP,
-        BROKER_SEQUENCE
+        BROKER_SEQUENCE,
+        PARTITION_LOG_START
     }
 
-    public record MetadataKey(KeyType type, long id) {
+    public record MetadataKey(KeyType type, long id, SharedPartitionId partition) {
+        public MetadataKey(KeyType type, long id) {
+            this(type, id, null);
+        }
+
         public MetadataKey {
             Objects.requireNonNull(type, "type");
+            if ((type == KeyType.PARTITION_LOG_START) != (partition != null)) {
+                throw new IllegalArgumentException("only partition log-start keys have partition identity");
+            }
         }
     }
 
@@ -395,6 +463,14 @@ public final class SharedMetadataRecordCodec {
     }
 
     public record BrokerSequenceValue(long reservedExclusiveSequence) implements MetadataValue {
+    }
+
+    public record PartitionLogStartValue(long startOffset) implements MetadataValue {
+        public PartitionLogStartValue {
+            if (startOffset < 0L) {
+                throw new IllegalArgumentException("partition log-start offset must be non-negative");
+            }
+        }
     }
 
     public enum TombstoneValue implements MetadataValue {
