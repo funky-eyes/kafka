@@ -104,7 +104,6 @@ jobs:
             :tools:jar \
             :tools:copyDependantLibs \
             :storage:shared-storage-s3:stageProcessRuntime \
-            :storage:shared-storage-s3:compileTestJava \
             --no-scan 2>&1 | tee shared-storage-upload-crash-build.log
           test -d storage/shared-storage-s3/build/process-runtime
           find storage/shared-storage-s3/build/process-runtime -maxdepth 1 -type f -printf '%f\n' | sort \

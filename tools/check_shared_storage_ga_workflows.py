@@ -84,6 +84,13 @@ REDUNDANT_MAIN_COMPILE_TASKS = (
     ":core:compileTestJava",
 )
 
+RUNTIME_STAGING_REDUNDANT_TEST_COMPILE_TASKS = (
+    ":core:compileTestJava",
+    ":core:compileTestScala",
+    ":storage:compileTestJava",
+    ":storage:shared-storage-s3:compileTestJava",
+)
+
 
 def manifest_constants():
     tree = ast.parse(MANIFEST.read_text(encoding="utf-8"), filename=str(MANIFEST))
@@ -614,6 +621,22 @@ def main():
                     f"{path}: test selector {selector} is not covered by push.paths; "
                     f"resolved source(s): {', '.join(sorted(sources))}"
                 )
+
+    for name, path in workflows.items():
+        text = texts[name]
+        if ":storage:shared-storage-s3:stageProcessRuntime" not in text:
+            continue
+        redundant_test_compiles = [
+            task
+            for task in RUNTIME_STAGING_REDUNDANT_TEST_COMPILE_TASKS
+            if task in text
+        ]
+        if redundant_test_compiles:
+            errors.append(
+                f"{path}: runtime staging must not compile test classes explicitly; "
+                "the focused test task owns test compilation: "
+                + ", ".join(redundant_test_compiles)
+            )
 
     main_jobs = workflow_job_blocks(texts.get(MAIN_WORKFLOW_NAME, ""))
     static_owner = main_jobs.get("storage-tests", "")

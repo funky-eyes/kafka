@@ -102,7 +102,6 @@ jobs:
           ./gradlew \
             :core:releaseTarGz \
             :storage:shared-storage-s3:stageProcessRuntime \
-            :core:compileTestJava \
             --no-scan 2>&1 | tee shared-storage-rolling-new-build.log
 
       - name: Extract independent old and new runtimes
