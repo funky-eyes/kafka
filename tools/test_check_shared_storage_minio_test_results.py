@@ -67,6 +67,20 @@ class MinIOJUnitEvidenceTest(unittest.TestCase):
         self.report(skipped={"S3OrphanObjectCleanerIntegrationTest.activePreparedUploadIsProtectedUntilUploadEnds"})
         self.assertTrue(any("SKIPPED" in error for error in validate_reports(self.root)))
 
+    def test_rejects_missing_redundant_committed_cleanup_case(self):
+        self.report(omit={
+            "S3OrphanObjectCleanerIntegrationTest."
+            "redundantCommittedPhysicalCopyIsReclaimedWithoutDeletingReadWinner"
+        })
+        self.assertTrue(any("MISSING" in error for error in validate_reports(self.root)))
+
+    def test_rejects_skipped_multi_partition_protection_case(self):
+        self.report(skipped={
+            "S3OrphanObjectCleanerIntegrationTest."
+            "multiPartitionPhysicalObjectSurvivesWhenAnyRangeIsStillReferenced"
+        })
+        self.assertTrue(any("SKIPPED" in error for error in validate_reports(self.root)))
+
     def test_rejects_skipped_case(self):
         self.report(skipped={"S3ObjectStoreTest.roundTripsPutRangeReadAndDeleteAgainstConfiguredS3"})
         self.assertTrue(any("SKIPPED" in error for error in validate_reports(self.root)))

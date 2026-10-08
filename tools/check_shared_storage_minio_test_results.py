@@ -32,6 +32,8 @@ REQUIRED_CASES = {
         "claimedOrphanIsDeletedAgainAfterLatePut",
         "committedObjectRemainsPhysicallyReadableAfterCleanup",
         "activePreparedUploadIsProtectedUntilUploadEnds",
+        "redundantCommittedPhysicalCopyIsReclaimedWithoutDeletingReadWinner",
+        "multiPartitionPhysicalObjectSurvivesWhenAnyRangeIsStillReferenced",
     },
 }
 

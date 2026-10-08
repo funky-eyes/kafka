@@ -40,7 +40,13 @@ multipart completion, multipart abort and absence of partial objects. The
 MinIO integration suite also verifies orphan-claim cleanup, reclamation
 after a late PUT, committed-object preservation, and active-upload fences
 against physical MinIO object HEAD/list operations. Missing or skipped
-mandatory MinIO integration tests block the gate. See
+mandatory MinIO integration tests block the gate. Duplicate COMMITTED
+physical objects are reclaimed only if the live remote index references
+neither of their ranges; packed multi-partition objects remain protected
+while any range is referenced. Topic deletion, Retention and DeleteRecords
+currently have logical lifecycle coverage, but physical reclamation of
+their committed objects remains a separate implementation/evidence gap
+(see the MinIO GA evidence document). See
 [MinIO GA evidence](shared-storage-minio-ga-evidence.md) for comparisons with AutoMQ and Aiven.
 
 Native AWS S3 interoperability is **not** claimed by MinIO GA.

@@ -18,6 +18,7 @@ package org.apache.kafka.storage.internals.shared.s3;
 
 import org.apache.kafka.storage.internals.shared.metadata.InMemoryObjectMetadataStore;
 import org.apache.kafka.storage.internals.shared.metadata.OffsetRange;
+import org.apache.kafka.storage.internals.shared.metadata.RemoteObjectIndex;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectRange;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
@@ -149,6 +150,107 @@ class S3OrphanObjectCleanerIntegrationTest {
             } finally {
                 activeUploads.end(objectId);
                 objects.delete(objectId).get(10, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+
+    @Test
+    void redundantCommittedPhysicalCopyIsReclaimedWithoutDeletingReadWinner() throws Exception {
+        S3ObjectStoreConfig config = config();
+        long retainedId = 9_104L;
+        long redundantId = 9_105L;
+        byte[] contents = new byte[] {31, 32, 33};
+
+        try (S3ObjectStore objects = new S3ObjectStore(config);
+             S3Client inspector = testClient(config)) {
+            ensureBucket(inspector, config);
+            InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
+            RemoteObjectIndex index = new RemoteObjectIndex();
+            OrphanObjectCleaner cleaner =
+                new OrphanObjectCleaner(objects, metadata, new ActiveObjectUploads(), index);
+            SharedObjectMetadata retained = committedMetadata(retainedId, contents.length);
+            SharedObjectMetadata redundant = committedMetadata(redundantId, contents.length);
+            try {
+                objects.put(retainedId, ByteBuffer.wrap(contents)).get(10, TimeUnit.SECONDS);
+                objects.put(redundantId, ByteBuffer.wrap(contents)).get(10, TimeUnit.SECONDS);
+                metadata.prepare(retainedId, 100L).get(10, TimeUnit.SECONDS);
+                metadata.commit(retained).get(10, TimeUnit.SECONDS);
+                metadata.prepare(redundantId, 101L).get(10, TimeUnit.SECONDS);
+                metadata.commit(redundant).get(10, TimeUnit.SECONDS);
+                assertTrue(index.add(retained).objectReferenced());
+                assertFalse(index.add(redundant).objectReferenced());
+
+                assertEquals(1, cleaner.clean(1_000L).get(10, TimeUnit.SECONDS));
+                assertTrue(metadata.isCommitted(retainedId));
+                assertFalse(metadata.isCommitted(redundantId));
+                assertTrue(index.referencesObject(retainedId));
+                assertFalse(index.referencesObject(redundantId));
+                assertPhysicalPresent(inspector, config, retainedId, contents.length);
+                assertPhysicalAbsent(inspector, config, redundantId);
+
+                ByteBuffer read = objects.rangeRead(retainedId, 0L, contents.length).get(10, TimeUnit.SECONDS);
+                byte[] actual = new byte[read.remaining()];
+                read.get(actual);
+                assertArrayEquals(contents, actual);
+                assertEquals(0, cleaner.clean(1_000L).get(10, TimeUnit.SECONDS));
+            } finally {
+                objects.delete(redundantId).get(10, TimeUnit.SECONDS);
+                objects.delete(retainedId).get(10, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    @Test
+    void multiPartitionPhysicalObjectSurvivesWhenAnyRangeIsStillReferenced() throws Exception {
+        S3ObjectStoreConfig config = config();
+        long retainedId = 9_106L;
+        long mixedId = 9_107L;
+        byte[] retainedBytes = new byte[] {41, 42, 43};
+        byte[] mixedBytes = new byte[] {41, 42, 43, 51, 52, 53};
+
+        try (S3ObjectStore objects = new S3ObjectStore(config);
+             S3Client inspector = testClient(config)) {
+            ensureBucket(inspector, config);
+            InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
+            RemoteObjectIndex index = new RemoteObjectIndex();
+            OrphanObjectCleaner cleaner =
+                new OrphanObjectCleaner(objects, metadata, new ActiveObjectUploads(), index);
+            SharedObjectMetadata retained = committedMetadata(retainedId, retainedBytes.length);
+            SharedPartitionId otherPartition = new SharedPartitionId(3L, 4L, 1);
+            SharedObjectMetadata mixed = new SharedObjectMetadata(
+                mixedId, mixedBytes.length, 23L,
+                List.of(
+                    retained.ranges().get(0),
+                    new SharedObjectRange(otherPartition, new OffsetRange(10L, 11L), 1, 3L, 3, 19L)
+                )
+            );
+            try {
+                objects.put(retainedId, ByteBuffer.wrap(retainedBytes)).get(10, TimeUnit.SECONDS);
+                objects.put(mixedId, ByteBuffer.wrap(mixedBytes)).get(10, TimeUnit.SECONDS);
+                metadata.prepare(retainedId, 100L).get(10, TimeUnit.SECONDS);
+                metadata.commit(retained).get(10, TimeUnit.SECONDS);
+                metadata.prepare(mixedId, 101L).get(10, TimeUnit.SECONDS);
+                metadata.commit(mixed).get(10, TimeUnit.SECONDS);
+                assertTrue(index.add(retained).objectReferenced());
+                assertTrue(index.add(mixed).objectReferenced());
+                assertEquals(retainedId,
+                    index.find(retained.ranges().get(0).partition(), 0L).orElseThrow().objectId());
+                assertEquals(mixedId, index.find(otherPartition, 10L).orElseThrow().objectId());
+
+                assertEquals(0, cleaner.clean(1_000L).get(10, TimeUnit.SECONDS));
+                assertTrue(metadata.isCommitted(mixedId));
+                assertTrue(index.referencesObject(mixedId));
+                assertPhysicalPresent(inspector, config, retainedId, retainedBytes.length);
+                assertPhysicalPresent(inspector, config, mixedId, mixedBytes.length);
+
+                ByteBuffer read = objects.rangeRead(mixedId, 3L, 3).get(10, TimeUnit.SECONDS);
+                byte[] actual = new byte[read.remaining()];
+                read.get(actual);
+                assertArrayEquals(new byte[] {51, 52, 53}, actual);
+            } finally {
+                objects.delete(mixedId).get(10, TimeUnit.SECONDS);
+                objects.delete(retainedId).get(10, TimeUnit.SECONDS);
             }
         }
     }
