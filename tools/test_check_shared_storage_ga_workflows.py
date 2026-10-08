@@ -19,6 +19,7 @@ import unittest
 from check_shared_storage_ga_workflows import (
     foreign_evidence_workflow_triggers,
     full_manifest_after_source_wait_loop,
+    missing_minio_evidence_requirements,
     redundant_runtime_staging_test_compiles,
     release_real_s3_default,
     workflow_job_blocks,
@@ -142,31 +143,58 @@ class ManifestWaitLoopTest(unittest.TestCase):
 
 
 class ReleaseScopeDefaultTest(unittest.TestCase):
-    def test_strict_aws_s3_is_default(self):
+    def test_minio_ga_is_default(self):
         workflow = """on:
   workflow_dispatch:
     inputs:
       release_ref:
         default: main
       require_real_s3:
-        description: Strict release mode
-        required: true
-        default: true
-        type: boolean
-"""
-        self.assertEqual("true", release_real_s3_default(workflow))
-
-    def test_rejects_minio_only_default_and_missing_scope(self):
-        workflow = """on:
-  workflow_dispatch:
-    inputs:
-      require_real_s3:
+        description: Optional AWS proof
         required: true
         default: false
         type: boolean
 """
         self.assertEqual("false", release_real_s3_default(workflow))
+
+    def test_explicit_aws_opt_in_and_missing_scope(self):
+        workflow = """on:
+  workflow_dispatch:
+    inputs:
+      require_real_s3:
+        required: true
+        default: true
+        type: boolean
+"""
+        self.assertEqual("true", release_real_s3_default(workflow))
         self.assertIsNone(release_real_s3_default("jobs:\n  validate:\n    runs-on: ubuntu-latest\n"))
+
+
+class MinIOEvidenceOwnershipTest(unittest.TestCase):
+    def test_rejects_missing_multipart_and_guard(self):
+        workflow = """jobs:
+  minio-environment:
+    steps:
+      - run: |
+          ./gradlew :storage:shared-storage-s3:test
+          --tests 'org.apache.kafka.storage.internals.shared.s3.S3ObjectStoreTest'
+"""
+        missing = missing_minio_evidence_requirements(workflow)
+        self.assertTrue(any("S3MultipartObjectStoreTest" in item for item in missing))
+        self.assertTrue(any("check_shared_storage_minio_test_results.py" in item for item in missing))
+
+    def test_accepts_complete_minio_contract(self):
+        workflow = """jobs:
+  minio-environment:
+    steps:
+      - uses: ./.github/actions/setup-minio
+      - run: |
+          SHARED_STORAGE_S3_ENDPOINT: http://127.0.0.1:9000
+          --tests 'org.apache.kafka.storage.internals.shared.s3.S3ObjectStoreTest'
+          --tests 'org.apache.kafka.storage.internals.shared.s3.S3MultipartObjectStoreTest'
+          python3 tools/check_shared_storage_minio_test_results.py storage/shared-storage-s3/build/test-results/test
+"""
+        self.assertEqual([], missing_minio_evidence_requirements(workflow))
 
 
 class WorkflowJobBlockTest(unittest.TestCase):

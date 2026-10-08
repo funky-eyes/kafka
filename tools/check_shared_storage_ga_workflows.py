@@ -318,6 +318,29 @@ def release_real_s3_default(text):
     return None
 
 
+MINIO_REQUIRED_TEST_SELECTIONS = (
+    "--tests 'org.apache.kafka.storage.internals.shared.s3.S3ObjectStoreTest'",
+    "--tests 'org.apache.kafka.storage.internals.shared.s3.S3MultipartObjectStoreTest'",
+)
+MINIO_TEST_RESULT_CHECK = (
+    "python3 tools/check_shared_storage_minio_test_results.py "
+    "storage/shared-storage-s3/build/test-results/test"
+)
+
+
+def missing_minio_evidence_requirements(workflow):
+    job = workflow_job_blocks(workflow).get("minio-environment")
+    if not job:
+        return ["minio-environment job"]
+    required = (
+        *MINIO_REQUIRED_TEST_SELECTIONS,
+        MINIO_TEST_RESULT_CHECK,
+        "SHARED_STORAGE_S3_ENDPOINT:",
+        "./.github/actions/setup-minio",
+    )
+    return [item for item in required if item not in job]
+
+
 def workflow_job_blocks(text):
     jobs_match = re.search(r"(?ms)^jobs:\s*\n(.*)\Z", text)
     if jobs_match is None:
@@ -719,7 +742,22 @@ def main():
                 + ", ".join(redundant_test_compiles)
             )
 
-    main_jobs = workflow_job_blocks(texts.get(MAIN_WORKFLOW_NAME, ""))
+    main_workflow = texts.get(MAIN_WORKFLOW_NAME, "")
+    for requirement in missing_minio_evidence_requirements(main_workflow):
+        errors.append(
+            f"{MAIN_WORKFLOW_NAME}: MinIO GA evidence must include " + requirement
+        )
+    for required_script in (
+        "tools/check_shared_storage_minio_test_results.py",
+        "tools/test_check_shared_storage_minio_test_results.py",
+    ):
+        for event_name in ("push", "pull_request"):
+            if required_script not in event_path_patterns(main_workflow, event_name):
+                errors.append(
+                    f"{MAIN_WORKFLOW_NAME}: {event_name}.paths must cover " + required_script
+                )
+
+    main_jobs = workflow_job_blocks(main_workflow)
     static_owner = main_jobs.get("storage-tests", "")
     if not static_owner:
         errors.append(f"{MAIN_WORKFLOW_NAME}: storage-tests job must own global static analysis")
@@ -884,6 +922,8 @@ def main():
         "tools/shared_storage_ga_source_runs.py",
         "tools/check_shared_storage_real_s3_environment.py",
         "tools/test_check_shared_storage_real_s3_environment.py",
+        "tools/check_shared_storage_minio_test_results.py",
+        "tools/test_check_shared_storage_minio_test_results.py",
     ):
         if not (ROOT / consistency_path).is_file():
             errors.append(f"GA consistency dependency is missing: {consistency_path}")
@@ -903,17 +943,21 @@ def main():
         errors.append(
             "Shared Storage GA Workflow Consistency: Real S3 Environment metadata tests must run"
         )
+    if "python3 tools/test_check_shared_storage_minio_test_results.py" not in ga_consistency:
+        errors.append(
+            "Shared Storage GA Workflow Consistency: MinIO JUnit result guard tests must run"
+        )
 
     ga_release = texts.get(GA_RELEASE_WORKFLOW_NAME, "")
-    if release_real_s3_default(ga_release) != "true":
+    if release_real_s3_default(ga_release) != "false":
         errors.append(
-            f"{GA_RELEASE_WORKFLOW_NAME}: strict exact-candidate Real S3 must be the default; "
-            "MinIO-only preflight requires explicit opt-out"
+            f"{GA_RELEASE_WORKFLOW_NAME}: MinIO-backed GA must be the default; "
+            "native AWS S3 compatibility is optional"
         )
     for scope_marker in (
-        "Strict AWS S3 GA evidence",
-        "MinIO-only preflight evidence",
-        "MinIO-only preflight (NOT AWS S3 GA)",
+        "MinIO GA plus AWS S3 compatibility",
+        "MinIO-backed Shared Storage GA",
+        "This result does not claim native AWS S3 interoperability.",
     ):
         if scope_marker not in ga_release:
             errors.append(

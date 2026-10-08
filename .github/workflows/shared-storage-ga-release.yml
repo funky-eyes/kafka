@@ -29,9 +29,9 @@ on:
         default: shared-wal-s3-4.3.1
         type: string
       require_real_s3:
-        description: Require exact-SHA AWS S3 evidence (disable only for MinIO-only preflight; not AWS S3 GA)
+        description: Optional strict native AWS S3 proof; not required for MinIO GA
         required: true
-        default: true
+        default: false
         type: boolean
 
 permissions:
@@ -40,7 +40,7 @@ permissions:
 
 jobs:
   ga-evidence-manifest:
-    name: ${{ inputs.require_real_s3 && 'Strict AWS S3 GA evidence' || 'MinIO-only preflight evidence' }}
+    name: ${{ inputs.require_real_s3 && 'MinIO GA plus AWS S3 compatibility' || 'MinIO-backed Shared Storage GA' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -67,12 +67,12 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${REQUIRE_REAL_S3}" = "true" ]; then
-            echo "## Strict AWS S3 GA release evidence" >> "${GITHUB_STEP_SUMMARY}"
-            echo "Requires same-SHA AWS S3 compatibility from the dedicated evidence branch." >> "${GITHUB_STEP_SUMMARY}"
+            echo "## MinIO GA plus AWS S3 compatibility" >> "${GITHUB_STEP_SUMMARY}"
+            echo "Requires strict exact-SHA AWS S3 proof in addition to the MinIO GA gates." >> "${GITHUB_STEP_SUMMARY}"
           else
-            echo "::warning::MinIO-only evidence is not an AWS S3 GA release certification."
-            echo "## MinIO-only preflight (NOT AWS S3 GA)" >> "${GITHUB_STEP_SUMMARY}"
-            echo "This run does not certify production AWS S3 compatibility." >> "${GITHUB_STEP_SUMMARY}"
+            echo "## MinIO-backed Shared Storage GA" >> "${GITHUB_STEP_SUMMARY}"
+            echo "Release scope: 19 required correctness and hardening gates including real MinIO integration." >> "${GITHUB_STEP_SUMMARY}"
+            echo "This result does not claim native AWS S3 interoperability." >> "${GITHUB_STEP_SUMMARY}"
           fi
 
       - name: Evaluate release criteria

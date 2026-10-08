@@ -26,6 +26,8 @@ on:
       - 'tools/check_shared_storage_ga_workflows.py'
       - 'tools/test_shared_storage_ga_manifest.py'
       - 'tools/test_check_shared_storage_ga_workflows.py'
+      - 'tools/check_shared_storage_minio_test_results.py'
+      - 'tools/test_check_shared_storage_minio_test_results.py'
       - 'tools/check_shared_storage_real_s3_environment.py'
       - 'tools/test_check_shared_storage_real_s3_environment.py'
       - 'tools/promote_shared_storage_real_s3_evidence.py'
@@ -41,6 +43,8 @@ on:
       - 'tools/check_shared_storage_ga_workflows.py'
       - 'tools/test_shared_storage_ga_manifest.py'
       - 'tools/test_check_shared_storage_ga_workflows.py'
+      - 'tools/check_shared_storage_minio_test_results.py'
+      - 'tools/test_check_shared_storage_minio_test_results.py'
       - 'tools/check_shared_storage_real_s3_environment.py'
       - 'tools/test_check_shared_storage_real_s3_environment.py'
       - 'tools/promote_shared_storage_real_s3_evidence.py'
@@ -77,6 +81,9 @@ jobs:
 
       - name: Test GA workflow checker rules
         run: python3 tools/test_check_shared_storage_ga_workflows.py
+
+      - name: Test required MinIO JUnit evidence rules
+        run: python3 tools/test_check_shared_storage_minio_test_results.py
 
       - name: Test MinIO fixture process ownership
         run: bash tools/test_shared_storage_minio_fixture.sh

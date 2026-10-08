@@ -337,6 +337,12 @@ class S3ObjectStoreTest {
             assertEquals(0, empty.remaining());
 
             store.delete(objectId).get(10, TimeUnit.SECONDS);
+            ExecutionException missing = assertThrows(
+                ExecutionException.class,
+                () -> store.rangeRead(objectId, 0L, 1).get(10, TimeUnit.SECONDS)
+            );
+            S3Exception absent = assertInstanceOf(S3Exception.class, missing.getCause());
+            assertEquals(404, absent.statusCode(), "Deleted MinIO object must no longer be readable");
         }
     }
 

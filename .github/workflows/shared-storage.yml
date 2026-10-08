@@ -62,6 +62,8 @@ on:
       - '.github/actions/setup-gradle/**'
       - '.github/actions/setup-minio/**'
       - 'tools/shared_storage_minio_fixture.sh'
+      - 'tools/check_shared_storage_minio_test_results.py'
+      - 'tools/test_check_shared_storage_minio_test_results.py'
       - '.github/workflows/shared-storage.yml'
   pull_request:
     paths:
@@ -94,6 +96,8 @@ on:
       - 'core/src/test/**/kafka/server/**'
       - 'checkstyle/import-control-shared-storage-s3.xml'
       - 'settings.gradle'
+      - 'tools/check_shared_storage_minio_test_results.py'
+      - 'tools/test_check_shared_storage_minio_test_results.py'
       - '.github/workflows/shared-storage.yml'
   workflow_dispatch:
 
@@ -204,7 +208,7 @@ jobs:
           java-version: 25
           gradle-cache-read-only: true
 
-      - name: Compile and exercise S3 object store against MinIO
+      - name: Exercise S3 PUT, Range, DELETE and multipart abort against MinIO
         shell: bash
         env:
           AWS_ACCESS_KEY_ID: minioadmin
@@ -216,15 +220,18 @@ jobs:
         run: |
           set -o pipefail
           ./gradlew \
-            :storage:shared-storage-s3:compileJava \
-            :storage:shared-storage-s3:compileTestJava \
             :storage:shared-storage-s3:test \
             --tests 'org.apache.kafka.storage.internals.shared.s3.S3ObjectStoreTest' \
+            --tests 'org.apache.kafka.storage.internals.shared.s3.S3MultipartObjectStoreTest' \
             -x :storage:shared-storage-s3:checkstyleMain \
             -x :storage:shared-storage-s3:checkstyleTest \
             -x :storage:shared-storage-s3:spotbugsMain \
             -x :storage:shared-storage-s3:spotbugsTest \
             --no-scan 2>&1 | tee shared-storage-minio-e2e.log
+
+      - name: Require executed, unskipped MinIO S3 integration tests
+        shell: bash
+        run: python3 tools/check_shared_storage_minio_test_results.py storage/shared-storage-s3/build/test-results/test
 
       - name: Run replicated WAL leader failover E2E
         shell: bash
@@ -259,6 +266,8 @@ jobs:
             shared-storage-minio-e2e.log
             shared-storage-kraft-e2e.log
             shared-storage-minio-objects.log
+            storage/shared-storage-s3/build/reports/tests/test
+            storage/shared-storage-s3/build/test-results/test
             core/build/reports/tests/test
           if-no-files-found: ignore
           retention-days: 7

@@ -26,6 +26,7 @@ import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.S3Configuration;
 import software.amazon.awssdk.services.s3.model.AbortMultipartUploadRequest;
 import software.amazon.awssdk.services.s3.model.CreateBucketRequest;
+import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
 import software.amazon.awssdk.services.s3.model.ListMultipartUploadsRequest;
 import software.amazon.awssdk.services.s3.model.S3Exception;
 
@@ -134,9 +135,26 @@ class S3MultipartObjectStoreTest {
                 assertEquals(2, pulls.get());
                 assertTrue(closed.get(), "failed known-size multipart source must be closed");
                 assertNoMultipartUpload(config, objectId);
+                assertUnpublishedObjectAbsent(config, objectId);
             } finally {
                 store.delete(objectId).get(10, TimeUnit.SECONDS);
             }
+        }
+    }
+
+    private static void assertUnpublishedObjectAbsent(S3ObjectStoreConfig config, long objectId) {
+        try (S3Client client = testClient(config)) {
+            S3Exception notFound = assertThrows(
+                S3Exception.class,
+                () -> client.headObject(
+                    HeadObjectRequest.builder()
+                        .bucket(config.bucket())
+                        .key(config.objectKey(objectId))
+                        .build()
+                )
+            );
+            assertEquals(404, notFound.statusCode(),
+                "Aborted multipart upload must not publish a partially written object");
         }
     }
 

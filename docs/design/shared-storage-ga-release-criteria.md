@@ -33,11 +33,16 @@ The GA gate currently requires these hardening workflows in addition to the corr
 
 Until those workflows exist and pass for the candidate production tree, the GA manifest must remain **BLOCKED**.
 
-The release workflow defaults to **`require_real_s3=true`**, so an unattended/default GA release evaluation
-requires exact-candidate AWS S3 evidence. Select `require_real_s3=false` only for an explicitly
-**MinIO-only preflight**: its workflow job and job summary identify this reduced scope, and a green result
-does **not** certify AWS S3 production compatibility. The underlying manifest intentionally continues to
-support both scopes; only the strict mode is sufficient for a release that claims AWS S3 support.
+The release workflow defaults to **`require_real_s3=false`**. This GA scope is
+**pinned MinIO and MinIO-backed S3-compatible storage**, proven by the required 19-gate
+correctness/hardening manifest. The MinIO E2E explicitly exercises PUT, Range GET, DELETE,
+multipart completion, multipart abort and absence of partial objects. Missing or skipped
+mandatory MinIO integration tests block the gate. See
+[MinIO GA evidence](shared-storage-minio-ga-evidence.md) for comparisons with AutoMQ and Aiven.
+
+Native AWS S3 interoperability is **not** claimed by MinIO GA.
+`require_real_s3=true` remains an optional extension for a separate strict AWS S3 claim.
+Missing AWS environment credentials never block MinIO GA.
 
 
 ## Evidence ownership

@@ -1,7 +1,7 @@
 # Shared Storage Real AWS S3 Release Evidence Runbook
 
-This runbook configures the **release-evidence-only** AWS path used by
-`Shared Storage Real S3 Compatibility`. It is intentionally narrower than a
+This runbook configures the **optional, release-evidence-only** AWS path used by
+`Shared Storage Real S3 Compatibility`. MinIO-backed GA does not require it. It is intentionally narrower than a
 production Shared Storage IAM policy.
 
 The current workflow uses GitHub Actions OIDC, the protected GitHub Environment
@@ -287,11 +287,11 @@ Do not claim real AWS S3 release compatibility until both are true:
 2. The strict GA manifest generated with `--require-real-s3`,
    `--require-real-s3-exact-sha`, and `--require-real-s3-branch-push` is PASS.
 
-The manual `Shared Storage GA Release Gate` now defaults to `require_real_s3=true` and uses the same
-three strict flags. An operator may deliberately choose `require_real_s3=false` for a
-**MinIO-only preflight**, but the job name and summary then explicitly state that it is
-**not AWS S3 GA certification**. A non-strict run must never be used as an alternate
-path to make a Real S3 release claim.
+The manual `Shared Storage GA Release Gate` defaults to `require_real_s3=false`:
+its 19 required MinIO-backed gates certify the declared MinIO GA scope without
+AWS credentials. Real AWS S3 is an **optional, separate** compatibility extension.
+Select `require_real_s3=true` to require all three strict flags.
+A MinIO-only manifest must not be described as native AWS S3 certification.
 
 Both the Real S3 compatibility workflow and the strict seal require their audit
 artifacts to exist before the workflow can finish green. A PASS therefore
