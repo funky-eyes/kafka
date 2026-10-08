@@ -54,7 +54,6 @@ on:
       - '.github/actions/setup-minio/**'
       - 'tools/shared_storage_minio_fixture.sh'
       - '.github/workflows/shared-storage-local-state-loss.yml'
-      - '.github/workflows/shared-storage-upload-crash.yml'
   pull_request:
     paths:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/**'
@@ -77,7 +76,6 @@ on:
       - 'core/src/test/java/kafka/server/SharedStorageLocalStateLossE2ETest.java'
       - 'core/src/test/java/kafka/server/SharedStorageRemoteCheckpointLossE2ETest.java'
       - '.github/workflows/shared-storage-local-state-loss.yml'
-      - '.github/workflows/shared-storage-upload-crash.yml'
   workflow_dispatch:
 
 permissions:

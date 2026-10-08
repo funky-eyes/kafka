@@ -540,6 +540,23 @@ def main():
         if not patterns:
             errors.append(f"{workflows[name]}: GA-required evidence workflow must define push.paths")
             continue
+
+        own_workflow_path = constants["EVIDENCE_WORKFLOW_PATHS"].get(name)
+        evidence_workflow_paths = set(constants["EVIDENCE_WORKFLOW_PATHS"].values())
+        for event_name in ("push", "pull_request"):
+            event_patterns = event_path_patterns(texts[name], event_name)
+            foreign_workflows = sorted(
+                workflow_path
+                for workflow_path in evidence_workflow_paths
+                if workflow_path != own_workflow_path
+                and path_is_triggered(workflow_path, event_patterns)
+            )
+            if foreign_workflows:
+                errors.append(
+                    f"{workflows[name]}: {event_name}.paths must not trigger on another GA evidence workflow: "
+                    + ", ".join(foreign_workflows)
+                )
+
         for contract_path in sorted(constants["COMMON_EVIDENCE_CONTRACT_PATHS"]):
             if not path_is_triggered(contract_path, patterns):
                 errors.append(
