@@ -121,19 +121,6 @@ jobs:
           java-version: 25
           gradle-cache-read-only: true
 
-      - name: Compile shared storage sources
-        shell: bash
-        run: |
-          set -o pipefail
-          ./gradlew \
-            :storage:compileJava \
-            :storage:compileTestJava \
-            :storage:shared-storage-s3:compileJava \
-            :storage:shared-storage-s3:compileTestJava \
-            :core:compileScala \
-            :core:compileTestJava \
-            --no-scan 2>&1 | tee shared-storage-compile.log
-
       - name: Run shared storage LogManager startup regression
         shell: bash
         run: |
@@ -160,13 +147,12 @@ jobs:
           set -o pipefail
           ./gradlew :storage:shared-storage-s3:test --no-scan 2>&1 | tee shared-storage-s3-test.log
 
-      - name: Upload compile and test logs
+      - name: Upload test logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: shared-storage-ci-logs
           path: |
-            shared-storage-compile.log
             shared-storage-logmanager-regression.log
             shared-storage-test.log
             shared-storage-s3-test.log

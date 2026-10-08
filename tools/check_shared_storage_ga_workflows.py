@@ -75,6 +75,15 @@ GLOBAL_STORAGE_VERIFICATION_TASKS = (
     ":storage:shared-storage-s3:spotbugsTest",
 )
 
+REDUNDANT_MAIN_COMPILE_TASKS = (
+    ":storage:compileJava",
+    ":storage:compileTestJava",
+    ":storage:shared-storage-s3:compileJava",
+    ":storage:shared-storage-s3:compileTestJava",
+    ":core:compileScala",
+    ":core:compileTestJava",
+)
+
 
 def manifest_constants():
     tree = ast.parse(MANIFEST.read_text(encoding="utf-8"), filename=str(MANIFEST))
@@ -611,6 +620,16 @@ def main():
     if not static_owner:
         errors.append(f"{MAIN_WORKFLOW_NAME}: storage-tests job must own global static analysis")
     else:
+        redundant_compile_tasks = [
+            task for task in REDUNDANT_MAIN_COMPILE_TASKS if task in static_owner
+        ]
+        if redundant_compile_tasks:
+            errors.append(
+                f"{MAIN_WORKFLOW_NAME}: storage-tests must rely on test task compile dependencies "
+                "instead of a redundant compile preflight: "
+                + ", ".join(redundant_compile_tasks)
+            )
+
         owner_specs = (
             (":core:test", FOCUSED_CORE_EXCLUSIONS, "Core"),
             (":storage:test", FOCUSED_STORAGE_EXCLUSIONS, "Storage"),
