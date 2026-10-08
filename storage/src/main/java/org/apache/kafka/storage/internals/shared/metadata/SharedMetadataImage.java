@@ -314,6 +314,17 @@ public final class SharedMetadataImage {
         return partitionLogStarts.getOrDefault(partition, 0L);
     }
 
+    /**
+     * Returns an immutable point-in-time copy of the explicitly replayed partition log-start
+     * watermarks. An absent entry is different from a persisted offset of zero.
+     *
+     * <p>This is read-only evidence, not authority to retire remote references or delete S3 data.</p>
+     */
+    public synchronized Map<SharedPartitionId, Long> partitionLogStartsSnapshot() {
+        requireReady();
+        return Map.copyOf(partitionLogStarts);
+    }
+
     private void requireReady() {
         if (state == State.RECOVERING) {
             throw new IllegalStateException("Shared metadata image is still recovering");

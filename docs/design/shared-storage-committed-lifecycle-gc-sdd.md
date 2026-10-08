@@ -51,3 +51,27 @@ and it does not change which remote ranges the read path exposes.
 This checkpoint intentionally does not yet satisfy gates 1–6: it only locks
 the replay contract and the fail-closed starting point. Production release
 claims must not extend to post-lifecycle COMMITTED-object physical GC yet.
+
+## Batch 14: read-only per-object retirement precheck
+
+`SharedMetadataImage.partitionLogStartsSnapshot()` returns an immutable, stable
+point-in-time copy of **explicitly replayed** watermarks after the image becomes
+READY. A missing entry is not silently substituted with offset zero. Failed or
+recovering images cannot provide a snapshot.
+
+`CommittedObjectRetirementPrecheck.assess()` applies only logical offset
+evidence to an immutable COMMITTED object's full set of RecordBatch ranges:
+
+- `MISSING_WATERMARK`: any partition or topic incarnation lacks an explicitly
+  replayed log start; fail closed, including packed objects with other live ranges.
+- `HAS_UNRETIRED_RANGE`: every partition has a watermark, but at least one
+  range has an exclusive end offset **greater** than its partition's log start;
+  partially intersecting RecordBatches retain all their physical bytes.
+- `ALL_RANGES_BELOW_LOG_START`: every range ends at or below its matching
+  watermark. **This is a logical observation, not deletion authorization.**
+
+The precheck has no object-store or index mutation capability and cannot cause
+physical reclamation. Unit tests lock the exclusive-end boundary, multi-partition
+reachability, recreated topic-ID isolation, missing-vs-zero evidence, immutable
+snapshots, and fail-closed recovery/failed states. All writer, quiescence and
+durable retirement fences listed above remain mandatory before physical GC.

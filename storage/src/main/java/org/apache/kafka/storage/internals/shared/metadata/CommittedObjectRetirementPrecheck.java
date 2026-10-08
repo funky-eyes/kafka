@@ -1,0 +1,68 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.kafka.storage.internals.shared.metadata;
+
+import java.util.Map;
+import java.util.Objects;
+
+/**
+ * Read-only logical retirement precheck for a committed physical object.
+ *
+ * <p>The precheck requires an explicitly replayed log-start watermark for
+ * <em>every</em> range, including ranges packed from other partitions or topic IDs.
+ * A range is entirely obsolete only when its exclusive end offset is at or below
+ * the durable inclusive log start. Missing watermarks and partially intersecting
+ * RecordBatch ranges fail closed.</p>
+ *
+ * <p>Even {@link Finding#ALL_RANGES_BELOW_LOG_START} is NOT permission to delete:
+ * authoritative monotonic writers, in-flight upload fencing, reader quiescence,
+ * durable reference retirement, and physical-delete retry have not been wired yet.
+ * This class neither mutates the remote index nor accesses an object store.</p>
+ */
+public final class CommittedObjectRetirementPrecheck {
+    private CommittedObjectRetirementPrecheck() {
+    }
+
+    public static Finding assess(SharedObjectMetadata object, SharedMetadataImage image) {
+        Objects.requireNonNull(object, "object");
+        Objects.requireNonNull(image, "image");
+        Map<SharedPartitionId, Long> watermarks = image.partitionLogStartsSnapshot();
+        boolean missingWatermark = false;
+        boolean hasUnretiredRange = false;
+        for (SharedObjectRange range : object.ranges()) {
+            Long startOffset = watermarks.get(range.partition());
+            if (startOffset == null) {
+                missingWatermark = true;
+            } else if (range.offsets().endOffset() > startOffset) {
+                hasUnretiredRange = true;
+            }
+        }
+        if (missingWatermark) {
+            return Finding.MISSING_WATERMARK;
+        }
+        if (hasUnretiredRange) {
+            return Finding.HAS_UNRETIRED_RANGE;
+        }
+        return Finding.ALL_RANGES_BELOW_LOG_START;
+    }
+
+    public enum Finding {
+        MISSING_WATERMARK,
+        HAS_UNRETIRED_RANGE,
+        ALL_RANGES_BELOW_LOG_START
+    }
+}
