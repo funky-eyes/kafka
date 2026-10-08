@@ -22,8 +22,12 @@ import sys
 
 from shared_storage_ga_manifest import (
     AUTOMATIC_EVIDENCE_EVENT,
+    CORE_REQUIRED,
+    EVIDENCE_WORKFLOW_PATHS,
+    GA_HARDENING_REQUIRED,
     GitHub,
-    source_evidence_run_state,
+    source_workflow_run_state,
+    source_workflow_runs,
 )
 
 
@@ -35,11 +39,56 @@ def describe(runs):
     )
 
 
+def evaluate_source_run_state(
+    runs,
+    repo,
+    branch,
+    source_sha,
+    required_names=None,
+    require_present=False,
+):
+    required_names = tuple(required_names or (CORE_REQUIRED + GA_HARDENING_REQUIRED))
+    unknown = sorted(name for name in required_names if name not in EVIDENCE_WORKFLOW_PATHS)
+    if unknown:
+        raise ValueError("unknown GA evidence workflow(s): " + ", ".join(unknown))
+
+    relevant = source_workflow_runs(
+        runs,
+        repo,
+        branch,
+        source_sha,
+        required_names,
+    )
+    pending, failed = source_workflow_run_state(
+        runs,
+        repo,
+        branch,
+        source_sha,
+        required_names,
+    )
+    seen = {run.get("name") for run in relevant}
+    missing = (
+        sorted(name for name in required_names if name not in seen)
+        if require_present
+        else []
+    )
+
+    if failed:
+        state = 2
+    elif pending or missing:
+        state = 1
+    else:
+        state = 0
+    return state, pending, failed, missing
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", required=True)
     parser.add_argument("--branch", required=True)
     parser.add_argument("--sha", required=True)
+    parser.add_argument("--workflow", action="append", dest="workflows")
+    parser.add_argument("--require-present", action="store_true")
     parser.add_argument("--token", default=os.environ.get("GITHUB_TOKEN"))
     args = parser.parse_args()
 
@@ -55,18 +104,26 @@ def main():
             "per_page": 100,
         },
     )
-    pending, failed = source_evidence_run_state(
-        payload.get("workflow_runs", []),
-        args.repo,
-        args.branch,
-        args.sha,
-    )
+    try:
+        state, pending, failed, missing = evaluate_source_run_state(
+            payload.get("workflow_runs", []),
+            args.repo,
+            args.branch,
+            args.sha,
+            required_names=args.workflows,
+            require_present=args.require_present,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
 
     if failed:
         print("Source-SHA GA evidence has terminal failure: " + describe(failed))
         return 2
     if pending:
         print("Source-SHA GA evidence still running: " + describe(pending))
+    if missing:
+        print("Source-SHA GA evidence is not visible yet: " + ", ".join(missing))
+    if state == 1:
         return 1
 
     print("Source-SHA GA evidence is terminal; running the full manifest once.")

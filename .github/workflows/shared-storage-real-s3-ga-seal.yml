@@ -69,10 +69,11 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           RELEASE_SHA: ${{ steps.candidate.outputs.sha }}
           EVIDENCE_BRANCH: ${{ steps.candidate.outputs.evidence_branch }}
+          REAL_S3_BRANCH: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           deadline=$((SECONDS + 1200))
-          attempt=0
+          source_attempt=0
 
           verify_canonical_head() {
             canonical_sha=$(
@@ -90,47 +91,55 @@ jobs:
           }
 
           while true; do
-            attempt=$((attempt + 1))
+            source_attempt=$((source_attempt + 1))
             verify_canonical_head
-            rm -f shared-storage-ga-real-s3-manifest.md /tmp/shared-storage-ga-real-s3.out
-
             set +e
-            python3 tools/shared_storage_ga_manifest.py \
+            python3 tools/shared_storage_ga_source_runs.py \
               --repo "${{ github.repository }}" \
-              --ref "${RELEASE_SHA}" \
-              --evidence-branch "${EVIDENCE_BRANCH}" \
-              --require-real-s3 \
-              --require-real-s3-exact-sha \
-              --require-real-s3-branch-push \
-              --output shared-storage-ga-real-s3-manifest.md \
-              > /tmp/shared-storage-ga-real-s3.out 2>&1
-            status=$?
+              --branch "${REAL_S3_BRANCH}" \
+              --sha "${RELEASE_SHA}" \
+              --workflow "Shared Storage Real S3 Compatibility" \
+              --require-present \
+              > /tmp/shared-storage-real-s3-source-runs.out 2>&1
+            source_status=$?
             set -e
+            cat /tmp/shared-storage-real-s3-source-runs.out
 
-            if [ "${status}" -eq 0 ]; then
-              verify_canonical_head
-              cat /tmp/shared-storage-ga-real-s3.out
-              exit 0
+            if [ "${source_status}" -eq 0 ]; then
+              break
             fi
-
-            echo "Strict GA evidence attempt ${attempt} is not terminal-green yet."
-            if [ -f shared-storage-ga-real-s3-manifest.md ]; then
-              grep -E '\| (MISSING|PENDING|FAIL) \|' shared-storage-ga-real-s3-manifest.md || true
-              if grep -Fq '| FAIL |' shared-storage-ga-real-s3-manifest.md; then
-                cat /tmp/shared-storage-ga-real-s3.out
-                exit "${status}"
-              fi
-            else
-              cat /tmp/shared-storage-ga-real-s3.out
+            if [ "${source_status}" -eq 2 ]; then
+              echo "Exact-SHA Real S3 evidence has a terminal failure; evaluating the strict manifest now."
+              break
             fi
-
+            if [ "${source_status}" -ne 1 ]; then
+              exit "${source_status}"
+            fi
             if [ "${SECONDS}" -ge "${deadline}" ]; then
-              echo "Timed out waiting for strict Shared Storage GA evidence with real AWS S3."
-              cat /tmp/shared-storage-ga-real-s3.out
-              exit "${status}"
+              echo "Exact-SHA Real S3 evidence wait reached the deadline; evaluating the strict manifest now."
+              break
             fi
+            echo "Exact-SHA Real S3 evidence attempt ${source_attempt} is still active."
             sleep 15
           done
+
+          verify_canonical_head
+          rm -f shared-storage-ga-real-s3-manifest.md /tmp/shared-storage-ga-real-s3.out
+          set +e
+          python3 tools/shared_storage_ga_manifest.py \
+            --repo "${{ github.repository }}" \
+            --ref "${RELEASE_SHA}" \
+            --evidence-branch "${EVIDENCE_BRANCH}" \
+            --require-real-s3 \
+            --require-real-s3-exact-sha \
+            --require-real-s3-branch-push \
+            --output shared-storage-ga-real-s3-manifest.md \
+            > /tmp/shared-storage-ga-real-s3.out 2>&1
+          status=$?
+          set -e
+          verify_canonical_head
+          cat /tmp/shared-storage-ga-real-s3.out
+          exit "${status}"
 
       - name: Upload strict real-S3 GA manifest
         if: always()

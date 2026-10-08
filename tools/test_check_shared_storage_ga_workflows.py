@@ -18,6 +18,7 @@ import unittest
 
 from check_shared_storage_ga_workflows import (
     foreign_evidence_workflow_triggers,
+    full_manifest_after_source_wait_loop,
     redundant_runtime_staging_test_compiles,
     workflow_job_blocks,
 )
@@ -105,6 +106,37 @@ class RuntimeStagingOwnershipTest(unittest.TestCase):
             redundant_runtime_staging_test_compiles(
                 "./gradlew :core:compileTestJava --no-scan"
             ),
+        )
+
+
+class ManifestWaitLoopTest(unittest.TestCase):
+    def test_requires_full_manifest_after_wait_loop(self):
+        good = """while true; do
+          python3 tools/shared_storage_ga_source_runs.py
+          sleep 15
+          done
+
+          python3 tools/shared_storage_ga_manifest.py
+"""
+        bad = """while true; do
+          python3 tools/shared_storage_ga_source_runs.py
+          python3 tools/shared_storage_ga_manifest.py
+          sleep 15
+          done
+"""
+        self.assertTrue(
+            full_manifest_after_source_wait_loop(
+                good,
+                "python3 tools/shared_storage_ga_source_runs.py",
+                "python3 tools/shared_storage_ga_manifest.py",
+            )
+        )
+        self.assertFalse(
+            full_manifest_after_source_wait_loop(
+                bad,
+                "python3 tools/shared_storage_ga_source_runs.py",
+                "python3 tools/shared_storage_ga_manifest.py",
+            )
         )
 
 

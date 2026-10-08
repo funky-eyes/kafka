@@ -293,6 +293,15 @@ def standalone_storage_verification_tasks(text):
     return standalone_verification_tasks(text, GLOBAL_STORAGE_VERIFICATION_TASKS)
 
 
+def full_manifest_after_source_wait_loop(text, source_wait_token, full_manifest_token):
+    source_wait_index = text.find(source_wait_token)
+    full_manifest_index = text.find(full_manifest_token)
+    if source_wait_index < 0 or full_manifest_index < 0:
+        return False
+    loop_end = text.find("\n          done", source_wait_index)
+    return loop_end >= 0 and full_manifest_index > loop_end
+
+
 def workflow_job_blocks(text):
     jobs_match = re.search(r"(?ms)^jobs:\s*\n(.*)\Z", text)
     if jobs_match is None:
@@ -510,6 +519,32 @@ def main():
     if real_s3_seal.count("verify_canonical_head") < 3:
         errors.append(
             f"{REAL_S3_SEAL_WORKFLOW_NAME}: canonical branch head must be checked while waiting and immediately before PASS"
+        )
+    real_s3_source_wait_token = "python3 tools/shared_storage_ga_source_runs.py"
+    real_s3_full_manifest_token = "python3 tools/shared_storage_ga_manifest.py"
+    if real_s3_source_wait_token not in real_s3_seal:
+        errors.append(
+            f"{REAL_S3_SEAL_WORKFLOW_NAME}: strict seal must cheaply wait for exact-SHA Real S3 evidence"
+        )
+    if '--workflow "Shared Storage Real S3 Compatibility"' not in real_s3_seal:
+        errors.append(
+            f"{REAL_S3_SEAL_WORKFLOW_NAME}: source waiter must target the Real S3 compatibility workflow"
+        )
+    if "--require-present" not in real_s3_seal:
+        errors.append(
+            f"{REAL_S3_SEAL_WORKFLOW_NAME}: source waiter must not treat a missing Real S3 run as terminal"
+        )
+    if real_s3_seal.count(real_s3_full_manifest_token) != 1:
+        errors.append(
+            f"{REAL_S3_SEAL_WORKFLOW_NAME}: strict seal must contain exactly one full GA manifest command"
+        )
+    elif not full_manifest_after_source_wait_loop(
+        real_s3_seal,
+        real_s3_source_wait_token,
+        real_s3_full_manifest_token,
+    ):
+        errors.append(
+            f"{REAL_S3_SEAL_WORKFLOW_NAME}: strict full manifest must run after the source-SHA wait loop"
         )
 
     try:
@@ -815,9 +850,13 @@ def main():
             f"{AUTHOR_WORKFLOW_NAME}: normalized seal must execute the full GA manifest exactly once; "
             f"found {full_manifest_count}"
         )
-    elif source_wait_token in author_workflow and author_workflow.index(source_wait_token) > author_workflow.index(full_manifest_token):
+    elif not full_manifest_after_source_wait_loop(
+        author_workflow,
+        source_wait_token,
+        full_manifest_token,
+    ):
         errors.append(
-            f"{AUTHOR_WORKFLOW_NAME}: source-SHA evidence waiter must run before the full GA manifest"
+            f"{AUTHOR_WORKFLOW_NAME}: full GA manifest must run after the source-SHA wait loop"
         )
 
     ga_consistency = texts.get("Shared Storage GA Workflow Consistency", "")

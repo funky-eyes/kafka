@@ -389,12 +389,12 @@ def is_branch_evidence_run(
     )
 
 
-def source_evidence_run_state(runs, repo, branch, source_sha):
-    required = set(CORE_REQUIRED + GA_HARDENING_REQUIRED)
+def source_workflow_runs(runs, repo, branch, source_sha, required_names):
+    required = set(required_names)
     relevant = []
     for run in runs:
         name = run.get("name")
-        if name not in required:
+        if name not in required or name not in EVIDENCE_WORKFLOW_PATHS:
             continue
         if not is_branch_evidence_run(
             run,
@@ -407,7 +407,17 @@ def source_evidence_run_state(runs, repo, branch, source_sha):
         ):
             continue
         relevant.append(run)
+    return relevant
 
+
+def source_workflow_run_state(runs, repo, branch, source_sha, required_names):
+    relevant = source_workflow_runs(
+        runs,
+        repo,
+        branch,
+        source_sha,
+        required_names,
+    )
     pending = [run for run in relevant if run.get("status") != "completed"]
     failed = [
         run
@@ -415,6 +425,16 @@ def source_evidence_run_state(runs, repo, branch, source_sha):
         if run.get("status") == "completed" and run.get("conclusion") != "success"
     ]
     return pending, failed
+
+
+def source_evidence_run_state(runs, repo, branch, source_sha):
+    return source_workflow_run_state(
+        runs,
+        repo,
+        branch,
+        source_sha,
+        CORE_REQUIRED + GA_HARDENING_REQUIRED,
+    )
 
 
 def run_url(repo, run):

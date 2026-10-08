@@ -16,6 +16,7 @@
 
 import unittest
 
+from shared_storage_ga_source_runs import evaluate_source_run_state
 from shared_storage_ga_manifest import (
     COMMON_EVIDENCE_CONTRACT_PATHS,
     EVIDENCE_EXTRA_CONTRACT_PATHS,
@@ -393,13 +394,13 @@ class ProductionFingerprintTest(unittest.TestCase):
 
 class SourceEvidenceRunStateTest(unittest.TestCase):
     @staticmethod
-    def make_run(name, path, status, conclusion, sha="source-sha"):
+    def make_run(name, path, status, conclusion, sha="source-sha", branch="release"):
         return {
             "event": "push",
             "name": name,
             "path": path,
             "head_repository": {"full_name": "apache/kafka"},
-            "head_branch": "release",
+            "head_branch": branch,
             "head_sha": sha,
             "status": status,
             "conclusion": conclusion,
@@ -467,6 +468,66 @@ class SourceEvidenceRunStateTest(unittest.TestCase):
                 "source-sha",
             ),
         )
+
+
+class SourceRunWaiterTest(unittest.TestCase):
+    def test_require_present_waits_until_real_s3_run_appears(self):
+        state, pending, failed, missing = evaluate_source_run_state(
+            [],
+            "apache/kafka",
+            "release-real-s3",
+            "candidate-sha",
+            required_names=[REAL_S3_REQUIRED],
+            require_present=True,
+        )
+        self.assertEqual(1, state)
+        self.assertEqual([], pending)
+        self.assertEqual([], failed)
+        self.assertEqual([REAL_S3_REQUIRED], missing)
+
+    def test_require_present_accepts_exact_real_s3_success(self):
+        run = SourceEvidenceRunStateTest.make_run(
+            REAL_S3_REQUIRED,
+            ".github/workflows/shared-storage-real-s3.yml",
+            "completed",
+            "success",
+            sha="candidate-sha",
+            branch="release-real-s3",
+        )
+        state, pending, failed, missing = evaluate_source_run_state(
+            [run],
+            "apache/kafka",
+            "release-real-s3",
+            "candidate-sha",
+            required_names=[REAL_S3_REQUIRED],
+            require_present=True,
+        )
+        self.assertEqual(0, state)
+        self.assertEqual([], pending)
+        self.assertEqual([], failed)
+        self.assertEqual([], missing)
+
+    def test_real_s3_failure_is_terminal(self):
+        run = SourceEvidenceRunStateTest.make_run(
+            REAL_S3_REQUIRED,
+            ".github/workflows/shared-storage-real-s3.yml",
+            "completed",
+            "failure",
+            sha="candidate-sha",
+            branch="release-real-s3",
+        )
+        state, pending, failed, missing = evaluate_source_run_state(
+            [run],
+            "apache/kafka",
+            "release-real-s3",
+            "candidate-sha",
+            required_names=[REAL_S3_REQUIRED],
+            require_present=True,
+        )
+        self.assertEqual(2, state)
+        self.assertEqual([], pending)
+        self.assertEqual([run], failed)
+        self.assertEqual([], missing)
 
 
 if __name__ == "__main__":
