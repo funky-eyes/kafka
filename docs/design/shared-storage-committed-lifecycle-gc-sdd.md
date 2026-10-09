@@ -148,3 +148,75 @@ partition watermark plus replay offset under the image lock. It avoids copying
 the entire COMMITTED-object inventory on each tentative watermark proposal
 and preserves the missing-versus-explicit-zero distinction. The full inventory
 snapshot remains available for batch object-retirement diagnostics.
+
+## Batch 18: local role ABA fence, scoped transaction identity, strict metadata client policy
+
+### Implemented, deliberately non-emitting
+
+- `SharedPartitionRoleListener` invalidates `LocalRetirementLeadershipFence`
+  tickets before follower/removal notifications, and issues a new ticket after
+  each leader callback. Repeated LEADER callbacks, demotion/re-promotion,
+  partition removal/reassignment and topic-ID recreation cannot resurrect
+  a previously captured local ticket. Tokens from a different fence instance
+  are rejected.
+- `SharedMetadataClientConfiguration.retirementProducerProperties(partition)`
+  reserves one deterministic transactional ID for each immutable
+  `(clusterId, topicIdHigh, topicIdLow, partition)` tuple, independent of
+  the broker ID. This is distinct from per-broker sequence-producer IDs.
+  A future `initTransactions()` under the same identity can fence a
+  previous producer incarnation. No production code instantiates this
+  producer or emits retirement records in Batch 18.
+- Existing metadata producers now reject unsafe `acks`, disabled
+  idempotence, and caller-supplied `transactional.id`. The metadata consumer
+  rejects `read_uncommitted`, auto-commit and `latest` auto-offset-reset
+  overrides. SASL/SSL and other safe client properties remain configurable.
+
+### Still required before the first watermark write
+
+1. **Finalized mixed-version capability:** demonstrate all active brokers and
+   supported rollback binaries decode the reserved log-start key/value. A
+   single non-upgraded metadata replay participant can be permanently
+   failed by an unexpected key; never use a local boolean as proof.
+2. **Authoritative Kafka leader epoch:** extend the broker callback/ownership
+   boundary with the source partition's actual KRaft leader epoch and
+   validated log-start observation. The current local ticket is only an
+   intra-process ABA fence; it contains no Kafka leader epoch.
+3. **Single transactional owner:** acquire the immutable-topic-partition
+   transaction identity and initialize the Kafka producer to fence the
+   previous transactional producer. A stale former leader must never be
+   able to re-initialize this identity and overwrite a newer watermark.
+   This requires an authoritative persisted generation claim and a
+   last-writer-wins/compaction-safe ordering protocol, not just a
+   preflight read or a producer mutex.
+4. **Read-committed catch-up:** after acquiring ownership, catch up from
+   Kafka's authoritative metadata partition to a verified read-committed
+   horizon. Recheck the source leader epoch, current log start and the
+   persisted watermark/generation; reject absent evidence unless recording
+   explicit zero on the first incarnation.
+5. **Atomic publication and uncertain outcomes:** validate immediately
+   before `commitTransaction()`. On fencing, timeouts, uncertain commit or
+   role changes, discard any authority and reconstruct from an up-to-date
+   read-committed replay before retrying. An acknowledgement/consumed
+   offset alone is not evidence that a superseded writer was legitimate.
+6. **No S3 side effects:** only when all above are proven may a separate
+   lifecycle phase begin durable RecordBatch reference retirement and
+   reader/upload quiescence, followed by crash-retryable MinIO DELETE.
+
+#### Critical safety examples
+
+| Scenario | Requirement |
+| --- | --- |
+| LEADER -> FOLLOWER -> LEADER on one process | Old local ticket stays invalid |
+| Same topic name recreated with new Topic ID | Distinct retirement transaction identity and watermark |
+| Different brokers lead the same topic-ID partition | Same transactional ID, able to fence old producer |
+| Stale old leader re-initializes after new leader | Must detect lower authoritative leader epoch; no write |
+| Metadata topic is compacted between generations | Last retained record remains monotonic and fenced |
+| Operator overrides metadata `acks=1` or `read_uncommitted` | Fail fast at metadata client configuration |
+| Kafka transaction outcome is unknown | Fail closed; reinitialize and replay before considering retry |
+| One live RecordBatch exists in a packed object | Entire MinIO object remains protected |
+
+Batch 18 changes **no persisted key/value encoding** and enables **no**
+log-start writer, remote-reference retirement or physical object deletion.
+Tests verify only the local ticket, deterministic ID and client-safety
+properties; neither the local ticket nor `retirementProducerProperties()`
+can authorize a cross-broker transaction.
