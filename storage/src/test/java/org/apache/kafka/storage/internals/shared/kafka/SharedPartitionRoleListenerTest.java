@@ -181,6 +181,78 @@ class SharedPartitionRoleListenerTest {
         assertTrue(listener.captureRetirementLeader(selectedId).isEmpty());
     }
 
+    @Test
+    void epochAwareRoleCallbackCarriesKafkaEpochAndFencesPriorGeneration() {
+        SharedPartitionRoleListener listener = new SharedPartitionRoleListener(
+            configuration(Map.of()), new SharedCommitProgress()
+        );
+        Uuid id = Uuid.randomUuid();
+        TopicIdPartition leader = topicPartition(id, "shared-topic", 0);
+        SharedPartitionId shared = sharedPartitionId(id, 0);
+
+        listener.onLeadershipChangeWithEpochs(Map.of(leader, 5), Map.of());
+        var first = listener.captureEpochRetirementLeader(shared).orElseThrow();
+        assertEquals(5, first.leaderEpoch());
+        listener.onLeadershipChangeWithEpochs(Map.of(), Map.of(leader, 6));
+        assertFalse(listener.stillRetirementLeader(first));
+        assertTrue(listener.captureEpochRetirementLeader(shared).isEmpty());
+
+        listener.onLeadershipChangeWithEpochs(Map.of(leader, 7), Map.of());
+        var replacement = listener.captureEpochRetirementLeader(shared).orElseThrow();
+        assertEquals(7, replacement.leaderEpoch());
+        assertFalse(listener.stillRetirementLeader(first));
+        assertTrue(listener.stillRetirementLeader(replacement));
+    }
+
+    @Test
+    void legacyCallbackKeepsOldRoleBehaviorWithoutClaimingKafkaEpoch() {
+        SharedPartitionRoleListener listener = new SharedPartitionRoleListener(
+            configuration(Map.of()), new SharedCommitProgress()
+        );
+        Uuid id = Uuid.randomUuid();
+        TopicIdPartition leader = topicPartition(id, "shared-topic", 0);
+        SharedPartitionId shared = sharedPartitionId(id, 0);
+
+        listener.onLeadershipChange(List.of(leader), List.of());
+        assertTrue(listener.captureRetirementLeader(shared).isPresent());
+        assertTrue(listener.captureEpochRetirementLeader(shared).isEmpty());
+    }
+
+    @Test
+    void staleEpochNotificationCannotProduceEpochTicket() {
+        SharedPartitionRoleListener listener = new SharedPartitionRoleListener(
+            configuration(Map.of()), new SharedCommitProgress()
+        );
+        Uuid id = Uuid.randomUuid();
+        TopicIdPartition partition = topicPartition(id, "shared-topic", 0);
+        SharedPartitionId shared = sharedPartitionId(id, 0);
+
+        listener.onLeadershipChangeWithEpochs(Map.of(partition, 20), Map.of());
+        listener.onLeadershipChangeWithEpochs(Map.of(), Map.of(partition, 21));
+        listener.onLeadershipChangeWithEpochs(Map.of(partition, 20), Map.of());
+        assertTrue(listener.captureEpochRetirementLeader(shared).isEmpty());
+    }
+
+    @Test
+    void epochCallbackIgnoresClassicAndInternalTopics() {
+        SharedPartitionRoleListener listener = new SharedPartitionRoleListener(
+            configuration(Map.of(SharedStorageConfiguration.TOPICS_CONFIG, "shared-topic")),
+            new SharedCommitProgress()
+        );
+        Uuid id = Uuid.randomUuid();
+        TopicIdPartition leader = topicPartition(id, "shared-topic", 0);
+        TopicIdPartition classic = topicPartition(Uuid.randomUuid(), "classic-topic", 0);
+        TopicIdPartition internal = topicPartition(Uuid.randomUuid(), "__consumer_offsets", 0);
+
+        listener.onLeadershipChangeWithEpochs(
+            Map.of(leader, 1, classic, 2, internal, 3), Map.of()
+        );
+        assertTrue(listener.captureEpochRetirementLeader(sharedPartitionId(id, 0)).isPresent());
+        assertTrue(listener.captureEpochRetirementLeader(
+            sharedPartitionId(classic.topicId(), 0)
+        ).isEmpty());
+    }
+
     private SharedStorageConfiguration configuration(Map<String, ?> originals) {
         return SharedStorageConfiguration.from(new StorageExtensionContext(
             originals,

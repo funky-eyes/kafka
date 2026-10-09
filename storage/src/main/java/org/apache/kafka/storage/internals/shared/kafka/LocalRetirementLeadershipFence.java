@@ -35,24 +35,49 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class LocalRetirementLeadershipFence {
     private final ConcurrentMap<SharedPartitionId, Role> roles = new ConcurrentHashMap<>();
     private final AtomicLong nextGeneration = new AtomicLong();
+    private static final int UNKNOWN_LEADER_EPOCH = -1;
 
+    /**
+     * Compatibility path for callbacks without an epoch. This can never issue
+     * an epoch-aware leader ticket even if the caller reports LEADER.
+     */
     public void onLeader(SharedPartitionId partition) {
-        setRole(partition, true);
+        setRole(partition, true, UNKNOWN_LEADER_EPOCH);
+    }
+
+    public void onLeader(SharedPartitionId partition, int leaderEpoch) {
+        requireEpoch(leaderEpoch);
+        setRole(partition, true, leaderEpoch);
     }
 
     public void onFollower(SharedPartitionId partition) {
-        setRole(partition, false);
+        setRole(partition, false, UNKNOWN_LEADER_EPOCH);
+    }
+
+    public void onFollower(SharedPartitionId partition, int leaderEpoch) {
+        requireEpoch(leaderEpoch);
+        setRole(partition, false, leaderEpoch);
     }
 
     public void onRemoved(SharedPartitionId partition) {
         roles.remove(Objects.requireNonNull(partition, "partition"));
     }
 
-    private void setRole(SharedPartitionId partition, boolean leader) {
+    private static void requireEpoch(int leaderEpoch) {
+        if (leaderEpoch < 0) {
+            throw new IllegalArgumentException("Kafka leaderEpoch must be non-negative");
+        }
+    }
+
+    private void setRole(SharedPartitionId partition, boolean leader, int leaderEpoch) {
         Objects.requireNonNull(partition, "partition");
         roles.compute(partition, (ignored, old) -> {
             long generation = nextGeneration.updateAndGet(current -> Math.addExact(current, 1L));
-            return new Role(generation, leader);
+            int observedMaxEpoch = old == null ? UNKNOWN_LEADER_EPOCH : old.leaderEpoch();
+            // A stale lower epoch or an unversioned callback after a known epoch
+            // must never re-promote the local retirement writer.
+            boolean newLeader = leader && leaderEpoch >= observedMaxEpoch;
+            return new Role(generation, newLeader, Math.max(observedMaxEpoch, leaderEpoch));
         });
     }
 
@@ -62,7 +87,17 @@ public final class LocalRetirementLeadershipFence {
         if (current == null || !current.leader()) {
             return Optional.empty();
         }
-        return Optional.of(new LeaderTicket(this, partition, current.generation()));
+        return Optional.of(new LeaderTicket(
+            this, partition, current.generation(), current.leaderEpoch()
+        ));
+    }
+
+    /**
+     * Reports only leaders whose authoritative KRaft leader epoch was
+     * carried through the epoch-aware broker callback.
+     */
+    public Optional<LeaderTicket> captureEpochLeader(SharedPartitionId partition) {
+        return captureLeader(partition).filter(ticket -> ticket.leaderEpoch() >= 0);
     }
 
     public boolean stillLeader(LeaderTicket ticket) {
@@ -71,22 +106,27 @@ public final class LocalRetirementLeadershipFence {
             return false;
         }
         Role current = roles.get(ticket.partition());
-        return current != null && current.leader() && current.generation() == ticket.localGeneration();
+        return current != null && current.leader()
+            && current.generation() == ticket.localGeneration()
+            && current.leaderEpoch() == ticket.leaderEpoch();
     }
 
     public static final class LeaderTicket {
         private final LocalRetirementLeadershipFence owner;
         private final SharedPartitionId partition;
         private final long localGeneration;
+        private final int leaderEpoch;
 
         private LeaderTicket(
             LocalRetirementLeadershipFence owner,
             SharedPartitionId partition,
-            long localGeneration
+            long localGeneration,
+            int leaderEpoch
         ) {
             this.owner = owner;
             this.partition = partition;
             this.localGeneration = localGeneration;
+            this.leaderEpoch = leaderEpoch;
         }
 
         public SharedPartitionId partition() {
@@ -96,8 +136,13 @@ public final class LocalRetirementLeadershipFence {
         public long localGeneration() {
             return localGeneration;
         }
+
+        /** Kafka source epoch or -1 when the legacy notification lacked one. */
+        public int leaderEpoch() {
+            return leaderEpoch;
+        }
     }
 
-    private record Role(long generation, boolean leader) {
+    private record Role(long generation, boolean leader, int leaderEpoch) {
     }
 }

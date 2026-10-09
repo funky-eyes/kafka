@@ -22,6 +22,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class LocalRetirementLeadershipFenceTest {
@@ -101,6 +102,72 @@ class LocalRetirementLeadershipFenceTest {
         assertTrue(fence.captureLeader(RECREATED_TOPIC).isPresent());
         fence.onRemoved(PARTITION);
         assertTrue(fence.captureLeader(RECREATED_TOPIC).isPresent());
+    }
+
+    @Test
+    void sourceKafkaEpochIsCapturedByEpochAwareLeaderTicket() {
+        LocalRetirementLeadershipFence fence = new LocalRetirementLeadershipFence();
+        fence.onLeader(PARTITION, 7);
+        var ticket = fence.captureEpochLeader(PARTITION).orElseThrow();
+        assertTrue(fence.stillLeader(ticket));
+        assertTrue(ticket.leaderEpoch() == 7);
+    }
+
+    @Test
+    void unversionedLeaderCallbacksNeverClaimKafkaEpochAuthority() {
+        LocalRetirementLeadershipFence fence = new LocalRetirementLeadershipFence();
+        fence.onLeader(PARTITION);
+        assertTrue(fence.captureLeader(PARTITION).isPresent());
+        assertTrue(fence.captureEpochLeader(PARTITION).isEmpty());
+        assertTrue(fence.captureLeader(PARTITION).orElseThrow().leaderEpoch() == -1);
+    }
+
+    @Test
+    void staleLowerEpochCannotReclaimLocalLeadershipAfterDemotion() {
+        LocalRetirementLeadershipFence fence = new LocalRetirementLeadershipFence();
+        fence.onLeader(PARTITION, 10);
+        var ticket = fence.captureEpochLeader(PARTITION).orElseThrow();
+        fence.onFollower(PARTITION, 11);
+        fence.onLeader(PARTITION, 10);
+
+        assertFalse(fence.stillLeader(ticket));
+        assertTrue(fence.captureLeader(PARTITION).isEmpty());
+        fence.onLeader(PARTITION, 11);
+        assertTrue(fence.captureEpochLeader(PARTITION).isPresent());
+        assertTrue(fence.captureEpochLeader(PARTITION).orElseThrow().leaderEpoch() == 11);
+    }
+
+    @Test
+    void lowerEpochDoesNotReplaceCurrentKnownLeader() {
+        LocalRetirementLeadershipFence fence = new LocalRetirementLeadershipFence();
+        fence.onLeader(PARTITION, 10);
+        var original = fence.captureEpochLeader(PARTITION).orElseThrow();
+        fence.onLeader(PARTITION, 9);
+
+        assertFalse(fence.stillLeader(original));
+        assertTrue(fence.captureEpochLeader(PARTITION).isEmpty());
+        fence.onLeader(PARTITION, 12);
+        assertTrue(fence.captureEpochLeader(PARTITION).orElseThrow().leaderEpoch() == 12);
+    }
+
+    @Test
+    void unversionedReelectionCannotErasePreviouslyKnownEpoch() {
+        LocalRetirementLeadershipFence fence = new LocalRetirementLeadershipFence();
+        fence.onLeader(PARTITION, 12);
+        fence.onFollower(PARTITION);
+        fence.onLeader(PARTITION);
+
+        assertTrue(fence.captureLeader(PARTITION).isEmpty());
+        fence.onLeader(PARTITION, 12);
+        assertTrue(fence.captureEpochLeader(PARTITION).isPresent());
+    }
+
+    @Test
+    void invalidExplicitKafkaEpochIsRejected() {
+        LocalRetirementLeadershipFence fence = new LocalRetirementLeadershipFence();
+        assertThrows(IllegalArgumentException.class, () -> fence.onLeader(PARTITION, -1));
+        assertThrows(IllegalArgumentException.class, () -> fence.onFollower(PARTITION, -1));
+        assertTrue(fence.captureEpochLeader(PARTITION).isEmpty());
     }
 
     @Test

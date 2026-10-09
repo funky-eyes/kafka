@@ -22,6 +22,7 @@ import org.apache.kafka.storage.internals.log.StoragePartitionRoleListener;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 
 import java.util.Collection;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -51,8 +52,19 @@ public final class SharedPartitionRoleListener implements StoragePartitionRoleLi
     ) {
         Objects.requireNonNull(leaders, "leaders");
         Objects.requireNonNull(followers, "followers");
-        leaders.forEach(partition -> updateRole(partition, true));
-        followers.forEach(partition -> updateRole(partition, false));
+        leaders.forEach(partition -> updateRole(partition, true, -1));
+        followers.forEach(partition -> updateRole(partition, false, -1));
+    }
+
+    @Override
+    public void onLeadershipChangeWithEpochs(
+        Map<TopicIdPartition, Integer> leaders,
+        Map<TopicIdPartition, Integer> followers
+    ) {
+        Objects.requireNonNull(leaders, "leaders");
+        Objects.requireNonNull(followers, "followers");
+        leaders.forEach((partition, epoch) -> updateRole(partition, true, Objects.requireNonNull(epoch, "epoch")));
+        followers.forEach((partition, epoch) -> updateRole(partition, false, Objects.requireNonNull(epoch, "epoch")));
     }
 
     @Override
@@ -68,18 +80,28 @@ public final class SharedPartitionRoleListener implements StoragePartitionRoleLi
         });
     }
 
-    private void updateRole(TopicIdPartition partition, boolean leader) {
+    private void updateRole(TopicIdPartition partition, boolean leader, int leaderEpoch) {
         Objects.requireNonNull(partition, "partition");
         if (!configuration.useSharedStorage(partition.topic())) {
             return;
         }
         SharedPartitionId sharedPartition = sharedPartitionId(partition);
         if (leader) {
+            // A negative/unknown epoch can carry a legacy notification, but can
+            // never issue an epoch-aware retirement writer ticket.
+            if (leaderEpoch >= 0) {
+                retirementFence.onLeader(sharedPartition, leaderEpoch);
+            } else {
+                retirementFence.onLeader(sharedPartition);
+            }
             commitProgress.onLeader(sharedPartition);
-            retirementFence.onLeader(sharedPartition);
         } else {
             // Invalidate local retirement work before publishing follower progress.
-            retirementFence.onFollower(sharedPartition);
+            if (leaderEpoch >= 0) {
+                retirementFence.onFollower(sharedPartition, leaderEpoch);
+            } else {
+                retirementFence.onFollower(sharedPartition);
+            }
             commitProgress.onFollower(sharedPartition);
         }
     }
@@ -89,6 +111,13 @@ public final class SharedPartitionRoleListener implements StoragePartitionRoleLi
         SharedPartitionId partition
     ) {
         return retirementFence.captureLeader(partition);
+    }
+
+    /** Requires a real KRaft epoch rather than a legacy/unversioned role callback. */
+    public Optional<LocalRetirementLeadershipFence.LeaderTicket> captureEpochRetirementLeader(
+        SharedPartitionId partition
+    ) {
+        return retirementFence.captureEpochLeader(partition);
     }
 
     /** False after any demotion, reassignment, duplicate leadership callback, or removal. */
