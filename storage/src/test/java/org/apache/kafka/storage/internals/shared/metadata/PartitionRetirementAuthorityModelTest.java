@@ -181,7 +181,7 @@ class PartitionRetirementAuthorityModelTest {
         // the higher watermark remains in that checkpoint after log compaction.
         Snapshot restoredCheckpoint = new Snapshot(
             PARTITION, state.authorityOffset(), state.maxSourceLeaderEpoch(),
-            state.activeBrokerId(), state.explicitLogStart()
+            state.activeBrokerId(), state.explicitLogStart(), false
         );
         Decision late = advance(restoredCheckpoint, 1, 10, 20L, 40L, 9L, 10L);
         assertEquals(Outcome.REGRESSED_WATERMARK, late.outcome());
@@ -205,12 +205,117 @@ class PartitionRetirementAuthorityModelTest {
         assertThrows(IllegalArgumentException.class, () -> advance(initial, 1, 0, -1L, 0L, -1L, 0L));
         assertThrows(IllegalArgumentException.class, () -> advance(initial, 1, 0, 0L, -1L, -1L, 0L));
         assertThrows(IllegalArgumentException.class, () ->
-            new Snapshot(PARTITION, -1L, -1, 2, OptionalLong.empty())
+            new Snapshot(PARTITION, -1L, -1, 2, OptionalLong.empty(), false)
         );
         assertThrows(IllegalArgumentException.class, () ->
-            new Snapshot(PARTITION, 10L, -1, -1, OptionalLong.empty())
+            new Snapshot(PARTITION, 10L, -1, -1, OptionalLong.empty(), false)
         );
         assertFalse(initial.explicitLogStart().isPresent());
+    }
+
+    @Test
+    void deletingActiveTopicIrreversiblyFencesNewElections() {
+        Snapshot active = elect(initial(), 1, 10, -1L, 0L).snapshot();
+        Decision deleted = delete(active, 0L, 1L);
+
+        assertEquals(Outcome.APPLIED, deleted.outcome());
+        assertTrue(deleted.snapshot().terminallyDeleted());
+        assertEquals(-1, deleted.snapshot().activeBrokerId());
+        Decision delayed = elect(deleted.snapshot(), 2, 99, 1L, 2L);
+        assertEquals(Outcome.TERMINALLY_DELETED, delayed.outcome());
+        assertSame(deleted.snapshot(), delayed.snapshot());
+    }
+
+    @Test
+    void topicDeleteBeforeAnyElectionIsTerminal() {
+        Decision deleted = delete(initial(), -1L, 0L);
+        assertEquals(Outcome.APPLIED, deleted.outcome());
+        assertEquals(-1, deleted.snapshot().maxSourceLeaderEpoch());
+        assertTrue(deleted.snapshot().terminallyDeleted());
+        Decision newEpoch = elect(deleted.snapshot(), 1, 0, 0L, 1L);
+        assertEquals(Outcome.TERMINALLY_DELETED, newEpoch.outcome());
+    }
+
+    @Test
+    void lateWatermarkAndNoLeaderCallbacksCannotModifyDeletion() {
+        Snapshot active = elect(initial(), 1, 10, -1L, 0L).snapshot();
+        active = advance(active, 1, 10, 0L, 0L, 0L, 1L).snapshot();
+        Snapshot deleted = delete(active, 1L, 2L).snapshot();
+        assertEquals(
+            Outcome.TERMINALLY_DELETED,
+            advance(deleted, 1, 10, 0L, 0L, 2L, 3L).outcome()
+        );
+        assertEquals(Outcome.TERMINALLY_DELETED, revoke(deleted, 11, 2L, 3L).outcome());
+        assertEquals(OptionalLong.of(0L), deleted.explicitLogStart());
+    }
+
+    @Test
+    void staleDeleteRequestCannotOverrideNewAuthorityVersion() {
+        Snapshot elected = elect(initial(), 1, 10, -1L, 0L).snapshot();
+        Snapshot advanced = advance(elected, 1, 10, 0L, 0L, 0L, 1L).snapshot();
+        Decision stale = delete(advanced, 0L, 2L);
+        assertEquals(Outcome.STALE_AUTHORITY_SNAPSHOT, stale.outcome());
+        assertSame(advanced, stale.snapshot());
+        assertFalse(stale.snapshot().terminallyDeleted());
+    }
+
+    @Test
+    void duplicateDeleteIsIdempotentButDoesNotMintNewVersion() {
+        Snapshot deleted = delete(initial(), -1L, 0L).snapshot();
+        Decision repeated = delete(deleted, 0L, 1L);
+        assertEquals(Outcome.NO_CHANGE, repeated.outcome());
+        assertSame(deleted, repeated.snapshot());
+        assertEquals(0L, repeated.snapshot().authorityOffset());
+    }
+
+    @Test
+    void topicIdRecreationDoesNotInheritTerminalState() {
+        Snapshot removed = delete(initial(), -1L, 0L).snapshot();
+        assertEquals(
+            Outcome.TOPIC_PARTITION_MISMATCH,
+            PartitionRetirementAuthorityModel.observeLeader(removed, RECREATED, 2, 1, 0L, 1L).outcome()
+        );
+        Snapshot newTopic = PartitionRetirementAuthorityModel.initial(RECREATED);
+        Decision elected = PartitionRetirementAuthorityModel.observeLeader(
+            newTopic, RECREATED, 2, 1, -1L, 0L
+        );
+        assertEquals(Outcome.APPLIED, elected.outcome());
+        assertFalse(elected.snapshot().terminallyDeleted());
+    }
+
+    @Test
+    void terminalSnapshotRetainsWatermarkAcrossCheckpointRoundTrip() {
+        Snapshot state = elect(initial(), 1, 10, -1L, 0L).snapshot();
+        state = advance(state, 1, 10, 0L, 0L, 0L, 1L).snapshot();
+        state = advance(state, 1, 10, 50L, 50L, 1L, 2L).snapshot();
+        Snapshot deleted = delete(state, 2L, 3L).snapshot();
+        Snapshot recovered = new Snapshot(
+            deleted.partition(), deleted.authorityOffset(),
+            deleted.maxSourceLeaderEpoch(), deleted.activeBrokerId(),
+            deleted.explicitLogStart(), deleted.terminallyDeleted()
+        );
+
+        assertEquals(OptionalLong.of(50L), recovered.explicitLogStart());
+        assertEquals(Outcome.TERMINALLY_DELETED, elect(recovered, 3, 11, 3L, 4L).outcome());
+    }
+
+    @Test
+    void terminalStateConstructorRejectsRevivedLeader() {
+        assertThrows(IllegalArgumentException.class, () ->
+            new Snapshot(PARTITION, 4L, 12, 1, OptionalLong.empty(), true)
+        );
+        assertThrows(IllegalArgumentException.class, () ->
+            new Snapshot(PARTITION, -1L, -1, -1, OptionalLong.empty(), true)
+        );
+        assertThrows(IllegalArgumentException.class, () ->
+            new Snapshot(PARTITION, 10L, -1, -1, OptionalLong.of(4L), true)
+        );
+    }
+
+    private static Decision delete(Snapshot state, long expected, long next) {
+        return PartitionRetirementAuthorityModel.observeTopicDeleted(
+            state, PARTITION, expected, next
+        );
     }
 
     private static Snapshot initial() {

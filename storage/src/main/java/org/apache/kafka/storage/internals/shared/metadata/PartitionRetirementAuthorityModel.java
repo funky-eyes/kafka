@@ -40,7 +40,7 @@ public final class PartitionRetirementAuthorityModel {
     }
 
     public static Snapshot initial(SharedPartitionId partition) {
-        return new Snapshot(partition, NO_AUTHORITY_OFFSET, UNKNOWN_EPOCH, NO_LEADER, OptionalLong.empty());
+        return new Snapshot(partition, NO_AUTHORITY_OFFSET, UNKNOWN_EPOCH, NO_LEADER, OptionalLong.empty(), false);
     }
 
     /**
@@ -60,6 +60,9 @@ public final class PartitionRetirementAuthorityModel {
         if (precondition != null) {
             return new Decision(precondition, previous);
         }
+        if (previous.terminallyDeleted()) {
+            return new Decision(Outcome.TERMINALLY_DELETED, previous);
+        }
         if (sourceLeaderEpoch < previous.maxSourceLeaderEpoch()) {
             return new Decision(Outcome.STALE_KAFKA_LEADER_EPOCH, previous);
         }
@@ -76,7 +79,8 @@ public final class PartitionRetirementAuthorityModel {
                 nextAuthorityOffset,
                 sourceLeaderEpoch,
                 brokerId,
-                previous.explicitLogStart()
+                previous.explicitLogStart(),
+                false
             )
         );
     }
@@ -96,6 +100,9 @@ public final class PartitionRetirementAuthorityModel {
         if (precondition != null) {
             return new Decision(precondition, previous);
         }
+        if (previous.terminallyDeleted()) {
+            return new Decision(Outcome.TERMINALLY_DELETED, previous);
+        }
         if (sourceLeaderEpoch < previous.maxSourceLeaderEpoch()) {
             return new Decision(Outcome.STALE_KAFKA_LEADER_EPOCH, previous);
         }
@@ -109,7 +116,8 @@ public final class PartitionRetirementAuthorityModel {
                 nextAuthorityOffset,
                 sourceLeaderEpoch,
                 NO_LEADER,
-                previous.explicitLogStart()
+                previous.explicitLogStart(),
+                false
             )
         );
     }
@@ -136,6 +144,9 @@ public final class PartitionRetirementAuthorityModel {
         if (precondition != null) {
             return new Decision(precondition, previous);
         }
+        if (previous.terminallyDeleted()) {
+            return new Decision(Outcome.TERMINALLY_DELETED, previous);
+        }
         Outcome finding = classifyAdvance(previous, brokerId, sourceLeaderEpoch,
             requestedLogStart, observedSourceLogStart);
         if (finding != Outcome.APPLIED) {
@@ -148,11 +159,44 @@ public final class PartitionRetirementAuthorityModel {
                 nextAuthorityOffset,
                 previous.maxSourceLeaderEpoch(),
                 brokerId,
-                OptionalLong.of(requestedLogStart)
+                OptionalLong.of(requestedLogStart),
+                false
             )
         );
     }
 
+
+    /**
+     * Models a controller-committed terminal Topic ID fence. It must be applied
+     * by a future authoritative controller after validating a real RemoveTopicRecord
+     * for this exact topic incarnation, and survives all later controller snapshots.
+     * Merely invoking this pure function does not persist or authorize anything.
+     */
+    public static Decision observeTopicDeleted(
+        Snapshot previous,
+        SharedPartitionId partition,
+        long expectedAuthorityOffset,
+        long nextAuthorityOffset
+    ) {
+        Outcome precondition = checkVersion(previous, partition, expectedAuthorityOffset, nextAuthorityOffset);
+        if (precondition != null) {
+            return new Decision(precondition, previous);
+        }
+        if (previous.terminallyDeleted()) {
+            return new Decision(Outcome.NO_CHANGE, previous);
+        }
+        return new Decision(
+            Outcome.APPLIED,
+            new Snapshot(
+                partition,
+                nextAuthorityOffset,
+                previous.maxSourceLeaderEpoch(),
+                NO_LEADER,
+                previous.explicitLogStart(),
+                true
+            )
+        );
+    }
 
     private static Outcome classifyAdvance(
         Snapshot previous,
@@ -218,6 +262,7 @@ public final class PartitionRetirementAuthorityModel {
     public enum Outcome {
         APPLIED,
         NO_CHANGE,
+        TERMINALLY_DELETED,
         TOPIC_PARTITION_MISMATCH,
         STALE_AUTHORITY_SNAPSHOT,
         NON_MONOTONIC_AUTHORITY_OFFSET,
@@ -235,7 +280,8 @@ public final class PartitionRetirementAuthorityModel {
         long authorityOffset,
         int maxSourceLeaderEpoch,
         int activeBrokerId,
-        OptionalLong explicitLogStart
+        OptionalLong explicitLogStart,
+        boolean terminallyDeleted
     ) {
         public Snapshot {
             Objects.requireNonNull(partition, "partition");
@@ -244,12 +290,20 @@ public final class PartitionRetirementAuthorityModel {
                 || activeBrokerId < NO_LEADER) {
                 throw new IllegalArgumentException("Invalid reference authority snapshot");
             }
-            if ((maxSourceLeaderEpoch == UNKNOWN_EPOCH) != (authorityOffset == NO_AUTHORITY_OFFSET)) {
-                throw new IllegalArgumentException("Initial epoch and authority offset must both be unknown");
+            if (authorityOffset == NO_AUTHORITY_OFFSET &&
+                (maxSourceLeaderEpoch != UNKNOWN_EPOCH || activeBrokerId != NO_LEADER
+                    || explicitLogStart.isPresent() || terminallyDeleted)) {
+                throw new IllegalArgumentException("Unknown authority offset requires an empty initial snapshot");
+            }
+            if (authorityOffset >= 0L && maxSourceLeaderEpoch == UNKNOWN_EPOCH && !terminallyDeleted) {
+                throw new IllegalArgumentException("Only terminal deletion may precede a first election");
             }
             if (maxSourceLeaderEpoch == UNKNOWN_EPOCH
                 && (activeBrokerId != NO_LEADER || explicitLogStart.isPresent())) {
-                throw new IllegalArgumentException("Uninitialized snapshot cannot contain an owner or watermark");
+                throw new IllegalArgumentException("Unknown source epoch cannot have a leader or watermark");
+            }
+            if (terminallyDeleted && activeBrokerId != NO_LEADER) {
+                throw new IllegalArgumentException("Terminally deleted topic cannot retain a leader");
             }
             if (explicitLogStart.isPresent() && explicitLogStart.getAsLong() < 0L) {
                 throw new IllegalArgumentException("Persisted log start must be non-negative");
