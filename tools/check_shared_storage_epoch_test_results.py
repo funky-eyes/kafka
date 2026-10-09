@@ -95,6 +95,10 @@ REQUIRED_TESTS = {
         "topicIdRecreationDoesNotInheritTerminalState",
         "terminalSnapshotRetainsWatermarkAcrossCheckpointRoundTrip",
         "terminalStateConstructorRejectsRevivedLeader",
+        "initialAuthorityOffsetCannotCarryAnyClaimedGeneration",
+        "unknownEpochAtCommittedOffsetRequiresATerminalTombstone",
+        "terminalStateRetainsPriorWatermarkButNeverActiveBroker",
+        "invalidNegativeDomainAndWatermarkValuesFailClosed",
     ),
     "org.apache.kafka.storage.internals.shared.metadata.PartitionRetirementCompactionSafetyTest": (
         "liveReplayDetectsBackwardWriteButCompactedReplayCannotRecoverItsHistory",

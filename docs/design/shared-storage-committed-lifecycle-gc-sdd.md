@@ -535,3 +535,30 @@ The legacy 0x04 log-start metadata key remains non-emitting. There is no new
 controller event, KRaft record, production watermark producer, remote index
 mutation or physical COMMITTED object deletion in Batch 23. Historical GA
 19/19 PASS remains limited to the already implemented shared-storage scope.
+
+
+## Batch 24: keep the authority snapshot invariant fail-closed under Checkstyle
+
+Batch 23 Java 25 Shared Storage failed in the main-storage module's static
+analysis, not in Kafka/MinIO runtime validation:
+the compact constructor of PartitionRetirementAuthorityModel.Snapshot
+exceeded Checkstyle Cyclomatic Complexity (19 > 16) and NPath
+Complexity (3456 > 500). The downstream Normalize GA Evidence Seal was
+correctly BLOCKED; this was not an independent release correctness failure.
+
+The constructor still performs the exact same fail-closed validations,
+but delegates to four private helpers: domain, initial-state consistency,
+leader/terminal-state consistency, and persisted watermark bounds. No
+exceptions are downgraded, no guard is removed and no Checkstyle or GA
+threshold is relaxed.
+
+Four additional required JUnit witnesses cover unknown initial authority
+offsets, terminal deletion before first election, preservation of
+watermarks in terminal snapshots, and malformed negative domains.
+The mandatory anti-skip list now requires **80** named methods across
+storage and controller metadata tests, with zero skipped/failed.
+
+The corrected guard is deliberately non-emitting. KRaft authoritative
+transition records, controller-commit fencing, mixed-version rollout,
+durable COMMITTED reference retirement and physical MinIO deletion remain
+separate hard requirements. This checkpoint does not certify any of them.

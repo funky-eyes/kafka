@@ -43,8 +43,8 @@ class EpochEvidenceCheckerTest(unittest.TestCase):
                 ET.SubElement(case, "failure")
         ET.ElementTree(xml).write(self.root / ("TEST-" + suite + ".xml"), encoding="utf-8")
 
-    def test_all_76_methods_pass(self):
-        self.assertEqual(76, verify(self.root))
+    def test_all_80_methods_pass(self):
+        self.assertEqual(80, verify(self.root))
 
     def test_missing_controller_module_report_fails_closed(self):
         controller = "org.apache.kafka.controller.PartitionRetirementControllerPrecheckTest"
@@ -59,7 +59,7 @@ class EpochEvidenceCheckerTest(unittest.TestCase):
             other = Path(controller_folder)
             (other / xml_name).write_bytes((self.root / xml_name).read_bytes())
             (self.root / xml_name).unlink()
-            self.assertEqual(76, verify(self.root, other))
+            self.assertEqual(80, verify(self.root, other))
 
     def test_missing_suite_fails(self):
         suite = next(iter(REQUIRED_TESTS))
