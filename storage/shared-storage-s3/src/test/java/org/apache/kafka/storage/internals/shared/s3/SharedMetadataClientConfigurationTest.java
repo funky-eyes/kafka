@@ -24,6 +24,7 @@ import org.apache.kafka.common.config.TopicConfig;
 import org.apache.kafka.common.security.auth.SecurityProtocol;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.storage.internals.log.StorageExtensionBrokerContext;
+import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 
 import org.junit.jupiter.api.Test;
 
@@ -33,6 +34,7 @@ import java.util.Map;
 import java.util.Properties;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -100,6 +102,73 @@ class SharedMetadataClientConfigurationTest {
             "[2001:db8::1]:9092",
             config.adminProperties().get(CommonClientConfigs.BOOTSTRAP_SERVERS_CONFIG)
         );
+    }
+
+    @Test
+    void retirementTransactionIdIsStableAcrossBrokerIncarnations() {
+        var first = SharedMetadataClientConfiguration.from(
+            context(List.of(new Endpoint("PLAINTEXT", SecurityProtocol.PLAINTEXT, "localhost", 9092)), Map.of())
+        );
+        var second = SharedMetadataClientConfiguration.from(new StorageExtensionBrokerContext(
+            "cluster-a", 8,
+            List.of(new Endpoint("PLAINTEXT", SecurityProtocol.PLAINTEXT, "localhost", 9092)),
+            Map.of(),
+            Time.SYSTEM
+        ));
+        SharedPartitionId partition = new SharedPartitionId(11L, 12L, 0);
+
+        assertEquals(first.retirementTransactionalId(partition), second.retirementTransactionalId(partition));
+        assertEquals(
+            first.retirementProducerProperties(partition).get(ProducerConfig.TRANSACTIONAL_ID_CONFIG),
+            second.retirementProducerProperties(partition).get(ProducerConfig.TRANSACTIONAL_ID_CONFIG)
+        );
+        assertNotEquals(
+            first.retirementProducerProperties(partition).get(ProducerConfig.CLIENT_ID_CONFIG),
+            second.retirementProducerProperties(partition).get(ProducerConfig.CLIENT_ID_CONFIG)
+        );
+        assertEquals("all", first.retirementProducerProperties(partition).get(ProducerConfig.ACKS_CONFIG));
+        assertEquals(true, first.retirementProducerProperties(partition).get(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG));
+    }
+
+    @Test
+    void retirementTransactionalIdIsolatedByTopicIncarnationPartitionAndCluster() {
+        var first = SharedMetadataClientConfiguration.from(
+            context(List.of(new Endpoint("PLAINTEXT", SecurityProtocol.PLAINTEXT, "localhost", 9092)), Map.of())
+        );
+        SharedPartitionId partition = new SharedPartitionId(11L, 12L, 0);
+        String id = first.retirementTransactionalId(partition);
+        assertNotEquals(id, first.retirementTransactionalId(new SharedPartitionId(11L, 12L, 1)));
+        assertNotEquals(id, first.retirementTransactionalId(new SharedPartitionId(11L, 13L, 0)));
+        assertNotEquals(id, first.retirementTransactionalId(new SharedPartitionId(-1L, 12L, 0)));
+        var otherCluster = SharedMetadataClientConfiguration.from(new StorageExtensionBrokerContext(
+            "cluster-b", 7,
+            List.of(new Endpoint("PLAINTEXT", SecurityProtocol.PLAINTEXT, "localhost", 9092)),
+            Map.of(),
+            Time.SYSTEM
+        ));
+        assertNotEquals(id, otherCluster.retirementTransactionalId(partition));
+        assertTrue(id.length() <= 256);
+        assertNotEquals(
+            first.sequenceProducerProperties().get(ProducerConfig.TRANSACTIONAL_ID_CONFIG),
+            id
+        );
+    }
+
+    @Test
+    void invalidOrOversizedClusterIdentityCannotBeTruncatedIntoTransactionIdAlias() {
+        SharedPartitionId partition = new SharedPartitionId(1L, 2L, 0);
+        List<Endpoint> listeners = List.of(
+            new Endpoint("PLAINTEXT", SecurityProtocol.PLAINTEXT, "localhost", 9092)
+        );
+        var invalid = SharedMetadataClientConfiguration.from(new StorageExtensionBrokerContext(
+            "cluster invalid!", 7, listeners, Map.of(), Time.SYSTEM
+        ));
+        assertThrows(IllegalArgumentException.class, () -> invalid.retirementTransactionalId(partition));
+
+        var oversized = SharedMetadataClientConfiguration.from(new StorageExtensionBrokerContext(
+            "a".repeat(240), 7, listeners, Map.of(), Time.SYSTEM
+        ));
+        assertThrows(IllegalArgumentException.class, () -> oversized.retirementTransactionalId(partition));
     }
 
     @Test

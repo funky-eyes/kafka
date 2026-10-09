@@ -26,6 +26,7 @@ import org.apache.kafka.common.config.TopicConfig;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.storage.internals.log.StorageExtensionBrokerContext;
+import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -149,6 +150,36 @@ public final class SharedMetadataClientConfiguration {
             "shared-storage-sequence-" + clusterId + "-broker-" + brokerId
         );
         return result;
+    }
+
+    /**
+     * Reserved client identity for a future EXCLUSIVE log-start writer.
+     *
+     * <p>The same topic ID/partition across every broker uses the same transactional.id,
+     * so initTransactions() will fence the older producer generation. Different topic
+     * incarnations or partitions never share the ID. Merely constructing these
+     * properties does not grant Kafka leadership, a cluster-wide monotonic CAS,
+     * or permission to emit PARTITION_LOG_START records.</p>
+     */
+    public Properties retirementProducerProperties(SharedPartitionId partition) {
+        Properties result = producerProperties();
+        result.put(ProducerConfig.CLIENT_ID_CONFIG, "shared-storage-retirement-producer-" + brokerId);
+        result.put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, retirementTransactionalId(partition));
+        return result;
+    }
+
+    public String retirementTransactionalId(SharedPartitionId partition) {
+        Objects.requireNonNull(partition, "partition");
+        // Prefix and delimiters keep this namespace disjoint from broker sequence allocation.
+        String identity = "shared-storage-retirement-" + clusterId
+            + "-" + Long.toUnsignedString(partition.topicIdHigh(), 16)
+            + "-" + Long.toUnsignedString(partition.topicIdLow(), 16)
+            + "-" + partition.partition();
+        // Kafka transactional IDs are bounded, and truncation could alias distinct partitions.
+        if (identity.length() > 256 || !identity.matches("[a-zA-Z0-9._-]+")) {
+            throw new IllegalArgumentException("Invalid partition retirement transactional.id");
+        }
+        return identity;
     }
 
     public Properties consumerProperties() {
