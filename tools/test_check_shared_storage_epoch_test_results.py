@@ -43,8 +43,8 @@ class EpochEvidenceCheckerTest(unittest.TestCase):
                 ET.SubElement(case, "failure")
         ET.ElementTree(xml).write(self.root / ("TEST-" + suite + ".xml"), encoding="utf-8")
 
-    def test_all_39_methods_pass(self):
-        self.assertEqual(39, verify(self.root))
+    def test_all_55_methods_pass(self):
+        self.assertEqual(55, verify(self.root))
 
     def test_missing_suite_fails(self):
         suite = next(iter(REQUIRED_TESTS))

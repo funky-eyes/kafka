@@ -385,3 +385,76 @@ No controller RPC, KRaft metadata record, authoritative writer, reference
 retirement, or MinIO physical COMMITTED lifecycle deletion is enabled in
 Batch 21. The historical 19/19 GA PASS remains scoped to the already
 implemented release behavior.
+
+
+## Batch 22: executable authority-transition reference model (still non-emitting)
+
+PartitionRetirementAuthorityModel is a **pure, side-effect-free reference
+specification** for a future controller/KRaft-serialized retirement
+generation and monotonic watermark protocol. It is intentionally **not**
+a controller implementation, has no active production callers and no
+Kafka producer, metadata codec writer, reader eviction or MinIO DELETE.
+
+### Required state and ordering assumptions
+
+Every hypothetical authority snapshot is scoped to an **immutable
+Topic ID and partition** and retains:
+
+- The offset of the **last accepted authority transition**, not a
+  Kafka metadata consumer offset. Offsets must strictly increase
+  but may have gaps for unrelated KRaft commands.
+- The highest source-partition KRaft leader epoch accepted.
+  A no-leader transition retains this epoch: a delayed same-epoch
+  election may never recreate a writer.
+- The active source broker ID, or explicit NO_LEADER, and an
+  explicitly persisted inclusive log start (missing differs from zero).
+
+The model's observeLeader, observeNoLeader and advanceLogStart
+operations assume that **one trusted controller has serialized and
+durably validated** every accepted transition at the commit boundary.
+Each proposal supplies an expected prior authority offset to detect
+stale snapshots. An old epoch, wrong broker, mismatched topic ID,
+stale expected version, absent first zero, regressed watermark or value
+above an observed source log start cannot change the model. Duplicate
+leadership and equal watermarks leave the model unchanged; a new epoch
+retains the prior watermark across broker changes.
+
+Sixteen unit tests exercise cross-broker handover, stale former
+leaders, equal-epoch demotion, authority-version races, monotonic
+watermarks across a *hypothetical* compacted durable controller
+snapshot, initial zero, topic-ID isolation and noncontiguous offsets.
+The mandatory Java 25 anti-skip gate now lists **55 named tests**.
+
+### What this reference does NOT establish
+
+An arbitrary caller could fabricate the reference Snapshot, broker ID,
+source epoch, log-start observation or authority offset. The reducer
+cannot authenticate them. A future integration MUST obtain trusted
+inputs from the current KRaft controller state and validate and
+persist at one authoritative serialization point:
+
+1. **Controller integration:** No KRaft record or controller RPC
+   currently exists. A versioned record, controller image and
+   mixed-version/rollback-capability gate are required first.
+2. **Epoch ownership:** Broker callbacks and Kafka transactional IDs
+   do not establish controller permission. Stale producers must be
+   rejected *at commit*, including after reinitialization or restart.
+3. **Durable snapshots:** The Java reference Snapshot is not durable.
+   KRaft replay and snapshot restore must preserve maximum watermark,
+   topic incarnation and generation despite compaction. The existing
+   single-key last-write-wins metadata topic cannot guarantee this.
+4. **Fresh source observation:** The method parameter representing
+   the source log start is caller-supplied, not an authenticated
+   latest source offset. Current KRaft epoch, bound and read-committed
+   metadata replay horizon must be revalidated at commit time.
+5. **Unknown outcomes:** Timeout, failed replay, lost generation,
+   unsupported binary or uncertain controller response must deny
+   further progress and reconstruct authority from committed state.
+6. **Logical and physical GC:** A durable log-start does not retire
+   COMMITTED packed objects by itself. A separate persistent reference
+   retirement, read/upload quiescence fence and crash-retryable physical
+   deletion phase are still mandatory.
+
+The existing 0x04 log-start compacted key remains **non-emitting**.
+The historical 19/19 GA manifest covers the previously delivered
+shared-storage behavior and does not certify COMMITTED lifecycle GC.
