@@ -19,6 +19,7 @@ package kafka.server;
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.AdminClientConfig;
 import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.clients.admin.OffsetSpec;
 import org.apache.kafka.clients.admin.TopicDescription;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
@@ -215,6 +216,7 @@ public class SharedStorageAcksOneIndependentProcessTest {
             stopBroker(brokers.get(followerId));
         }
         waitForTopicState(admin, replicationFactor, (short) 1, leaderId);
+        waitForLeaderServingData(admin, leaderId);
 
         RecordMetadata acknowledged = produceOne(bootstrapServers, 0);
         assertEquals(0L, acknowledged.offset());
@@ -274,6 +276,7 @@ public class SharedStorageAcksOneIndependentProcessTest {
         );
         int leaderId = topic.partitions().get(0).leader().id();
         List<Integer> replicas = replicaIds(topic);
+        waitForLeaderServingData(admin, leaderId);
 
         RecordMetadata acknowledged = produceOne(bootstrapServers, 1);
         assertEquals(1L, acknowledged.offset());
@@ -550,6 +553,32 @@ public class SharedStorageAcksOneIndependentProcessTest {
         }, 90_000L, () -> "Topic did not converge to RF=" + expectedReplicas +
             ", ISR=" + expectedIsr + ", expectedLeader=" + expectedLeader);
         return ready[0];
+    }
+
+    /**
+     * Controller metadata can advertise the elected leader before its local partition
+     * has finished the leader transition. Test actual data-plane readiness without
+     * writing a record, so the first acks=1 produce remains a single-attempt write.
+     */
+    private static void waitForLeaderServingData(Admin admin, int expectedLeader) throws Exception {
+        TopicPartition partition = new TopicPartition(TOPIC, 0);
+        TestUtils.waitForCondition(() -> {
+            try {
+                TopicDescription topic = describeTopic(admin);
+                if (topic == null || topic.partitions().size() != 1 ||
+                    topic.partitions().get(0).leader() == null ||
+                    topic.partitions().get(0).leader().id() != expectedLeader) {
+                    return false;
+                }
+                var offsets = admin.listOffsets(Map.of(partition, OffsetSpec.latest()))
+                    .all().get(5, TimeUnit.SECONDS);
+                return offsets.containsKey(partition) && offsets.get(partition).offset() >= 0L;
+            } catch (Exception ignored) {
+                return false;
+            }
+        }, 30_000L, () -> "Elected leader " + expectedLeader +
+            " did not become data-plane ready for " + partition);
+        System.out.println("ACKS1_DATA_PLANE_READY leader=" + expectedLeader);
     }
 
     private static int waitForNewLeader(Admin admin, int oldLeader) throws Exception {
