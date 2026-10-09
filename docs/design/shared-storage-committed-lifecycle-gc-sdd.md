@@ -116,3 +116,28 @@ The gate cannot prevent writes from an independent old/external producer; true
 cross-broker fencing, mixed-version rollout and monotonic transactional writes
 remain mandatory before authorizing this feature. Existing object, cleanup
 and sequence metadata protocols are unchanged.
+
+## Batch 17: read-only watermark writer preflight and acks=1 readiness
+
+`PartitionLogStartAdvancePrecheck.assess()` classifies **value-domain**
+proposals before any authoritative writer exists. It takes an explicitly
+identified topic incarnation and partition, a proposed inclusive start offset,
+a caller-observed Kafka log start, and a caller-established read-committed
+metadata replay horizon. It rejects a snapshot behind the horizon, offsets
+ahead of the source log, and replayed regressions. Equality is idempotent.
+A missing topic-incarnation watermark requires an explicit initial zero rather
+than silently inheriting another topic's value.
+
+The precheck has no Kafka or MinIO write capability and does not establish the
+freshness or authenticity of the caller-provided evidence. In particular it
+cannot prove all brokers decode the watermark keys, active broker generation,
+exclusive transactional writer ownership, read-committed catch-up at commit
+time, or the source log-start value at commit time. `VALUE_DOMAIN_CANDIDATE`
+and `INITIAL_ZERO_CANDIDATE` **must not** be treated as permission to write
+or to retire references. The ordinary metadata producer continues to reject
+log-start writes.
+
+The acks=1 external-JVM test additionally waits for the elected partition leader
+to answer a real, read-only ListOffsets request before its single-attempt,
+`retries=0`, leader-only produce. This closes the test's controller-metadata
+vs local leader-initialization race without weakening the crash/durability proof.
