@@ -55,6 +55,7 @@ public final class SharedMetadataImage {
     private final Consumer<SharedObjectMetadata> committedObjectListener;
     private State state = State.RECOVERING;
     private Throwable failure;
+    private long lastConsumedMetadataOffset = -1L;
 
     public SharedMetadataImage() {
         this(ignored -> { });
@@ -77,6 +78,33 @@ public final class SharedMetadataImage {
                 case BROKER_SEQUENCE -> applyBrokerSequence(Math.toIntExact(key.id()), value);
                 case PARTITION_LOG_START -> applyPartitionLogStart(key.partition(), value);
             }
+        } catch (RuntimeException | Error replayFailure) {
+            markFailed(replayFailure);
+            throw replayFailure;
+        }
+    }
+
+    /**
+     * Applies one record from the single authoritative Kafka metadata partition, retaining
+     * the actual consumed offset in the same monitor as the image update.
+     *
+     * <p>Offsets can have gaps because the metadata topic is compacted. An offset
+     * that is negative, duplicated, or behind a previously consumed record fails
+     * the image closed. Direct in-memory calls to {@link #apply(byte[], byte[])}
+     * are not associated with a Kafka consumer offset.</p>
+     */
+    public synchronized void applyFromMetadataLog(byte[] keyBytes, byte[] valueBytes, long offset) {
+        if (state == State.FAILED) {
+            throw failedState();
+        }
+        try {
+            if (offset < 0L || offset <= lastConsumedMetadataOffset) {
+                throw corruption(
+                    "metadata consumer offset " + offset + " does not advance " + lastConsumedMetadataOffset
+                );
+            }
+            apply(keyBytes, valueBytes);
+            lastConsumedMetadataOffset = offset;
         } catch (RuntimeException | Error replayFailure) {
             markFailed(replayFailure);
             throw replayFailure;
@@ -328,22 +356,34 @@ public final class SharedMetadataImage {
     /**
      * Captures the replayed COMMITTED inventory and explicit partition log-start watermarks under one lock.
      *
-     * <p>The immutable evidence is a single local replay point in time, not a broker-generation fence,
-     * durable reference retirement, or permission to remove physical objects. Live replay can advance
-     * after this method returns.</p>
+     * <p>The immutable evidence is a single local replay point in time. The consumed metadata offset
+     * is diagnostic provenance, not proof the consumer has reached Kafka's latest committed offset.
+     * It is not a broker-generation fence, durable reference retirement, or permission to delete.
+     * Live replay can advance after this method returns.</p>
      */
     public synchronized RetirementEvidenceSnapshot retirementEvidenceSnapshot() {
         requireReady();
-        return new RetirementEvidenceSnapshot(committedObjects(), partitionLogStarts);
+        return new RetirementEvidenceSnapshot(committedObjects(), partitionLogStarts, lastConsumedMetadataOffset);
     }
 
     public record RetirementEvidenceSnapshot(
         List<SharedObjectMetadata> committedObjects,
-        Map<SharedPartitionId, Long> partitionLogStarts
+        Map<SharedPartitionId, Long> partitionLogStarts,
+        long lastConsumedMetadataOffset
     ) {
+        public RetirementEvidenceSnapshot(
+            List<SharedObjectMetadata> committedObjects,
+            Map<SharedPartitionId, Long> partitionLogStarts
+        ) {
+            this(committedObjects, partitionLogStarts, -1L);
+        }
+
         public RetirementEvidenceSnapshot {
             committedObjects = List.copyOf(Objects.requireNonNull(committedObjects, "committedObjects"));
             partitionLogStarts = Map.copyOf(Objects.requireNonNull(partitionLogStarts, "partitionLogStarts"));
+            if (lastConsumedMetadataOffset < -1L) {
+                throw new IllegalArgumentException("lastConsumedMetadataOffset must be >= -1");
+            }
         }
     }
 

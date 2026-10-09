@@ -51,13 +51,22 @@ public final class CommittedObjectRetirementPrecheck {
      * that a reader has quiesced, a writer is fenced, or a remote reference has been retired.</p>
      */
     public static List<ObjectFinding> assessCommitted(SharedMetadataImage image) {
+        return assessCommittedSnapshot(image).findings();
+    }
+
+    /**
+     * Returns an immutable diagnostic classification with its consumed metadata log offset.
+     * The offset is not a durable GC authorization or proof of consumer catch-up.
+     */
+    public static AssessmentSnapshot assessCommittedSnapshot(SharedMetadataImage image) {
         Objects.requireNonNull(image, "image");
         SharedMetadataImage.RetirementEvidenceSnapshot evidence = image.retirementEvidenceSnapshot();
-        return evidence.committedObjects().stream()
+        List<ObjectFinding> findings = evidence.committedObjects().stream()
             .map(object -> new ObjectFinding(
                 object.objectId(), assessRanges(object, evidence.partitionLogStarts())
             ))
             .toList();
+        return new AssessmentSnapshot(evidence.lastConsumedMetadataOffset(), findings);
     }
 
     private static Finding assessRanges(SharedObjectMetadata object, Map<SharedPartitionId, Long> watermarks) {
@@ -84,6 +93,15 @@ public final class CommittedObjectRetirementPrecheck {
         MISSING_WATERMARK,
         HAS_UNRETIRED_RANGE,
         ALL_RANGES_BELOW_LOG_START
+    }
+
+    public record AssessmentSnapshot(long lastConsumedMetadataOffset, List<ObjectFinding> findings) {
+        public AssessmentSnapshot {
+            if (lastConsumedMetadataOffset < -1L) {
+                throw new IllegalArgumentException("lastConsumedMetadataOffset must be >= -1");
+            }
+            findings = List.copyOf(Objects.requireNonNull(findings, "findings"));
+        }
     }
 
     public record ObjectFinding(long objectId, Finding finding) {
