@@ -23,6 +23,7 @@ import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 
 import java.util.Collection;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * Routes Kafka replica-role and assignment notifications into the shared-storage commit tracker.
@@ -33,6 +34,7 @@ import java.util.Objects;
 public final class SharedPartitionRoleListener implements StoragePartitionRoleListener {
     private final SharedStorageConfiguration configuration;
     private final SharedCommitProgress commitProgress;
+    private final LocalRetirementLeadershipFence retirementFence = new LocalRetirementLeadershipFence();
 
     public SharedPartitionRoleListener(
         SharedStorageConfiguration configuration,
@@ -59,7 +61,9 @@ public final class SharedPartitionRoleListener implements StoragePartitionRoleLi
         partitions.forEach(partition -> {
             Objects.requireNonNull(partition, "partition");
             if (configuration.useSharedStorage(partition.topic())) {
-                commitProgress.remove(sharedPartitionId(partition));
+                SharedPartitionId id = sharedPartitionId(partition);
+                retirementFence.onRemoved(id);
+                commitProgress.remove(id);
             }
         });
     }
@@ -72,9 +76,24 @@ public final class SharedPartitionRoleListener implements StoragePartitionRoleLi
         SharedPartitionId sharedPartition = sharedPartitionId(partition);
         if (leader) {
             commitProgress.onLeader(sharedPartition);
+            retirementFence.onLeader(sharedPartition);
         } else {
+            // Invalidate local retirement work before publishing follower progress.
+            retirementFence.onFollower(sharedPartition);
             commitProgress.onFollower(sharedPartition);
         }
+    }
+
+    /** Read-only local role ticket; distributed generation fencing must still be verified. */
+    public Optional<LocalRetirementLeadershipFence.LeaderTicket> captureRetirementLeader(
+        SharedPartitionId partition
+    ) {
+        return retirementFence.captureLeader(partition);
+    }
+
+    /** False after any demotion, reassignment, duplicate leadership callback, or removal. */
+    public boolean stillRetirementLeader(LocalRetirementLeadershipFence.LeaderTicket ticket) {
+        return retirementFence.stillLeader(ticket);
     }
 
     private static SharedPartitionId sharedPartitionId(TopicIdPartition partition) {

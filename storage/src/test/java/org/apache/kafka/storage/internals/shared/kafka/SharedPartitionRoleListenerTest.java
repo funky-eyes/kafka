@@ -32,6 +32,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SharedPartitionRoleListenerTest {
     @TempDir
@@ -132,6 +133,52 @@ class SharedPartitionRoleListenerTest {
             SharedCommitProgress.ReplicaRole.LEADER,
             progress.partitionProgress(sharedPartitionId(userTopicId, 1)).orElseThrow().role()
         );
+    }
+
+    @Test
+    void roleCallbackInvalidatesRetirementTicketBeforeReelection() {
+        SharedStorageConfiguration configuration = configuration(Map.of());
+        SharedPartitionRoleListener listener = new SharedPartitionRoleListener(
+            configuration, new SharedCommitProgress()
+        );
+        Uuid id = Uuid.randomUuid();
+        TopicIdPartition partition = topicPartition(id, "shared-topic", 0);
+        SharedPartitionId sharedId = sharedPartitionId(id, 0);
+
+        listener.onLeadershipChange(List.of(partition), List.of());
+        var first = listener.captureRetirementLeader(sharedId).orElseThrow();
+        assertTrue(listener.stillRetirementLeader(first));
+        listener.onLeadershipChange(List.of(), List.of(partition));
+        assertFalse(listener.stillRetirementLeader(first));
+
+        listener.onLeadershipChange(List.of(partition), List.of());
+        assertFalse(listener.stillRetirementLeader(first));
+        assertTrue(listener.stillRetirementLeader(
+            listener.captureRetirementLeader(sharedId).orElseThrow()
+        ));
+    }
+
+    @Test
+    void partitionRemovalAndUnselectedTopicsCannotRetainRetirementTickets() {
+        SharedStorageConfiguration configuration = configuration(Map.of(
+            SharedStorageConfiguration.TOPICS_CONFIG, "shared-topic"
+        ));
+        SharedPartitionRoleListener listener = new SharedPartitionRoleListener(
+            configuration, new SharedCommitProgress()
+        );
+        Uuid id = Uuid.randomUuid();
+        TopicIdPartition selected = topicPartition(id, "shared-topic", 0);
+        TopicIdPartition other = topicPartition(Uuid.randomUuid(), "classic-topic", 0);
+        SharedPartitionId selectedId = sharedPartitionId(id, 0);
+
+        listener.onLeadershipChange(List.of(selected, other), List.of());
+        assertFalse(listener.captureRetirementLeader(
+            sharedPartitionId(other.topicId(), 0)
+        ).isPresent());
+        var ticket = listener.captureRetirementLeader(selectedId).orElseThrow();
+        listener.onPartitionsRemoved(List.of(selected));
+        assertFalse(listener.stillRetirementLeader(ticket));
+        assertTrue(listener.captureRetirementLeader(selectedId).isEmpty());
     }
 
     private SharedStorageConfiguration configuration(Map<String, ?> originals) {
