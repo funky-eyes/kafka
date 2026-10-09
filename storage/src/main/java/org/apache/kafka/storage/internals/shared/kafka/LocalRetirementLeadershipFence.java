@@ -76,7 +76,14 @@ public final class LocalRetirementLeadershipFence {
             int observedMaxEpoch = old == null ? UNKNOWN_LEADER_EPOCH : old.leaderEpoch();
             // A stale lower epoch or an unversioned callback after a known epoch
             // must never re-promote the local retirement writer.
-            boolean newLeader = leader && leaderEpoch >= observedMaxEpoch;
+            //
+            // Even an EQUAL epoch is stale once we have observed FOLLOWER for that
+            // epoch: a delayed old LEADER callback cannot undo demotion. Repeated
+            // LEADER notifications at the current epoch remain valid and refresh
+            // the local generation, preserving Kafka's duplicate-callback behavior.
+            boolean epochCanPromote = old == null || old.leader()
+                || observedMaxEpoch == UNKNOWN_LEADER_EPOCH || leaderEpoch > observedMaxEpoch;
+            boolean newLeader = leader && leaderEpoch >= observedMaxEpoch && epochCanPromote;
             return new Role(generation, newLeader, Math.max(observedMaxEpoch, leaderEpoch));
         });
     }

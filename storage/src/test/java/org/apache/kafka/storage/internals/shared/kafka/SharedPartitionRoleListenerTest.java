@@ -234,6 +234,26 @@ class SharedPartitionRoleListenerTest {
     }
 
     @Test
+    void equalEpochDelayedLeaderCallbackCannotOverrideFollowerRole() {
+        SharedPartitionRoleListener listener = new SharedPartitionRoleListener(
+            configuration(Map.of()), new SharedCommitProgress()
+        );
+        Uuid id = Uuid.randomUuid();
+        TopicIdPartition partition = topicPartition(id, "shared-topic", 0);
+        SharedPartitionId shared = sharedPartitionId(id, 0);
+
+        listener.onLeadershipChangeWithEpochs(Map.of(partition, 30), Map.of());
+        var original = listener.captureEpochRetirementLeader(shared).orElseThrow();
+        listener.onLeadershipChangeWithEpochs(Map.of(), Map.of(partition, 30));
+        listener.onLeadershipChangeWithEpochs(Map.of(partition, 30), Map.of());
+        assertFalse(listener.stillRetirementLeader(original));
+        assertTrue(listener.captureEpochRetirementLeader(shared).isEmpty());
+
+        listener.onLeadershipChangeWithEpochs(Map.of(partition, 31), Map.of());
+        assertEquals(31, listener.captureEpochRetirementLeader(shared).orElseThrow().leaderEpoch());
+    }
+
+    @Test
     void epochCallbackIgnoresClassicAndInternalTopics() {
         SharedPartitionRoleListener listener = new SharedPartitionRoleListener(
             configuration(Map.of(SharedStorageConfiguration.TOPICS_CONFIG, "shared-topic")),

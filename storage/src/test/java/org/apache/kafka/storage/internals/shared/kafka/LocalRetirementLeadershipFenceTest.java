@@ -132,9 +132,9 @@ class LocalRetirementLeadershipFenceTest {
 
         assertFalse(fence.stillLeader(ticket));
         assertTrue(fence.captureLeader(PARTITION).isEmpty());
-        fence.onLeader(PARTITION, 11);
+        fence.onLeader(PARTITION, 12);
         assertTrue(fence.captureEpochLeader(PARTITION).isPresent());
-        assertTrue(fence.captureEpochLeader(PARTITION).orElseThrow().leaderEpoch() == 11);
+        assertTrue(fence.captureEpochLeader(PARTITION).orElseThrow().leaderEpoch() == 12);
     }
 
     @Test
@@ -158,8 +158,37 @@ class LocalRetirementLeadershipFenceTest {
         fence.onLeader(PARTITION);
 
         assertTrue(fence.captureLeader(PARTITION).isEmpty());
-        fence.onLeader(PARTITION, 12);
+        fence.onLeader(PARTITION, 13);
         assertTrue(fence.captureEpochLeader(PARTITION).isPresent());
+    }
+
+    @Test
+    void equalEpochLeaderCallbackAfterFollowerCannotUndoDemotion() {
+        LocalRetirementLeadershipFence fence = new LocalRetirementLeadershipFence();
+        fence.onLeader(PARTITION, 15);
+        var first = fence.captureEpochLeader(PARTITION).orElseThrow();
+        fence.onFollower(PARTITION, 15);
+        fence.onLeader(PARTITION, 15);
+
+        assertFalse(fence.stillLeader(first));
+        assertTrue(fence.captureEpochLeader(PARTITION).isEmpty());
+        fence.onLeader(PARTITION, 16);
+        assertTrue(fence.captureEpochLeader(PARTITION).isPresent());
+        assertTrue(fence.captureEpochLeader(PARTITION).orElseThrow().leaderEpoch() == 16);
+    }
+
+    @Test
+    void sameEpochDuplicateLeaderCallbackOnlyRefreshesLocalGeneration() {
+        LocalRetirementLeadershipFence fence = new LocalRetirementLeadershipFence();
+        fence.onLeader(PARTITION, 21);
+        var previous = fence.captureEpochLeader(PARTITION).orElseThrow();
+
+        fence.onLeader(PARTITION, 21);
+        var next = fence.captureEpochLeader(PARTITION).orElseThrow();
+        assertFalse(fence.stillLeader(previous));
+        assertNotEquals(previous.localGeneration(), next.localGeneration());
+        assertTrue(fence.stillLeader(next));
+        assertTrue(next.leaderEpoch() == 21);
     }
 
     @Test
