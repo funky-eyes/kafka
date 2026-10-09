@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.storage.internals.shared.metadata;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
@@ -40,7 +41,26 @@ public final class CommittedObjectRetirementPrecheck {
     public static Finding assess(SharedObjectMetadata object, SharedMetadataImage image) {
         Objects.requireNonNull(object, "object");
         Objects.requireNonNull(image, "image");
-        Map<SharedPartitionId, Long> watermarks = image.partitionLogStartsSnapshot();
+        return assessRanges(object, image.partitionLogStartsSnapshot());
+    }
+
+    /**
+     * Classifies the replayed COMMITTED-object inventory against one consistent watermark snapshot.
+     *
+     * <p>Every finding is advisory and read-only. In particular, an expired range is not evidence
+     * that a reader has quiesced, a writer is fenced, or a remote reference has been retired.</p>
+     */
+    public static List<ObjectFinding> assessCommitted(SharedMetadataImage image) {
+        Objects.requireNonNull(image, "image");
+        SharedMetadataImage.RetirementEvidenceSnapshot evidence = image.retirementEvidenceSnapshot();
+        return evidence.committedObjects().stream()
+            .map(object -> new ObjectFinding(
+                object.objectId(), assessRanges(object, evidence.partitionLogStarts())
+            ))
+            .toList();
+    }
+
+    private static Finding assessRanges(SharedObjectMetadata object, Map<SharedPartitionId, Long> watermarks) {
         boolean missingWatermark = false;
         boolean hasUnretiredRange = false;
         for (SharedObjectRange range : object.ranges()) {
@@ -64,5 +84,14 @@ public final class CommittedObjectRetirementPrecheck {
         MISSING_WATERMARK,
         HAS_UNRETIRED_RANGE,
         ALL_RANGES_BELOW_LOG_START
+    }
+
+    public record ObjectFinding(long objectId, Finding finding) {
+        public ObjectFinding {
+            if (objectId <= 0L) {
+                throw new IllegalArgumentException("objectId must be positive");
+            }
+            Objects.requireNonNull(finding, "finding");
+        }
     }
 }

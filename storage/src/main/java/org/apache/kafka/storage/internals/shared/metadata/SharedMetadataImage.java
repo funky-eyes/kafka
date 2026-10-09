@@ -325,6 +325,28 @@ public final class SharedMetadataImage {
         return Map.copyOf(partitionLogStarts);
     }
 
+    /**
+     * Captures the replayed COMMITTED inventory and explicit partition log-start watermarks under one lock.
+     *
+     * <p>The immutable evidence is a single local replay point in time, not a broker-generation fence,
+     * durable reference retirement, or permission to remove physical objects. Live replay can advance
+     * after this method returns.</p>
+     */
+    public synchronized RetirementEvidenceSnapshot retirementEvidenceSnapshot() {
+        requireReady();
+        return new RetirementEvidenceSnapshot(committedObjects(), partitionLogStarts);
+    }
+
+    public record RetirementEvidenceSnapshot(
+        List<SharedObjectMetadata> committedObjects,
+        Map<SharedPartitionId, Long> partitionLogStarts
+    ) {
+        public RetirementEvidenceSnapshot {
+            committedObjects = List.copyOf(Objects.requireNonNull(committedObjects, "committedObjects"));
+            partitionLogStarts = Map.copyOf(Objects.requireNonNull(partitionLogStarts, "partitionLogStarts"));
+        }
+    }
+
     private void requireReady() {
         if (state == State.RECOVERING) {
             throw new IllegalStateException("Shared metadata image is still recovering");

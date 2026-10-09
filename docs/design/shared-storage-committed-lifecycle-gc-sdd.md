@@ -75,3 +75,22 @@ physical reclamation. Unit tests lock the exclusive-end boundary, multi-partitio
 reachability, recreated topic-ID isolation, missing-vs-zero evidence, immutable
 snapshots, and fail-closed recovery/failed states. All writer, quiescence and
 durable retirement fences listed above remain mandatory before physical GC.
+
+## Batch 15: atomic read-only committed inventory
+
+`SharedMetadataImage.retirementEvidenceSnapshot()` takes both the sorted COMMITTED
+object inventory and all explicitly replayed partition log starts under the same
+image monitor. Live replay cannot interleave between these two copies, and the
+returned lists/maps are immutable defensive snapshots.
+
+`CommittedObjectRetirementPrecheck.assessCommitted()` classifies that entire
+inventory against **one** watermark snapshot rather than re-reading live
+watermarks for each object. The results are sorted by object ID, only include
+authoritative COMMITTED entries, and do not hide a live range in packed
+multi-partition objects. Missing evidence remains distinct from offset zero.
+
+This checkpoint is purely diagnostic: it has **no** writer, reference eviction,
+Kafka metadata offset / leader-generation proof, reader-quiescence proof or S3
+DELETE. A logically expired observation can become stale immediately, must
+never be used directly as deletion authority, and must be revalidated after
+the durable retirement and lifetime fences are implemented.
