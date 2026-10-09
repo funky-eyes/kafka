@@ -141,3 +141,10 @@ The acks=1 external-JVM test additionally waits for the elected partition leader
 to answer a real, read-only ListOffsets request before its single-attempt,
 `retries=0`, leader-only produce. This closes the test's controller-metadata
 vs local leader-initialization race without weakening the crash/durability proof.
+
+The focused watermark value preflight uses
+`SharedMetadataImage.partitionLogStartEvidence(partition)` to capture only one
+partition watermark plus replay offset under the image lock. It avoids copying
+the entire COMMITTED-object inventory on each tentative watermark proposal
+and preserves the missing-versus-explicit-zero distinction. The full inventory
+snapshot remains available for batch object-retirement diagnostics.

@@ -33,6 +33,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.function.Consumer;
 
 /**
@@ -351,6 +352,31 @@ public final class SharedMetadataImage {
     public synchronized Map<SharedPartitionId, Long> partitionLogStartsSnapshot() {
         requireReady();
         return Map.copyOf(partitionLogStarts);
+    }
+
+    /**
+     * Reads one explicitly replayed partition log-start and the consumer provenance atomically.
+     *
+     * <p>The targeted lookup does not copy the COMMITTED-object inventory. Neither the
+     * offset nor the watermark authenticates an exclusive writer or permits deletion.</p>
+     */
+    public synchronized PartitionLogStartEvidence partitionLogStartEvidence(SharedPartitionId partition) {
+        requireReady();
+        Objects.requireNonNull(partition, "partition");
+        Long replayed = partitionLogStarts.get(partition);
+        return new PartitionLogStartEvidence(
+            lastConsumedMetadataOffset,
+            replayed == null ? OptionalLong.empty() : OptionalLong.of(replayed)
+        );
+    }
+
+    public record PartitionLogStartEvidence(long lastConsumedMetadataOffset, OptionalLong explicitLogStart) {
+        public PartitionLogStartEvidence {
+            if (lastConsumedMetadataOffset < -1L) {
+                throw new IllegalArgumentException("lastConsumedMetadataOffset must be >= -1");
+            }
+            Objects.requireNonNull(explicitLogStart, "explicitLogStart");
+        }
     }
 
     /**

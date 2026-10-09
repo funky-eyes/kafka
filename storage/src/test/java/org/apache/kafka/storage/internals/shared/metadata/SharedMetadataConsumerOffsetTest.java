@@ -24,6 +24,7 @@ import static org.apache.kafka.storage.internals.shared.metadata.CommittedObject
 import static org.apache.kafka.storage.internals.shared.metadata.CommittedObjectRetirementPrecheck.ObjectFinding;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SharedMetadataConsumerOffsetTest {
     private static final SharedPartitionId PARTITION = new SharedPartitionId(1L, 2L, 0);
@@ -69,6 +70,44 @@ class SharedMetadataConsumerOffsetTest {
             ),
             CommittedObjectRetirementPrecheck.assessCommittedSnapshot(image)
         );
+    }
+
+    @Test
+    void targetedEvidenceDistinguishesMissingWatermarkFromExplicitZero() {
+        SharedMetadataImage image = new SharedMetadataImage();
+        image.applyFromMetadataLog(
+            SharedMetadataRecordCodec.partitionLogStartKey(PARTITION),
+            SharedMetadataRecordCodec.partitionLogStartValue(0L),
+            3L
+        );
+        image.markReady();
+
+        assertEquals(3L, image.partitionLogStartEvidence(PARTITION).lastConsumedMetadataOffset());
+        assertEquals(0L, image.partitionLogStartEvidence(PARTITION).explicitLogStart().orElseThrow());
+        assertTrue(image.partitionLogStartEvidence(OTHER_TOPIC).explicitLogStart().isEmpty());
+    }
+
+    @Test
+    void targetedEvidenceIsStableAfterLiveConsumerReplay() {
+        SharedMetadataImage image = new SharedMetadataImage();
+        image.applyFromMetadataLog(
+            SharedMetadataRecordCodec.partitionLogStartKey(PARTITION),
+            SharedMetadataRecordCodec.partitionLogStartValue(7L),
+            3L
+        );
+        image.markReady();
+        SharedMetadataImage.PartitionLogStartEvidence original = image.partitionLogStartEvidence(PARTITION);
+
+        image.applyFromMetadataLog(
+            SharedMetadataRecordCodec.partitionLogStartKey(PARTITION),
+            SharedMetadataRecordCodec.partitionLogStartValue(10L),
+            11L
+        );
+
+        assertEquals(3L, original.lastConsumedMetadataOffset());
+        assertEquals(7L, original.explicitLogStart().orElseThrow());
+        assertEquals(11L, image.partitionLogStartEvidence(PARTITION).lastConsumedMetadataOffset());
+        assertEquals(10L, image.partitionLogStartEvidence(PARTITION).explicitLogStart().orElseThrow());
     }
 
     @Test

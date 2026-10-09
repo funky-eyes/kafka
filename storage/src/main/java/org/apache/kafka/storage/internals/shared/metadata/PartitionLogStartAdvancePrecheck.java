@@ -17,6 +17,7 @@
 package org.apache.kafka.storage.internals.shared.metadata;
 
 import java.util.Objects;
+import java.util.OptionalLong;
 
 /**
  * Read-only value-domain precheck for a future fenced partition log-start writer.
@@ -53,7 +54,7 @@ public final class PartitionLogStartAdvancePrecheck {
             throw new IllegalArgumentException("Invalid partition log-start precheck offset");
         }
 
-        SharedMetadataImage.RetirementEvidenceSnapshot evidence = image.retirementEvidenceSnapshot();
+        SharedMetadataImage.PartitionLogStartEvidence evidence = image.partitionLogStartEvidence(partition);
         if (evidence.lastConsumedMetadataOffset() < requiredMetadataOffset) {
             return Finding.METADATA_REPLAY_BEHIND;
         }
@@ -61,18 +62,18 @@ public final class PartitionLogStartAdvancePrecheck {
             return Finding.EXCEEDS_OBSERVED_KAFKA_LOG_START;
         }
 
-        Long previous = evidence.partitionLogStarts().get(partition);
-        if (previous == null) {
+        OptionalLong previous = evidence.explicitLogStart();
+        if (previous.isEmpty()) {
             // First write for a topic incarnation must explicitly persist zero.
             // Never infer a missing generation-specific watermark from another topic.
             return requestedStartOffset == 0L
                 ? Finding.INITIAL_ZERO_CANDIDATE
                 : Finding.INITIAL_ZERO_REQUIRED;
         }
-        if (requestedStartOffset < previous) {
+        if (requestedStartOffset < previous.getAsLong()) {
             return Finding.REGRESSED_BELOW_REPLAYED_WATERMARK;
         }
-        if (requestedStartOffset == previous) {
+        if (requestedStartOffset == previous.getAsLong()) {
             return Finding.ALREADY_REPLAYED;
         }
         return Finding.VALUE_DOMAIN_CANDIDATE;
