@@ -55,6 +55,21 @@ REQUIRED_TESTS = {
         "epochCallbackIgnoresClassicAndInternalTopics",
         "equalEpochDelayedLeaderCallbackCannotOverrideFollowerRole",
     ),
+    "org.apache.kafka.controller.PartitionRetirementControllerPrecheckTest": (
+        "currentRecoveredLeaderInIsrMatchesButIsNotWriteAuthorization",
+        "missingPartitionOrDeletedTopicIsNotAnAuthoritySource",
+        "noActiveLeaderIsRejected",
+        "previousLeaderEpochIsRejectedEvenWhenBrokerMatches",
+        "futureClaimedEpochIsRejectedEvenWhenBrokerMatches",
+        "formerBrokerCannotClaimTheNewLeaderEpoch",
+        "uncleanElectionStillRecoveringDoesNotQualify",
+        "leaderOutsideIsrDoesNotQualify",
+        "leaderOutsideReplicaSetDoesNotQualify",
+        "invalidBrokerAndEpochInputsFailFast",
+        "controllerLookupRevalidatesCurrentLeaderAfterEpochTransition",
+        "deletedTopicIdCannotBorrowRecreatedTopicRegistration",
+        "invalidControllerLookupArgumentsFailClosed",
+    ),
     "org.apache.kafka.storage.internals.shared.metadata.PartitionRetirementAuthorityModelTest": (
         "initialStateHasNeitherImplicitZeroNorAnAuthoritativeLeader",
         "higherEpochControllerElectionCreatesOnePartitionOwner",
@@ -72,6 +87,14 @@ REQUIRED_TESTS = {
         "compactionCannotMakeALowerProposalAdmissibleAgainstRetainedAuthority",
         "controllerOffsetsMaySkipUnrelatedLogEntriesButNeverGoBackward",
         "invalidArgumentsAndFabricatedInitialSnapshotFailFast",
+        "deletingActiveTopicIrreversiblyFencesNewElections",
+        "topicDeleteBeforeAnyElectionIsTerminal",
+        "lateWatermarkAndNoLeaderCallbacksCannotModifyDeletion",
+        "staleDeleteRequestCannotOverrideNewAuthorityVersion",
+        "duplicateDeleteIsIdempotentButDoesNotMintNewVersion",
+        "topicIdRecreationDoesNotInheritTerminalState",
+        "terminalSnapshotRetainsWatermarkAcrossCheckpointRoundTrip",
+        "terminalStateConstructorRejectsRevivedLeader",
     ),
     "org.apache.kafka.storage.internals.shared.metadata.PartitionRetirementCompactionSafetyTest": (
         "liveReplayDetectsBackwardWriteButCompactedReplayCannotRecoverItsHistory",
@@ -91,10 +114,13 @@ REQUIRED_TESTS = {
 }
 
 
-def verify(results_dir: Path) -> int:
+def verify(results_dir: Path, controller_results_dir: Path | None = None) -> int:
+    if controller_results_dir is None:
+        controller_results_dir = results_dir
     total = 0
     for suite, expected in REQUIRED_TESTS.items():
-        xml = results_dir / ("TEST-" + suite + ".xml")
+        suite_dir = controller_results_dir if suite.startswith("org.apache.kafka.controller.") else results_dir
+        xml = suite_dir / ("TEST-" + suite + ".xml")
         if not xml.is_file():
             raise ValueError(f"Missing mandatory test report: {xml}")
         root = ET.parse(xml).getroot()
@@ -124,11 +150,14 @@ def verify(results_dir: Path) -> int:
 
 
 def main() -> int:
-    if len(sys.argv) != 2:
-        print("Usage: check_shared_storage_epoch_test_results.py TEST_RESULTS_DIRECTORY", file=sys.stderr)
+    if len(sys.argv) not in (2, 3):
+        print(
+            "Usage: check_shared_storage_epoch_test_results.py STORAGE_REPORTS [CONTROLLER_REPORTS]",
+            file=sys.stderr,
+        )
         return 2
     try:
-        total = verify(Path(sys.argv[1]))
+        total = verify(Path(sys.argv[1]), Path(sys.argv[2]) if len(sys.argv) == 3 else None)
     except (OSError, ValueError, ET.ParseError) as exc:
         print(f"SHARED_STORAGE_EPOCH_EVIDENCE FAIL: {exc}", file=sys.stderr)
         return 1

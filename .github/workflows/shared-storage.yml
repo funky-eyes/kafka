@@ -32,6 +32,8 @@ on:
       - 'core/src/main/scala/kafka/server/**'
       - 'build.gradle'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/**'
+      - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementControllerPrecheck.java'
+      - 'metadata/src/test/java/org/apache/kafka/controller/PartitionRetirementControllerPrecheckTest.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/**'
       - 'storage/shared-storage-s3/**'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/log/LogLoader.java'
@@ -72,6 +74,8 @@ on:
     paths:
       - 'build.gradle'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/**'
+      - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementControllerPrecheck.java'
+      - 'metadata/src/test/java/org/apache/kafka/controller/PartitionRetirementControllerPrecheckTest.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/**'
       - 'storage/shared-storage-s3/**'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/log/LogLoader.java'
@@ -152,11 +156,20 @@ jobs:
             --tests 'org.apache.kafka.storage.internals.log.StoragePartitionRoleListenerEpochCompatibilityTest' \
             2>&1 | tee shared-storage-test.log
 
+      - name: Run KRaft controller retirement source preflight tests
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew :metadata:test --no-scan \
+            --tests 'org.apache.kafka.controller.PartitionRetirementControllerPrecheckTest' \
+            2>&1 | tee shared-storage-controller-retirement-test.log
+
       - name: Require leadership and epoch JUnit evidence
         shell: bash
         run: |
           python3 -m unittest tools.test_check_shared_storage_epoch_test_results
-          python3 tools/check_shared_storage_epoch_test_results.py storage/build/test-results/test
+          python3 tools/check_shared_storage_epoch_test_results.py \
+            storage/build/test-results/test metadata/build/test-results/test
 
       - name: Run S3 module tests
         shell: bash
@@ -172,6 +185,7 @@ jobs:
           path: |
             shared-storage-logmanager-regression.log
             shared-storage-test.log
+            shared-storage-controller-retirement-test.log
             shared-storage-s3-test.log
           if-no-files-found: ignore
           retention-days: 7
@@ -197,6 +211,8 @@ jobs:
           path: |
             storage/build/reports/tests/test
             storage/build/test-results/test
+            metadata/build/reports/tests/test
+            metadata/build/test-results/test
             storage/shared-storage-s3/build/reports/tests/test
             core/build/reports/tests/test
           if-no-files-found: ignore

@@ -458,3 +458,80 @@ persist at one authoritative serialization point:
 The existing 0x04 log-start compacted key remains **non-emitting**.
 The historical 19/19 GA manifest covers the previously delivered
 shared-storage behavior and does not certify COMMITTED lifecycle GC.
+
+
+## Batch 23: irrevocable Topic ID retirement and KRaft controller source preflight
+
+### Topic Delete is terminal, independent of Kafka leader epochs
+
+The Batch 22 pure authority reducer now models a **terminal Topic ID / partition
+retirement fence**. A future controller-applied Topic Delete must persist this
+terminal state at its authoritative serialized log position, even when the
+topic never had an elected leader. Once deleted, the same immutable topic ID
+can never gain a leader, accept a watermark, or be revived by a higher source
+leader epoch. A duplicate terminal notification is idempotent, and a stale
+expected authority offset cannot erase a newer state.
+
+The terminal state preserves the previously accepted watermark for
+crash/replay diagnosis and is intentionally separate from a temporary
+NO_LEADER event. The reference Snapshot now includes an explicit terminal
+flag, and its constructor rejects impossible combinations such as
+terminally deleted plus an active leader. Topic recreation with a *new*
+topic ID begins from an independent initial state.
+
+Eight new model tests cover deleted-before-election, deleted-after-election,
+stale/duplicate deletion, delayed watermark and leader callbacks, topic ID
+recreation, immutable checkpoint restore, and invalid resurrection state.
+
+**This is a reference invariant, not a KRaft topic-delete hook.** The current
+production controller does not yet write or restore this retirement state.
+Kafka Topic Delete by itself is not a COMMITTED physical object GC signal.
+
+### Ground candidate identity in the actual controller registration
+
+The metadata module now contains a read-only
+PartitionRetirementControllerPrecheck using
+ReplicationControlManager.getPartition(topicId, partitionId). The lookup is
+scoped to immutable Topic ID, rather than a recyclable topic name. A candidate
+broker and leader epoch are checked against the KRaft controller's current
+PartitionRegistration. The gate rejects absent/deleted partitions, no leader,
+wrong broker, old/future epochs, an unclean leader still recovering, and
+leaders absent from ISR or the replica set.
+
+Controller registration tests include simulated leader handover and deletion
+via the actual controller lookup method, as well as fail-closed input handling.
+They do not issue Kafka metadata writes or claims. Even
+CONTROLLER_IMAGE_MATCH only describes one read from the local controller image
+and must **not** be treated as an authorization token.
+
+The Java 25 Shared Storage CI now also executes the targeted metadata-module
+controller test class and checks its actual JUnit XML. Combined required
+controller, topic-deletion, leadership, compaction and reference-model methods:
+**76 executed, zero skipped**. A missing controller-module result or any
+failure must block the gate.
+
+### Remaining hard requirements before production enablement
+
+1. A versioned KRaft metadata record and controller-owned replayable image
+   for the immutable Topic ID terminal fence, elected generation, monotonic
+   log-start watermark and last authoritative transition offset, including
+   snapshot retention and mixed-version/rollback fencing.
+2. A controller RPC/event-queue implementation validating the *current*
+   PartitionRegistration, active broker incarnation and exact source log start,
+   then writing the authority transition atomically at the KRaft commit
+   boundary. A broker must not be able to claim or pre-empt a newer generation
+   solely through transactional.id initialization.
+3. Handle uncertain/failed commits by re-reading committed controller state,
+   never by trusting an acknowledgement, stale local ticket or old compacted
+   metadata record.
+4. Persist multi-partition COMMITTED reference retirement separately from
+   reader/upload lifetime fences. Reclaim an entire physical MinIO object only
+   after every packed range and concurrent reader are proven unreachable.
+5. Run restart, controller failover, rolling version, topic recreation,
+   retention, DeleteRecords and MinIO physical HEAD/ListObjectsV2 tests with
+   fail-closed evidence and no skipped cases.
+
+The legacy 0x04 log-start metadata key remains non-emitting. There is no new
+controller event, KRaft record, production watermark producer, remote index
+mutation or physical COMMITTED object deletion in Batch 23. Historical GA
+19/19 PASS remains limited to the already implemented shared-storage scope.

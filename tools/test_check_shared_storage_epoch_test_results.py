@@ -43,8 +43,23 @@ class EpochEvidenceCheckerTest(unittest.TestCase):
                 ET.SubElement(case, "failure")
         ET.ElementTree(xml).write(self.root / ("TEST-" + suite + ".xml"), encoding="utf-8")
 
-    def test_all_55_methods_pass(self):
-        self.assertEqual(55, verify(self.root))
+    def test_all_76_methods_pass(self):
+        self.assertEqual(76, verify(self.root))
+
+    def test_missing_controller_module_report_fails_closed(self):
+        controller = "org.apache.kafka.controller.PartitionRetirementControllerPrecheckTest"
+        (self.root / ("TEST-" + controller + ".xml")).unlink()
+        with self.assertRaisesRegex(ValueError, "Missing mandatory test report"):
+            verify(self.root)
+
+    def test_distinct_storage_and_controller_report_directories(self):
+        controller = "org.apache.kafka.controller.PartitionRetirementControllerPrecheckTest"
+        xml_name = "TEST-" + controller + ".xml"
+        with tempfile.TemporaryDirectory() as controller_folder:
+            other = Path(controller_folder)
+            (other / xml_name).write_bytes((self.root / xml_name).read_bytes())
+            (self.root / xml_name).unlink()
+            self.assertEqual(76, verify(self.root, other))
 
     def test_missing_suite_fails(self):
         suite = next(iter(REQUIRED_TESTS))
