@@ -17,6 +17,7 @@
 package kafka.server;
 
 import org.apache.kafka.clients.admin.Admin;
+import org.apache.kafka.clients.admin.OffsetSpec;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.admin.TopicDescription;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
@@ -45,6 +46,7 @@ import org.junit.jupiter.api.Timeout;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
@@ -533,24 +535,41 @@ public class SharedStoragePerformanceBaselineTest {
     }
 
     private static void waitForTopicReady(Admin admin, List<String> topics) throws Exception {
+        Map<TopicPartition, OffsetSpec> latestOffsets = new HashMap<>();
+        for (String topic : topics) {
+            for (int partition = 0; partition < PARTITIONS; partition++) {
+                latestOffsets.put(new TopicPartition(topic, partition), OffsetSpec.latest());
+            }
+        }
+
+        // RF3/ISR3 in controller metadata does not prove the leader can serve data requests yet.
+        // Read-only ListOffsets on every partition closes that startup gap without a test write.
         TestUtils.waitForCondition(() -> {
             try {
                 Map<String, TopicDescription> descriptions = admin.describeTopics(topics)
-                    .allTopicNames()
-                    .get(5, TimeUnit.SECONDS);
-                return descriptions.size() == topics.size() && descriptions.values().stream().allMatch(description ->
-                    description.partitions().size() == PARTITIONS &&
-                        description.partitions().stream().allMatch(partition ->
-                            partition.leader() != null &&
-                                partition.leader().id() >= 0 &&
-                                partition.replicas().size() == 3 &&
-                                partition.isr().size() == 3
-                        )
-                );
+                    .allTopicNames().get(5, TimeUnit.SECONDS);
+                boolean isrReady = descriptions.size() == topics.size() &&
+                    descriptions.values().stream().allMatch(description ->
+                        description.partitions().size() == PARTITIONS &&
+                            description.partitions().stream().allMatch(partition ->
+                                partition.leader() != null &&
+                                    partition.leader().id() >= 0 &&
+                                    partition.replicas().size() == 3 &&
+                                    partition.isr().size() == 3
+                            )
+                    );
+                if (!isrReady) {
+                    return false;
+                }
+                var offsets = admin.listOffsets(latestOffsets).all().get(5, TimeUnit.SECONDS);
+                return offsets.size() == latestOffsets.size() &&
+                    offsets.values().stream().allMatch(result -> result.offset() >= 0L);
             } catch (Exception ignored) {
                 return false;
             }
-        }, 60_000L, () -> "Benchmark topics did not converge to RF3/ISR3: " + topics);
+        }, 60_000L, () -> "Benchmark RF3/ISR3 leaders not data-plane ready: " + topics);
+        System.out.printf("SHARED_STORAGE_PERF_DATA_PLANE_READY topics=%s partitions=%d%n",
+            topics, latestOffsets.size());
     }
 
     private static void warmPairedProducePaths(

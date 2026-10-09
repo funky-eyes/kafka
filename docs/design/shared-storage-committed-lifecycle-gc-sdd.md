@@ -277,3 +277,34 @@ partition log-start record, retires a durable remote reference, changes
 RecordBatch reachability, or physically deletes a COMMITTED MinIO
 object. The existing 19-gate GA evidence applies only to the previous
 release scope, **not** completed COMMITTED lifecycle physical GC.
+
+
+## Batch 20: epoch regression evidence and performance leader readiness
+
+Batch 19's performance JUnit captured `NOT_LEADER_OR_FOLLOWER` on a
+freshly created shared topic before repeated `OUT_OF_ORDER_SEQUENCE_NUMBER`
+retries and a 120-second producer delivery timeout. The three completed LZ4
+sample produce ratios were 0.5883, 0.7541, and 0.6876; the fourth sample
+never completed. This is a **correctness-sensitive idempotent-producer
+failure** requiring a production-path investigation if reproduced, not merely
+a slow-performance sample to discard or a reason to relax GA thresholds.
+
+The benchmark now requires read-only ListOffsets responses from all six
+leaders after RF3/ISR3 metadata convergence for each new topic pair, before
+sending idempotent warmup records. This targets the controller-metadata versus
+data-plane leader-initialization race; it does not prove that an unrelated
+leader transition, producer-state replay, or sequence-validation defect is
+fixed. The acks=all, idempotence, throughput thresholds, warmup workload, and
+sample count are unchanged.
+
+The Shared Storage Java 25 workflow explicitly selects the two
+`StoragePartitionRoleListenerEpochCompatibilityTest` methods. A new
+fail-closed JUnit evidence checker requires those two methods plus the 13
+local leadership fence, 10 shared role listener, and eight epoch precheck
+methods to be present and unskipped. Missing reports, methods, failures,
+errors, and skips fail CI; test-result XML is retained as an artifact.
+
+The Batch 20 changes are **not** authoritative monotonic watermark writes,
+durable COMMITTED reference retirement, reader/upload quiescence, or MinIO
+physical lifecycle GC. A GA manifest PASS for the historical workflow
+matrix does not authorize those unimplemented capabilities.
