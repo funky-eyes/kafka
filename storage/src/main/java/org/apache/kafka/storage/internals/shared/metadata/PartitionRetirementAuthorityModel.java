@@ -286,26 +286,54 @@ public final class PartitionRetirementAuthorityModel {
         public Snapshot {
             Objects.requireNonNull(partition, "partition");
             Objects.requireNonNull(explicitLogStart, "explicitLogStart");
-            if (authorityOffset < NO_AUTHORITY_OFFSET || maxSourceLeaderEpoch < UNKNOWN_EPOCH
-                || activeBrokerId < NO_LEADER) {
+            validateSnapshotDomain(authorityOffset, maxSourceLeaderEpoch, activeBrokerId);
+            validateSnapshotInitialState(
+                authorityOffset, maxSourceLeaderEpoch, activeBrokerId, explicitLogStart, terminallyDeleted
+            );
+            validateSnapshotLeadership(
+                maxSourceLeaderEpoch, activeBrokerId, explicitLogStart, terminallyDeleted
+            );
+            validateSnapshotWatermark(explicitLogStart);
+        }
+
+        private static void validateSnapshotDomain(long offset, int leaderEpoch, int brokerId) {
+            if (offset < NO_AUTHORITY_OFFSET || leaderEpoch < UNKNOWN_EPOCH || brokerId < NO_LEADER) {
                 throw new IllegalArgumentException("Invalid reference authority snapshot");
             }
-            if (authorityOffset == NO_AUTHORITY_OFFSET &&
-                (maxSourceLeaderEpoch != UNKNOWN_EPOCH || activeBrokerId != NO_LEADER
-                    || explicitLogStart.isPresent() || terminallyDeleted)) {
+        }
+
+        private static void validateSnapshotInitialState(
+            long offset,
+            int leaderEpoch,
+            int brokerId,
+            OptionalLong watermark,
+            boolean deleted
+        ) {
+            if (offset == NO_AUTHORITY_OFFSET
+                && (leaderEpoch != UNKNOWN_EPOCH || brokerId != NO_LEADER || watermark.isPresent() || deleted)) {
                 throw new IllegalArgumentException("Unknown authority offset requires an empty initial snapshot");
             }
-            if (authorityOffset >= 0L && maxSourceLeaderEpoch == UNKNOWN_EPOCH && !terminallyDeleted) {
+            if (offset >= 0L && leaderEpoch == UNKNOWN_EPOCH && !deleted) {
                 throw new IllegalArgumentException("Only terminal deletion may precede a first election");
             }
-            if (maxSourceLeaderEpoch == UNKNOWN_EPOCH
-                && (activeBrokerId != NO_LEADER || explicitLogStart.isPresent())) {
+        }
+
+        private static void validateSnapshotLeadership(
+            int leaderEpoch,
+            int brokerId,
+            OptionalLong watermark,
+            boolean deleted
+        ) {
+            if (leaderEpoch == UNKNOWN_EPOCH && (brokerId != NO_LEADER || watermark.isPresent())) {
                 throw new IllegalArgumentException("Unknown source epoch cannot have a leader or watermark");
             }
-            if (terminallyDeleted && activeBrokerId != NO_LEADER) {
+            if (deleted && brokerId != NO_LEADER) {
                 throw new IllegalArgumentException("Terminally deleted topic cannot retain a leader");
             }
-            if (explicitLogStart.isPresent() && explicitLogStart.getAsLong() < 0L) {
+        }
+
+        private static void validateSnapshotWatermark(OptionalLong watermark) {
+            if (watermark.isPresent() && watermark.getAsLong() < 0L) {
                 throw new IllegalArgumentException("Persisted log start must be non-negative");
             }
         }

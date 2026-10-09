@@ -312,6 +312,52 @@ class PartitionRetirementAuthorityModelTest {
         );
     }
 
+    @Test
+    void initialAuthorityOffsetCannotCarryAnyClaimedGeneration() {
+        assertThrows(IllegalArgumentException.class, () ->
+            new Snapshot(PARTITION, -1L, 10, -1, OptionalLong.empty(), false)
+        );
+        assertThrows(IllegalArgumentException.class, () ->
+            new Snapshot(PARTITION, -1L, -1, -1, OptionalLong.empty(), true)
+        );
+    }
+
+    @Test
+    void unknownEpochAtCommittedOffsetRequiresATerminalTombstone() {
+        assertThrows(IllegalArgumentException.class, () ->
+            new Snapshot(PARTITION, 0L, -1, -1, OptionalLong.empty(), false)
+        );
+        Snapshot deletedBeforeElection = new Snapshot(
+            PARTITION, 0L, -1, -1, OptionalLong.empty(), true
+        );
+        assertTrue(deletedBeforeElection.terminallyDeleted());
+    }
+
+    @Test
+    void terminalStateRetainsPriorWatermarkButNeverActiveBroker() {
+        Snapshot deleted = new Snapshot(PARTITION, 20L, 9, -1, OptionalLong.of(50L), true);
+        assertEquals(OptionalLong.of(50L), deleted.explicitLogStart());
+        assertThrows(IllegalArgumentException.class, () ->
+            new Snapshot(PARTITION, 20L, 9, 1, OptionalLong.of(50L), true)
+        );
+    }
+
+    @Test
+    void invalidNegativeDomainAndWatermarkValuesFailClosed() {
+        assertThrows(IllegalArgumentException.class, () ->
+            new Snapshot(PARTITION, -2L, -1, -1, OptionalLong.empty(), false)
+        );
+        assertThrows(IllegalArgumentException.class, () ->
+            new Snapshot(PARTITION, 2L, -2, -1, OptionalLong.empty(), false)
+        );
+        assertThrows(IllegalArgumentException.class, () ->
+            new Snapshot(PARTITION, 2L, 3, -2, OptionalLong.empty(), false)
+        );
+        assertThrows(IllegalArgumentException.class, () ->
+            new Snapshot(PARTITION, 2L, 3, 1, OptionalLong.of(-1L), false)
+        );
+    }
+
     private static Decision delete(Snapshot state, long expected, long next) {
         return PartitionRetirementAuthorityModel.observeTopicDeleted(
             state, PARTITION, expected, next
