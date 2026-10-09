@@ -19,6 +19,7 @@ package org.apache.kafka.storage.internals.log;
 import org.apache.kafka.common.TopicIdPartition;
 
 import java.util.Collection;
+import java.util.Map;
 
 /**
  * Notification seam for physical storage implementations that need to know which local replicas currently own
@@ -43,6 +44,21 @@ public interface StoragePartitionRoleListener {
         Collection<TopicIdPartition> leaders,
         Collection<TopicIdPartition> followers
     );
+
+    /**
+     * Reports the actual KRaft leader epoch observed after each local role transition.
+     *
+     * <p>Existing extensions keep receiving the original callback by default.
+     * The epoch is diagnostic local ownership evidence only; even an exact epoch
+     * match is not a distributed lease or proof that a remote writer is fenced.
+     * Implementations must remain non-blocking and perform no I/O here.</p>
+     */
+    default void onLeadershipChangeWithEpochs(
+        Map<TopicIdPartition, Integer> leaders,
+        Map<TopicIdPartition, Integer> followers
+    ) {
+        onLeadershipChange(leaders.keySet(), followers.keySet());
+    }
 
     /**
      * Reports partitions for which this broker is no longer a replica.

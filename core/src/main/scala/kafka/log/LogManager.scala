@@ -193,6 +193,14 @@ class LogManager(logDirs: Seq[File],
     storagePartitionRoleListener.onLeadershipChange(leaders, followers)
   }
 
+  /** Reports source Kafka leader epochs without breaking legacy role listeners. */
+  def onLeadershipChangeWithEpochs(
+    leaders: util.Map[TopicIdPartition, Integer],
+    followers: util.Map[TopicIdPartition, Integer]
+  ): Unit = {
+    storagePartitionRoleListener.onLeadershipChangeWithEpochs(leaders, followers)
+  }
+
   /** Reports local replica removals before the local log is stopped or deleted. */
   def onPartitionsRemoved(partitions: util.Collection[TopicIdPartition]): Unit = {
     storagePartitionRoleListener.onPartitionsRemoved(partitions)

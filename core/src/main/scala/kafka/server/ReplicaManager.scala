@@ -2411,15 +2411,19 @@ class ReplicaManager(val config: KafkaConfig,
         replicaAlterLogDirsManager.shutdownIdleFetcherThreads()
 
         remoteLogManager.foreach(rlm => rlm.onLeadershipChange((leaderChangedPartitions.toSet: Set[TopicPartitionLog]).asJava, (followerChangedPartitions.toSet: Set[TopicPartitionLog]).asJava, localChanges.topicIds()))
-        val storageLeaderChanges = leaderChangedPartitions.flatMap { partition =>
+        // Carry the actual KRaft leader epoch after the local transition. These are
+        // notifications for asynchronous storage workers, never I/O or writer leases.
+        val storageLeaderEpochs = leaderChangedPartitions.flatMap { partition =>
           Option(localChanges.topicIds().get(partition.topicPartition.topic()))
-            .map(topicId => new TopicIdPartition(topicId, partition.topicPartition))
-        }.asJava
-        val storageFollowerChanges = followerChangedPartitions.flatMap { partition =>
+            .map(topicId => new TopicIdPartition(topicId, partition.topicPartition) ->
+              Int.box(partition.getLeaderEpoch))
+        }.toMap.asJava
+        val storageFollowerEpochs = followerChangedPartitions.flatMap { partition =>
           Option(localChanges.topicIds().get(partition.topicPartition.topic()))
-            .map(topicId => new TopicIdPartition(topicId, partition.topicPartition))
-        }.asJava
-        logManager.onLeadershipChange(storageLeaderChanges, storageFollowerChanges)
+            .map(topicId => new TopicIdPartition(topicId, partition.topicPartition) ->
+              Int.box(partition.getLeaderEpoch))
+        }.toMap.asJava
+        logManager.onLeadershipChangeWithEpochs(storageLeaderEpochs, storageFollowerEpochs)
       }
 
       if (metadataVersion.isDirectoryAssignmentSupported) {
