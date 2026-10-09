@@ -220,3 +220,60 @@ log-start writer, remote-reference retirement or physical object deletion.
 Tests verify only the local ticket, deterministic ID and client-safety
 properties; neither the local ticket nor `retirementProducerProperties()`
 can authorize a cross-broker transaction.
+
+## Batch 19: source KRaft leader epoch notifications (still no writer)
+
+### Code and compatibility
+
+The broker role seam now offers
+`StoragePartitionRoleListener.onLeadershipChangeWithEpochs(leaders, followers)`.
+`ReplicaManager.applyDelta()` supplies the **post-transition Kafka
+`Partition.getLeaderEpoch`** for both leaders and followers, through
+`LogManager`. The old callback remains the one abstract method: third-party
+implementations and the default no-op listener still receive the original
+leader/follower collections through a default delegation. The callback
+does not block, access MinIO, or produce Kafka records.
+
+`SharedPartitionRoleListener` forwards known source epochs into
+`LocalRetirementLeadershipFence`. Each callback changes a unique **local**
+generation, and demotion/partition removal invalidates existing tickets.
+A stale lower epoch cannot re-promote a writer; an unversioned callback
+after a known epoch cannot erase epoch evidence. Only
+`captureEpochRetirementLeader()` can supply a ticket carrying an observed
+KRaft epoch, and it rejects legacy notifications with an unknown epoch.
+
+`PartitionRetirementEpochPrecheck` joins a still-current local ticket,
+a caller-observed Kafka epoch, and the Batch 17 read-only watermark-value
+preflight. Its strongest status is
+`LOCAL_EPOCH_OBSERVATION_MATCH`: this **only** describes a local moment
+and an advisory value-domain finding. It is explicitly not a write
+authorization. Unit tests cover ABA, source-epoch mismatch, missing
+epochs, stale lower-epoch notifications, missing initial zero, stale
+metadata replay, an offset exceeding source log start, failed image,
+and the original functional interface compatibility.
+
+### The remaining cross-broker correctness gap
+
+Kafka's `transactional.id` fences an earlier producer only when the
+replacement initializes a new producer epoch. It **does not prevent a
+stale old leader from subsequently calling `initTransactions()` and
+fencing the current leader**. Nor can Kafka's compacted metadata topic
+compare the next value with the previous value atomically: a delayed
+lower watermark under the existing compacted partition key can replace
+a higher watermark, leaving only the wrong winner after compaction.
+
+This remains a **hard blocker** even now that the actual source leader
+epoch reaches the local listener. Future code must prove an authority
+protocol that rejects old KRaft epochs at **the durable commit boundary**,
+including stale restarts, and preserves monotonic replay **after topic
+compaction**. Candidate approaches need their own design and failure
+proof (for example, generation-scoped records with safe ordering and
+retention, or a KRaft-authoritative controller-coordinated state
+machine); the existing one-key last-write-wins record cannot simply
+be made safe by an in-memory precheck or the transaction ID alone.
+
+No Batch 19 code creates a retirement transactional producer, emits a
+partition log-start record, retires a durable remote reference, changes
+RecordBatch reachability, or physically deletes a COMMITTED MinIO
+object. The existing 19-gate GA evidence applies only to the previous
+release scope, **not** completed COMMITTED lifecycle physical GC.
