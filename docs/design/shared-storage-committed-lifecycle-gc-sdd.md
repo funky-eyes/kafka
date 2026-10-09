@@ -562,3 +562,73 @@ The corrected guard is deliberately non-emitting. KRaft authoritative
 transition records, controller-commit fencing, mixed-version rollout,
 durable COMMITTED reference retirement and physical MinIO deletion remain
 separate hard requirements. This checkpoint does not certify any of them.
+
+
+## Batch 25: offline versioned authority envelope and WAL barrier evidence
+
+### Non-emitting, strict versioned authority snapshot envelope
+
+PartitionRetirementAuthoritySnapshotCodec is an **offline, non-production**
+binary envelope for a hypothetical controller-authenticated retirement
+snapshot. It defines a fixed **56-byte, big-endian v1** representation:
+
+- magic (4 bytes), version (2), flags (2)
+- immutable topic ID high/low (16), partition (4)
+- last accepted authority transition offset (8)
+- maximum source KRaft epoch (4), leader broker ID (4)
+- explicitly present log-start watermark or canonical absent zero (8)
+- CRC32C covering the first 52 bytes (4)
+
+Unknown versions, reserved flags, noncanonical missing values, negative or
+invalid snapshot state, truncation, extension, wrong topic incarnation,
+uncommitted initial snapshots, corrupt CRC, and checkpoints behind the
+caller-supplied committed authority horizon are all rejected. The required
+Java 25 anti-skip contract adds **20 strict codec/replay tests**, taking
+the required leadership, controller and snapshot coverage from 80 to 100
+named methods.
+
+Crucially, a CRC32C is **not cryptographic authentication**. This envelope
+can be forged by an adversary and cannot establish a committed KRaft record,
+source-leader truth or a fresh controller generation. Neither the encoded
+bytes nor decoded Snapshot authorizes watermark emission, reference
+retirement or MinIO deletion. The horizon is caller-supplied and MUST
+ultimately be independently proven against committed controller state.
+No KRaft MetadataRecord type, controller RPC or disk snapshot publisher is
+introduced here. Compatibility/capability rollout and actual KRaft state
+machine integration are still hard blockers.
+
+### Batch 24 performance failure is WAL force dominated, not yet fixed
+
+The unchanged performance test source blob
+35ca6a384979227ba27d0fe04099f93d4b59b457 produced three
+different measured distributions on GitHub's ephemeral runners:
+
+| Batch | LZ4 produce ratio samples | Median | Raw produce ratio |
+| --- | --- | --- | --- |
+| 22 | 0.9949, 0.9043, 0.9075, 1.2346 | 0.9512 | 0.4567 |
+| 23 | 0.8861, 0.3917, 0.7601, 0.7702 | 0.7652 | 0.4093 |
+| 24 | 0.3614, 0.0895, 0.3160, 1.0641 | 0.3387 | 0.2463 |
+
+In Batch 24 repetition 2, shared produce took 226.898 ms and all three
+brokers' **aggregated** WAL durability barriers accumulated 243.730 ms
+(116.783 ms data-force plus 126.166 ms checkpoint-force). These broker
+measurements are cumulative/concurrent, so they must NOT be interpreted
+as the single request's exclusive critical path. Nevertheless, the
+barrier share of 1.0742 and WAL average barrier 3532 microseconds
+identify storage-forcing variance as the main *observed* candidate.
+The four hot-read ratios remain near 1, and the compared benchmark
+source has not changed between these runs.
+
+This is **not a claim that a performance regression is fixed**, nor
+proof that hosted runner variance alone explains it. The required
+minimum median produce ratio remains **0.60**, the consume ratio
+remains **0.50**, both sample counts and all acks=all/fsync semantics
+remain unchanged. Batch 24 therefore correctly produced a FAIL,
+with a downstream BLOCKED GA Manifest.
+
+Next performance investigations must isolate the underlying filesystem
+force latency, compare cold/hot runner evidence and the two ordered
+checkpoint barriers, and test any proposed batching improvement against
+WAL crash windows, reopen, head reclamation and MinIO durability. A
+faster but non-durable acknowledgement or a retry-to-green cannot be
+a substitute for verified production throughput.
