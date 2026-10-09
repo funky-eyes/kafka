@@ -39,6 +39,8 @@ REQUIRED_TESTS = {
         "unversionedReelectionCannotErasePreviouslyKnownEpoch",
         "invalidExplicitKafkaEpochIsRejected",
         "ticketFromAnotherFenceInstanceNeverValidates",
+        "equalEpochLeaderCallbackAfterFollowerCannotUndoDemotion",
+        "sameEpochDuplicateLeaderCallbackOnlyRefreshesLocalGeneration",
     ),
     "org.apache.kafka.storage.internals.shared.kafka.SharedPartitionRoleListenerTest": (
         "routesOnlySelectedUserTopicsAndTracksLeaderDemotion",
@@ -51,6 +53,12 @@ REQUIRED_TESTS = {
         "legacyCallbackKeepsOldRoleBehaviorWithoutClaimingKafkaEpoch",
         "staleEpochNotificationCannotProduceEpochTicket",
         "epochCallbackIgnoresClassicAndInternalTopics",
+        "equalEpochDelayedLeaderCallbackCannotOverrideFollowerRole",
+    ),
+    "org.apache.kafka.storage.internals.shared.metadata.PartitionRetirementCompactionSafetyTest": (
+        "liveReplayDetectsBackwardWriteButCompactedReplayCannotRecoverItsHistory",
+        "compactionDoesNotSupplyAWriterEpochOrAnAuthenticCatchUpHorizon",
+        "topicRecreationKeepsDistinctCompactedKeys",
     ),
     "org.apache.kafka.storage.internals.shared.kafka.PartitionRetirementEpochPrecheckTest": (
         "matchingSourceEpochOnlyProducesAnAdvisoryValueFinding",

@@ -308,3 +308,80 @@ The Batch 20 changes are **not** authoritative monotonic watermark writes,
 durable COMMITTED reference retirement, reader/upload quiescence, or MinIO
 physical lifecycle GC. A GA manifest PASS for the historical workflow
 matrix does not authorize those unimplemented capabilities.
+
+
+## Batch 21: reject equal-epoch callback reentry; prove compaction unsafety
+
+### Local epoch-fence safety invariant
+
+An epoch-aware LEADER callback may refresh a **currently leading** local
+ticket at the same epoch (invalidating any previously captured ticket).
+But once this partition has been observed as FOLLOWER at epoch E, a
+delayed LEADER callback at E or below must **never re-promote** a local
+retirement ticket. A new positive leader transition requires an epoch
+strictly greater than the most recently observed follower epoch.
+
+`LocalRetirementLeadershipFence` now applies this rule. Tests cover
+LEADER(E) -> FOLLOWER(E) -> delayed LEADER(E), the subsequent valid
+LEADER(E+1), and same-epoch duplicate leader notifications. A companion
+`SharedPartitionRoleListenerTest` checks the real callback seam. The
+mandatory Java 25 JUnit-evidence checker now requires all 39 named
+epoch, role, and compaction-safety regression tests, without skips.
+
+**Limitations:** this is only a process-local race fence. The current
+`onRemoved()` releases local epoch history to avoid unbounded topic-ID
+tombstones. Reassignment after removal, process restart, another broker
+and stale producer reinitialization therefore still require an independent
+authoritative generation check. Do not interpret these tickets as leases
+or emission authorization.
+
+### Real compacted-topic counterexample
+
+`PartitionRetirementCompactionSafetyTest` uses the actual reserved
+partition-log-start codec and `SharedMetadataImage`:
+
+1. Replay `startOffset=40` at metadata offset 10, then
+   `startOffset=20` at offset 11 for the same compacted key:
+   live image replay correctly fails closed on the regression.
+2. Kafka may compact away offset 10. A new consumer that only sees
+   offset 11 accepts `20` because the higher value's provenance has
+   disappeared; the persisted state cannot distinguish a stale writer
+   from a legitimate initial value.
+3. A consumed metadata offset does not prove a read-committed horizon,
+   authoritative source leader epoch, or writer generation. Topic
+   recreation remains isolated by immutable topic ID.
+
+This is a **negative safety proof for the existing key**, not a test
+that a production writer is working. Simply adding `transactional.id`
+cannot fix it: an old broker can call `initTransactions()` after the
+new leader and fence its producer in turn.
+
+### Required authoritative protocol before emitting anything
+
+The preferred design direction is a controller/KRaft-serialized partition
+generation and watermark state machine, subject to explicit compatibility,
+restart and rollback proofs. The **serialized authority** would need to:
+
+1. Bind a generation to immutable topic ID, partition, current KRaft
+   leader epoch, and authenticated current leader identity. Validate a
+   fresh source log-start observation at the same epoch.
+2. Serialize leader transition and watermark advance against one
+   durable authority log with a monotonic-value invariant. Reject all
+   lower generations and lower start offsets at that log's commit
+   boundary; reconstruct those checks from compacted/snapshot state.
+3. Prohibit unknown source log start, lost replay horizon, generation
+   uncertainty, mixed-version decoder incompatibility, and ambiguous
+   commit outcomes. No external metadata Kafka transaction or local
+   callback alone may substitute for controller validation.
+4. Keep the historical `0x04` compacted log-start key **non-emitting**
+   unless its use is proven safe against a late stale last writer.
+   Consumer mirrors cannot themselves become deletion authority.
+5. Retire COMMITTED references only in a later, separately persisted
+   lifecycle phase after every packed RecordBatch range is unreachable
+   and reader/upload owners are fenced. Delete physical MinIO bytes
+   only after crash-retryable reference retirement.
+
+No controller RPC, KRaft metadata record, authoritative writer, reference
+retirement, or MinIO physical COMMITTED lifecycle deletion is enabled in
+Batch 21. The historical 19/19 GA PASS remains scoped to the already
+implemented release behavior.
