@@ -200,6 +200,54 @@ class SharedMetadataClientConfigurationTest {
     }
 
     @Test
+    void rejectsUnsafeMetadataProducerDurabilityOverrides() {
+        Endpoint endpoint = new Endpoint("PLAINTEXT", SecurityProtocol.PLAINTEXT, "localhost", 9092);
+        for (Map.Entry<String, Object> unsafe : List.<Map.Entry<String, Object>>of(
+            Map.entry(ProducerConfig.ACKS_CONFIG, "1"),
+            Map.entry(ProducerConfig.ACKS_CONFIG, "0"),
+            Map.entry(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, false),
+            Map.entry(ProducerConfig.TRANSACTIONAL_ID_CONFIG, "external")
+        )) {
+            var config = SharedMetadataClientConfiguration.from(context(
+                List.of(endpoint),
+                Map.of(SharedMetadataClientConfiguration.CLIENT_PREFIX + unsafe.getKey(), unsafe.getValue())
+            ));
+            assertThrows(IllegalArgumentException.class, config::producerProperties);
+            assertThrows(IllegalArgumentException.class, config::sequenceProducerProperties);
+        }
+    }
+
+    @Test
+    void acceptsEquivalentStrictProducerDurabilityRepresentations() {
+        Endpoint endpoint = new Endpoint("PLAINTEXT", SecurityProtocol.PLAINTEXT, "localhost", 9092);
+        var config = SharedMetadataClientConfiguration.from(context(
+            List.of(endpoint),
+            Map.of(
+                SharedMetadataClientConfiguration.CLIENT_PREFIX + ProducerConfig.ACKS_CONFIG, "-1",
+                SharedMetadataClientConfiguration.CLIENT_PREFIX + ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "true"
+            )
+        ));
+        assertEquals("-1", config.producerProperties().get(ProducerConfig.ACKS_CONFIG));
+        assertEquals("true", config.producerProperties().get(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG));
+    }
+
+    @Test
+    void rejectsUnsafeMetadataReplayIsolationOverrides() {
+        Endpoint endpoint = new Endpoint("PLAINTEXT", SecurityProtocol.PLAINTEXT, "localhost", 9092);
+        for (Map.Entry<String, Object> unsafe : List.<Map.Entry<String, Object>>of(
+            Map.entry(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_uncommitted"),
+            Map.entry(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, true),
+            Map.entry(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "latest")
+        )) {
+            var config = SharedMetadataClientConfiguration.from(context(
+                List.of(endpoint),
+                Map.of(SharedMetadataClientConfiguration.CLIENT_PREFIX + unsafe.getKey(), unsafe.getValue())
+            ));
+            assertThrows(IllegalArgumentException.class, config::consumerProperties);
+        }
+    }
+
+    @Test
     void rejectsMetadataProducerRequestBudgetBelowCommitEnvelope() {
         Endpoint endpoint = new Endpoint("PLAINTEXT", SecurityProtocol.PLAINTEXT, "localhost", 9092);
         SharedMetadataClientConfiguration config = SharedMetadataClientConfiguration.from(context(

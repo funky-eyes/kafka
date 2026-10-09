@@ -126,6 +126,21 @@ public final class SharedMetadataClientConfiguration {
         result.putIfAbsent(ProducerConfig.CLIENT_ID_CONFIG, "shared-storage-metadata-producer-" + brokerId);
         result.putIfAbsent(ProducerConfig.ACKS_CONFIG, "all");
         result.putIfAbsent(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
+        // The normal producer is intentionally non-transactional; sequence and
+        // retirement identities are owned by their dedicated factory methods.
+        if (result.containsKey(ProducerConfig.TRANSACTIONAL_ID_CONFIG)) {
+            throw new IllegalArgumentException(
+                CLIENT_PREFIX + ProducerConfig.TRANSACTIONAL_ID_CONFIG + " is reserved for internal producers");
+        }
+        String acks = result.get(ProducerConfig.ACKS_CONFIG).toString();
+        if (!"all".equalsIgnoreCase(acks) && !"-1".equals(acks)) {
+            throw new IllegalArgumentException(CLIENT_PREFIX + ProducerConfig.ACKS_CONFIG
+                + " must be all for authoritative metadata");
+        }
+        if (!"true".equalsIgnoreCase(result.get(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG).toString())) {
+            throw new IllegalArgumentException(CLIENT_PREFIX + ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG
+                + " must be true for authoritative metadata");
+        }
         int maxRequestSize = positiveInt(
             result.get(ProducerConfig.MAX_REQUEST_SIZE_CONFIG),
             MIN_METADATA_MESSAGE_BYTES,
@@ -188,6 +203,18 @@ public final class SharedMetadataClientConfiguration {
         result.putIfAbsent(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
         result.putIfAbsent(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
         result.putIfAbsent(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_committed");
+        if (!"read_committed".equals(result.get(ConsumerConfig.ISOLATION_LEVEL_CONFIG).toString())) {
+            throw new IllegalArgumentException(CLIENT_PREFIX + ConsumerConfig.ISOLATION_LEVEL_CONFIG
+                + " must be read_committed for authoritative replay");
+        }
+        if (!"false".equalsIgnoreCase(result.get(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG).toString())) {
+            throw new IllegalArgumentException(CLIENT_PREFIX + ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG
+                + " must be false for manually assigned metadata replay");
+        }
+        if (!"earliest".equals(result.get(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG).toString())) {
+            throw new IllegalArgumentException(CLIENT_PREFIX + ConsumerConfig.AUTO_OFFSET_RESET_CONFIG
+                + " must be earliest for metadata recovery");
+        }
         result.putIfAbsent(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class);
         result.putIfAbsent(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class);
         return result;
