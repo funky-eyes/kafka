@@ -280,7 +280,7 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
 
     private void applyRecords(ConsumerRecords<byte[], byte[]> records) {
         for (ConsumerRecord<byte[], byte[]> record : records.records(METADATA_PARTITION)) {
-            image.apply(record.key(), record.value());
+            image.applyFromMetadataLog(record.key(), record.value(), record.offset());
             markApplied(record.offset());
         }
     }
@@ -416,7 +416,25 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
         }
     }
 
+    /**
+     * The ordinary metadata producer must never emit retirement watermarks.
+     * A future writer requires exclusive cross-broker generation fencing and a
+     * monotonic transactional protocol; consumer replay alone cannot prevent
+     * a delayed lower value from replacing the compacted latest value.
+     */
+    static void rejectUnfencedRetirementWrite(byte[] key) {
+        if (SharedMetadataRecordCodec.decodeKey(key).type() ==
+            SharedMetadataRecordCodec.KeyType.PARTITION_LOG_START) {
+            throw new IllegalArgumentException("Unfenced partition log-start write is disabled");
+        }
+    }
+
     private CompletableFuture<Void> writeRecord(byte[] key, byte[] value) {
+        try {
+            rejectUnfencedRetirementWrite(key);
+        } catch (IllegalArgumentException e) {
+            return CompletableFuture.failedFuture(e);
+        }
         if (closed.get()) {
             return CompletableFuture.failedFuture(new IllegalStateException("Shared metadata store is closed"));
         }

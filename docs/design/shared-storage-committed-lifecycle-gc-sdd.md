@@ -94,3 +94,25 @@ Kafka metadata offset / leader-generation proof, reader-quiescence proof or S3
 DELETE. A logically expired observation can become stale immediately, must
 never be used directly as deletion authority, and must be revalidated after
 the durable retirement and lifetime fences are implemented.
+
+## Batch 16: replay-offset provenance and default-deny writer gate
+
+The single-partition Kafka metadata consumer now applies each replayed record
+through `SharedMetadataImage.applyFromMetadataLog(key, value, offset)`. Its
+monotonic Kafka consumer offset is recorded under the image lock alongside
+the updated object/watermark state. Compaction gaps are allowed; duplicate or
+backward offsets, negative offsets and corrupt records fail the image closed.
+Direct in-memory `apply()` leaves the provenance offset at `-1`.
+
+`retirementEvidenceSnapshot()` and
+`CommittedObjectRetirementPrecheck.assessCommittedSnapshot()` expose the
+last **consumed** metadata offset as diagnostic provenance only. It does not
+prove catch-up to the latest committed metadata topic offset, leadership,
+generation ownership, durable retirement, reader quiescence or deletion safety.
+
+`KafkaObjectMetadataStore.writeRecord()` rejects partition-log-start keys
+on its ordinary producer path. No production writer for that key is enabled.
+The gate cannot prevent writes from an independent old/external producer; true
+cross-broker fencing, mixed-version rollout and monotonic transactional writes
+remain mandatory before authorizing this feature. Existing object, cleanup
+and sequence metadata protocols are unchanged.

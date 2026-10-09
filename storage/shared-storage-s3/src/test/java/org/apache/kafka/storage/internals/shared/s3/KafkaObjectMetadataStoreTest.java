@@ -36,6 +36,32 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class KafkaObjectMetadataStoreTest {
     @Test
+    void ordinaryMetadataProducerCannotEmitUnfencedRetirementWatermark() {
+        org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId partition =
+            new org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId(1L, 2L, 0);
+        assertThrows(IllegalArgumentException.class, () ->
+            KafkaObjectMetadataStore.rejectUnfencedRetirementWrite(
+                org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.partitionLogStartKey(
+                    partition
+                )
+            )
+        );
+    }
+
+    @Test
+    void ordinaryMetadataProducerStillAcceptsExistingMetadataKeys() {
+        KafkaObjectMetadataStore.rejectUnfencedRetirementWrite(
+            org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.objectKey(1L)
+        );
+        KafkaObjectMetadataStore.rejectUnfencedRetirementWrite(
+            org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.objectCleanupKey(1L)
+        );
+        KafkaObjectMetadataStore.rejectUnfencedRetirementWrite(
+            org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.brokerSequenceKey(1)
+        );
+    }
+
+    @Test
     void closeAggregationAttemptsEveryMetadataClientResource() {
         AtomicInteger closed = new AtomicInteger();
         RuntimeException first = new IllegalStateException("first");
