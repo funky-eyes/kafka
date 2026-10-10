@@ -87,6 +87,10 @@ REQUIRED_TESTS = {
         "aNewBrokerIncarnationCannotReuseTheSamePartitionLeaderEpoch",
         "freshLeaderEpochCanPassRegistrationCasButStillNeedsSourceProof",
         "forgedOrPartialBrokerIdentityIsRejectedAtRequestBoundary",
+        "brokerRegistrationWithoutIncarnationFailsClosedInsteadOfThrowing",
+        "brokerRegistrationWithReservedIncarnationFailsClosed",
+        "authorityChangesAfterPreflightInvalidateTheOriginalGeneration",
+        "leaderElectionAfterPreflightInvalidatesTheOldCandidate",
     ),
     "org.apache.kafka.controller.PartitionRetirementFeatureGateTest": (
         "productionControllerCannotReplayExperimentalFeatureLevel",
@@ -138,6 +142,9 @@ REQUIRED_TESTS = {
         "negotiatedVersionMustPrecedeAuthorityRecordInReplayOrder",
         "negotiatedFullSnapshotRoundTripsNewRecordAndTerminalTombstone",
         "negotiatedImageRejectsDowngradeSnapshotTarget",
+        "brokerIncarnationProofSurvivesNegotiatedKRaftSnapshotAndReplay",
+        "malformedBrokerIdentityCannotEnterBrokerMetadataImage",
+        "changingIncarnationWithinSameLeaderEpochFailsDuringMetadataReplay",
     ),
     "org.apache.kafka.server.common.PartitionRetirementAuthorityVersionTest": (
         "productionBuildCannotAdvertiseRecordFeatureLevelOne",

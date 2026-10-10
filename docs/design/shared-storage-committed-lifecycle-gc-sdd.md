@@ -979,3 +979,77 @@ A missing report, any skip or any failed case remains a release blocker.
 Current 19/19 historical GA PASS continues to cover existing Shared
 Storage runtime only. This batch neither activates Watermark Writer nor
 authorizes physical deletion.
+
+
+## Batch 31: restore CI compilation and pin CAS evidence to one controller state
+
+### Batch 30 failure classification
+
+Batch 30's Java 25 Shared Storage and MinIO workflow jobs both failed
+BEFORE meaningful runtime testing, while compiling
+PartitionRetirementCandidatePrecheckTest. Four local variable declarations
+used the package-private nested type `Candidate` without importing
+`PartitionRetirementCandidatePrecheck.Candidate`. The downstream
+Normalize GA Evidence Seal was BLOCKED. This was one deterministic
+test compilation failure observed in two workflows, not evidence
+that the replicated WAL, remote upload or MinIO correctness regressed.
+
+Batch 31 adds the missing import without relaxing any Java compiler,
+Checkstyle, CI or GA gate. Both affected workflows must actually run
+on the new canonical HEAD before this repair is considered verified.
+
+### CAS and broker incarnation review fixes
+
+- Controller candidate preflight now reads the previously replayed
+  authoritative Value only **once** per assessment, then uses the same
+  immutable value for both expected-authority-offset CAS and monotonic
+  epoch/watermark/broker continuity validation. This prevents a
+  potential mixed-observation classification if the checker is ever
+  called outside the serialized ControllerWriteEvent context. In the
+  existing event-queue call path, updates are already serialized.
+- A KRaft broker registration without an incarnation UUID is an
+  explicit BROKER_INCARNATION_MISMATCH rather than a NullPointerException.
+  The candidate must still present a nonzero incarnation, broker epoch
+  and unfenced, non-shutting-down registration.
+- A preflight finding is NEVER a reusable authorization token.
+  Deterministic tests first observe
+  SOURCE_LOG_START_NOT_VERIFIED, then mutate authoritative CAS state or
+  elect a different leader, and require the original candidate to be
+  rejected on a fresh controller assessment.
+
+### Broker identity persistence and fail-closed metadata replay
+
+Three mandatory MetadataImage tests now verify:
+
+1. BrokerEpoch and BrokerIncarnationId survive an actual negotiated
+   KRaft MetadataImage snapshot serialization and full MetadataDelta
+   replay without loss or substitution.
+2. A record with only one of the two broker-identity fields cannot
+   enter the Broker metadata image.
+3. Replacing an authenticated broker incarnation without incrementing
+   source partition LeaderEpoch is rejected during MetadataDelta replay.
+
+These complement four new Controller candidate regression methods.
+The mandatory Java 25 evidence checker now requires **177 named methods**
+(up from 170), including real Storage, Metadata and Server Common
+JUnit XML; missing, skipped or failed witnesses block the release.
+
+### Remaining unimplemented authority proof
+
+The current broker SharedCommitProgress is a **process-local cache** of
+Kafka log-start, HW and replica role, not an authenticated, durable
+Controller attestation. Neither a caller-provided watermark nor a
+CRC32C-valid offline snapshot is proof of authoritative Kafka source
+state. The Controller deliberately returns
+SOURCE_LOG_START_NOT_VERIFIED even after every CAS/registration check.
+
+Next work must bind an independently verified source log-start with
+KRaft Topic ID, BrokerEpoch, BrokerIncarnationId, LeaderEpoch,
+committed WAL/replica horizon and read-committed metadata catch-up;
+it must be revalidated inside one actual controller write event that
+atomically emits the version-gated authority record at its assigned
+Raft append offset. No reusable preflight receipt is acceptable.
+
+COMMITTED reference retirement, physical deletion, reader quiescence
+and object-store garbage collection remain disabled. Existing
+historical GA evidence does not certify these missing capabilities.
