@@ -87,6 +87,8 @@ on:
       - 'tools/test_check_shared_storage_minio_test_results.py'
       - 'tools/check_shared_storage_epoch_test_results.py'
       - 'tools/test_check_shared_storage_epoch_test_results.py'
+      - 'tools/check_shared_storage_epoch_test_sources.py'
+      - 'tools/test_check_shared_storage_epoch_test_sources.py'
       - '.github/workflows/shared-storage.yml'
   pull_request:
     paths:
@@ -144,6 +146,8 @@ on:
       - 'tools/test_check_shared_storage_minio_test_results.py'
       - 'tools/check_shared_storage_epoch_test_results.py'
       - 'tools/test_check_shared_storage_epoch_test_results.py'
+      - 'tools/check_shared_storage_epoch_test_sources.py'
+      - 'tools/test_check_shared_storage_epoch_test_sources.py'
       - '.github/workflows/shared-storage.yml'
   workflow_dispatch:
 
@@ -164,6 +168,12 @@ jobs:
         uses: actions/checkout@v5
         with:
           persist-credentials: false
+
+      - name: Preflight mandatory Java test sources before Gradle
+        shell: bash
+        run: |
+          python3 -m unittest tools.test_check_shared_storage_epoch_test_sources
+          python3 tools/check_shared_storage_epoch_test_sources.py .
 
       - name: Setup Gradle
         uses: ./.github/actions/setup-gradle
