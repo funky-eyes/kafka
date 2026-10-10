@@ -24,6 +24,7 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Non-blocking bridge from Kafka's native log offsets and replica role into the shared-storage upload plane.
@@ -33,7 +34,12 @@ import java.util.concurrent.ConcurrentMap;
  * log-start offset, exclusive high-watermark boundary and current local replica role.</p>
  */
 public final class SharedCommitProgress {
+    private static final long UPLOAD_ADMISSION_CLOSED = Long.MIN_VALUE;
+    private static final long UPLOAD_ADMISSION_COUNT = Long.MAX_VALUE;
     private final ConcurrentMap<SharedPartitionId, PartitionProgress> partitions = new ConcurrentHashMap<>();
+    // The high bit permanently closes upload admission, while the low bits
+    // count already-admitted uploads that may finish after quarantine.
+    private final AtomicLong uploadAdmissions = new AtomicLong();
     private volatile boolean disabledForQuarantine;
 
     /**
@@ -41,12 +47,54 @@ public final class SharedCommitProgress {
      * can reset the role/epoch tombstone capacity quarantine.
      */
     void disableForRetirementQuarantine() {
+        // Close admissions BEFORE clearing the cached Kafka progress windows.
+        // Concurrent schedulers cannot begin a new admitted upload afterward.
+        uploadAdmissions.getAndUpdate(state -> state | UPLOAD_ADMISSION_CLOSED);
         disabledForQuarantine = true;
         partitions.clear();
     }
 
     boolean isDisabledForRetirementQuarantine() {
-        return disabledForQuarantine;
+        return uploadAdmissions.get() < 0L;
+    }
+
+    /**
+     * Linearization point for new local asynchronous object uploads.
+     * A successfully admitted upload is already in flight when a subsequent
+     * quarantine occurs; it must release this permit on any completion path.
+     * This does not confer distributed KRaft retirement authorization.
+     */
+    boolean tryAcquireUploadAdmission() {
+        while (true) {
+            long current = uploadAdmissions.get();
+            if (current < 0L) {
+                return false;
+            }
+            if (current == UPLOAD_ADMISSION_COUNT) {
+                throw new IllegalStateException("Shared upload admission counter exhausted");
+            }
+            if (uploadAdmissions.compareAndSet(current, current + 1L)) {
+                return true;
+            }
+        }
+    }
+
+    void releaseUploadAdmission() {
+        while (true) {
+            long current = uploadAdmissions.get();
+            long count = current & UPLOAD_ADMISSION_COUNT;
+            if (count == 0L) {
+                throw new IllegalStateException("Shared upload admission counter underflow");
+            }
+            long next = (current & UPLOAD_ADMISSION_CLOSED) | (count - 1L);
+            if (uploadAdmissions.compareAndSet(current, next)) {
+                return;
+            }
+        }
+    }
+
+    long activeUploadAdmissions() {
+        return uploadAdmissions.get() & UPLOAD_ADMISSION_COUNT;
     }
 
     public void onLogLoaded(SharedPartitionId partition, long logStartOffset) {

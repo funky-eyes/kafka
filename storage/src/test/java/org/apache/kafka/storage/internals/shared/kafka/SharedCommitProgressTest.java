@@ -20,6 +20,12 @@ import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -234,6 +240,93 @@ class SharedCommitProgressTest {
         assertTrue(progress.isDisabledForRetirementQuarantine());
         assertTrue(progress.snapshot().isEmpty());
         assertTrue(progress.highWatermark(two).isEmpty());
+    }
+
+    @Test
+    void quarantineClosesAdmissionButPreservesAlreadyAdmittedUpload() {
+        SharedCommitProgress progress = new SharedCommitProgress();
+        assertTrue(progress.tryAcquireUploadAdmission());
+        assertEquals(1L, progress.activeUploadAdmissions());
+
+        progress.disableForRetirementQuarantine();
+
+        assertTrue(progress.isDisabledForRetirementQuarantine());
+        assertFalse(progress.tryAcquireUploadAdmission());
+        assertEquals(1L, progress.activeUploadAdmissions());
+        progress.releaseUploadAdmission();
+        assertEquals(0L, progress.activeUploadAdmissions());
+        assertFalse(progress.tryAcquireUploadAdmission());
+    }
+
+    @Test
+    void everyAdmittedUploadReleasesItsOwnCounterEvenAfterQuarantine() {
+        SharedCommitProgress progress = new SharedCommitProgress();
+        assertTrue(progress.tryAcquireUploadAdmission());
+        assertTrue(progress.tryAcquireUploadAdmission());
+        assertTrue(progress.tryAcquireUploadAdmission());
+        progress.disableForRetirementQuarantine();
+
+        progress.releaseUploadAdmission();
+        progress.releaseUploadAdmission();
+        assertEquals(1L, progress.activeUploadAdmissions());
+        assertFalse(progress.tryAcquireUploadAdmission());
+        progress.releaseUploadAdmission();
+        progress.disableForRetirementQuarantine();
+
+        assertEquals(0L, progress.activeUploadAdmissions());
+        assertTrue(progress.isDisabledForRetirementQuarantine());
+    }
+
+    @Test
+    void admissionReleaseWithoutAnOwnerFailsClosed() {
+        SharedCommitProgress progress = new SharedCommitProgress();
+        assertThrows(IllegalStateException.class, progress::releaseUploadAdmission);
+        assertTrue(progress.tryAcquireUploadAdmission());
+        progress.releaseUploadAdmission();
+        assertThrows(IllegalStateException.class, progress::releaseUploadAdmission);
+        progress.disableForRetirementQuarantine();
+        assertThrows(IllegalStateException.class, progress::releaseUploadAdmission);
+    }
+
+    @Test
+    void concurrentQuarantineAndAdmissionHaveOneCasOrdering() throws Exception {
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            for (int attempt = 0; attempt < 32; attempt++) {
+                SharedCommitProgress progress = new SharedCommitProgress();
+                CountDownLatch start = new CountDownLatch(1);
+                CompletableFuture<Boolean> admitted = CompletableFuture.supplyAsync(() -> {
+                    await(start);
+                    return progress.tryAcquireUploadAdmission();
+                }, workers);
+                CompletableFuture<Void> quarantine = CompletableFuture.runAsync(() -> {
+                    await(start);
+                    progress.disableForRetirementQuarantine();
+                }, workers);
+                start.countDown();
+
+                boolean accepted = admitted.get(10, TimeUnit.SECONDS);
+                quarantine.get(10, TimeUnit.SECONDS);
+                assertTrue(progress.isDisabledForRetirementQuarantine());
+                assertFalse(progress.tryAcquireUploadAdmission());
+                assertEquals(accepted ? 1L : 0L, progress.activeUploadAdmissions());
+                if (accepted) {
+                    progress.releaseUploadAdmission();
+                }
+                assertEquals(0L, progress.activeUploadAdmissions());
+            }
+        } finally {
+            workers.shutdownNow();
+        }
+    }
+
+    private static void await(CountDownLatch latch) {
+        try {
+            latch.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted while racing admission and quarantine", e);
+        }
     }
 
     @Test
