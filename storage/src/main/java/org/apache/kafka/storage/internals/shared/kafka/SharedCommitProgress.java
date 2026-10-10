@@ -47,6 +47,42 @@ public final class SharedCommitProgress {
         ));
     }
 
+    /**
+     * Observes a successful live Kafka DeleteRecords/retention advance, not a
+     * broker's proposed retirement watermark. Out-of-order notifications from
+     * concurrent advances must not roll the observed source log start backward.
+     * Unknown or removed partitions must never be recreated by a late callback.
+     */
+    public void onLogStartOffsetAdvanced(SharedPartitionId partition, long logStartOffset) {
+        Objects.requireNonNull(partition, "partition");
+        if (logStartOffset < 0L) {
+            throw new IllegalArgumentException("logStartOffset must be non-negative");
+        }
+        partitions.computeIfPresent(partition, (ignored, current) -> new PartitionProgress(
+            Math.max(current.logStartOffset(), logStartOffset),
+            current.highWatermark(),
+            current.role()
+        ));
+    }
+
+    /**
+     * Kafka log truncation/recovery can legally LOWER the source log start.
+     * This must replace the cached value rather than using a monotonic max.
+     * Existing role and high-watermark callbacks retain separate ownership;
+     * no state may be fabricated after topic removal.
+     */
+    public void onLogRebased(SharedPartitionId partition, long logStartOffset) {
+        Objects.requireNonNull(partition, "partition");
+        if (logStartOffset < 0L) {
+            throw new IllegalArgumentException("logStartOffset must be non-negative");
+        }
+        partitions.computeIfPresent(partition, (ignored, current) -> new PartitionProgress(
+            logStartOffset,
+            current.highWatermark(),
+            current.role()
+        ));
+    }
+
     public void onHighWatermarkUpdated(SharedPartitionId partition, long highWatermark) {
         Objects.requireNonNull(partition, "partition");
         if (highWatermark < 0) {

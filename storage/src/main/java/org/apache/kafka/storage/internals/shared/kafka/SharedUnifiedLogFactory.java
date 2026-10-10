@@ -133,7 +133,6 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
             false,
             segmentFactory
         ).load();
-        commitProgress.onLogLoaded(sharedPartition, offsets.logStartOffset());
 
         SharedLocalLog localLog = new SharedLocalLog(
             dir,
@@ -158,6 +157,9 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
             false,
             context.logOffsetsListener()
         );
+        // UnifiedLog may normalize its start in its constructor. Observe the
+        // actual native source state only after that constructor completes.
+        log.trackSourceLogStart(commitProgress, sharedPartition);
         log.addLogOffsetsListener(new LogOffsetsListener() {
             @Override
             public void onHighWatermarkUpdated(long highWatermark) {

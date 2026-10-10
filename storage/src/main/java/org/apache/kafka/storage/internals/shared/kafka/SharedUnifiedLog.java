@@ -23,13 +23,16 @@ import org.apache.kafka.storage.internals.epoch.LeaderEpochFileCache;
 import org.apache.kafka.storage.internals.log.AppendOrigin;
 import org.apache.kafka.storage.internals.log.LogAppendInfo;
 import org.apache.kafka.storage.internals.log.LogOffsetsListener;
+import org.apache.kafka.storage.internals.log.LogStartOffsetIncrementReason;
 import org.apache.kafka.storage.internals.log.ProducerStateManager;
 import org.apache.kafka.storage.internals.log.StorageAction;
 import org.apache.kafka.storage.internals.log.UnifiedLog;
 import org.apache.kafka.storage.internals.log.VerificationGuard;
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats;
+import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 
 import java.io.IOException;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
@@ -49,6 +52,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 public final class SharedUnifiedLog extends UnifiedLog {
     private final ReentrantReadWriteLock remoteRecoveryFence = new ReentrantReadWriteLock();
     private volatile long remoteCommittedHighWatermarkFloor;
+    private volatile SourceLogStartCallbackFence sourceLogStartTracker;
 
     public SharedUnifiedLog(
         long logStartOffset,
@@ -72,6 +76,40 @@ public final class SharedUnifiedLog extends UnifiedLog {
             remoteStorageSystemEnable,
             logOffsetsListener
         );
+    }
+
+    /**
+     * Install the native-log observation bridge after Kafka's constructor has
+     * finished initializing the actual log start and high watermark.
+     * This is only a local upload progress signal, never GC authorization.
+     */
+    void trackSourceLogStart(SharedCommitProgress progress, SharedPartitionId partition) {
+        Objects.requireNonNull(progress, "progress");
+        Objects.requireNonNull(partition, "partition");
+        if (sourceLogStartTracker != null) {
+            throw new IllegalStateException("Kafka source log-start tracker is already installed");
+        }
+        progress.onLogLoaded(partition, logStartOffset());
+        progress.onHighWatermarkUpdated(partition, highWatermark());
+        sourceLogStartTracker = new SourceLogStartCallbackFence(progress, partition);
+    }
+
+    /**
+     * Observe only a successful native DeleteRecords or retention advancement.
+     * Use the shared recovery-fence lock order for both update and publication.
+     */
+    @Override
+    public boolean maybeIncrementLogStartOffset(long newLogStartOffset, LogStartOffsetIncrementReason reason) {
+        // Kafka may call this while already holding its native log monitor.
+        // Never acquire remoteRecoveryFence here: that reverses the lock order
+        // used for truncation and metadata replay, and could deadlock.
+        SourceLogStartCallbackFence tracker = sourceLogStartTracker;
+        long generation = tracker == null ? -1L : tracker.captureGeneration();
+        boolean changed = super.maybeIncrementLogStartOffset(newLogStartOffset, reason);
+        if (changed && tracker != null) {
+            tracker.observeAdvance(generation, logStartOffset());
+        }
+        return changed;
     }
 
     @Override
@@ -117,7 +155,15 @@ public final class SharedUnifiedLog extends UnifiedLog {
     public boolean truncateTo(long targetOffset) {
         remoteRecoveryFence.writeLock().lock();
         try {
-            return super.truncateTo(targetOffset);
+            SourceLogStartCallbackFence tracker = sourceLogStartTracker;
+            if (tracker != null) {
+                tracker.invalidateForRebase();
+            }
+            boolean truncated = super.truncateTo(targetOffset);
+            if (truncated) {
+                observeLogRebase();
+            }
+            return truncated;
         } finally {
             remoteRecoveryFence.writeLock().unlock();
         }
@@ -131,7 +177,12 @@ public final class SharedUnifiedLog extends UnifiedLog {
     public void truncateFullyAndStartAt(long newOffset, Optional<Long> logStartOffsetOpt) {
         remoteRecoveryFence.writeLock().lock();
         try {
+            SourceLogStartCallbackFence tracker = sourceLogStartTracker;
+            if (tracker != null) {
+                tracker.invalidateForRebase();
+            }
             super.truncateFullyAndStartAt(newOffset, logStartOffsetOpt);
+            observeLogRebase();
         } finally {
             remoteRecoveryFence.writeLock().unlock();
         }
@@ -183,6 +234,17 @@ public final class SharedUnifiedLog extends UnifiedLog {
 
     long applyRemoteCommittedHighWatermarkFloor(long highWatermark) {
         return Math.max(highWatermark, remoteCommittedHighWatermarkFloor);
+    }
+
+    /**
+     * Native truncation may reduce the source log start. A removed partition
+     * is not re-created by a late observation.
+     */
+    private void observeLogRebase() {
+        SourceLogStartCallbackFence tracker = sourceLogStartTracker;
+        if (tracker != null) {
+            tracker.observeRebase(logStartOffset());
+        }
     }
 
     public <T> T withRemoteRecoveryFence(StorageAction<T, IOException> action) throws IOException {
