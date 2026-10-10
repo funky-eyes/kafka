@@ -703,6 +703,26 @@ public final class QuorumController implements Controller {
         return clusterControl;
     }
 
+    /**
+     * Serializes a non-emitting retirement candidate precheck with controller
+     * write events. A matching KRaft CAS and broker registration are NOT a
+     * log-start attestation or permission to publish a retirement record.
+     */
+    CompletableFuture<PartitionRetirementCandidatePrecheck.Finding> preflightPartitionRetirement(
+        PartitionRetirementCandidatePrecheck.Candidate candidate
+    ) {
+        return appendWriteEvent("partitionRetirementPreflight", OptionalLong.empty(), () ->
+            ControllerResult.of(
+                List.of(),
+                PartitionRetirementCandidatePrecheck.assess(
+                    featureControl, clusterControl, replicationControl, partitionRetirementControl,
+                    candidate, offsetControl.nextWriteOffset()
+                )
+            )
+        );
+    }
+
+
     // Visible for testing
     ConfigurationControlManager configurationControl() {
         return configurationControl;
