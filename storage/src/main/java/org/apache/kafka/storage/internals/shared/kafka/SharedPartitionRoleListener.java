@@ -94,7 +94,14 @@ public final class SharedPartitionRoleListener implements StoragePartitionRoleLi
             } else {
                 retirementFence.onLeader(sharedPartition);
             }
-            commitProgress.onLeader(sharedPartition);
+            // A delayed equal/lower-epoch LEADER callback can be rejected
+            // by the local epoch fence. It must not re-enable uploads via
+            // SharedCommitProgress when retirement leadership stayed revoked.
+            if (retirementFence.captureLeader(sharedPartition).isPresent()) {
+                commitProgress.onLeader(sharedPartition);
+            } else {
+                commitProgress.onFollower(sharedPartition);
+            }
         } else {
             // Invalidate local retirement work before publishing follower progress.
             if (leaderEpoch >= 0) {

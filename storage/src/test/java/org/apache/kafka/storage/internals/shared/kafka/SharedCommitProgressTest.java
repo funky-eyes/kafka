@@ -101,6 +101,90 @@ class SharedCommitProgressTest {
     }
 
     @Test
+    void kafkaDeleteRecordsUpdatesLiveUploadStartWithoutChangingCommittedHighWatermark() {
+        SharedCommitProgress progress = new SharedCommitProgress();
+        SharedPartitionId partition = new SharedPartitionId(2L, 3L, 0);
+        progress.onLogLoaded(partition, 10L);
+        progress.onHighWatermarkUpdated(partition, 80L);
+        progress.onLeader(partition);
+
+        progress.onLogStartOffsetAdvanced(partition, 40L);
+
+        SharedCommitProgress.PartitionProgress observed = progress.partitionProgress(partition).orElseThrow();
+        assertEquals(40L, observed.logStartOffset());
+        assertEquals(80L, observed.highWatermark());
+        assertEquals(SharedCommitProgress.ReplicaRole.LEADER, observed.role());
+    }
+
+    @Test
+    void delayedLowerDeleteRecordsObservationCannotRegressLiveSourceStart() {
+        SharedCommitProgress progress = new SharedCommitProgress();
+        SharedPartitionId partition = new SharedPartitionId(2L, 3L, 1);
+        progress.onLogLoaded(partition, 10L);
+        progress.onLogStartOffsetAdvanced(partition, 60L);
+        progress.onLogStartOffsetAdvanced(partition, 40L);
+
+        assertEquals(60L, progress.partitionProgress(partition).orElseThrow().logStartOffset());
+    }
+
+    @Test
+    void nativeTruncationCanLowerStartWithoutPreservingStaleHighWatermark() {
+        SharedCommitProgress progress = new SharedCommitProgress();
+        SharedPartitionId partition = new SharedPartitionId(2L, 3L, 2);
+        progress.onLogLoaded(partition, 10L);
+        progress.onHighWatermarkUpdated(partition, 80L);
+        progress.onLeader(partition);
+        progress.onLogStartOffsetAdvanced(partition, 60L);
+
+        progress.onHighWatermarkUpdated(partition, 30L);
+        progress.onLogRebased(partition, 15L);
+
+        SharedCommitProgress.PartitionProgress observed = progress.partitionProgress(partition).orElseThrow();
+        assertEquals(15L, observed.logStartOffset());
+        assertEquals(30L, observed.highWatermark());
+        assertEquals(SharedCommitProgress.ReplicaRole.LEADER, observed.role());
+    }
+
+    @Test
+    void observationsBeforeNativeLogInitializationDoNotInventAPartition() {
+        SharedCommitProgress progress = new SharedCommitProgress();
+        SharedPartitionId partition = new SharedPartitionId(2L, 3L, 3);
+
+        progress.onLogStartOffsetAdvanced(partition, 100L);
+        progress.onLogRebased(partition, 5L);
+
+        assertFalse(progress.partitionProgress(partition).isPresent());
+        progress.onLogLoaded(partition, 11L);
+        assertEquals(11L, progress.partitionProgress(partition).orElseThrow().logStartOffset());
+    }
+
+    @Test
+    void lateNativeCallbacksAfterReplicaRemovalCannotResurrectUploadProgress() {
+        SharedCommitProgress progress = new SharedCommitProgress();
+        SharedPartitionId partition = new SharedPartitionId(2L, 3L, 4);
+        progress.onLogLoaded(partition, 50L);
+        progress.onLeader(partition);
+        progress.remove(partition);
+
+        progress.onLogStartOffsetAdvanced(partition, 70L);
+        progress.onLogRebased(partition, 20L);
+
+        assertFalse(progress.partitionProgress(partition).isPresent());
+    }
+
+    @Test
+    void repeatedSuccessfulLogStartObservationIsIdempotent() {
+        SharedCommitProgress progress = new SharedCommitProgress();
+        SharedPartitionId partition = new SharedPartitionId(2L, 3L, 5);
+        progress.onLogLoaded(partition, 10L);
+
+        progress.onLogStartOffsetAdvanced(partition, 40L);
+        progress.onLogStartOffsetAdvanced(partition, 40L);
+
+        assertEquals(40L, progress.partitionProgress(partition).orElseThrow().logStartOffset());
+    }
+
+    @Test
     void rejectsNegativeOffsets() {
         SharedCommitProgress progress = new SharedCommitProgress();
         SharedPartitionId partition = new SharedPartitionId(1L, 2L, 5);
@@ -113,5 +197,7 @@ class SharedCommitProgressTest {
             IllegalArgumentException.class,
             () -> progress.onLogLoaded(partition, -1L)
         );
+        assertThrows(IllegalArgumentException.class, () -> progress.onLogStartOffsetAdvanced(partition, -1L));
+        assertThrows(IllegalArgumentException.class, () -> progress.onLogRebased(partition, -1L));
     }
 }

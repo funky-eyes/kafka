@@ -254,6 +254,58 @@ class SharedPartitionRoleListenerTest {
     }
 
     @Test
+    void delayedEqualEpochLeaderCannotReenableUploadAfterDemotion() {
+        SharedCommitProgress progress = new SharedCommitProgress();
+        SharedPartitionRoleListener listener = new SharedPartitionRoleListener(configuration(Map.of()), progress);
+        Uuid topicId = Uuid.randomUuid();
+        TopicIdPartition partition = topicPartition(topicId, "shared-topic", 3);
+        SharedPartitionId id = sharedPartitionId(topicId, 3);
+
+        listener.onLeadershipChangeWithEpochs(Map.of(partition, 20), Map.of());
+        assertTrue(progress.partitionProgress(id).orElseThrow().isLeader());
+        listener.onLeadershipChangeWithEpochs(Map.of(), Map.of(partition, 20));
+        listener.onLeadershipChangeWithEpochs(Map.of(partition, 20), Map.of());
+
+        assertFalse(progress.partitionProgress(id).orElseThrow().isLeader());
+        assertTrue(listener.captureEpochRetirementLeader(id).isEmpty());
+        listener.onLeadershipChangeWithEpochs(Map.of(partition, 21), Map.of());
+        assertTrue(progress.partitionProgress(id).orElseThrow().isLeader());
+    }
+
+    @Test
+    void delayedLowerEpochLeaderCannotReenableUploadAfterDemotion() {
+        SharedCommitProgress progress = new SharedCommitProgress();
+        SharedPartitionRoleListener listener = new SharedPartitionRoleListener(configuration(Map.of()), progress);
+        Uuid topicId = Uuid.randomUuid();
+        TopicIdPartition partition = topicPartition(topicId, "shared-topic", 4);
+        SharedPartitionId id = sharedPartitionId(topicId, 4);
+
+        listener.onLeadershipChangeWithEpochs(Map.of(partition, 30), Map.of());
+        listener.onLeadershipChangeWithEpochs(Map.of(), Map.of(partition, 31));
+        listener.onLeadershipChangeWithEpochs(Map.of(partition, 29), Map.of());
+
+        assertFalse(progress.partitionProgress(id).orElseThrow().isLeader());
+        assertTrue(listener.captureEpochRetirementLeader(id).isEmpty());
+    }
+
+    @Test
+    void legacyLeaderCallbackCannotOverrideAlreadyKnownEpochDemotion() {
+        SharedCommitProgress progress = new SharedCommitProgress();
+        SharedPartitionRoleListener listener = new SharedPartitionRoleListener(configuration(Map.of()), progress);
+        Uuid topicId = Uuid.randomUuid();
+        TopicIdPartition partition = topicPartition(topicId, "shared-topic", 5);
+        SharedPartitionId id = sharedPartitionId(topicId, 5);
+
+        listener.onLeadershipChangeWithEpochs(Map.of(partition, 40), Map.of());
+        listener.onLeadershipChangeWithEpochs(Map.of(), Map.of(partition, 40));
+        listener.onLeadershipChange(List.of(partition), List.of());
+
+        assertFalse(progress.partitionProgress(id).orElseThrow().isLeader());
+        listener.onLeadershipChangeWithEpochs(Map.of(partition, 41), Map.of());
+        assertTrue(progress.partitionProgress(id).orElseThrow().isLeader());
+    }
+
+    @Test
     void epochCallbackIgnoresClassicAndInternalTopics() {
         SharedPartitionRoleListener listener = new SharedPartitionRoleListener(
             configuration(Map.of(SharedStorageConfiguration.TOPICS_CONFIG, "shared-topic")),
