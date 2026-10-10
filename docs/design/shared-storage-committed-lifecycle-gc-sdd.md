@@ -1312,3 +1312,64 @@ remote metadata catch-up, and atomic feature-gated Controller CAS
 record emission at the genuine assigned KRaft offset. None of that
 is bypassed or enabled by this batch. Physical MinIO deletion and
 COMMITTED-reference retirement remain disabled.
+
+
+## Batch 35: repair shared storage test compilation and preflight required Java sources
+
+### CI evidence and exact failure classification
+
+Batch 34 HEAD `8dd3e264`, normalized to `668155ff`, launched
+20 GitHub Actions workflows. Fourteen completed successfully.
+Six failed: Main Shared Storage, Object Format Correctness,
+Ring WAL Correctness, WAL Crash Windows, Local State Loss Recovery,
+and the dependent Normalize GA Evidence Seal.
+
+The first five failures all trace to exactly one common Java
+compilation error in
+`storage/src/test/java/org/apache/kafka/storage/internals/shared/kafka/SharedCommitProgressTest.java`:
+the new permanent-quarantine tests call JUnit's `assertTrue` without
+`import static org.junit.jupiter.api.Assertions.assertTrue;`.
+Gradle fails at `:storage:compileTestJava`; the dependent seal
+cannot PASS because the source-SHA evidence is incomplete.
+
+There is **no evidence from those failed jobs** of an independent WAL,
+MinIO or Kafka correctness regression, because their affected tests
+did not reach actual runtime execution. Batch 35 fixes the missing
+test import without changing the production quarantine contract,
+the mandatory count of **229 JUnit methods**, or any Checkstyle rule.
+
+### Cheap negative-tested source preflight
+
+A new standard-library-only Python checker
+`tools/check_shared_storage_epoch_test_sources.py` examines the exact
+mandatory test suites in the existing Java 25 JUnit evidence manifest:
+
+- Maps each fully qualified mandatory test class to its actual
+  Storage, Metadata or Server Common Java test source.
+- Rejects any missing required Java file or named test method.
+- Detects unqualified JUnit assertion calls (`assertTrue`,
+  `assertFalse`, `assertThrows`, etc.) without a matching
+  `org.junit.jupiter.api.Assertions` static import.
+- Supports explicit assertions, JUnit wildcard static imports and
+  fully qualified assertion calls without requiring a static import.
+
+The checker has dedicated fast regression tests for the exact missing
+`assertTrue` scenario, a wrong-framework static import, wildcard and
+fully qualified legal forms, missing test file and missing method.
+The Shared Storage Java 25 workflow executes these cheap tests and the
+source preflight **before Gradle setup or expensive Java test startup**.
+This is a compiler-error preflight, not a substitute for javac,
+JUnit XML anti-skip gating, or runtime MinIO tests; it does not
+duplicate the mandatory 229 JUnit tests.
+
+### Scope and next blockers
+
+Batch 35 is deliberately a targeted CI repair with fail-fast
+validation. Its prior evidence is not GA PASS until Java 25 and the
+complete refreshed source-SHA GA matrix rerun on the new canonical
+commit. The production hard blockers for COMMITTED object retirement
+are unchanged: durable authenticated source LogStart evidence tied to
+the immutable Topic ID, BrokerEpoch, Incarnation ID and LeaderEpoch,
+KRaft controller atomic version-gated emission, Topic Delete
+tombstone durability, WAL/remote metadata replay catch-up and
+reader/upload quiescence ahead of any MinIO physical deletion.
