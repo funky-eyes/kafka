@@ -430,6 +430,14 @@ public final class SharedUploadScheduler implements AutoCloseable {
             if (objectId < 0) {
                 throw new IllegalStateException("objectIdSupplier returned a negative object ID");
             }
+            // The allocator is user-supplied and may block or trigger an
+            // identity quarantine after selectionStillCurrent has succeeded.
+            // Reject the newly allocated ID without starting a physical PUT.
+            if (commitProgress.isDisabledForRetirementQuarantine()) {
+                releaseReservation(selection.candidates());
+                releaseUploadSlot();
+                return CompletableFuture.completedFuture(Optional.empty());
+            }
             result = uploader
                 .upload(objectId, nowMs, selection.candidates())
                 .thenApply(Optional::of);
