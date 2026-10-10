@@ -15,9 +15,12 @@
 # limitations under the License.
 
 import unittest
+from pathlib import Path
 
 from check_shared_storage_ga_workflows import (
     foreign_evidence_workflow_triggers,
+    event_path_patterns,
+    path_is_triggered,
     full_manifest_after_source_wait_loop,
     missing_minio_evidence_requirements,
     redundant_runtime_staging_test_compiles,
@@ -88,6 +91,25 @@ class WorkflowTriggerOwnershipTest(unittest.TestCase):
                 "pull_request",
             ),
         )
+
+
+class LocalStateLossCompileSourceOwnershipTest(unittest.TestCase):
+    def test_quarantine_test_compilation_is_in_the_ga_recovery_push_contract(self):
+        root = Path(__file__).resolve().parents[1]
+        path = root / ".github/workflows/shared-storage-local-state-loss.yml"
+        workflow = path.read_text(encoding="utf-8")
+        sources = (
+            "storage/src/test/java/org/apache/kafka/storage/internals/shared/kafka/SharedCommitProgressTest.java",
+            "storage/src/test/java/org/apache/kafka/storage/internals/shared/kafka/SharedUploadSchedulerTest.java",
+        )
+        for event in ("push", "pull_request"):
+            patterns = event_path_patterns(workflow, event)
+            for source in sources:
+                with self.subTest(event=event, source=source):
+                    self.assertTrue(
+                        path_is_triggered(source, patterns),
+                        f"{path}: {event}.paths must include compiled quarantine source {source}",
+                    )
 
 
 class RuntimeStagingOwnershipTest(unittest.TestCase):
