@@ -392,6 +392,71 @@ class SharedPartitionRoleListenerTest {
         assertTrue(progress.partitionProgress(sharedPartitionId(recreated, 0)).orElseThrow().isLeader());
     }
 
+    @Test
+    void identityQuarantinePurgesAllPreviouslyEligibleUploadPartitions() {
+        SharedCommitProgress progress = new SharedCommitProgress();
+        SharedPartitionRoleListener listener = new SharedPartitionRoleListener(
+            configuration(Map.of()), progress, new LocalRetirementLeadershipFence(2)
+        );
+        Uuid firstId = Uuid.randomUuid();
+        Uuid secondId = Uuid.randomUuid();
+        Uuid thirdId = Uuid.randomUuid();
+        TopicIdPartition first = topicPartition(firstId, "shared-topic", 0);
+        TopicIdPartition second = topicPartition(secondId, "shared-topic", 0);
+        TopicIdPartition third = topicPartition(thirdId, "shared-topic", 0);
+        listener.onLeadershipChangeWithEpochs(Map.of(first, 7, second, 8), Map.of());
+        assertEquals(2, progress.snapshot().size());
+
+        listener.onLeadershipChangeWithEpochs(Map.of(third, 9), Map.of());
+
+        assertTrue(progress.isDisabledForRetirementQuarantine());
+        assertTrue(progress.snapshot().isEmpty());
+        assertTrue(listener.captureEpochRetirementLeader(sharedPartitionId(firstId, 0)).isEmpty());
+        assertTrue(listener.captureEpochRetirementLeader(sharedPartitionId(thirdId, 0)).isEmpty());
+    }
+
+    @Test
+    void quarantineTriggeredByRemovalAlsoDisablesAllRemainingLeaders() {
+        SharedCommitProgress progress = new SharedCommitProgress();
+        SharedPartitionRoleListener listener = new SharedPartitionRoleListener(
+            configuration(Map.of()), progress, new LocalRetirementLeadershipFence(1)
+        );
+        Uuid firstId = Uuid.randomUuid();
+        Uuid secondId = Uuid.randomUuid();
+        TopicIdPartition first = topicPartition(firstId, "shared-topic", 0);
+        TopicIdPartition second = topicPartition(secondId, "shared-topic", 0);
+        listener.onLeadershipChangeWithEpochs(Map.of(first, 10), Map.of());
+        assertTrue(progress.partitionProgress(sharedPartitionId(firstId, 0)).orElseThrow().isLeader());
+
+        listener.onPartitionsRemoved(List.of(second));
+
+        assertTrue(progress.isDisabledForRetirementQuarantine());
+        assertTrue(progress.snapshot().isEmpty());
+        assertTrue(listener.captureEpochRetirementLeader(sharedPartitionId(firstId, 0)).isEmpty());
+    }
+
+    @Test
+    void subsequentKafkaHighWatermarkCannotResurrectQuarantinedUploadWindow() {
+        SharedCommitProgress progress = new SharedCommitProgress();
+        SharedPartitionRoleListener listener = new SharedPartitionRoleListener(
+            configuration(Map.of()), progress, new LocalRetirementLeadershipFence(1)
+        );
+        Uuid firstId = Uuid.randomUuid();
+        Uuid secondId = Uuid.randomUuid();
+        TopicIdPartition first = topicPartition(firstId, "shared-topic", 0);
+        TopicIdPartition second = topicPartition(secondId, "shared-topic", 0);
+        listener.onLeadershipChangeWithEpochs(Map.of(first, 5), Map.of());
+        listener.onLeadershipChangeWithEpochs(Map.of(second, 6), Map.of());
+
+        SharedPartitionId firstPartition = sharedPartitionId(firstId, 0);
+        progress.onLogLoaded(firstPartition, 0L);
+        progress.onHighWatermarkUpdated(firstPartition, 100L);
+        listener.onLeadershipChangeWithEpochs(Map.of(first, 100), Map.of());
+
+        assertTrue(progress.snapshot().isEmpty());
+        assertTrue(listener.captureEpochRetirementLeader(firstPartition).isEmpty());
+    }
+
     private SharedStorageConfiguration configuration(Map<String, ?> originals) {
         return SharedStorageConfiguration.from(new StorageExtensionContext(
             originals,

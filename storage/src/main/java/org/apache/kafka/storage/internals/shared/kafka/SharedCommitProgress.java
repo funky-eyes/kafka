@@ -34,13 +34,30 @@ import java.util.concurrent.ConcurrentMap;
  */
 public final class SharedCommitProgress {
     private final ConcurrentMap<SharedPartitionId, PartitionProgress> partitions = new ConcurrentHashMap<>();
+    private volatile boolean disabledForQuarantine;
+
+    /**
+     * Permanent process-local fail-closed latch. Only a fresh broker restart
+     * can reset the role/epoch tombstone capacity quarantine.
+     */
+    void disableForRetirementQuarantine() {
+        disabledForQuarantine = true;
+        partitions.clear();
+    }
+
+    boolean isDisabledForRetirementQuarantine() {
+        return disabledForQuarantine;
+    }
 
     public void onLogLoaded(SharedPartitionId partition, long logStartOffset) {
         Objects.requireNonNull(partition, "partition");
         if (logStartOffset < 0) {
             throw new IllegalArgumentException("logStartOffset must be non-negative");
         }
-        partitions.compute(partition, (ignored, current) -> new PartitionProgress(
+        if (disabledForQuarantine) {
+            return;
+        }
+        partitions.compute(partition, (ignored, current) -> disabledForQuarantine ? null : new PartitionProgress(
             logStartOffset,
             current == null ? logStartOffset : current.highWatermark(),
             current == null ? ReplicaRole.UNKNOWN : current.role()
@@ -58,11 +75,15 @@ public final class SharedCommitProgress {
         if (logStartOffset < 0L) {
             throw new IllegalArgumentException("logStartOffset must be non-negative");
         }
-        partitions.computeIfPresent(partition, (ignored, current) -> new PartitionProgress(
-            Math.max(current.logStartOffset(), logStartOffset),
-            current.highWatermark(),
-            current.role()
-        ));
+        if (disabledForQuarantine) {
+            return;
+        }
+        partitions.computeIfPresent(partition, (ignored, current) -> disabledForQuarantine ? null :
+            new PartitionProgress(
+                Math.max(current.logStartOffset(), logStartOffset),
+                current.highWatermark(),
+                current.role()
+            ));
     }
 
     /**
@@ -76,11 +97,15 @@ public final class SharedCommitProgress {
         if (logStartOffset < 0L) {
             throw new IllegalArgumentException("logStartOffset must be non-negative");
         }
-        partitions.computeIfPresent(partition, (ignored, current) -> new PartitionProgress(
-            logStartOffset,
-            current.highWatermark(),
-            current.role()
-        ));
+        if (disabledForQuarantine) {
+            return;
+        }
+        partitions.computeIfPresent(partition, (ignored, current) -> disabledForQuarantine ? null :
+            new PartitionProgress(
+                logStartOffset,
+                current.highWatermark(),
+                current.role()
+            ));
     }
 
     public void onHighWatermarkUpdated(SharedPartitionId partition, long highWatermark) {
@@ -89,7 +114,10 @@ public final class SharedCommitProgress {
             throw new IllegalArgumentException("highWatermark must be non-negative");
         }
         // Use assignment rather than max(): recovery or a leadership change may legitimately restore a lower HW.
-        partitions.compute(partition, (ignored, current) -> new PartitionProgress(
+        if (disabledForQuarantine) {
+            return;
+        }
+        partitions.compute(partition, (ignored, current) -> disabledForQuarantine ? null : new PartitionProgress(
             current == null ? 0L : current.logStartOffset(),
             highWatermark,
             current == null ? ReplicaRole.UNKNOWN : current.role()
@@ -107,7 +135,10 @@ public final class SharedCommitProgress {
     private void updateRole(SharedPartitionId partition, ReplicaRole role) {
         Objects.requireNonNull(partition, "partition");
         Objects.requireNonNull(role, "role");
-        partitions.compute(partition, (ignored, current) -> new PartitionProgress(
+        if (disabledForQuarantine) {
+            return;
+        }
+        partitions.compute(partition, (ignored, current) -> disabledForQuarantine ? null : new PartitionProgress(
             current == null ? 0L : current.logStartOffset(),
             current == null ? 0L : current.highWatermark(),
             role
@@ -116,17 +147,21 @@ public final class SharedCommitProgress {
 
     public OptionalLong highWatermark(SharedPartitionId partition) {
         Objects.requireNonNull(partition, "partition");
+        if (disabledForQuarantine) {
+            return OptionalLong.empty();
+        }
         PartitionProgress progress = partitions.get(partition);
-        return progress == null ? OptionalLong.empty() : OptionalLong.of(progress.highWatermark());
+        return disabledForQuarantine || progress == null
+            ? OptionalLong.empty() : OptionalLong.of(progress.highWatermark());
     }
 
     public Optional<PartitionProgress> partitionProgress(SharedPartitionId partition) {
         Objects.requireNonNull(partition, "partition");
-        return Optional.ofNullable(partitions.get(partition));
+        return disabledForQuarantine ? Optional.empty() : Optional.ofNullable(partitions.get(partition));
     }
 
     public Map<SharedPartitionId, PartitionProgress> snapshot() {
-        return Map.copyOf(partitions);
+        return disabledForQuarantine ? Map.of() : Map.copyOf(partitions);
     }
 
     public void remove(SharedPartitionId partition) {

@@ -185,6 +185,57 @@ class SharedCommitProgressTest {
     }
 
     @Test
+    void quarantineClearsPriorCommitWindowsAndAllUploadEligibility() {
+        SharedCommitProgress progress = new SharedCommitProgress();
+        SharedPartitionId partition = new SharedPartitionId(10L, 11L, 0);
+        progress.onLogLoaded(partition, 10L);
+        progress.onHighWatermarkUpdated(partition, 80L);
+        progress.onLeader(partition);
+        assertTrue(progress.partitionProgress(partition).orElseThrow().isLeader());
+
+        progress.disableForRetirementQuarantine();
+
+        assertTrue(progress.isDisabledForRetirementQuarantine());
+        assertTrue(progress.snapshot().isEmpty());
+        assertTrue(progress.partitionProgress(partition).isEmpty());
+        assertTrue(progress.highWatermark(partition).isEmpty());
+    }
+
+    @Test
+    void quarantinedProgressCannotBeRestoredByLateKafkaCallbacks() {
+        SharedCommitProgress progress = new SharedCommitProgress();
+        SharedPartitionId partition = new SharedPartitionId(10L, 11L, 1);
+        progress.onLogLoaded(partition, 10L);
+        progress.disableForRetirementQuarantine();
+
+        progress.onLogLoaded(partition, 20L);
+        progress.onHighWatermarkUpdated(partition, 80L);
+        progress.onLogStartOffsetAdvanced(partition, 40L);
+        progress.onLogRebased(partition, 5L);
+        progress.onLeader(partition);
+        progress.onFollower(partition);
+
+        assertTrue(progress.snapshot().isEmpty());
+        assertTrue(progress.partitionProgress(partition).isEmpty());
+    }
+
+    @Test
+    void quarantineIsIdempotentEvenAfterAdditionalPartitionCallbacks() {
+        SharedCommitProgress progress = new SharedCommitProgress();
+        SharedPartitionId one = new SharedPartitionId(10L, 11L, 0);
+        SharedPartitionId two = new SharedPartitionId(10L, 11L, 2);
+        progress.onLogLoaded(one, 10L);
+        progress.disableForRetirementQuarantine();
+        progress.disableForRetirementQuarantine();
+        progress.onLogLoaded(two, 100L);
+        progress.onLeader(two);
+
+        assertTrue(progress.isDisabledForRetirementQuarantine());
+        assertTrue(progress.snapshot().isEmpty());
+        assertTrue(progress.highWatermark(two).isEmpty());
+    }
+
+    @Test
     void rejectsNegativeOffsets() {
         SharedCommitProgress progress = new SharedCommitProgress();
         SharedPartitionId partition = new SharedPartitionId(1L, 2L, 5);

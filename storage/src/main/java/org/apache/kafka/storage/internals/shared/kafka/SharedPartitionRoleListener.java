@@ -21,6 +21,9 @@ import org.apache.kafka.common.Uuid;
 import org.apache.kafka.storage.internals.log.StoragePartitionRoleListener;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.util.Collection;
 import java.util.Map;
 import java.util.Objects;
@@ -33,9 +36,10 @@ import java.util.Optional;
  * they never start object-store or metadata-store I/O on Kafka's metadata application thread.</p>
  */
 public final class SharedPartitionRoleListener implements StoragePartitionRoleListener {
+    private static final Logger LOG = LoggerFactory.getLogger(SharedPartitionRoleListener.class);
     private final SharedStorageConfiguration configuration;
     private final SharedCommitProgress commitProgress;
-    private final LocalRetirementLeadershipFence retirementFence = new LocalRetirementLeadershipFence();
+    private final LocalRetirementLeadershipFence retirementFence;
     // Keep remove/reassign and upload-role publication ordered per listener,
     // without I/O or coordination with Kafka's native log monitor.
     private final Object roleCallbackLock = new Object();
@@ -44,8 +48,17 @@ public final class SharedPartitionRoleListener implements StoragePartitionRoleLi
         SharedStorageConfiguration configuration,
         SharedCommitProgress commitProgress
     ) {
+        this(configuration, commitProgress, new LocalRetirementLeadershipFence());
+    }
+
+    SharedPartitionRoleListener(
+        SharedStorageConfiguration configuration,
+        SharedCommitProgress commitProgress,
+        LocalRetirementLeadershipFence retirementFence
+    ) {
         this.configuration = Objects.requireNonNull(configuration, "configuration");
         this.commitProgress = Objects.requireNonNull(commitProgress, "commitProgress");
+        this.retirementFence = Objects.requireNonNull(retirementFence, "retirementFence");
     }
 
     @Override
@@ -82,6 +95,7 @@ public final class SharedPartitionRoleListener implements StoragePartitionRoleLi
                     commitProgress.remove(id);
                 }
             });
+            disableUploadsIfQuarantined();
         }
     }
 
@@ -109,6 +123,7 @@ public final class SharedPartitionRoleListener implements StoragePartitionRoleLi
             retirementFence.onFollower(partition);
         }
 
+        disableUploadsIfQuarantined();
         // The tombstone remains until an explicit newer epoch reassigns the
         // partition. A stale leader/follower callback after removal must NOT
         // recreate an upload-progress entry with a fresh default offset 0.
@@ -120,6 +135,21 @@ public final class SharedPartitionRoleListener implements StoragePartitionRoleLi
             commitProgress.onLeader(partition);
         } else {
             commitProgress.onFollower(partition);
+        }
+    }
+
+    private void disableUploadsIfQuarantined() {
+        // The fence clears its identity map when full, which revokes all local
+        // tickets. The upload scheduler must also see an empty commit-window
+        // map, including after any late Kafka HW/log-load callback.
+        if (retirementFence.isQuarantined()) {
+            if (!commitProgress.isDisabledForRetirementQuarantine()) {
+                LOG.error(
+                    "Shared storage role identity budget exhausted; disabling local upload eligibility "
+                        + "until broker restart to preserve removed-topic epoch fences"
+                );
+            }
+            commitProgress.disableForRetirementQuarantine();
         }
     }
 

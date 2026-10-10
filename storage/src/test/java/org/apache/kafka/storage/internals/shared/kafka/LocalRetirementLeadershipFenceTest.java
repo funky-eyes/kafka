@@ -276,6 +276,57 @@ class LocalRetirementLeadershipFenceTest {
     }
 
     @Test
+    void finiteEpochTombstoneBudgetQuarantinesRatherThanEvictingStaleIdentity() {
+        LocalRetirementLeadershipFence fence = new LocalRetirementLeadershipFence(2);
+        fence.onLeader(PARTITION, 10);
+        var original = fence.captureEpochLeader(PARTITION).orElseThrow();
+        fence.onRemoved(PARTITION);
+        fence.onRemoved(OTHER_PARTITION);
+        assertFalse(fence.isQuarantined());
+
+        fence.onRemoved(RECREATED_TOPIC);
+
+        assertTrue(fence.isQuarantined());
+        assertFalse(fence.stillLeader(original));
+        assertTrue(fence.captureLeader(PARTITION).isEmpty());
+        fence.onLeader(PARTITION, 1000);
+        fence.onLeader(RECREATED_TOPIC, 1000);
+        assertTrue(fence.captureEpochLeader(RECREATED_TOPIC).isEmpty());
+        assertTrue(fence.isRemoved(RECREATED_TOPIC));
+    }
+
+    @Test
+    void capacityQuarantineRevokesAllActiveTicketsNotJustRemovedOnes() {
+        LocalRetirementLeadershipFence fence = new LocalRetirementLeadershipFence(1);
+        fence.onLeader(PARTITION, 12);
+        var active = fence.captureEpochLeader(PARTITION).orElseThrow();
+
+        fence.onLeader(OTHER_PARTITION, 20);
+
+        assertTrue(fence.isQuarantined());
+        assertFalse(fence.stillLeader(active));
+        assertTrue(fence.captureEpochLeader(OTHER_PARTITION).isEmpty());
+    }
+
+    @Test
+    void previouslySeenIdentityCanChangeRolesAtCapacityWithoutQuarantine() {
+        LocalRetirementLeadershipFence fence = new LocalRetirementLeadershipFence(1);
+        fence.onLeader(PARTITION, 10);
+        fence.onFollower(PARTITION, 11);
+        fence.onRemoved(PARTITION);
+        fence.onLeader(PARTITION, 12);
+
+        assertFalse(fence.isQuarantined());
+        assertTrue(fence.captureEpochLeader(PARTITION).isPresent());
+    }
+
+    @Test
+    void invalidTrackedIdentityBudgetIsRejected() {
+        assertThrows(IllegalArgumentException.class, () -> new LocalRetirementLeadershipFence(0));
+        assertThrows(IllegalArgumentException.class, () -> new LocalRetirementLeadershipFence(-1));
+    }
+
+    @Test
     void ticketFromAnotherFenceInstanceNeverValidates() {
         LocalRetirementLeadershipFence first = new LocalRetirementLeadershipFence();
         LocalRetirementLeadershipFence second = new LocalRetirementLeadershipFence();

@@ -33,9 +33,50 @@ import java.util.concurrent.atomic.AtomicLong;
  * transactional-producer fence, or authorization to emit watermark metadata.</p>
  */
 public final class LocalRetirementLeadershipFence {
+    // Bound persistent removed-topic epoch tombstones. Do not evict them by
+    // TTL: an old LEADER callback could then resurrect a removed partition.
+    private static final int DEFAULT_MAX_TRACKED_IDENTITIES = 131_072;
     private final ConcurrentMap<SharedPartitionId, Role> roles = new ConcurrentHashMap<>();
     private final AtomicLong nextGeneration = new AtomicLong();
+    private final int maxTrackedIdentities;
+    private volatile boolean quarantined;
     private static final int UNKNOWN_LEADER_EPOCH = -1;
+
+    public LocalRetirementLeadershipFence() {
+        this(DEFAULT_MAX_TRACKED_IDENTITIES);
+    }
+
+    LocalRetirementLeadershipFence(int maxTrackedIdentities) {
+        if (maxTrackedIdentities < 1) {
+            throw new IllegalArgumentException("maxTrackedIdentities must be positive");
+        }
+        this.maxTrackedIdentities = maxTrackedIdentities;
+    }
+
+    /**
+     * Permanently disables this process-local fence after its bounded identity
+     * budget is exhausted. The caller must also stop existing uploads.
+     * Only a fresh broker process can reset this fail-closed state.
+     */
+    public boolean isQuarantined() {
+        return quarantined;
+    }
+
+    private void quarantine() {
+        quarantined = true;
+        roles.clear();
+    }
+
+    private boolean ensureCapacity(SharedPartitionId partition) {
+        if (quarantined) {
+            return false;
+        }
+        if (!roles.containsKey(partition) && roles.size() >= maxTrackedIdentities) {
+            quarantine();
+            return false;
+        }
+        return true;
+    }
 
     /**
      * Compatibility path for callbacks without an epoch. This can never issue
@@ -65,8 +106,11 @@ public final class LocalRetirementLeadershipFence {
      * assignment and reopen uploads after the partition was removed.
      * A subsequent assignment requires a strictly newer explicit epoch.
      */
-    public void onRemoved(SharedPartitionId partition) {
+    public synchronized void onRemoved(SharedPartitionId partition) {
         Objects.requireNonNull(partition, "partition");
+        if (!ensureCapacity(partition)) {
+            return;
+        }
         roles.compute(partition, (ignored, old) -> new Role(
             nextGeneration.updateAndGet(value -> Math.addExact(value, 1L)),
             false,
@@ -81,8 +125,11 @@ public final class LocalRetirementLeadershipFence {
         }
     }
 
-    private void setRole(SharedPartitionId partition, boolean leader, int leaderEpoch) {
+    private synchronized void setRole(SharedPartitionId partition, boolean leader, int leaderEpoch) {
         Objects.requireNonNull(partition, "partition");
+        if (!ensureCapacity(partition)) {
+            return;
+        }
         roles.compute(partition, (ignored, old) -> {
             long generation = nextGeneration.updateAndGet(current -> Math.addExact(current, 1L));
             int observedMaxEpoch = old == null ? UNKNOWN_LEADER_EPOCH : old.leaderEpoch();
@@ -112,13 +159,16 @@ public final class LocalRetirementLeadershipFence {
     public boolean isRemoved(SharedPartitionId partition) {
         Objects.requireNonNull(partition, "partition");
         Role current = roles.get(partition);
-        return current != null && current.removed();
+        return quarantined || current != null && current.removed();
     }
 
     public Optional<LeaderTicket> captureLeader(SharedPartitionId partition) {
         Objects.requireNonNull(partition, "partition");
+        if (quarantined) {
+            return Optional.empty();
+        }
         Role current = roles.get(partition);
-        if (current == null || !current.leader()) {
+        if (quarantined || current == null || !current.leader()) {
             return Optional.empty();
         }
         return Optional.of(new LeaderTicket(
@@ -136,7 +186,7 @@ public final class LocalRetirementLeadershipFence {
 
     public boolean stillLeader(LeaderTicket ticket) {
         Objects.requireNonNull(ticket, "ticket");
-        if (ticket.owner != this) {
+        if (quarantined || ticket.owner != this) {
             return false;
         }
         Role current = roles.get(ticket.partition());
