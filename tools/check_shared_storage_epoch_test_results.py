@@ -78,6 +78,8 @@ REQUIRED_TESTS = {
         "quarantineDuringAsyncPutDrainsPriorAdmissionAndRejectsNewOnes",
         "failedObjectPutReleasesAdmissionAndDoesNotReopenQuarantine",
         "roleHandoverDuringObjectIdAllocationRejectsOldCandidateAndRetriesFresh",
+        "highWatermarkRegressionDuringObjectIdAllocationRejectsStalePut",
+        "nativeLogStartAdvanceDuringObjectIdAllocationRejectsStalePut",
     ),
     "org.apache.kafka.storage.internals.shared.kafka.SharedCommitProgressTest": (
         "followsKafkaHighWatermarkExactlyRatherThanTakingMaximum",

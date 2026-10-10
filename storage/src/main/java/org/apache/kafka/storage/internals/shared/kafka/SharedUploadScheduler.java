@@ -312,7 +312,7 @@ public final class SharedUploadScheduler implements AutoCloseable {
             return CompletableFuture.completedFuture(Optional.empty());
         }
 
-        CompletableFuture<Optional<SharedObjectMetadata>> result = startUpload(selection, nowMs);
+        CompletableFuture<Optional<SharedObjectMetadata>> result = startUpload(selection, nowMs, applyTriggerGate);
         if (byteTriggerWitnessReservation != null) {
             reservedCandidates.remove(byteTriggerWitnessReservation);
         }
@@ -422,7 +422,8 @@ public final class SharedUploadScheduler implements AutoCloseable {
 
     private CompletableFuture<Optional<SharedObjectMetadata>> startUpload(
         CandidateSelection selection,
-        long nowMs
+        long nowMs,
+        boolean validateByteTriggerWitness
     ) {
         final CompletableFuture<Optional<SharedObjectMetadata>> result;
         boolean admitted = false;
@@ -440,6 +441,16 @@ public final class SharedUploadScheduler implements AutoCloseable {
                 return CompletableFuture.completedFuture(Optional.empty());
             }
             admitted = true;
+            // Object ID allocation is pluggable and may overlap native Kafka
+            // LogStart/HW changes, WAL truncation or remote coverage updates.
+            // A role-revision CAS alone cannot validate those source windows.
+            if (!selectionStillCurrent(selection, validateByteTriggerWitness)) {
+                admitted = false;
+                commitProgress.releaseUploadAdmission();
+                releaseReservation(selection.candidates());
+                releaseUploadSlot();
+                return CompletableFuture.completedFuture(Optional.empty());
+            }
             result = uploader
                 .upload(objectId, nowMs, selection.candidates())
                 .thenApply(Optional::of);

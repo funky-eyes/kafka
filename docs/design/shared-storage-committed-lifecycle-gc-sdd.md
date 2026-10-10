@@ -1620,3 +1620,34 @@ The trusted BrokerEpoch/Incarnation and LeaderEpoch source certificate,
 WAL/metadata replay horizon, Controller atomic append, durable reference
 retirement, reader/upload quiescence and physical object GC remain
 unimplemented and disabled.
+
+## Batch 39: revalidate native source windows after upload-ID allocation
+
+Batch 38 CAS upload admission rejects leader-role ABA, but admission
+only authenticates local role revision and quarantine. Source LogStart,
+high watermark, WAL truncation and remote coverage can change during a
+pluggable object ID allocation without any role callback. Previously the
+scheduler only evaluated those candidate invariants before allocation,
+allowing stale ranges to enter a new PUT on unchanged leadership.
+
+After winning the Batch 38 CAS admission, the scheduler now performs a
+second in-memory candidate/window/revision/witness verification before
+calling SharedObjectUploader. It rejects and releases a stale selection
+without object PUT, remote publication, a spurious failure diagnostic,
+leaked admission, WAL reservation or upload slot. Monotonically assigned
+but unused object IDs are never recycled. A fresh candidate selection may
+run on subsequent scheduler ticks.
+
+Two deterministic SharedUploadSchedulerTest cases mutate the actual
+cached native HW and LogStart during object ID allocation. They require
+zero stale PUTs and show that restoring a valid HW permits a fresh
+selection/upload. The mandatory Java 25 no-skip JUnit evidence rises
+from **239 to 241 methods**. As before, MinIO integration and all 19 GA
+workflows must pass on the new normalized source tree.
+
+This is a targeted final-validation hardening, NOT a distributed or
+fully atomic source-log lease. A Kafka source-window change after the
+final validation can still overlap an already-admitted upload. Durable
+source attestation, KRaft controller CAS, reader quiescence and physical
+COMMITTED GC remain disabled. A future certificate must supply the
+cross-broker durability/identity barrier; a local last-check cannot do so.
