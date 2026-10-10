@@ -1140,3 +1140,91 @@ broker incarnation, durable log/WAL/remote metadata catch-up,
 a revalidated atomic KRaft controller write, and durable
 COMMITTED-reference retirement with reader/upload fences before
 physical MinIO deletion.
+
+
+## Batch 33: preserve removed-partition epoch fences and capture native source windows
+
+### Production safety bug: removal forgot the maximum source leader epoch
+
+Batch 32 correctly rejected delayed LEADER(E) after FOLLOWER(E),
+but LocalRetirementLeadershipFence.onRemoved removed the entire
+partition entry. A later delayed LEADER(E) callback could then look
+like the first-ever assignment, obtain a new valid local ticket, and
+set SharedCommitProgress's upload role to LEADER on a removed partition.
+The scheduler might eventually upload obsolete data if old WAL progress
+or callbacks repopulated the commit window.
+
+Batch 33 keeps an explicit, fail-closed removed-partition tombstone
+holding the highest already-seen source LeaderEpoch and a new
+local generation. A removed partition is only readmitted after a
+strictly higher, **explicit** Kafka epoch notification. Legacy
+epoch-less callbacks are not sufficient for reassignment because
+they cannot distinguish a new assignment from a delayed old one.
+Repeated removal, delayed same/lower epoch, and later follower
+notifications do not erase this tombstone; an immutable new Topic ID
+starts independently. Existing initial legacy callbacks remain
+supported before a partition has ever been removed.
+
+SharedPartitionRoleListener serializes its removal and role callbacks
+using one strictly in-memory monitor, then checks the removed
+tombstone before creating any SharedCommitProgress entry. It removes
+stale progress instead of turning rejected leader/follower callbacks
+into synthetic new partitions with default offsets. The monitor
+never performs Kafka, MinIO or metadata I/O.
+
+**Lifecycle trade-off:** removed-epoch tombstones are retained for the
+lifetime of the broker process rather than evicted on a timer, because
+removing one without KRaft evidence could re-enable an old callback.
+The future authoritative broker fencing protocol needs a validated
+reclamation policy with bounded memory, not a best-effort TTL.
+Until then these process-local tombstones are not durable KRaft state.
+
+### Real native source window, not a self-reported watermark
+
+SharedUnifiedLog.captureNativeSourceWindow reads actual Kafka
+logStartOffset, highWatermark and exclusive logEndOffset under
+the established **remote-recovery read lock -> Kafka native log
+monitor** order. Invalid offset relations (negative start, HW below
+start, LEO below HW) return UNKNOWN rather than inventing a result.
+No user-facing Kafka log mutation or I/O is performed by the reader.
+
+SourceLogStartObservation.capture additionally requires:
+
+- matching immutable Topic ID and partition between the requested
+  SharedPartitionId and the actual live UnifiedLog
+- a Kafka-epoch-aware local leadership ticket
+- a valid native source offset window
+- that the same ticket is still the local leader after the native
+  snapshot has been read
+
+A leadership change during observation fails closed. A stale topic
+name, different partition, removed partition, unknown epoch or
+inconsistent source offsets cannot produce an observation.
+
+This is strictly broker-local **read-only evidence**. A local ticket,
+log bounds and normal log lock are not a signed broker-incarnation
+attestation, durable WAL checksum/commit horizon, quorum-wide
+source progress, or a KRaft-authorized Controller CAS. No producer,
+controller RPC, watermark writer or deletion authority is introduced.
+
+### Regression and GA scope
+
+Five LocalRetirementLeadershipFenceTest methods and four
+SharedPartitionRoleListenerTest methods cover removed partitions,
+reassignment epochs, recreated topics and prevention of phantom
+upload progress. Ten SourceLogStartObservationTest methods cover
+native bounds, topic/partition binding, legacy epochs, demotion
+during capture and re-election after removal.
+
+The Java 25 Shared Storage anti-skip JUnit gate grows from
+**198 to 217 named safety cases**, alongside existing real MinIO,
+crash/failover, rolling upgrade and performance workflows.
+No other job duplicates these storage unit tests.
+
+Open P0 blockers before enabling full COMMITTED lifecycle GC remain:
+authenticated, durable BrokerEpoch/Incarnation/LeaderEpoch/LogStart
+evidence with WAL and metadata replay catch-up; one atomic,
+version-gated KRaft Controller commit event with exact assigned
+offset; Topic Delete tombstone survival through snapshots; durable
+reference retirement; reader/upload quiescence; and retryable
+physical MinIO deletion with crash and restart proofs.
