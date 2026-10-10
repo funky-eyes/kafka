@@ -70,6 +70,34 @@ REQUIRED_TESTS = {
         "deletedTopicIdCannotBorrowRecreatedTopicRegistration",
         "invalidControllerLookupArgumentsFailClosed",
     ),
+    "org.apache.kafka.controller.PartitionRetirementControlManagerTest": (
+        "controllerReplayRetainsTheHighestWatermarkAcrossEpochHandover",
+        "controllerReplayRejectsLateFormerBroker",
+        "terminalTopicDeleteCannotBeReauthorizedByReplayedRecord",
+        "timelineRollbackRevertsToThePriorAuthoritySnapshot",
+        "topicRecreationDoesNotReuseDeletedAuthority",
+    ),
+    "org.apache.kafka.metadata.PartitionRetirementAuthorityStateTest": (
+        "generatedKRaftRecordIdIsReservedAndVersionZero",
+        "distinctTopicIncarnationNeverSharesAnAuthorityKey",
+        "malformedPartitionOrUnknownInitialStateFailsClosed",
+        "oldAuthorityOffsetCannotOverwriteCurrentState",
+        "replayRejectsRegressedSourceLeaderEpoch",
+        "replayRejectsRegressedMonotonicWatermark",
+        "equalEpochDemotionAllowedButRepromotionBlocked",
+        "equalEpochCannotAssignDifferentBroker",
+        "terminalTopicIdIsIrrevocable",
+        "aTopicMayBeDeletedBeforeFirstLeaderElection",
+    ),
+    "org.apache.kafka.image.PartitionRetirementAuthorityImageTest": (
+        "brokerMetadataDeltaActuallyReplaysTheGeneratedKRaftRecord",
+        "snapshotWritesAndRestoresDeletedTopicIdTombstone",
+        "snapshotFinishDropsAKeyOmittedFromFreshSnapshot",
+        "metadataReplayRejectsWatermarkRegression",
+        "sameEpochDemotionDoesNotPermitLateElection",
+        "aRecreatedTopicHasAnIndependentAuthorityKey",
+        "imageDefensivelyCopiesMutableCallerMap",
+    ),
     "org.apache.kafka.storage.internals.shared.metadata.PartitionRetirementAuthorityModelTest": (
         "initialStateHasNeitherImplicitZeroNorAnAuthoritativeLeader",
         "higherEpochControllerElectionCreatesOnePartitionOwner",
@@ -151,7 +179,12 @@ def verify(results_dir: Path, controller_results_dir: Path | None = None) -> int
         controller_results_dir = results_dir
     total = 0
     for suite, expected in REQUIRED_TESTS.items():
-        suite_dir = controller_results_dir if suite.startswith("org.apache.kafka.controller.") else results_dir
+        is_metadata_module = suite.startswith((
+            "org.apache.kafka.controller.",
+            "org.apache.kafka.metadata.",
+            "org.apache.kafka.image.",
+        ))
+        suite_dir = controller_results_dir if is_metadata_module else results_dir
         xml = suite_dir / ("TEST-" + suite + ".xml")
         if not xml.is_file():
             raise ValueError(f"Missing mandatory test report: {xml}")

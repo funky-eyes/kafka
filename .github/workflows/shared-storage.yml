@@ -34,6 +34,16 @@ on:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/**'
       - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementControllerPrecheck.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/PartitionRetirementControllerPrecheckTest.java'
+      - 'metadata/src/main/resources/common/metadata/PartitionRetirementAuthorityRecord.json'
+      - 'metadata/src/main/java/org/apache/kafka/metadata/PartitionRetirementAuthorityState.java'
+      - 'metadata/src/main/java/org/apache/kafka/image/PartitionRetirementAuthority*.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementControlManager.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/QuorumController.java'
+      - 'metadata/src/main/java/org/apache/kafka/image/MetadataDelta.java'
+      - 'metadata/src/main/java/org/apache/kafka/image/MetadataImage.java'
+      - 'metadata/src/test/java/org/apache/kafka/metadata/PartitionRetirementAuthorityStateTest.java'
+      - 'metadata/src/test/java/org/apache/kafka/image/PartitionRetirementAuthorityImageTest.java'
+      - 'metadata/src/test/java/org/apache/kafka/controller/PartitionRetirementControlManagerTest.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/**'
       - 'storage/shared-storage-s3/**'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/log/LogLoader.java'
@@ -76,6 +86,16 @@ on:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/**'
       - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementControllerPrecheck.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/PartitionRetirementControllerPrecheckTest.java'
+      - 'metadata/src/main/resources/common/metadata/PartitionRetirementAuthorityRecord.json'
+      - 'metadata/src/main/java/org/apache/kafka/metadata/PartitionRetirementAuthorityState.java'
+      - 'metadata/src/main/java/org/apache/kafka/image/PartitionRetirementAuthority*.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementControlManager.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/QuorumController.java'
+      - 'metadata/src/main/java/org/apache/kafka/image/MetadataDelta.java'
+      - 'metadata/src/main/java/org/apache/kafka/image/MetadataImage.java'
+      - 'metadata/src/test/java/org/apache/kafka/metadata/PartitionRetirementAuthorityStateTest.java'
+      - 'metadata/src/test/java/org/apache/kafka/image/PartitionRetirementAuthorityImageTest.java'
+      - 'metadata/src/test/java/org/apache/kafka/controller/PartitionRetirementControlManagerTest.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/**'
       - 'storage/shared-storage-s3/**'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/log/LogLoader.java'
@@ -160,8 +180,11 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          ./gradlew :metadata:test --no-scan \
+          ./gradlew :metadata:checkstyleMain :metadata:checkstyleTest :metadata:test --no-scan \
             --tests 'org.apache.kafka.controller.PartitionRetirementControllerPrecheckTest' \
+            --tests 'org.apache.kafka.controller.PartitionRetirementControlManagerTest' \
+            --tests 'org.apache.kafka.metadata.PartitionRetirementAuthorityStateTest' \
+            --tests 'org.apache.kafka.image.PartitionRetirementAuthorityImageTest' \
             2>&1 | tee shared-storage-controller-retirement-test.log
 
       - name: Require leadership and epoch JUnit evidence
@@ -198,6 +221,7 @@ jobs:
           path: |
             storage/build/reports/spotbugs
             storage/build/reports/checkstyle
+            metadata/build/reports/checkstyle
             storage/shared-storage-s3/build/reports/spotbugs
             storage/shared-storage-s3/build/reports/checkstyle
           if-no-files-found: ignore

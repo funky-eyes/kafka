@@ -43,8 +43,8 @@ class EpochEvidenceCheckerTest(unittest.TestCase):
                 ET.SubElement(case, "failure")
         ET.ElementTree(xml).write(self.root / ("TEST-" + suite + ".xml"), encoding="utf-8")
 
-    def test_all_106_methods_pass(self):
-        self.assertEqual(106, verify(self.root))
+    def test_all_128_methods_pass(self):
+        self.assertEqual(128, verify(self.root))
 
     def test_missing_controller_module_report_fails_closed(self):
         controller = "org.apache.kafka.controller.PartitionRetirementControllerPrecheckTest"
@@ -53,13 +53,24 @@ class EpochEvidenceCheckerTest(unittest.TestCase):
             verify(self.root)
 
     def test_distinct_storage_and_controller_report_directories(self):
-        controller = "org.apache.kafka.controller.PartitionRetirementControllerPrecheckTest"
-        xml_name = "TEST-" + controller + ".xml"
         with tempfile.TemporaryDirectory() as controller_folder:
             other = Path(controller_folder)
-            (other / xml_name).write_bytes((self.root / xml_name).read_bytes())
-            (self.root / xml_name).unlink()
-            self.assertEqual(106, verify(self.root, other))
+            for suite in REQUIRED_TESTS:
+                if suite.startswith((
+                    "org.apache.kafka.controller.",
+                    "org.apache.kafka.metadata.",
+                    "org.apache.kafka.image.",
+                )):
+                    xml_name = "TEST-" + suite + ".xml"
+                    (other / xml_name).write_bytes((self.root / xml_name).read_bytes())
+                    (self.root / xml_name).unlink()
+            self.assertEqual(128, verify(self.root, other))
+
+    def test_missing_controller_image_report_fails_closed(self):
+        suite = "org.apache.kafka.image.PartitionRetirementAuthorityImageTest"
+        (self.root / ("TEST-" + suite + ".xml")).unlink()
+        with self.assertRaisesRegex(ValueError, "Missing mandatory test report"):
+            verify(self.root)
 
     def test_missing_suite_fails(self):
         suite = next(iter(REQUIRED_TESTS))

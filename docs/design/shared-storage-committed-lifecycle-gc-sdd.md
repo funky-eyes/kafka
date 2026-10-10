@@ -741,3 +741,66 @@ a repeated batch.
 This batch contains no authoritative KRaft watermark write, COMMITTED
 reference retirement or physical MinIO lifecycle deletion. Full lifecycle
 GC remains outside the historical GA manifest.
+
+
+## Batch 28: generated KRaft metadata type and read-only replay
+
+This checkpoint moves beyond offline authority reference code to **Kafka's
+actual generated KRaft metadata record, metadata images and controller
+replay timeline**, without enabling production emission or deletion.
+
+### Record, snapshot, controller image
+
+- New PartitionRetirementAuthorityRecord.json reserves metadata API key **29**
+  (flexible v0), holding immutable Topic ID and partition, last accepted
+  authority offset, highest source leader epoch, active broker ID, an
+  explicit/missing (-1) log start, and terminal Topic Delete bit.
+- PartitionRetirementAuthorityState rejects malformed records, decreasing
+  authority offsets, decreasing source epochs/watermarks, same-epoch
+  broker switches or re-promotion following demotion, and revivals after
+  terminal Topic Delete.
+- MetadataDelta and MetadataImage now replay the generated record into an
+  immutable PartitionRetirementAuthorityImage. Its isolated v0 snapshot
+  serializer includes all known states, including deleted Topic ID
+  tombstones. Production MetadataImage.write **fails closed** for any
+  nonempty authority image until an explicit cluster capability gate
+  and compatible mixed-version rollout have been implemented.
+- QuorumController now routes replay of that record to a TimelineHashMap
+  backed by the actual SnapshotRegistry, allowing in-memory controller
+  rollback/replay without an authority writer or new RPC.
+- Ten record/state, seven image/snapshot and five controller timeline
+  regression cases are added. The Java 25 anti-skip evidence requirement
+  increases from **106 to 128 methods**. The targeted metadata test job
+  also executes its main/test Checkstyle tasks.
+
+### Compatibility and safety boundary
+
+**Never emit the new API key 29 in production yet.** Existing older Kafka
+controllers and brokers cannot decode an unknown KRaft record type. A
+code-generated message type is not itself a rolling upgrade feature
+gate. This stage provides no controller write event, Broker API, CLI,
+timer, or metadata record producer for the new type.
+
+A future implementation must explicitly gate ALL writer and snapshot
+paths on cluster feature negotiation and coordinated versions across
+controllers and brokers, including rollback. Until that negotiation is
+proven, the only safe production image is an empty retirement image.
+Even after replay, the authorityOffset field is supplied by the
+record, not authenticated at a KRaft write boundary.
+
+A Topic Delete record does not currently emit a corresponding
+terminal retirement authority record. A future controller must
+serialize deletion and retirement fencing together, preserving
+immutable Topic-ID tombstones through snapshots and compaction.
+Missing or incomplete images MUST NOT be used as proof that
+COMMITTED object references are unreachable.
+
+The following remain hard GA blockers for full lifecycle GC:
+atomic controller event queue / KRaft authority validation and
+commit, proven broker/epoch identity, metadata-version capability
+gating, quorum failover and replay under mixed versions, durable
+COMMITTED reference retirement, reader/upload quiescence and
+real MinIO physical deletion with crash/retry proof.
+
+Existing 19/19 GA evidence applies only to previously enabled
+Shared Storage functionality. Batch 28 adds no physical GC.
