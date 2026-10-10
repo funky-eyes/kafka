@@ -1469,3 +1469,98 @@ The existing Java 25, MinIO, WAL crash and recovery workflows must
 revalidate the new commit before GA PASS can be claimed. This batch
 does not activate the KRaft authority producer, COMMITTED object
 reference GC, or physical MinIO deletion.
+
+
+## Batch 37: CAS-linearized upload admission versus local retirement quarantine
+
+### Batch 36 evidence classification
+
+Batch 36 canonical HEAD was normalized to
+`d2b47cdc59e80ded514829df8ad1d6baaf721038`.
+The Java 25 main Shared Storage test job and the real MinIO
+three-broker KRaft E2E job succeeded, along with several independent
+GA gates. The Ring WAL Correctness job failed before Java source
+compilation while Gradle resolved buildscript artifacts: unrelated
+grgit, Log4j, Kotlin and other dependencies were temporarily
+unavailable from configured artifact repositories. No Ring WAL test
+ran in that attempt. The single failed GitHub Actions job was
+re-run without changing dependencies or starting a new complete CI
+matrix. A failed or nonterminal Ring WAL gate still blocks GA.
+
+### Previous last-check/PUT concurrency gap
+
+The Batch 36 upload scheduler rechecked
+`isDisabledForRetirementQuarantine()` after allocating an object ID
+and before calling the object uploader, fixing the deterministic case
+where that allocator synchronously triggers quarantine.
+However, an independent callback thread could set quarantine after
+the final volatile boolean read but before upload initialization.
+
+This is a local admission race, **not** a cross-broker Controller
+LogStart or COMMITTED reference-retirement problem. Closing it must
+not hold Kafka log monitors, upload metadata locks or any remote
+I/O lock while performing PUT/COMMIT.
+
+### Atomic process-local upload admission
+
+SharedCommitProgress now owns one `AtomicLong` admission state:
+
+- High bit is the irreversible CLOSED latch for the current broker
+  process, initially clear.
+- Low 63 bits count already-admitted object uploads, initially zero.
+- An upload `tryAcquireUploadAdmission()` uses CAS to increment that
+  count, but always rejects after the high bit is set.
+- `disableForRetirementQuarantine()` sets CLOSED atomically
+  **before** marking progress disabled and clearing Kafka offset
+  windows. CAS provides a single order between an admission and
+  quarantine, including when both run on different threads.
+- `releaseUploadAdmission()` CAS-decrements the count while
+  preserving CLOSED, detects underflow, and cannot reopen the latch.
+
+The scheduler performs this admission **after** object ID allocation
+and **before** invoking `SharedObjectUploader.upload()`. A denied
+admission releases selected WAL reservations and the upload slot
+without performing PUT or recording a spurious candidate failure.
+An accepted upload is now logically **in-flight at its CAS
+linearization point**, and may complete the existing durable remote
+PUT + metadata COMMIT protocol even if quarantine follows later.
+Both synchronous launch exceptions and asynchronous success/failure
+release the admission count exactly once.
+
+This defines the precise local boundary. An accepted upload may
+physically start PUT after the closed bit is set if preparation was
+already under way when quarantine arrived; the authorization
+preceded closure. The mechanism does **not** forcibly cancel
+already-admitted work or provide a controller/cluster-wide
+publication revocation. Reader quiescence and persistent GC
+must not use this local admission bit as retirement authority.
+
+### Focused deterministic and concurrent evidence
+
+Four SharedCommitProgressTest regressions check quarantine ordering,
+multiple in-flight admissions, double release/underflow, and a
+32-iteration two-thread CAS-vs-quarantine race. Two
+SharedUploadSchedulerTest regressions hold an actual asynchronous
+ObjectStore PUT across quarantine and force a PUT failure that
+itself triggers quarantine, verifying zero leaked admissions,
+reservations or upload slots, and that new work stays blocked.
+
+Mandatory Java 25 Storage/Metadata/Server Common JUnit evidence
+increases from **230 to 236 named methods**; a missing or skipped
+test remains a hard blocker. The main Java 25/real MinIO workflow,
+Ring WAL failure recovery, GA normalization and all other required
+source-SHA gates must succeed before this batch can be treated
+as GA evidence.
+
+### Remaining P0 work
+
+This local upload admission CAS is not the missing KRaft
+authoritative source LogStart transaction. COMMITTED object
+retirement still requires authenticated BrokerEpoch/Incarnation
+and source LeaderEpoch identity, durable Kafka and WAL source
+horizons, verified metadata-consumer replay catch-up, an atomic
+version-gated Controller record at its assigned Raft offset,
+Topic Delete tombstone survival across failover/snapshot and a
+reference-retirement grace barrier before retryable MinIO
+physical deletion. Production authority emission and physical
+COMMITTED GC remain off.
