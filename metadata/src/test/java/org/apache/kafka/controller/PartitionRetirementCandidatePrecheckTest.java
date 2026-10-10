@@ -25,6 +25,7 @@ import org.apache.kafka.metadata.PartitionRegistration;
 import org.apache.kafka.metadata.PartitionRetirementAuthorityState;
 import org.apache.kafka.metadata.PartitionRetirementAuthorityState.Key;
 import org.apache.kafka.metadata.PartitionRetirementAuthorityState.Value;
+import org.apache.kafka.controller.PartitionRetirementCandidatePrecheck.Candidate;
 import org.apache.kafka.timeline.SnapshotRegistry;
 
 import org.junit.jupiter.api.Test;
@@ -168,6 +169,42 @@ class PartitionRetirementCandidatePrecheckTest {
             request(1, 300L, INCARNATION, -1, -1L, 20L, 50L));
         assertThrows(IllegalArgumentException.class, () ->
             request(1, 300L, INCARNATION, 7, -2L, 20L, 50L));
+    }
+
+    @Test
+    void brokerRegistrationWithoutIncarnationFailsClosedInsteadOfThrowing() {
+        Fixture f = fixture();
+        BrokerRegistration registration = mock(BrokerRegistration.class);
+        when(registration.epoch()).thenReturn(300L);
+        when(registration.incarnationId()).thenReturn(null);
+        when(f.cluster.registration(1)).thenReturn(registration);
+        assertEquals(Finding.BROKER_INCARNATION_MISMATCH, evaluate(f, candidate()));
+        assertNull(f.authority.get(KEY));
+    }
+
+    @Test
+    void brokerRegistrationWithReservedIncarnationFailsClosed() {
+        Fixture f = fixture();
+        when(f.cluster.registration(1)).thenReturn(broker(300L, Uuid.ZERO_UUID, false, false));
+        assertEquals(Finding.BROKER_INCARNATION_MISMATCH, evaluate(f, candidate()));
+    }
+
+    @Test
+    void authorityChangesAfterPreflightInvalidateTheOriginalGeneration() {
+        Fixture f = fixture();
+        assertEquals(Finding.SOURCE_LOG_START_NOT_VERIFIED, evaluate(f, candidate()));
+        f.authority.replay(record(prior(30L)));
+        assertEquals(Finding.STALE_AUTHORITY_VERSION, evaluate(f, candidate()));
+        assertEquals(10L, f.authority.get(KEY).authorityOffset());
+    }
+
+    @Test
+    void leaderElectionAfterPreflightInvalidatesTheOldCandidate() {
+        Fixture f = fixture();
+        assertEquals(Finding.SOURCE_LOG_START_NOT_VERIFIED, evaluate(f, candidate()));
+        when(f.replicas.getPartition(KEY.topicId(), 0)).thenReturn(partition(2, 8));
+        assertEquals(Finding.LEADER_REGISTRATION_MISMATCH, evaluate(f, candidate()));
+        assertNull(f.authority.get(KEY));
     }
 
     private static PartitionRetirementCandidatePrecheck.Candidate candidate() {

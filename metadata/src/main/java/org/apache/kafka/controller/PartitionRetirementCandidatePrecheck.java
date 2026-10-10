@@ -100,7 +100,11 @@ final class PartitionRetirementCandidatePrecheck {
         if (!featureControl.isPartitionRetirementAuthorityEnabled()) {
             return Finding.FEATURE_NOT_NEGOTIATED;
         }
-        Finding check = checkCAS(authorityControl.get(candidate.key()), candidate, nextWriteOffset);
+        // One controller-timeline snapshot is shared by both the generation CAS and
+        // subsequent leader/epoch/watermark transition validation. Do not look the
+        // state up again after validating the expected authority offset.
+        Value previous = authorityControl.get(candidate.key());
+        Finding check = checkCAS(previous, candidate, nextWriteOffset);
         if (check != null) {
             return check;
         }
@@ -112,7 +116,6 @@ final class PartitionRetirementCandidatePrecheck {
         if (check != null) {
             return check;
         }
-        Value previous = authorityControl.get(candidate.key());
         try {
             PartitionRetirementAuthorityState.validateAdvance(previous, candidate.proposedValue());
         } catch (IllegalStateException rejected) {
@@ -163,7 +166,9 @@ final class PartitionRetirementCandidatePrecheck {
         if (registration.epoch() != candidate.brokerEpoch()) {
             return Finding.BROKER_EPOCH_MISMATCH;
         }
-        if (!registration.incarnationId().equals(candidate.brokerIncarnationId())) {
+        // Old/malformed broker registrations can have no incarnation UUID. A
+        // missing registration proof is a deterministic fence, not an NPE.
+        if (!candidate.brokerIncarnationId().equals(registration.incarnationId())) {
             return Finding.BROKER_INCARNATION_MISMATCH;
         }
         return null;
