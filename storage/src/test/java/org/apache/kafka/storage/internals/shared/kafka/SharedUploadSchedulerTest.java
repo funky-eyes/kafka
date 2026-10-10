@@ -1035,6 +1035,60 @@ class SharedUploadSchedulerTest {
         }
     }
 
+    @Test
+    void quarantineBeforeUploadDoesNotAllocateAnObjectIdOrReserveASlot() throws Exception {
+        InMemoryObjectStore objectStore = new InMemoryObjectStore();
+        InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
+        try (SharedStorageEngine engine = engine("quarantine-before-upload")) {
+            append(engine, P0, 0L, 9L, new byte[] {1, 2, 3});
+            SharedCommitProgress progress = leaderProgress(P0, 0L, 10L);
+            progress.disableForRetirementQuarantine();
+
+            try (SharedUploadScheduler scheduler = scheduler(
+                engine, progress, objectStore, metadataStore, 1024L
+            )) {
+                assertTrue(scheduler.tryUploadOnce().get(10, TimeUnit.SECONDS).isEmpty());
+                assertEquals(0, scheduler.reservedCandidateCount());
+                assertEquals(0, scheduler.uploadsInProgress());
+                assertFalse(objectStore.contains(100L));
+                assertFalse(engine.remoteIndex().coverage(P0).covers(new OffsetRange(0L, 10L)));
+            }
+        }
+    }
+
+    @Test
+    void quarantineBetweenSelectionAndPutRejectsStaleUploadCandidate() throws Exception {
+        InMemoryObjectStore objectStore = new InMemoryObjectStore();
+        InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
+        try (SharedStorageEngine engine = engine("quarantine-after-selection")) {
+            append(engine, P0, 0L, 9L, new byte[] {1, 2, 3});
+            SharedCommitProgress progress = leaderProgress(P0, 0L, 10L);
+            AtomicInteger objectIdCalls = new AtomicInteger();
+            SharedObjectUploader uploader = new SharedObjectUploader(
+                objectStore, metadataStore, new SharedObjectPacker(), engine
+            );
+            try (SharedUploadScheduler scheduler = new SharedUploadScheduler(
+                engine, progress, uploader,
+                () -> {
+                    objectIdCalls.incrementAndGet();
+                    return 100L;
+                },
+                () -> {
+                    progress.disableForRetirementQuarantine();
+                    return 1_000L;
+                },
+                1024L
+            )) {
+                assertTrue(scheduler.tryUploadOnce().get(10, TimeUnit.SECONDS).isEmpty());
+                assertEquals(0, objectIdCalls.get());
+                assertEquals(0, scheduler.reservedCandidateCount());
+                assertEquals(0, scheduler.uploadsInProgress());
+                assertFalse(objectStore.contains(100L));
+                assertTrue(progress.snapshot().isEmpty());
+            }
+        }
+    }
+
     private static SharedCommitProgress leaderProgress(
         SharedPartitionId partition,
         long logStartOffset,

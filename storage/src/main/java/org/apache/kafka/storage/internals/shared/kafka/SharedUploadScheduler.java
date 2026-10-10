@@ -215,6 +215,9 @@ public final class SharedUploadScheduler implements AutoCloseable {
         if (closed.get()) {
             return CompletableFuture.failedFuture(new IllegalStateException("Shared upload scheduler is closed"));
         }
+        if (commitProgress.isDisabledForRetirementQuarantine()) {
+            return CompletableFuture.completedFuture(Optional.empty());
+        }
         if (!tryAcquireUploadSlot()) {
             if (closed.get()) {
                 return CompletableFuture.failedFuture(new IllegalStateException("Shared upload scheduler is closed"));
@@ -317,11 +320,15 @@ public final class SharedUploadScheduler implements AutoCloseable {
     }
 
     private boolean selectionStillCurrent(CandidateSelection selection, boolean validateByteTriggerWitness) {
+        if (commitProgress.isDisabledForRetirementQuarantine()) {
+            return false;
+        }
         Map<SharedPartitionId, SharedCommitProgress.PartitionProgress> currentProgress = commitProgress.snapshot();
         if (!selectedCandidatesStillCurrent(selection, currentProgress)) {
             return false;
         }
-        return !validateByteTriggerWitness || byteTriggerWitnessStillCurrent(selection, currentProgress);
+        return !commitProgress.isDisabledForRetirementQuarantine()
+            && (!validateByteTriggerWitness || byteTriggerWitnessStillCurrent(selection, currentProgress));
     }
 
     private boolean selectedCandidatesStillCurrent(
