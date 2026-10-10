@@ -46,6 +46,10 @@ REQUIRED_TESTS = {
         "removedPartitionTracksLaterFollowerEpochBeforeReassignment",
         "repeatedRemovalKeepsLatestFenceAndInvalidatesPriorLeaderTickets",
         "deletedTopicIdTombstoneDoesNotFenceRecreatedTopicId",
+        "finiteEpochTombstoneBudgetQuarantinesRatherThanEvictingStaleIdentity",
+        "capacityQuarantineRevokesAllActiveTicketsNotJustRemovedOnes",
+        "previouslySeenIdentityCanChangeRolesAtCapacityWithoutQuarantine",
+        "invalidTrackedIdentityBudgetIsRejected",
     ),
     "org.apache.kafka.storage.internals.shared.kafka.SourceLogStartCallbackFenceTest": (
         "nativeDeleteRecordsSuccessAdvancesTheTrackedSourceStart",
@@ -67,6 +71,10 @@ REQUIRED_TESTS = {
         "freshReassignmentWithHigherEpochMayRecaptureLocalSourceView",
         "nativeWindowRejectsUnknownOrContradictoryOffsetRanges",
     ),
+    "org.apache.kafka.storage.internals.shared.kafka.SharedUploadSchedulerTest": (
+        "quarantineBeforeUploadDoesNotAllocateAnObjectIdOrReserveASlot",
+        "quarantineBetweenSelectionAndPutRejectsStaleUploadCandidate",
+    ),
     "org.apache.kafka.storage.internals.shared.kafka.SharedCommitProgressTest": (
         "followsKafkaHighWatermarkExactlyRatherThanTakingMaximum",
         "snapshotsKafkaLogStartHighWatermarkAndRoleAsOneCommitWindow",
@@ -80,6 +88,9 @@ REQUIRED_TESTS = {
         "lateNativeCallbacksAfterReplicaRemovalCannotResurrectUploadProgress",
         "repeatedSuccessfulLogStartObservationIsIdempotent",
         "rejectsNegativeOffsets",
+        "quarantineClearsPriorCommitWindowsAndAllUploadEligibility",
+        "quarantinedProgressCannotBeRestoredByLateKafkaCallbacks",
+        "quarantineIsIdempotentEvenAfterAdditionalPartitionCallbacks",
     ),
     "org.apache.kafka.storage.internals.shared.kafka.SharedPartitionRoleListenerTest": (
         "routesOnlySelectedUserTopicsAndTracksLeaderDemotion",
@@ -100,6 +111,9 @@ REQUIRED_TESTS = {
         "removedPartitionRejectsLateFollowerAndLegacyLeaderWithoutPhantomProgress",
         "onlyNewerExplicitEpochCanReassignRemovedUploadLeader",
         "recreationWithNewTopicIdIsIndependentOfRemovedEpochTombstone",
+        "identityQuarantinePurgesAllPreviouslyEligibleUploadPartitions",
+        "quarantineTriggeredByRemovalAlsoDisablesAllRemainingLeaders",
+        "subsequentKafkaHighWatermarkCannotResurrectQuarantinedUploadWindow",
     ),
     "org.apache.kafka.controller.PartitionRetirementControllerPrecheckTest": (
         "currentRecoveredLeaderInIsrMatchesButIsNotWriteAuthorization",

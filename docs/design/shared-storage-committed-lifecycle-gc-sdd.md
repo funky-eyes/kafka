@@ -1228,3 +1228,87 @@ version-gated KRaft Controller commit event with exact assigned
 offset; Topic Delete tombstone survival through snapshots; durable
 reference retirement; reader/upload quiescence; and retryable
 physical MinIO deletion with crash and restart proofs.
+
+
+## Batch 34: bounded removed-partition identities with permanent fail-closed quarantine
+
+### Why a simple TTL or LRU eviction is unsafe
+
+Batch 33 correctly retained the maximum Kafka LeaderEpoch for a removed
+immutable Topic ID and partition so a delayed LEADER(E) could not
+re-create SharedCommitProgress upload eligibility. However those
+removed-partition entries accumulated for the broker process lifetime.
+A topic create/delete or partition reassignment workload could grow
+the role identity map without bound.
+
+Evicting the oldest tombstone via LRU, time-based TTL, or a fixed age
+is **not safe**: callbacks carry no signed expiry proof, and eviction
+makes a delayed old LeaderEpoch indistinguishable from first assignment.
+This would trade a memory bound for possible reuse of stale upload
+leadership.
+
+### Bounded, fail-closed operational behavior
+
+LocalRetirementLeadershipFence now has a fixed per-process limit of
+**131072 distinct tracked immutable partition identities** (including
+active roles and removed-topic tombstones). This is a conservative
+bound for the in-memory local role evidence, not a bound for Kafka's
+registered partitions or cluster metadata. Internal tests use a
+smaller injected limit to exercise saturation deterministically.
+
+On the first additional previously unseen identity when full:
+
+1. The fence permanently latches QUARANTINED for this broker process,
+   clears all its previously tracked roles and tombstones, and refuses
+   **every** new leader ticket, including a newer LeaderEpoch. It
+   never silently evicts a tombstone and remains unable to grant local
+   upload eligibility until a full broker-process restart.
+2. SharedPartitionRoleListener serializes removal/reassignment
+   callbacks through its existing in-memory callback lock and, on
+   quarantine, issues one ERROR-level operational message explaining
+   the restart requirement.
+3. SharedCommitProgress latches DISABLED, clears all previously
+   selected leader/HW/log-start commit windows, and rejects later
+   onLogLoaded, HW, native LogStart, rebase and role callbacks. The
+   upload scheduler observes an empty partition snapshot regardless
+   of concurrent callback timing.
+4. SharedUploadScheduler rejects new scheduling before reserving
+   upload slots and rechecks the latch before accepting a selected
+   WAL candidate. It does not allocate new object IDs or start a new
+   object PUT from a quarantined selection.
+
+This is a deliberate **availability-for-safety** choice. A broker
+that exhausts its local role identity memory budget may stop making
+progress on shared uploads until restart. The limit is not auto-reset
+during partial component reload, and there is no unsafe time-based
+quarantine release.
+
+Already-started asynchronous S3 PUT/metadata futures are not forcibly
+cancelled; they follow the existing bounded completion and shutdown
+protocol. Quarantine prevents **new upload scheduling** and fences
+new local leadership, but it is not a distributed object publication
+revocation or cross-broker GC permit. Kafka's regular source-log and
+replication processing remain unchanged.
+
+### Regression evidence and remaining Controller requirements
+
+Mandatory Java 25 safety coverage expands from **217 to 229 named
+tests**. Four LocalRetirementLeadershipFenceTest methods cover
+capacity exhaustion, old-ticket revocation, non-eviction of
+previously seen identities and bad capacity settings. Three
+SharedCommitProgressTest methods verify permanent callback shutdown.
+Three SharedPartitionRoleListenerTest methods verify revocation of
+all existing progress windows on leader- or removal-triggered
+quarantine, and two SharedUploadSchedulerTest methods verify both
+pre-scheduling and selection-to-PUT races. The strict anti-skip
+checker still rejects missing, skipped or failed JUnit XML evidence.
+
+Next, cross-broker durable controller authority MUST NOT depend on
+these ephemeral process-local latches. Safe tombstone retirement
+requires a separate KRaft state-version/reader horizon proof. A
+fully trusted LogStart certificate still needs broker incarnation,
+source LeaderEpoch, exact Kafka LogStart/HW/LEO, durable WAL and
+remote metadata catch-up, and atomic feature-gated Controller CAS
+record emission at the genuine assigned KRaft offset. None of that
+is bypassed or enabled by this batch. Physical MinIO deletion and
+COMMITTED-reference retirement remain disabled.
