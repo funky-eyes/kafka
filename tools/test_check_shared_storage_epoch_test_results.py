@@ -43,8 +43,8 @@ class EpochEvidenceCheckerTest(unittest.TestCase):
                 ET.SubElement(case, "failure")
         ET.ElementTree(xml).write(self.root / ("TEST-" + suite + ".xml"), encoding="utf-8")
 
-    def test_all_128_methods_pass(self):
-        self.assertEqual(128, verify(self.root))
+    def test_all_147_methods_pass(self):
+        self.assertEqual(147, verify(self.root))
 
     def test_missing_controller_module_report_fails_closed(self):
         controller = "org.apache.kafka.controller.PartitionRetirementControllerPrecheckTest"
@@ -64,7 +64,34 @@ class EpochEvidenceCheckerTest(unittest.TestCase):
                     xml_name = "TEST-" + suite + ".xml"
                     (other / xml_name).write_bytes((self.root / xml_name).read_bytes())
                     (self.root / xml_name).unlink()
-            self.assertEqual(128, verify(self.root, other))
+            self.assertEqual(147, verify(self.root, other))
+
+    def test_third_module_feature_report_must_be_present(self):
+        feature = "org.apache.kafka.server.common.PartitionRetirementAuthorityVersionTest"
+        (self.root / ("TEST-" + feature + ".xml")).unlink()
+        with self.assertRaisesRegex(ValueError, "Missing mandatory test report"):
+            verify(self.root)
+
+    def test_three_module_evidence_isolation(self):
+        feature = "org.apache.kafka.server.common.PartitionRetirementAuthorityVersionTest"
+        with tempfile.TemporaryDirectory() as metadata_dir:
+            with tempfile.TemporaryDirectory() as server_dir:
+                metadata = Path(metadata_dir)
+                server = Path(server_dir)
+                for suite in REQUIRED_TESTS:
+                    filename = "TEST-" + suite + ".xml"
+                    source = self.root / filename
+                    if suite == feature:
+                        (server / filename).write_bytes(source.read_bytes())
+                        source.unlink()
+                    elif suite.startswith((
+                        "org.apache.kafka.controller.",
+                        "org.apache.kafka.metadata.",
+                        "org.apache.kafka.image.",
+                    )):
+                        (metadata / filename).write_bytes(source.read_bytes())
+                        source.unlink()
+                self.assertEqual(147, verify(self.root, metadata, server))
 
     def test_missing_controller_image_report_fails_closed(self):
         suite = "org.apache.kafka.image.PartitionRetirementAuthorityImageTest"

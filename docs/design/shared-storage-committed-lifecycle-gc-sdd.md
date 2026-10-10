@@ -804,3 +804,82 @@ real MinIO physical deletion with crash/retry proof.
 
 Existing 19/19 GA evidence applies only to previously enabled
 Shared Storage functionality. Batch 28 adds no physical GC.
+
+
+## Batch 29: negotiated KRaft authority feature and replay-offset provenance
+
+The generated retirement KRaft record from Batch 28 remains **non-emitting**
+in all production controller and broker operations. This batch adds an
+explicit, experimental Kafka cluster capability and refuses out-of-order
+replay and unsupported metadata snapshot emission.
+
+### Feature negotiation: production defaults to disabled
+
+The standard Kafka Feature enum now includes
+partition.retirement.authority.version with these levels:
+
+- v0: no authority records are permitted; this is the latest production
+  version and the default through metadata.version=4.3-IV0.
+- v1: experimental, requiring metadata.version >= 4.4-IV0 (currently
+  unstable), registered through Kafka's normal broker/controller
+  supported-feature advertisements and finalized FeatureLevelRecord.
+  FeatureControlManager can negotiate the level only when the full
+  quorum supports it. Installing a new binary alone cannot activate it.
+
+Both QuorumController and broker MetadataDelta reject API key 29 unless
+feature v1 is finalized **and** the replayed metadata.version supports
+4.4-IV0. This includes KRaft snapshot replay; the snapshot must place
+metadata.version and feature records before the retirement records.
+
+MetadataImage.write also requires negotiated v1 in the source image and
+a snapshot target metadata.version >= 4.4-IV0. Writing a nonempty
+authority image to a 4.3 or otherwise unnegotiated image throws
+**before writing any bytes**. A negotiated test-only 4.4 image writes
+the complete tombstone set; its full KRaft MetadataDelta replay must
+recover both the feature level and terminal deletion state. Empty
+legacy images remain writable without new records.
+
+The v1 enum has LATEST_PRODUCTION=v0. The test matrix covers default
+v0, unstable level rejection, dependency validation, wrong record
+ordering, unsupported 4.3 replay, negotiated v1 snapshot round trip,
+and fail-closed snapshot downgrade.
+
+### Bind version provenance to actual KRaft log position
+
+A new replayFromKRaft entry point in PartitionRetirementControlManager
+requires the historical authority transition offset to match the
+**actual KRaft append log offset** for ordinary record replay. For a
+KRaft snapshot, it must be strictly less than the snapshot's
+next-offset boundary; a valid historical authority may precede
+unrelated KRaft records. A mismatch throws before mutating the
+controller's SnapshotRegistry/TimelineHashMap-backed state.
+This check cannot authenticate a fabricated or corrupted KRaft
+snapshot independently, but no unverified arbitrary offset is accepted
+on the ordinary controller replay path.
+
+### Evidence and remaining release blockers
+
+The dedicated Java 25 Shared Storage job now runs Metadata module
+targeted Checkstyle + replay tests and Server Common feature-version
+tests and four actual FeatureControlManager/QuorumFeatures contract
+tests; it checks JUnit XML from all three modules with no missing,
+failed or skipped methods. Total mandatory safety methods:
+**147**, increased from 128.
+
+There is still NO public controller API or producer for this record.
+Even with feature v1 negotiated, there is no authorized watermark
+advance, trusted source-log-start proof, per-broker incarnation grant,
+or atomic controller event to emit API key 29. It must remain disabled
+for production until the upgrade/rollback protocol, true
+controller-serialized checks and quorum failover tests are complete.
+No COMMITTED reference retirement or physical MinIO deletion is
+enabled, and historical GA 19/19 does not certify either capability.
+
+The replay-side authority-version check is tied to KRaft's real record
+position for ordinary log replay, not to a caller's invented offset.
+Controller tests also reject forged high-offset claims and confirm
+that the previous state is unchanged on rejection. Experimental
+FeatureLevelRecord replay can precede metadata.version=4.4 only as
+an in-memory record; the effective authority feature stays disabled
+until BOTH required levels are present. A production controller
+rejects the unsupported experimental feature record outright.

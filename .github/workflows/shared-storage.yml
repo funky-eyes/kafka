@@ -44,6 +44,12 @@ on:
       - 'metadata/src/test/java/org/apache/kafka/metadata/PartitionRetirementAuthorityStateTest.java'
       - 'metadata/src/test/java/org/apache/kafka/image/PartitionRetirementAuthorityImageTest.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/PartitionRetirementControlManagerTest.java'
+      - 'metadata/src/test/java/org/apache/kafka/controller/PartitionRetirementFeatureGateTest.java'
+      - 'server-common/src/main/java/org/apache/kafka/server/common/PartitionRetirementAuthorityVersion.java'
+      - 'server-common/src/main/java/org/apache/kafka/server/common/Feature.java'
+      - 'server-common/src/test/java/org/apache/kafka/server/common/PartitionRetirementAuthorityVersionTest.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/FeatureControlManager.java'
+      - 'metadata/src/main/java/org/apache/kafka/image/FeaturesImage.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/**'
       - 'storage/shared-storage-s3/**'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/log/LogLoader.java'
@@ -96,6 +102,12 @@ on:
       - 'metadata/src/test/java/org/apache/kafka/metadata/PartitionRetirementAuthorityStateTest.java'
       - 'metadata/src/test/java/org/apache/kafka/image/PartitionRetirementAuthorityImageTest.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/PartitionRetirementControlManagerTest.java'
+      - 'metadata/src/test/java/org/apache/kafka/controller/PartitionRetirementFeatureGateTest.java'
+      - 'server-common/src/main/java/org/apache/kafka/server/common/PartitionRetirementAuthorityVersion.java'
+      - 'server-common/src/main/java/org/apache/kafka/server/common/Feature.java'
+      - 'server-common/src/test/java/org/apache/kafka/server/common/PartitionRetirementAuthorityVersionTest.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/FeatureControlManager.java'
+      - 'metadata/src/main/java/org/apache/kafka/image/FeaturesImage.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/**'
       - 'storage/shared-storage-s3/**'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/log/LogLoader.java'
@@ -183,16 +195,26 @@ jobs:
           ./gradlew :metadata:checkstyleMain :metadata:checkstyleTest :metadata:test --no-scan \
             --tests 'org.apache.kafka.controller.PartitionRetirementControllerPrecheckTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementControlManagerTest' \
+            --tests 'org.apache.kafka.controller.PartitionRetirementFeatureGateTest' \
             --tests 'org.apache.kafka.metadata.PartitionRetirementAuthorityStateTest' \
             --tests 'org.apache.kafka.image.PartitionRetirementAuthorityImageTest' \
             2>&1 | tee shared-storage-controller-retirement-test.log
+
+      - name: Run KRaft retirement feature version compatibility tests
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew :server-common:test --no-scan \
+            --tests 'org.apache.kafka.server.common.PartitionRetirementAuthorityVersionTest' \
+            2>&1 | tee shared-storage-retirement-feature-test.log
 
       - name: Require leadership and epoch JUnit evidence
         shell: bash
         run: |
           python3 -m unittest tools.test_check_shared_storage_epoch_test_results
           python3 tools/check_shared_storage_epoch_test_results.py \
-            storage/build/test-results/test metadata/build/test-results/test
+            storage/build/test-results/test metadata/build/test-results/test \
+            server-common/build/test-results/test
 
       - name: Run S3 module tests
         shell: bash
@@ -209,6 +231,7 @@ jobs:
             shared-storage-logmanager-regression.log
             shared-storage-test.log
             shared-storage-controller-retirement-test.log
+            shared-storage-retirement-feature-test.log
             shared-storage-s3-test.log
           if-no-files-found: ignore
           retention-days: 7
@@ -237,6 +260,8 @@ jobs:
             storage/build/test-results/test
             metadata/build/reports/tests/test
             metadata/build/test-results/test
+            server-common/build/reports/tests/test
+            server-common/build/test-results/test
             storage/shared-storage-s3/build/reports/tests/test
             core/build/reports/tests/test
           if-no-files-found: ignore

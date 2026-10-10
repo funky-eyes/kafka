@@ -70,12 +70,23 @@ REQUIRED_TESTS = {
         "deletedTopicIdCannotBorrowRecreatedTopicRegistration",
         "invalidControllerLookupArgumentsFailClosed",
     ),
+    "org.apache.kafka.controller.PartitionRetirementFeatureGateTest": (
+        "productionControllerCannotReplayExperimentalFeatureLevel",
+        "negotiatedFeatureStillRequiresMetadataVersionFourFour",
+        "finalizedFeatureDisableRevokesSnapshotEligibility",
+        "unsupportedFeatureIsNotAdvertisedByProductionQuorum",
+    ),
     "org.apache.kafka.controller.PartitionRetirementControlManagerTest": (
         "controllerReplayRetainsTheHighestWatermarkAcrossEpochHandover",
         "controllerReplayRejectsLateFormerBroker",
         "terminalTopicDeleteCannotBeReauthorizedByReplayedRecord",
         "timelineRollbackRevertsToThePriorAuthoritySnapshot",
         "topicRecreationDoesNotReuseDeletedAuthority",
+        "committedKRaftAppendOffsetMustMatchAuthorityOffset",
+        "forgedAuthorityOffsetCannotAdvanceFromOrdinaryLogReplay",
+        "KRaftSnapshotMayRetainOlderAcceptedAuthorityOffset",
+        "snapshotCannotClaimAuthorityBeyondItsCommittedHorizon",
+        "wrongOffsetIsRejectedWithoutReplacingPreviouslyReplayedState",
     ),
     "org.apache.kafka.metadata.PartitionRetirementAuthorityStateTest": (
         "generatedKRaftRecordIdIsReservedAndVersionZero",
@@ -97,6 +108,18 @@ REQUIRED_TESTS = {
         "sameEpochDemotionDoesNotPermitLateElection",
         "aRecreatedTopicHasAnIndependentAuthorityKey",
         "imageDefensivelyCopiesMutableCallerMap",
+        "missingFinalizedFeatureRejectsNewKRaftRecord",
+        "oldMetadataVersionCannotEnableRecordDespiteFeatureClaim",
+        "negotiatedVersionMustPrecedeAuthorityRecordInReplayOrder",
+        "negotiatedFullSnapshotRoundTripsNewRecordAndTerminalTombstone",
+        "negotiatedImageRejectsDowngradeSnapshotTarget",
+    ),
+    "org.apache.kafka.server.common.PartitionRetirementAuthorityVersionTest": (
+        "productionBuildCannotAdvertiseRecordFeatureLevelOne",
+        "featureIsDisabledByDefaultThroughProductionMetadataVersion",
+        "featureLevelOneRequiresUnstableMetadataVersion",
+        "featureNameIsRegisteredWithTheStandardKafkaFeatureSystem",
+        "featureLevelZeroRemainsBackwardCompatible",
     ),
     "org.apache.kafka.storage.internals.shared.metadata.PartitionRetirementAuthorityModelTest": (
         "initialStateHasNeitherImplicitZeroNorAnAuthoritativeLeader",
@@ -174,9 +197,15 @@ REQUIRED_TESTS = {
 }
 
 
-def verify(results_dir: Path, controller_results_dir: Path | None = None) -> int:
+def verify(
+    results_dir: Path,
+    controller_results_dir: Path | None = None,
+    server_results_dir: Path | None = None,
+) -> int:
     if controller_results_dir is None:
         controller_results_dir = results_dir
+    if server_results_dir is None:
+        server_results_dir = results_dir
     total = 0
     for suite, expected in REQUIRED_TESTS.items():
         is_metadata_module = suite.startswith((
@@ -184,7 +213,10 @@ def verify(results_dir: Path, controller_results_dir: Path | None = None) -> int
             "org.apache.kafka.metadata.",
             "org.apache.kafka.image.",
         ))
-        suite_dir = controller_results_dir if is_metadata_module else results_dir
+        if suite.startswith("org.apache.kafka.server.common."):
+            suite_dir = server_results_dir
+        else:
+            suite_dir = controller_results_dir if is_metadata_module else results_dir
         xml = suite_dir / ("TEST-" + suite + ".xml")
         if not xml.is_file():
             raise ValueError(f"Missing mandatory test report: {xml}")
@@ -215,14 +247,18 @@ def verify(results_dir: Path, controller_results_dir: Path | None = None) -> int
 
 
 def main() -> int:
-    if len(sys.argv) not in (2, 3):
+    if len(sys.argv) not in (2, 3, 4):
         print(
-            "Usage: check_shared_storage_epoch_test_results.py STORAGE_REPORTS [CONTROLLER_REPORTS]",
+            "Usage: check_shared_storage_epoch_test_results.py STORAGE_REPORTS [CONTROLLER_REPORTS] [SERVER_REPORTS]",
             file=sys.stderr,
         )
         return 2
     try:
-        total = verify(Path(sys.argv[1]), Path(sys.argv[2]) if len(sys.argv) == 3 else None)
+        total = verify(
+            Path(sys.argv[1]),
+            Path(sys.argv[2]) if len(sys.argv) >= 3 else None,
+            Path(sys.argv[3]) if len(sys.argv) == 4 else None,
+        )
     except (OSError, ValueError, ET.ParseError) as exc:
         print(f"SHARED_STORAGE_EPOCH_EVIDENCE FAIL: {exc}", file=sys.stderr)
         return 1
