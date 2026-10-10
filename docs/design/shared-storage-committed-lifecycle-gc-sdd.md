@@ -1053,3 +1053,90 @@ Raft append offset. No reusable preflight receipt is acceptable.
 COMMITTED reference retirement, physical deletion, reader quiescence
 and object-store garbage collection remain disabled. Existing
 historical GA evidence does not certify these missing capabilities.
+
+
+## Batch 32: live native source LogStart visibility and upload-role fencing
+
+### Discovered missing runtime observation
+
+Before Batch 32, SharedUnifiedLogFactory called
+SharedCommitProgress.onLogLoaded() only when LogLoader returned offsets.
+The SharedUploadScheduler then used the cached logStartOffset in its
+segment selection and revalidation. Native Kafka UnifiedLog can advance
+the real log start later via DeleteRecords or retention, and can
+lower it during replica divergence truncation and restart. Merely
+observing the initial value therefore risks scheduling already-deleted
+source records for remote upload or retaining an obsolete cached start.
+It is **not** a trusted LogStart attestation for KRaft.
+
+### Actual Kafka mutation hooks rather than candidate-supplied watermarks
+
+1. SharedUnifiedLog now binds the SharedCommitProgress tracker **after
+   native UnifiedLog construction**, taking the initial logical
+   logStartOffset and high watermark from the actual initialized log,
+   not the pre-constructor LogLoader candidate.
+2. A successful override of maybeIncrementLogStartOffset publishes
+   the new actual Kafka log start. The override MUST NOT acquire the
+   shared remote-recovery lock: Kafka retention code may invoke it
+   with the native log monitor already held, reversing the normal
+   recovery-fence -> Kafka-log lock order and risking a deadlock.
+   Instead, SourceLogStartCallbackFence captures a local generation
+   before the native mutation and serializes callback publication
+   only if that generation remains current. The bridge is strictly
+   in-memory; failed/no-op Kafka updates publish nothing.
+3. Both truncateTo and truncateFullyAndStartAt publish an exact
+   post-operation native log-start rebase under the remote recovery
+   write fence; a lower value is legal following Kafka truncation.
+   The generation increments at BOTH truncation entry and completion.
+   Old callbacks captured before or during truncation cannot republish
+   stale higher values afterward, even if they complete out of order.
+   onLogRebased ignores already-removed partitions, so late callbacks
+   cannot re-create retired upload state. The native high-watermark
+   callback remains responsible for the high-watermark value.
+4. SharedPartitionRoleListener now checks its local epoch fence
+   before publishing a LEADER role to SharedCommitProgress. A
+   delayed LEADER(E) following FOLLOWER(E), a lower-epoch leader,
+   or an unversioned leader callback after an observed epoch can no
+   longer re-enable uploads when the local fence rejected that
+   leadership. Genuine new LEADER(E+1) still re-enables uploads.
+
+These are **production runtime safety/visibility fixes** for the
+existing shared upload scheduler. All callbacks stay in-memory,
+non-blocking and free of remote I/O under Kafka log/role locks.
+The native replica HW and acknowledgement semantics are unchanged,
+as are the MinIO upload, remote metadata and WAL formats.
+
+### Fail-closed tests and release evidence
+
+The Batch 32 Java 25 Shared Storage workflow MUST execute:
+- all 12 SharedCommitProgressTest methods, including six new
+  deterministic DeleteRecords/truncation/removal callbacks
+- all 14 SharedPartitionRoleListenerTest methods, including three new
+  stale-leader upload-fencing regressions
+- all 6 SourceLogStartCallbackFenceTest methods, including generation
+  capture before/during/after truncation, nested truncation callbacks,
+  and callbacks arriving after partition removal
+
+The strict anti-skip evidence checker therefore expands from 177 to
+**198 named methods**. Skipped, missing and failed methods remain
+hard blockers. Existing Shared Storage and real-MinIO E2E continue
+to run as before and GA source fingerprints include the updated
+production Java files.
+
+### What this does NOT prove
+
+A Kafka source log's local logical LogStart and high watermark are
+observations from one broker, not a KRaft-committed, replicated
+certificate. A broker may crash or be fenced after the observation,
+the WAL durability/replay horizon may be behind, and local upload
+state can change without a controller event.
+
+No code in this batch hands SharedCommitProgress observations to a
+KRaft authority writer. Controller preflight continues to return
+SOURCE_LOG_START_NOT_VERIFIED and emits zero metadata records.
+The remaining GA blockers for COMMITTED lifecycle GC are a
+trustworthy source LogStart certificate bound to topic ID, leader and
+broker incarnation, durable log/WAL/remote metadata catch-up,
+a revalidated atomic KRaft controller write, and durable
+COMMITTED-reference retirement with reader/upload fences before
+physical MinIO deletion.
