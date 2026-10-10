@@ -1373,3 +1373,24 @@ the immutable Topic ID, BrokerEpoch, Incarnation ID and LeaderEpoch,
 KRaft controller atomic version-gated emission, Topic Delete
 tombstone durability, WAL/remote metadata replay catch-up and
 reader/upload quiescence ahead of any MinIO physical deletion.
+
+
+### Batch 35 fast preflight bootstrap correction
+
+The initial Batch 35 push reached the new fast Python preflight.
+All seven source-preflight unit tests succeeded, but the subsequent
+script-path invocation failed before scanning Java sources with
+`ModuleNotFoundError: No module named 'tools'`. The cause was the
+Python startup search path for `python3 tools/script.py`, which
+starts at the tools/ directory rather than the repository root.
+The checker now bootstraps the repository root into `sys.path` when
+run as a standalone script, while retaining the package mode
+`python3 -m tools.check_shared_storage_epoch_test_sources`.
+An eighth negative-tested subprocess regression runs the script
+from an unrelated directory and verifies that it resolves the
+package and reports missing required Java sources normally.
+
+This was a new preflight invocation defect, not a Java or object
+storage runtime regression. The compilation repair and original 229
+mandatory Java tests remain unchanged. The canonical-head CI rerun
+must still pass all release gates before declaring Batch 35 PASS.
