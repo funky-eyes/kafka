@@ -213,6 +213,63 @@ class PartitionRetirementAuthoritySnapshotCodecTest {
         assertArrayEquals(encode(state), encode(decode(encode(state), PARTITION, 3L)));
     }
 
+    @Test
+    void recomputedChecksumCannotSwapImmutableTopicId() {
+        byte[] encoded = encode(active(50L));
+        view(encoded).putLong(16, 3L);
+        fixChecksum(encoded);
+        assertThrows(IllegalArgumentException.class, () -> decode(encoded, PARTITION, 3L));
+    }
+
+    @Test
+    void negativeEncodedPartitionIsRejectedAfterChecksumRepair() {
+        byte[] encoded = encode(active(50L));
+        view(encoded).putInt(24, -1);
+        fixChecksum(encoded);
+        assertThrows(IllegalArgumentException.class, () -> decode(encoded, PARTITION, 3L));
+    }
+
+    @Test
+    void invalidBrokerIdIsRejectedAfterChecksumRepair() {
+        byte[] encoded = encode(active(50L));
+        view(encoded).putInt(40, -2);
+        fixChecksum(encoded);
+        assertThrows(IllegalArgumentException.class, () -> decode(encoded, PARTITION, 3L));
+    }
+
+    @Test
+    void nonterminalUnknownSourceEpochIsRejectedAfterChecksumRepair() {
+        byte[] encoded = encode(active(50L));
+        view(encoded).putInt(36, -1);
+        fixChecksum(encoded);
+        assertThrows(IllegalArgumentException.class, () -> decode(encoded, PARTITION, 3L));
+    }
+
+    @Test
+    void forgedHigherAuthorityOffsetProvesCrcIsNotAuthentication() {
+        byte[] encoded = encode(active(50L));
+        view(encoded).putLong(28, 400L);
+        fixChecksum(encoded);
+
+        // Deliberately documents the codec's limitation. An attacker can recalculate
+        // CRC and forge an apparently newer offset; only committed controller state
+        // outside this codec can authenticate or reject the snapshot.
+        Snapshot untrusted = decode(encoded, PARTITION, 4L);
+        assertEquals(400L, untrusted.authorityOffset());
+    }
+
+    @Test
+    void forgedTerminalFlagDemonstratesNeedForControllerProvenance() {
+        Snapshot deleted = new Snapshot(PARTITION, 15L, 10, -1, OptionalLong.of(50L), true);
+        byte[] encoded = encode(deleted);
+        view(encoded).putShort(6, (short) 1);
+        fixChecksum(encoded);
+
+        // A fresh CRC cannot prove a RemoveTopicRecord was never committed.
+        // Never use decode() output as a source of write or delete authorization.
+        assertFalse(decode(encoded, PARTITION, 15L).terminallyDeleted());
+    }
+
     private static Snapshot active(long watermark) {
         return new Snapshot(PARTITION, 3L, 10, 1, OptionalLong.of(watermark), false);
     }

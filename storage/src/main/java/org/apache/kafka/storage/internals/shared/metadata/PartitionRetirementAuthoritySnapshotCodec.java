@@ -86,6 +86,26 @@ public final class PartitionRetirementAuthoritySnapshotCodec {
         SharedPartitionId expectedPartition,
         long minimumAuthorityOffset
     ) {
+        requireDecodableEnvelope(encoded, expectedPartition, minimumAuthorityOffset);
+        ByteBuffer in = ByteBuffer.wrap(encoded).order(ByteOrder.BIG_ENDIAN);
+        validateHeaderAndChecksum(in, encoded);
+        int flags = readFlags(in);
+        SharedPartitionId partition = readPartition(in, expectedPartition);
+        long authorityOffset = readAuthorityOffset(in, minimumAuthorityOffset);
+        int sourceLeaderEpoch = in.getInt();
+        int brokerId = in.getInt();
+        OptionalLong watermark = readWatermark(in, flags);
+        return new Snapshot(
+            partition, authorityOffset, sourceLeaderEpoch, brokerId,
+            watermark, (flags & FLAG_TERMINAL) != 0
+        );
+    }
+
+    private static void requireDecodableEnvelope(
+        byte[] encoded,
+        SharedPartitionId expectedPartition,
+        long minimumAuthorityOffset
+    ) {
         Objects.requireNonNull(encoded, "encoded");
         Objects.requireNonNull(expectedPartition, "expectedPartition");
         if (minimumAuthorityOffset < 0L) {
@@ -94,9 +114,10 @@ public final class PartitionRetirementAuthoritySnapshotCodec {
         if (encoded.length != ENCODED_LENGTH) {
             throw new IllegalArgumentException("Invalid authority snapshot envelope length");
         }
-        ByteBuffer in = ByteBuffer.wrap(encoded).order(ByteOrder.BIG_ENDIAN);
-        int actualChecksum = in.getInt(CONTENT_LENGTH);
-        if (actualChecksum != crc(encoded)) {
+    }
+
+    private static void validateHeaderAndChecksum(ByteBuffer in, byte[] encoded) {
+        if (in.getInt(CONTENT_LENGTH) != crc(encoded)) {
             throw new IllegalArgumentException("Authority snapshot CRC32C mismatch");
         }
         if (in.getInt() != MAGIC) {
@@ -105,30 +126,39 @@ public final class PartitionRetirementAuthoritySnapshotCodec {
         if (in.getShort() != VERSION) {
             throw new IllegalArgumentException("Unsupported authority snapshot version");
         }
+    }
+
+    private static int readFlags(ByteBuffer in) {
         int flags = Short.toUnsignedInt(in.getShort());
         if ((flags & ~FLAG_MASK) != 0) {
             throw new IllegalArgumentException("Unknown authority snapshot flags");
         }
+        return flags;
+    }
+
+    private static SharedPartitionId readPartition(ByteBuffer in, SharedPartitionId expected) {
         SharedPartitionId partition = new SharedPartitionId(in.getLong(), in.getLong(), in.getInt());
-        if (!expectedPartition.equals(partition)) {
+        if (!expected.equals(partition)) {
             throw new IllegalArgumentException("Authority snapshot belongs to another Topic ID or partition");
         }
+        return partition;
+    }
+
+    private static long readAuthorityOffset(ByteBuffer in, long minimumAuthorityOffset) {
         long authorityOffset = in.getLong();
-        int sourceLeaderEpoch = in.getInt();
-        int brokerId = in.getInt();
-        long watermarkValue = in.getLong();
         if (authorityOffset < minimumAuthorityOffset) {
             throw new IllegalArgumentException("Authority snapshot is behind required committed horizon");
         }
+        return authorityOffset;
+    }
+
+    private static OptionalLong readWatermark(ByteBuffer in, int flags) {
+        long watermarkValue = in.getLong();
         boolean hasWatermark = (flags & FLAG_HAS_WATERMARK) != 0;
         if (!hasWatermark && watermarkValue != 0L) {
             throw new IllegalArgumentException("Absent watermark must use its canonical zero encoding");
         }
-        OptionalLong watermark = hasWatermark ? OptionalLong.of(watermarkValue) : OptionalLong.empty();
-        return new Snapshot(
-            partition, authorityOffset, sourceLeaderEpoch, brokerId,
-            watermark, (flags & FLAG_TERMINAL) != 0
-        );
+        return hasWatermark ? OptionalLong.of(watermarkValue) : OptionalLong.empty();
     }
 
     private static int crc(byte[] bytes) {
