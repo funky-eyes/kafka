@@ -35,6 +35,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -270,6 +271,74 @@ class PartitionRetirementEpochPrecheckTest {
             PartitionRetirementEpochPrecheck.Status.LOCAL_ROLE_CHANGED_DURING_METADATA_CHECK,
             result.status()
         );
+        assertTrue(result.valueFinding().isEmpty());
+    }
+
+    @Test
+    void nativeSourceLogStartRegressionDuringMetadataLookupInvalidatesResult() throws IOException {
+        SharedPartitionRoleListener roles = nativeRoles();
+        elect(roles, 8);
+        AtomicReference<Optional<SharedUnifiedLog.NativeSourceWindow>> window =
+            new AtomicReference<>(goodNativeWindow());
+        SharedUnifiedLog log = nativeLog(TOPIC_ID, 0, goodNativeWindow());
+        when(log.captureNativeSourceWindow()).thenAnswer(ignored -> window.get());
+        SharedMetadataImage image = mock(SharedMetadataImage.class);
+        when(image.partitionLogStartEvidence(PARTITION)).thenAnswer(ignored -> {
+            window.set(Optional.of(new SharedUnifiedLog.NativeSourceWindow(15L, 50L, 80L)));
+            return new SharedMetadataImage.PartitionLogStartEvidence(2L, OptionalLong.of(10L));
+        });
+
+        var result = nativeCheck(roles, log, image, 20L, 2L);
+        assertEquals(PartitionRetirementEpochPrecheck.Status.NATIVE_SOURCE_WINDOW_STALE, result.status());
+        assertTrue(result.valueFinding().isEmpty());
+    }
+
+    @Test
+    void nativeSourceLogStartAdvanceDuringMetadataLookupAlsoInvalidatesResult() throws IOException {
+        SharedPartitionRoleListener roles = nativeRoles();
+        elect(roles, 8);
+        AtomicReference<Optional<SharedUnifiedLog.NativeSourceWindow>> window =
+            new AtomicReference<>(goodNativeWindow());
+        SharedUnifiedLog log = nativeLog(TOPIC_ID, 0, goodNativeWindow());
+        when(log.captureNativeSourceWindow()).thenAnswer(ignored -> window.get());
+        SharedMetadataImage image = mock(SharedMetadataImage.class);
+        when(image.partitionLogStartEvidence(PARTITION)).thenAnswer(ignored -> {
+            window.set(Optional.of(new SharedUnifiedLog.NativeSourceWindow(30L, 50L, 80L)));
+            return new SharedMetadataImage.PartitionLogStartEvidence(2L, OptionalLong.of(10L));
+        });
+
+        var result = nativeCheck(roles, log, image, 20L, 2L);
+        assertEquals(PartitionRetirementEpochPrecheck.Status.NATIVE_SOURCE_WINDOW_STALE, result.status());
+        assertTrue(result.valueFinding().isEmpty());
+    }
+
+    @Test
+    void nativeSourceDisappearingAfterMetadataLookupInvalidatesResult() throws IOException {
+        SharedPartitionRoleListener roles = nativeRoles();
+        elect(roles, 8);
+        SharedUnifiedLog log = nativeLog(TOPIC_ID, 0, goodNativeWindow());
+        when(log.captureNativeSourceWindow()).thenReturn(goodNativeWindow(), Optional.empty());
+
+        var result = nativeCheck(roles, log, imageWithWatermark(10L), 20L, 2L);
+        assertEquals(PartitionRetirementEpochPrecheck.Status.NATIVE_SOURCE_WINDOW_STALE, result.status());
+        assertTrue(result.valueFinding().isEmpty());
+    }
+
+    @Test
+    void nativeSourceIdentityChangeAfterMetadataLookupInvalidatesResult() throws IOException {
+        SharedPartitionRoleListener roles = nativeRoles();
+        elect(roles, 8);
+        AtomicReference<Uuid> identity = new AtomicReference<>(TOPIC_ID);
+        SharedUnifiedLog log = nativeLog(TOPIC_ID, 0, goodNativeWindow());
+        when(log.topicId()).thenAnswer(ignored -> Optional.of(identity.get()));
+        SharedMetadataImage image = mock(SharedMetadataImage.class);
+        when(image.partitionLogStartEvidence(PARTITION)).thenAnswer(ignored -> {
+            identity.set(new Uuid(90L, 91L));
+            return new SharedMetadataImage.PartitionLogStartEvidence(2L, OptionalLong.of(10L));
+        });
+
+        var result = nativeCheck(roles, log, image, 20L, 2L);
+        assertEquals(PartitionRetirementEpochPrecheck.Status.NATIVE_SOURCE_WINDOW_STALE, result.status());
         assertTrue(result.valueFinding().isEmpty());
     }
 

@@ -1745,3 +1745,32 @@ evidence increases from 251 to **253 named methods**.
 
 Neither identity check is a cluster-wide linearizable lease. Controller
 authority emission and COMMITTED physical deletion stay disabled.
+
+## Batch 44: reject changing Kafka source LogStart across metadata replay checks
+
+Batch 41 captured real Kafka LogStart/HW/LEO before querying replayed
+shared-storage metadata, and Batch 42 rechecked local role generation.
+Kafka can also change the actual source LogStart during that metadata
+lookup without changing leadership: retention, DeleteRecords,
+truncation and recovery are not all role transitions. A preflight that
+only checks role identity could report a value finding computed against
+a stale native source start.
+
+After metadata lookup and the role-generation recheck, the read-only
+preflight now captures native source identity and offsets a second time.
+If identity/window disappears or the inclusive Kafka LogStart differs
+in either direction, it discards the finding with
+NATIVE_SOURCE_WINDOW_STALE. A different epoch/generation also discards
+the result. HighWatermark/LEO may legitimately change without a
+LogStart change; they are not frozen by this advisory preflight.
+
+Four deterministic tests force source LogStart regression, advancement,
+window disappearance and Topic ID replacement between the first source
+read and metadata lookup. They verify that stale evidence contains no
+value finding. Mandatory Java 25 anti-skip evidence grows from 253
+to **257 named tests**.
+
+This double observation is deliberately NOT a linearizable attestation
+or an ABA-proof source mutation generation. A source can change again
+after the check, and no broker-incarnation binding, durable WAL proof,
+controller CAS or physical COMMITTED deletion authorization exists.

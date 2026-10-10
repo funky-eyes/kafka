@@ -114,6 +114,21 @@ public final class PartitionRetirementEpochPrecheck {
             || currentTicket.get().localGeneration() != source.localGeneration()) {
             return new Assessment(Status.LOCAL_ROLE_CHANGED_DURING_METADATA_CHECK, Optional.empty());
         }
+        // Kafka source LogStart may rebase or advance independently of leader
+        // callbacks while the metadata image is consulted. A matching local
+        // role ticket alone cannot validate the old source observation.
+        var latest = SourceLogStartObservation.capture(roleListener, sourceLog, partition);
+        if (latest.isEmpty()) {
+            return new Assessment(Status.NATIVE_SOURCE_WINDOW_STALE, Optional.empty());
+        }
+        SourceLogStartObservation.LocalObservation current = latest.get();
+        if (current.sourceLeaderEpoch() != source.sourceLeaderEpoch()
+            || current.localGeneration() != source.localGeneration()) {
+            return new Assessment(Status.LOCAL_ROLE_CHANGED_DURING_METADATA_CHECK, Optional.empty());
+        }
+        if (current.offsets().logStartOffset() != source.offsets().logStartOffset()) {
+            return new Assessment(Status.NATIVE_SOURCE_WINDOW_STALE, Optional.empty());
+        }
         return new Assessment(Status.LOCAL_EPOCH_OBSERVATION_MATCH, Optional.of(value));
     }
 
@@ -123,6 +138,7 @@ public final class PartitionRetirementEpochPrecheck {
         KAFKA_EPOCH_MISMATCH,
         LOCAL_EPOCH_OBSERVATION_MATCH,
         NATIVE_SOURCE_WINDOW_UNKNOWN,
+        NATIVE_SOURCE_WINDOW_STALE,
         LOCAL_ROLE_CHANGED_DURING_METADATA_CHECK
     }
 

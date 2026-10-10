@@ -309,6 +309,10 @@ REQUIRED_TESTS = {
         "nativeSourceCannotProposeLogStartBeyondActualKafkaLogStart",
         "nativeSourceRoleChangeDuringMetadataReadDiscardsAdvisoryResult",
         "nativeSourceFailedMetadataReplayRemainsFailClosed",
+        "nativeSourceLogStartRegressionDuringMetadataLookupInvalidatesResult",
+        "nativeSourceLogStartAdvanceDuringMetadataLookupAlsoInvalidatesResult",
+        "nativeSourceDisappearingAfterMetadataLookupInvalidatesResult",
+        "nativeSourceIdentityChangeAfterMetadataLookupInvalidatesResult",
     ),
 }
 
