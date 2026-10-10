@@ -193,6 +193,10 @@ public final class MetadataDelta {
         return partitionRetirementDelta;
     }
 
+    private FeaturesImage currentFeatures() {
+        return featuresDelta == null ? image.features() : featuresDelta.apply();
+    }
+
     private PartitionRetirementAuthorityImage appliedPartitionRetirements() {
         return partitionRetirementDelta == null
             ? image.partitionRetirements() : partitionRetirementDelta.apply();
@@ -307,6 +311,11 @@ public final class MetadataDelta {
     }
 
     public void replay(PartitionRetirementAuthorityRecord record) {
+        if (!currentFeatures().isPartitionRetirementAuthorityEnabled()) {
+            throw new IllegalStateException(
+                "KRaft partition retirement authority record before negotiated feature"
+            );
+        }
         getOrCreatePartitionRetirementDelta().replay(record);
     }
 

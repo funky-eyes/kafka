@@ -24,6 +24,9 @@ import org.apache.kafka.metadata.PartitionRetirementAuthorityState;
 import org.apache.kafka.metadata.PartitionRetirementAuthorityState.Key;
 import org.apache.kafka.metadata.PartitionRetirementAuthorityState.Value;
 import org.apache.kafka.timeline.SnapshotRegistry;
+import org.apache.kafka.server.common.OffsetAndEpoch;
+
+import java.util.Optional;
 
 import org.junit.jupiter.api.Test;
 
@@ -85,6 +88,62 @@ class PartitionRetirementControlManagerTest {
         assertEquals(-1, manager.get(PARTITION).brokerId());
         assertEquals(2, manager.get(recreated).brokerId());
         assertNull(manager.get(new Key(PARTITION.topicId(), 1)));
+    }
+
+    @Test
+    void committedKRaftAppendOffsetMustMatchAuthorityOffset() {
+        PartitionRetirementControlManager manager = manager();
+        Value value = new Value(120L, 5, 1, 0L, false);
+        manager.replayFromKRaft(record(PARTITION, value), Optional.empty(), 120L);
+        assertEquals(value, manager.get(PARTITION));
+    }
+
+    @Test
+    void forgedAuthorityOffsetCannotAdvanceFromOrdinaryLogReplay() {
+        PartitionRetirementControlManager manager = manager();
+        assertThrows(IllegalStateException.class, () ->
+            manager.replayFromKRaft(
+                record(PARTITION, new Value(9000L, 5, 1, 0L, false)),
+                Optional.empty(), 120L
+            )
+        );
+        assertNull(manager.get(PARTITION));
+    }
+
+    @Test
+    void KRaftSnapshotMayRetainOlderAcceptedAuthorityOffset() {
+        PartitionRetirementControlManager manager = manager();
+        Value historical = new Value(80L, 4, -1, 40L, true);
+        manager.replayFromKRaft(
+            record(PARTITION, historical), Optional.of(new OffsetAndEpoch(200L, 9)), 199L
+        );
+        assertEquals(historical, manager.get(PARTITION));
+    }
+
+    @Test
+    void snapshotCannotClaimAuthorityBeyondItsCommittedHorizon() {
+        PartitionRetirementControlManager manager = manager();
+        Value atHorizon = new Value(200L, 5, 1, 40L, false);
+        assertThrows(IllegalStateException.class, () ->
+            manager.replayFromKRaft(
+                record(PARTITION, atHorizon), Optional.of(new OffsetAndEpoch(200L, 9)), 150L
+            )
+        );
+        assertNull(manager.get(PARTITION));
+    }
+
+    @Test
+    void wrongOffsetIsRejectedWithoutReplacingPreviouslyReplayedState() {
+        PartitionRetirementControlManager manager = manager();
+        Value previous = new Value(10L, 5, 1, 0L, false);
+        manager.replayFromKRaft(record(PARTITION, previous), Optional.empty(), 10L);
+        assertThrows(IllegalStateException.class, () ->
+            manager.replayFromKRaft(
+                record(PARTITION, new Value(40L, 6, 2, 0L, false)),
+                Optional.empty(), 20L
+            )
+        );
+        assertEquals(previous, manager.get(PARTITION));
     }
 
     private static PartitionRetirementControlManager manager() {

@@ -19,12 +19,14 @@ package org.apache.kafka.image;
 
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.metadata.PartitionRetirementAuthorityRecord;
+import org.apache.kafka.common.metadata.FeatureLevelRecord;
 import org.apache.kafka.image.writer.ImageWriterOptions;
 import org.apache.kafka.image.writer.RecordListWriter;
 import org.apache.kafka.metadata.PartitionRetirementAuthorityState;
 import org.apache.kafka.metadata.PartitionRetirementAuthorityState.Key;
 import org.apache.kafka.metadata.PartitionRetirementAuthorityState.Value;
 import org.apache.kafka.server.common.MetadataVersion;
+import org.apache.kafka.server.common.PartitionRetirementAuthorityVersion;
 
 import org.junit.jupiter.api.Test;
 
@@ -41,7 +43,7 @@ class PartitionRetirementAuthorityImageTest {
 
     @Test
     void brokerMetadataDeltaActuallyReplaysTheGeneratedKRaftRecord() {
-        MetadataDelta delta = new MetadataDelta.Builder().build();
+        MetadataDelta delta = negotiatedDelta();
         delta.replay(record(PARTITION, ELECTED));
         MetadataImage image = delta.apply(MetadataProvenance.EMPTY);
         assertEquals(ELECTED, image.partitionRetirements().get(PARTITION));
@@ -64,7 +66,7 @@ class PartitionRetirementAuthorityImageTest {
         image.write(writer);
         assertEquals(1, writer.records().size());
 
-        MetadataDelta loaded = new MetadataDelta.Builder().build();
+        MetadataDelta loaded = negotiatedDelta();
         loaded.replay(writer.records().get(0).message());
         loaded.finishSnapshot();
         MetadataImage restored = loaded.apply(MetadataProvenance.EMPTY);
@@ -95,7 +97,7 @@ class PartitionRetirementAuthorityImageTest {
 
     @Test
     void metadataReplayRejectsWatermarkRegression() {
-        MetadataDelta delta = new MetadataDelta.Builder().build();
+        MetadataDelta delta = negotiatedDelta();
         delta.replay(record(PARTITION, ELECTED));
         assertThrows(IllegalStateException.class, () ->
             delta.replay(record(PARTITION, new Value(11L, 7, 2, 20L, false)))
@@ -134,6 +136,69 @@ class PartitionRetirementAuthorityImageTest {
         mutable.clear();
         assertEquals(ELECTED, image.get(PARTITION));
         assertThrows(UnsupportedOperationException.class, () -> image.entries().clear());
+    }
+
+    @Test
+    void missingFinalizedFeatureRejectsNewKRaftRecord() {
+        MetadataDelta delta = new MetadataDelta.Builder().build();
+        assertThrows(IllegalStateException.class, () -> delta.replay(record(PARTITION, ELECTED)));
+    }
+
+    @Test
+    void oldMetadataVersionCannotEnableRecordDespiteFeatureClaim() {
+        MetadataDelta delta = new MetadataDelta.Builder().build();
+        delta.replay(feature(MetadataVersion.FEATURE_NAME, MetadataVersion.IBP_4_3_IV0.featureLevel()));
+        delta.replay(feature(PartitionRetirementAuthorityVersion.FEATURE_NAME, (short) 1));
+        assertThrows(IllegalStateException.class, () -> delta.replay(record(PARTITION, ELECTED)));
+    }
+
+    @Test
+    void negotiatedVersionMustPrecedeAuthorityRecordInReplayOrder() {
+        MetadataDelta delta = new MetadataDelta.Builder().build();
+        delta.replay(feature(PartitionRetirementAuthorityVersion.FEATURE_NAME, (short) 1));
+        assertThrows(IllegalStateException.class, () -> delta.replay(record(PARTITION, ELECTED)));
+        delta.replay(feature(MetadataVersion.FEATURE_NAME, MetadataVersion.IBP_4_4_IV0.featureLevel()));
+        delta.replay(record(PARTITION, ELECTED));
+        assertEquals(ELECTED, delta.apply(MetadataProvenance.EMPTY).partitionRetirements().get(PARTITION));
+    }
+
+    @Test
+    void negotiatedFullSnapshotRoundTripsNewRecordAndTerminalTombstone() {
+        MetadataDelta delta = negotiatedDelta();
+        Value tombstone = new Value(12L, 7, -1, 40L, true);
+        delta.replay(record(PARTITION, tombstone));
+        MetadataImage image = delta.apply(MetadataProvenance.EMPTY);
+        RecordListWriter writer = new RecordListWriter();
+        image.write(writer, new ImageWriterOptions.Builder(MetadataVersion.IBP_4_4_IV0).build());
+
+        MetadataDelta recovered = new MetadataDelta.Builder().build();
+        writer.records().forEach(record -> recovered.replay(record.message()));
+        recovered.finishSnapshot();
+        MetadataImage result = recovered.apply(MetadataProvenance.EMPTY);
+        assertEquals(tombstone, result.partitionRetirements().get(PARTITION));
+        assertTrue(result.features().isPartitionRetirementAuthorityEnabled());
+    }
+
+    @Test
+    void negotiatedImageRejectsDowngradeSnapshotTarget() {
+        MetadataDelta delta = negotiatedDelta();
+        delta.replay(record(PARTITION, ELECTED));
+        MetadataImage image = delta.apply(MetadataProvenance.EMPTY);
+        assertThrows(IllegalStateException.class, () -> image.write(
+            new RecordListWriter(),
+            new ImageWriterOptions.Builder(MetadataVersion.IBP_4_3_IV0).build()
+        ));
+    }
+
+    private static FeatureLevelRecord feature(String name, short level) {
+        return new FeatureLevelRecord().setName(name).setFeatureLevel(level);
+    }
+
+    private static MetadataDelta negotiatedDelta() {
+        MetadataDelta delta = new MetadataDelta.Builder().build();
+        delta.replay(feature(MetadataVersion.FEATURE_NAME, MetadataVersion.IBP_4_4_IV0.featureLevel()));
+        delta.replay(feature(PartitionRetirementAuthorityVersion.FEATURE_NAME, (short) 1));
+        return delta;
     }
 
     private static PartitionRetirementAuthorityRecord record(Key key, Value value) {

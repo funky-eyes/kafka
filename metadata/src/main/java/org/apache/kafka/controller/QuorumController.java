@@ -1237,7 +1237,7 @@ public final class QuorumController implements Controller {
                 replicationControl.replay((PartitionRecord) message);
                 break;
             case PARTITION_RETIREMENT_AUTHORITY_RECORD:
-                partitionRetirementControl.replay((PartitionRetirementAuthorityRecord) message);
+                replayPartitionRetirementAuthority((PartitionRetirementAuthorityRecord) message, snapshotId, offset);
                 break;
             case CONFIG_RECORD:
                 configurationControl.replay((ConfigRecord) message);
@@ -1310,6 +1310,19 @@ public final class QuorumController implements Controller {
             default:
                 throw new RuntimeException("Unhandled record type " + type);
         }
+    }
+
+    private void replayPartitionRetirementAuthority(
+        PartitionRetirementAuthorityRecord record,
+        Optional<OffsetAndEpoch> snapshotId,
+        long offset
+    ) {
+        if (!featureControl.isPartitionRetirementAuthorityEnabled()) {
+            throw new IllegalStateException(
+                "KRaft partition retirement authority record before negotiated feature"
+            );
+        }
+        partitionRetirementControl.replayFromKRaft(record, snapshotId, offset);
     }
 
     /**

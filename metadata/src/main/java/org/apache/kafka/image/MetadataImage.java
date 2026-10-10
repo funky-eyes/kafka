@@ -21,6 +21,7 @@ import org.apache.kafka.image.node.MetadataImageNode;
 import org.apache.kafka.image.writer.ImageWriter;
 import org.apache.kafka.image.writer.ImageWriterOptions;
 import org.apache.kafka.server.common.OffsetAndEpoch;
+import org.apache.kafka.server.common.MetadataVersion;
 
 
 /**
@@ -89,11 +90,13 @@ public record MetadataImage(MetadataProvenance provenance, FeaturesImage feature
     }
 
     public void write(ImageWriter writer, ImageWriterOptions options) {
-        // No released metadata.version or cluster feature has negotiated API key 29.
-        // Do not poison a KRaft snapshot or silently drop authoritative tombstones.
-        if (!partitionRetirements.isEmpty()) {
+        // Fail closed until the finalized feature AND snapshot target metadata.version
+        // both support the new record. Older readers cannot decode API key 29.
+        if (!partitionRetirements.isEmpty() && (
+            !features.isPartitionRetirementAuthorityEnabled()
+                || !options.metadataVersion().isAtLeast(MetadataVersion.IBP_4_4_IV0))) {
             throw new IllegalStateException(
-                "Partition retirement authority snapshot emission requires an unsupported cluster capability"
+                "Partition retirement authority snapshot requires negotiated metadata 4.4 capability"
             );
         }
         // Features should be written out first so we can include the metadata.version at the beginning of the

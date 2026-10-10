@@ -23,6 +23,9 @@ import org.apache.kafka.metadata.PartitionRetirementAuthorityState.Key;
 import org.apache.kafka.metadata.PartitionRetirementAuthorityState.Value;
 import org.apache.kafka.timeline.SnapshotRegistry;
 import org.apache.kafka.timeline.TimelineHashMap;
+import org.apache.kafka.server.common.OffsetAndEpoch;
+
+import java.util.Optional;
 
 import java.util.Objects;
 
@@ -46,6 +49,32 @@ final class PartitionRetirementControlManager {
         Value next = PartitionRetirementAuthorityState.value(record);
         PartitionRetirementAuthorityState.validateAdvance(states.get(key), next);
         states.put(key, next);
+    }
+
+    /**
+     * Validates the record's claimed authority offset against the KRaft source
+     * position. Log replay must match the actual append offset exactly. Snapshot
+     * replay retains the historical accepted offset, which must be strictly
+     * earlier than the snapshot's next-offset boundary.
+     *
+     * This authenticates the position within a trusted KRaft reader only; it
+     * does not independently validate the broker or source-log-start proof.
+     */
+    void replayFromKRaft(
+        PartitionRetirementAuthorityRecord record,
+        Optional<OffsetAndEpoch> snapshotId,
+        long recordOffset
+    ) {
+        Objects.requireNonNull(snapshotId, "snapshotId");
+        Objects.requireNonNull(record, "record");
+        if (snapshotId.isPresent()) {
+            if (record.authorityOffset() >= snapshotId.get().offset()) {
+                throw new IllegalStateException("Retirement authority is ahead of its KRaft snapshot horizon");
+            }
+        } else if (record.authorityOffset() != recordOffset) {
+            throw new IllegalStateException("Retirement authority offset does not match its KRaft record offset");
+        }
+        replay(record);
     }
 
     Value get(Key key) {
