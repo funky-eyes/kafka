@@ -48,17 +48,57 @@ public final class PartitionRetirementAuthorityState {
         int sourceLeaderEpoch,
         int brokerId,
         long logStartOffset,
-        boolean terminallyDeleted
+        boolean terminallyDeleted,
+        long brokerEpoch,
+        Uuid brokerIncarnationId
     ) {
+        /**
+         * Compatibility constructor for existing non-emitting reference models.
+         * Unbound broker IDs are not authorized for future KRaft writes.
+         */
+        public Value(long offset, int leaderEpoch, int broker, long watermark, boolean deleted) {
+            this(offset, leaderEpoch, broker, watermark, deleted, -1L, Uuid.ZERO_UUID);
+        }
+
+        public boolean hasBrokerIdentityProof() {
+            return brokerId >= 0 && brokerEpoch >= 0 && !Uuid.ZERO_UUID.equals(brokerIncarnationId);
+        }
+
         public Value {
-            if (authorityOffset < 0 || sourceLeaderEpoch < -1 || brokerId < -1 || logStartOffset < -1) {
+            Objects.requireNonNull(brokerIncarnationId, "brokerIncarnationId");
+            validateCoordinates(authorityOffset, sourceLeaderEpoch, brokerId, logStartOffset);
+            validateLeadership(sourceLeaderEpoch, brokerId, logStartOffset, terminallyDeleted);
+            validateBrokerIdentity(brokerId, brokerEpoch, brokerIncarnationId);
+        }
+
+        private static void validateCoordinates(long offset, int leaderEpoch, int broker, long watermark) {
+            if (offset < 0 || leaderEpoch < -1 || broker < -1 || watermark < -1) {
                 throw new IllegalArgumentException("Invalid retirement authority record values");
             }
-            if (sourceLeaderEpoch == -1 && (!terminallyDeleted || brokerId != -1 || logStartOffset != -1)) {
+        }
+
+        private static void validateLeadership(
+            int leaderEpoch, int brokerId, long watermark, boolean deleted
+        ) {
+            if (leaderEpoch == -1 && (!deleted || brokerId != -1 || watermark != -1)) {
                 throw new IllegalArgumentException("Unknown source epoch only permits terminal deletion");
             }
-            if (terminallyDeleted && brokerId != -1) {
+            if (deleted && brokerId != -1) {
                 throw new IllegalArgumentException("Deleted partition cannot retain an active broker");
+            }
+        }
+
+        private static void validateBrokerIdentity(int brokerId, long epoch, Uuid incarnation) {
+            if (epoch < -1) {
+                throw new IllegalArgumentException("Broker registration epoch must be nonnegative or unknown");
+            }
+            if (brokerId == -1 && (epoch != -1 || !Uuid.ZERO_UUID.equals(incarnation))) {
+                throw new IllegalArgumentException("A demoted or deleted partition cannot retain broker identity");
+            }
+            boolean hasBrokerEpoch = epoch >= 0;
+            boolean hasIncarnation = !Uuid.ZERO_UUID.equals(incarnation);
+            if (hasBrokerEpoch != hasIncarnation) {
+                throw new IllegalArgumentException("Broker epoch and incarnation must be bound together");
             }
         }
     }
@@ -75,7 +115,9 @@ public final class PartitionRetirementAuthorityState {
             record.sourceLeaderEpoch(),
             record.brokerId(),
             record.logStartOffset(),
-            record.terminallyDeleted()
+            record.terminallyDeleted(),
+            record.brokerEpoch(),
+            record.brokerIncarnationId()
         );
     }
 
@@ -88,6 +130,8 @@ public final class PartitionRetirementAuthorityState {
             .setAuthorityOffset(value.authorityOffset())
             .setSourceLeaderEpoch(value.sourceLeaderEpoch())
             .setBrokerId(value.brokerId())
+            .setBrokerEpoch(value.brokerEpoch())
+            .setBrokerIncarnationId(value.brokerIncarnationId())
             .setLogStartOffset(value.logStartOffset())
             .setTerminallyDeleted(value.terminallyDeleted());
     }
@@ -102,6 +146,11 @@ public final class PartitionRetirementAuthorityState {
         if (previous == null) {
             return;
         }
+        validateMonotonicity(previous, next);
+        validateBrokerContinuity(previous, next);
+    }
+
+    private static void validateMonotonicity(Value previous, Value next) {
         if (previous.terminallyDeleted()) {
             throw new IllegalStateException("Retirement authority may not revive a deleted Topic ID");
         }
@@ -114,9 +163,28 @@ public final class PartitionRetirementAuthorityState {
         if (next.logStartOffset() < previous.logStartOffset()) {
             throw new IllegalStateException("Retirement log-start watermark regressed");
         }
-        if (next.sourceLeaderEpoch() == previous.sourceLeaderEpoch()
-            && next.brokerId() >= 0 && previous.brokerId() != next.brokerId()) {
+    }
+
+    private static void validateBrokerContinuity(Value previous, Value next) {
+        if (next.brokerId() < 0) {
+            return;
+        }
+        if (previous.hasBrokerIdentityProof() && !next.hasBrokerIdentityProof()) {
+            throw new IllegalStateException("Retirement record discarded authenticated broker identity");
+        }
+        if (next.sourceLeaderEpoch() == previous.sourceLeaderEpoch()) {
+            validateSameEpochBroker(previous, next);
+        }
+    }
+
+    private static void validateSameEpochBroker(Value previous, Value next) {
+        if (previous.brokerId() != next.brokerId()) {
             throw new IllegalStateException("Retirement leader promoted or changed without a new source epoch");
+        }
+        if (previous.hasBrokerIdentityProof()
+            && (previous.brokerEpoch() != next.brokerEpoch()
+                || !previous.brokerIncarnationId().equals(next.brokerIncarnationId()))) {
+            throw new IllegalStateException("Broker incarnation changed without a fresh source leader epoch");
         }
     }
 }

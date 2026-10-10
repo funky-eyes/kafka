@@ -129,6 +129,68 @@ class PartitionRetirementAuthorityStateTest {
         ));
     }
 
+    @Test
+    void authenticatedBrokerRegistrationRoundTripsThroughGeneratedMetadataRecord() {
+        Uuid incarnation = Uuid.randomUuid();
+        Value authenticated = new Value(90L, 7, 1, 50L, false, 300L, incarnation);
+        PartitionRetirementAuthorityRecord record = PartitionRetirementAuthorityState.record(PARTITION, authenticated);
+        assertEquals(300L, record.brokerEpoch());
+        assertEquals(incarnation, record.brokerIncarnationId());
+        assertEquals(authenticated, PartitionRetirementAuthorityState.value(record));
+        assertEquals(true, authenticated.hasBrokerIdentityProof());
+    }
+
+    @Test
+    void anUnboundLegacyBrokerValueNeverSuppliesRegistrationProof() {
+        Value legacy = active(90L, 7, 1, 50L);
+        assertEquals(-1L, legacy.brokerEpoch());
+        assertEquals(Uuid.ZERO_UUID, legacy.brokerIncarnationId());
+        assertEquals(false, legacy.hasBrokerIdentityProof());
+    }
+
+    @Test
+    void halfPopulatedRegistrationIdentityIsRejected() {
+        Uuid incarnation = Uuid.randomUuid();
+        assertThrows(IllegalArgumentException.class, () ->
+            new Value(90L, 7, 1, 50L, false, 300L, Uuid.ZERO_UUID));
+        assertThrows(IllegalArgumentException.class, () ->
+            new Value(90L, 7, 1, 50L, false, -1L, incarnation));
+        assertThrows(IllegalArgumentException.class, () ->
+            new Value(90L, 7, 1, 50L, false, -2L, incarnation));
+    }
+
+    @Test
+    void noLeaderOrDeletedRecordCannotRetainRegistrationIdentity() {
+        Uuid incarnation = Uuid.randomUuid();
+        assertThrows(IllegalArgumentException.class, () ->
+            new Value(91L, 7, -1, 50L, false, 300L, incarnation));
+        assertThrows(IllegalArgumentException.class, () ->
+            new Value(91L, 7, -1, 50L, true, 300L, incarnation));
+    }
+
+    @Test
+    void equalLeaderEpochCannotReplaceAnAuthenticatedBrokerIncarnation() {
+        Value previous = new Value(90L, 7, 1, 50L, false, 300L, Uuid.randomUuid());
+        Value replacement = new Value(91L, 7, 1, 50L, false, 301L, Uuid.randomUuid());
+        assertThrows(IllegalStateException.class, () ->
+            PartitionRetirementAuthorityState.validateAdvance(previous, replacement));
+    }
+
+    @Test
+    void authenticatedLeaderCannotDowngradeToUnboundRecordAfterRestart() {
+        Value previous = new Value(90L, 7, 1, 50L, false, 300L, Uuid.randomUuid());
+        assertThrows(IllegalStateException.class, () ->
+            PartitionRetirementAuthorityState.validateAdvance(previous, active(91L, 8, 1, 50L)));
+    }
+
+    @Test
+    void higherSourceLeaderEpochMayCarryNewAuthenticatedBrokerIncarnation() {
+        Value previous = new Value(90L, 7, 1, 50L, false, 300L, Uuid.randomUuid());
+        Value elected = new Value(91L, 8, 1, 50L, false, 301L, Uuid.randomUuid());
+        PartitionRetirementAuthorityState.validateAdvance(previous, elected);
+        assertEquals(true, elected.hasBrokerIdentityProof());
+    }
+
     private static Value active(long offset, int epoch, int broker, long watermark) {
         return new Value(offset, epoch, broker, watermark, false);
     }
