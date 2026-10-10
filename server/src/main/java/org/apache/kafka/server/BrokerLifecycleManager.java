@@ -312,6 +312,15 @@ public class BrokerLifecycleManager {
         return brokerEpoch;
     }
 
+    /**
+     * Returns the immutable UUID used in this process's broker registration
+     * requests. This alone does not prove that the controller still recognizes
+     * the registration or that this broker is unfenced.
+     */
+    public Uuid incarnationId() {
+        return incarnationId;
+    }
+
     public BrokerState state() {
         return state;
     }

@@ -17,6 +17,7 @@
 package org.apache.kafka.storage.internals.log;
 
 import org.apache.kafka.common.Endpoint;
+import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.security.auth.SecurityProtocol;
 import org.apache.kafka.common.utils.Time;
 
@@ -28,8 +29,10 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class StorageExtensionBrokerContextTest {
     @Test
@@ -50,6 +53,9 @@ class StorageExtensionBrokerContextTest {
 
         assertEquals("cluster-a", context.clusterId());
         assertEquals(7, context.brokerId());
+        assertEquals(-1L, context.brokerEpoch());
+        assertEquals(Uuid.ZERO_UUID, context.brokerIncarnationId());
+        assertFalse(context.hasBrokerIdentitySnapshot());
         assertEquals(List.of(endpoint), context.listeners());
         assertEquals("value", context.originals().get("key"));
         assertNull(context.originals().get("nullable"));
@@ -68,6 +74,40 @@ class StorageExtensionBrokerContextTest {
             IllegalArgumentException.class,
             () -> new StorageExtensionBrokerContext("cluster-a", 1, List.of(), Map.of(), Time.SYSTEM)
         );
+    }
+
+
+    @Test
+    void bindsExplicitBrokerRegistrationSnapshotWithoutGrantingRetirementAuthority() {
+        Endpoint endpoint = new Endpoint("PLAINTEXT", SecurityProtocol.PLAINTEXT, "127.0.0.1", 9092);
+        Uuid incarnation = new Uuid(10L, 11L);
+        StorageExtensionBrokerContext context = new StorageExtensionBrokerContext(
+            "cluster-a", 7, List.of(endpoint), Map.of(), Time.SYSTEM, 54L, incarnation
+        );
+        assertEquals(7, context.brokerId());
+        assertEquals(54L, context.brokerEpoch());
+        assertEquals(incarnation, context.brokerIncarnationId());
+        assertTrue(context.hasBrokerIdentitySnapshot());
+    }
+
+    @Test
+    void rejectsPartialOrMalformedRegistrationSnapshots() {
+        Endpoint endpoint = new Endpoint("PLAINTEXT", SecurityProtocol.PLAINTEXT, "127.0.0.1", 9092);
+        List<Endpoint> endpoints = List.of(endpoint);
+        Uuid incarnation = new Uuid(10L, 11L);
+
+        assertThrows(IllegalArgumentException.class, () -> new StorageExtensionBrokerContext(
+            "cluster-a", 7, endpoints, Map.of(), Time.SYSTEM, 1L, Uuid.ZERO_UUID
+        ));
+        assertThrows(IllegalArgumentException.class, () -> new StorageExtensionBrokerContext(
+            "cluster-a", 7, endpoints, Map.of(), Time.SYSTEM, -1L, incarnation
+        ));
+        assertThrows(IllegalArgumentException.class, () -> new StorageExtensionBrokerContext(
+            "cluster-a", 7, endpoints, Map.of(), Time.SYSTEM, -2L, Uuid.ZERO_UUID
+        ));
+        assertThrows(NullPointerException.class, () -> new StorageExtensionBrokerContext(
+            "cluster-a", 7, endpoints, Map.of(), Time.SYSTEM, 1L, null
+        ));
     }
 
     @Test

@@ -622,12 +622,18 @@ class BrokerServer(
         enableRequestProcessingFuture, startupDeadline, time)
 
       storageExtensionOpt.foreach(extension => {
+        // A local identity snapshot, never a KRaft-authorized retirement
+        // lease. Use the explicitly unbound pair if registration is unknown.
+        val registrationEpoch = lifecycleManager.brokerEpoch
+        val registrationIncarnation = if (registrationEpoch >= 0L) lifecycleManager.incarnationId else Uuid.ZERO_UUID
         val extensionReadyContext = new StorageExtensionBrokerContext(
           clusterId,
           config.brokerId,
           listenerInfo.listeners().values().asScala.toList.asJava,
           config.originals(),
-          time)
+          time,
+          registrationEpoch,
+          registrationIncarnation)
         FutureUtils.waitWithLogging(logger.underlying, logIdent,
           "the storage extension to become broker-ready",
           extension.onBrokerReady(extensionReadyContext), startupDeadline, time)

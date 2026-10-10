@@ -70,6 +70,20 @@ class BrokerLifecycleManagerTest {
   }
 
   @Test
+  def testIncarnationChangesAcrossBrokerProcessRestart(): Unit = {
+    val context = new RegistrationTestContext(configProperties)
+    manager = new BrokerLifecycleManager(context.config, context.time, "first-incarnation-", logDirs)
+    val firstIncarnation = manager.incarnationId()
+    assertNotEquals(Uuid.ZERO_UUID, firstIncarnation)
+    assertEquals(-1L, manager.brokerEpoch)
+
+    manager.close()
+    manager = new BrokerLifecycleManager(context.config, context.time, "second-incarnation-", logDirs)
+    assertNotEquals(firstIncarnation, manager.incarnationId())
+    assertEquals(-1L, manager.brokerEpoch)
+  }
+
+  @Test
   def testCreateStartAndClose(): Unit = {
     val context = new RegistrationTestContext(configProperties)
     manager = new BrokerLifecycleManager(context.config, context.time, "create-start-and-close-", logDirs)
@@ -287,8 +301,13 @@ class BrokerLifecycleManagerTest {
     def nextRegistrationRequest(epoch: Long) =
       doPoll[BrokerRegistrationRequest](new BrokerRegistrationResponse(new BrokerRegistrationResponseData().setBrokerEpoch(epoch)))
 
-    // Broker registers and response sets epoch to 1000L
-    assertEquals(10L, nextRegistrationRequest(1000L).data().previousBrokerEpoch())
+    // Broker registration and re-registration must use the same UUID
+    // within one process, even when the controller issues a new epoch.
+    val incarnation = manager.incarnationId()
+    assertNotEquals(Uuid.ZERO_UUID, incarnation)
+    val firstRegistration = nextRegistrationRequest(1000L).data()
+    assertEquals(10L, firstRegistration.previousBrokerEpoch())
+    assertEquals(incarnation, firstRegistration.incarnationId())
 
     nextHeartbeatRequest() // poll for next request as way to synchronize with the new value into brokerEpoch
     assertEquals(1000L, manager.brokerEpoch)
@@ -297,10 +316,11 @@ class BrokerLifecycleManagerTest {
     manager.resendBrokerRegistration()
 
     // Accept new registration, response sets epoch to 1200
-    nextRegistrationRequest(1200L)
+    assertEquals(incarnation, nextRegistrationRequest(1200L).data().incarnationId())
 
     nextHeartbeatRequest()
     assertEquals(1200L, manager.brokerEpoch)
+    assertEquals(incarnation, manager.incarnationId())
   }
 
   @Test
