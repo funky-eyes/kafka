@@ -28,6 +28,7 @@ import org.apache.kafka.common.metadata.FenceBrokerRecord;
 import org.apache.kafka.common.metadata.MetadataRecordType;
 import org.apache.kafka.common.metadata.PartitionChangeRecord;
 import org.apache.kafka.common.metadata.PartitionRecord;
+import org.apache.kafka.common.metadata.PartitionRetirementAuthorityRecord;
 import org.apache.kafka.common.metadata.ProducerIdsRecord;
 import org.apache.kafka.common.metadata.RegisterBrokerRecord;
 import org.apache.kafka.common.metadata.RegisterControllerRecord;
@@ -90,6 +91,8 @@ public final class MetadataDelta {
     private ScramDelta scramDelta = null;
 
     private DelegationTokenDelta delegationTokenDelta = null;
+
+    private PartitionRetirementAuthorityDelta partitionRetirementDelta = null;
 
     private MetadataDelta(MetadataImage image, SupportedConfigChecker supportedConfigChecker) {
         this.image = image;
@@ -183,6 +186,18 @@ public final class MetadataDelta {
         return delegationTokenDelta;
     }
 
+    public PartitionRetirementAuthorityDelta getOrCreatePartitionRetirementDelta() {
+        if (partitionRetirementDelta == null) {
+            partitionRetirementDelta = new PartitionRetirementAuthorityDelta(image.partitionRetirements());
+        }
+        return partitionRetirementDelta;
+    }
+
+    private PartitionRetirementAuthorityImage appliedPartitionRetirements() {
+        return partitionRetirementDelta == null
+            ? image.partitionRetirements() : partitionRetirementDelta.apply();
+    }
+
     public Optional<MetadataVersion> metadataVersionChanged() {
         if (featuresDelta == null) {
             return Optional.empty();
@@ -205,6 +220,9 @@ public final class MetadataDelta {
                 break;
             case PARTITION_RECORD:
                 replay((PartitionRecord) record);
+                break;
+            case PARTITION_RETIREMENT_AUTHORITY_RECORD:
+                replay((PartitionRetirementAuthorityRecord) record);
                 break;
             case CONFIG_RECORD:
                 replay((ConfigRecord) record);
@@ -286,6 +304,10 @@ public final class MetadataDelta {
 
     public void replay(PartitionRecord record) {
         getOrCreateTopicsDelta().replay(record);
+    }
+
+    public void replay(PartitionRetirementAuthorityRecord record) {
+        getOrCreatePartitionRetirementDelta().replay(record);
     }
 
     public void replay(ConfigRecord record) {
@@ -382,6 +404,7 @@ public final class MetadataDelta {
         getOrCreateAclsDelta().finishSnapshot();
         getOrCreateScramDelta().finishSnapshot();
         getOrCreateDelegationTokenDelta().finishSnapshot();
+        getOrCreatePartitionRetirementDelta().finishSnapshot();
     }
 
     public MetadataImage apply(MetadataProvenance provenance) {
@@ -449,7 +472,8 @@ public final class MetadataDelta {
             newProducerIds,
             newAcls,
             newScram,
-            newDelegationTokens
+            newDelegationTokens,
+            appliedPartitionRetirements()
         );
     }
 
