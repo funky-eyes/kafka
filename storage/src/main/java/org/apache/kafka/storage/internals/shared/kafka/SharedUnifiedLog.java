@@ -247,6 +247,42 @@ public final class SharedUnifiedLog extends UnifiedLog {
         }
     }
 
+    /**
+     * Read-only Kafka source offsets under the same lock order as leader/follower
+     * appends: remote-recovery read fence followed by Kafka's native log lock.
+     * Call from broker diagnostic/retirement workers, NEVER from an existing
+     * Kafka native log callback that already holds the log monitor.
+     *
+     * An inconsistent window is UNKNOWN, not a deletion permission. In
+     * particular this observation proves neither WAL durability nor the
+     * latest committed controller epoch.
+     */
+    Optional<NativeSourceWindow> captureNativeSourceWindow() throws IOException {
+        remoteRecoveryFence.readLock().lock();
+        try {
+            return withLogLock(() -> NativeSourceWindow.fromBounds(
+                logStartOffset(), highWatermark(), logEndOffset()
+            ));
+        } finally {
+            remoteRecoveryFence.readLock().unlock();
+        }
+    }
+
+    record NativeSourceWindow(long logStartOffset, long highWatermark, long logEndOffset) {
+        NativeSourceWindow {
+            if (logStartOffset < 0L || highWatermark < logStartOffset || logEndOffset < highWatermark) {
+                throw new IllegalArgumentException("Invalid native Kafka source log offset window");
+            }
+        }
+
+        static Optional<NativeSourceWindow> fromBounds(long start, long hw, long end) {
+            if (start < 0L || hw < start || end < hw) {
+                return Optional.empty();
+            }
+            return Optional.of(new NativeSourceWindow(start, hw, end));
+        }
+    }
+
     public <T> T withRemoteRecoveryFence(StorageAction<T, IOException> action) throws IOException {
         remoteRecoveryFence.writeLock().lock();
         try {
