@@ -25,6 +25,12 @@ import re
 import sys
 from pathlib import Path
 
+# Running python3 tools/check_shared_storage_epoch_test_sources.py sets
+# sys.path[0] to tools/, not the repository root. Support that invocation
+# and python3 -m tools.check_shared_storage_epoch_test_sources equally.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from tools.check_shared_storage_epoch_test_results import REQUIRED_TESTS
 
 ASSERTION_NAMES = (

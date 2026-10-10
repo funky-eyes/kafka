@@ -16,6 +16,8 @@
 
 """Unit checks for Java regression source preflight; do not execute Java tests."""
 
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -89,6 +91,19 @@ class EpochTestSourcePreflightTest(unittest.TestCase):
         self.source.unlink()
         with self.assertRaisesRegex(ValueError, "Missing mandatory Java test source"):
             verify_sources(self.root, self.REQUIRED)
+
+    def test_direct_script_invocation_from_another_directory_resolves_tools_package(self):
+        checker = Path(__file__).with_name("check_shared_storage_epoch_test_sources.py")
+        process = subprocess.run(
+            [sys.executable, str(checker.resolve()), str(self.root)],
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(0, process.returncode)
+        self.assertIn("Missing mandatory Java test source", process.stderr)
+        self.assertNotIn("ModuleNotFoundError", process.stderr)
 
 
 if __name__ == "__main__":
