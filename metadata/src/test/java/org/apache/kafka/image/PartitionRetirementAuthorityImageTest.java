@@ -190,6 +190,45 @@ class PartitionRetirementAuthorityImageTest {
         ));
     }
 
+    @Test
+    void brokerIncarnationProofSurvivesNegotiatedKRaftSnapshotAndReplay() {
+        Uuid incarnation = Uuid.randomUuid();
+        Value bound = new Value(18L, 8, 1, 50L, false, 777L, incarnation);
+        MetadataDelta first = negotiatedDelta();
+        first.replay(record(PARTITION, bound));
+        RecordListWriter writer = new RecordListWriter();
+        first.apply(MetadataProvenance.EMPTY).write(
+            writer, new ImageWriterOptions.Builder(MetadataVersion.IBP_4_4_IV0).build()
+        );
+        MetadataDelta recovered = new MetadataDelta.Builder().build();
+        writer.records().forEach(entry -> recovered.replay(entry.message()));
+        recovered.finishSnapshot();
+        Value restored = recovered.apply(MetadataProvenance.EMPTY).partitionRetirements().get(PARTITION);
+        assertEquals(bound, restored);
+        assertEquals(777L, restored.brokerEpoch());
+        assertEquals(incarnation, restored.brokerIncarnationId());
+        assertTrue(restored.hasBrokerIdentityProof());
+    }
+
+    @Test
+    void malformedBrokerIdentityCannotEnterBrokerMetadataImage() {
+        PartitionRetirementAuthorityRecord forged = record(
+            PARTITION, new Value(18L, 8, 1, 50L, false)
+        ).setBrokerEpoch(777L);
+        MetadataDelta delta = negotiatedDelta();
+        assertThrows(IllegalArgumentException.class, () -> delta.replay(forged));
+        assertTrue(delta.apply(MetadataProvenance.EMPTY).partitionRetirements().isEmpty());
+    }
+
+    @Test
+    void changingIncarnationWithinSameLeaderEpochFailsDuringMetadataReplay() {
+        MetadataDelta delta = negotiatedDelta();
+        delta.replay(record(PARTITION, new Value(18L, 8, 1, 50L, false, 777L, Uuid.randomUuid())));
+        assertThrows(IllegalStateException.class, () ->
+            delta.replay(record(PARTITION, new Value(19L, 8, 1, 50L, false, 778L, Uuid.randomUuid())))
+        );
+    }
+
     private static FeatureLevelRecord feature(String name, short level) {
         return new FeatureLevelRecord().setName(name).setFeatureLevel(level);
     }
