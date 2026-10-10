@@ -23,6 +23,7 @@ import org.apache.kafka.image.writer.ImageWriter;
 import org.apache.kafka.image.writer.ImageWriterOptions;
 import org.apache.kafka.server.common.EligibleLeaderReplicasVersion;
 import org.apache.kafka.server.common.MetadataVersion;
+import org.apache.kafka.server.common.PartitionRetirementAuthorityVersion;
 
 import java.util.Collections;
 import java.util.Map;
@@ -80,6 +81,20 @@ public final class FeaturesImage {
     public boolean isElrEnabled() {
         return finalizedVersions.getOrDefault(EligibleLeaderReplicasVersion.FEATURE_NAME, EligibleLeaderReplicasVersion.ELRV_0.featureLevel())
             >= EligibleLeaderReplicasVersion.ELRV_1.featureLevel();
+    }
+
+    /**
+     * Negotiated experimental capability. Not a controller authorization token.
+     * A nonempty retirement image may be written only on a metadata version
+     * that understands the new record and after feature finalization.
+     */
+    public boolean isPartitionRetirementAuthorityEnabled() {
+        return finalizedVersions.getOrDefault(
+            PartitionRetirementAuthorityVersion.FEATURE_NAME,
+            PartitionRetirementAuthorityVersion.PRAV_0.featureLevel()
+        ) >= PartitionRetirementAuthorityVersion.PRAV_1.featureLevel()
+            && metadataVersion.isPresent()
+            && metadataVersion.get().isAtLeast(MetadataVersion.IBP_4_4_IV0);
     }
 
     public void write(ImageWriter writer, ImageWriterOptions options) {
