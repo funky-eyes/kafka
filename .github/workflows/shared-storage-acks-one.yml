@@ -138,6 +138,8 @@ jobs:
           grep -q 'skipped="0"' "$result_xml"
           grep -q 'ACKS1_SCENARIO rf=${{ matrix.rf }} minIsr=${{ matrix.rf }} brokers=3 controller=dedicated' "$result_xml"
           grep -q 'ACKS1_LEADER_ONLY_ACK rf=${{ matrix.rf }} leader=' "$result_xml"
+          grep -q 'ACKS1_METADATA_DATA_PLANE_READY partition=__shared_storage_metadata-0' "$result_xml"
+          grep -q 'ACKS1_LEADER_ONLY_REMOTE_UNCOMMITTED rf=${{ matrix.rf }} leader=' "$result_xml"
           grep -q 'ACKS1_SINGLE_COPY_RISK rf=${{ matrix.rf }} leader=' "$result_xml"
           grep -q 'ACKS1_NO_AUTOMATIC_FAILOVER rf=${{ matrix.rf }} reason=' "$result_xml"
           grep -q 'ACKS1_ORIGINAL_DISK_RECOVERED rf=${{ matrix.rf }} leader=' "$result_xml"

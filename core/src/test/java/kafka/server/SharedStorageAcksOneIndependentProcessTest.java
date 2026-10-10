@@ -183,6 +183,7 @@ public class SharedStorageAcksOneIndependentProcessTest {
                     replicationFactor,
                     firstLeader,
                     followers,
+                    partition,
                     1
                 );
 
@@ -220,12 +221,11 @@ public class SharedStorageAcksOneIndependentProcessTest {
 
         RecordMetadata acknowledged = produceOne(bootstrapServers, 0);
         assertEquals(0L, acknowledged.offset());
-        assertFalse(
-            hasCommittedCoverage(bootstrapServers, partition, new OffsetRange(0, 1)),
-            "Leader-only acks=1 record must not depend on S3 publication"
-        );
+        // Do not seek the RF3 internal metadata topic while all followers are stopped:
+        // it has independent availability from the acks=1 user partition. Verify
+        // COMMITTED absence after restoring the broker quorum in recoverOriginalLeader.
         System.out.println("ACKS1_LEADER_ONLY_ACK rf=" + replicationFactor +
-            " leader=" + leaderId + " offset=0 followerCopies=0 remoteCommitted=false");
+            " leader=" + leaderId + " offset=0 followerCopies=0 remoteEvidence=pending");
         System.out.println("ACKS1_SINGLE_COPY_RISK rf=" + replicationFactor +
             " leader=" + leaderId + " durableCopies=1");
 
@@ -244,11 +244,20 @@ public class SharedStorageAcksOneIndependentProcessTest {
         short replicationFactor,
         int leaderId,
         List<Integer> followers,
+        SharedPartitionId partition,
         int expectedRecords
     ) throws Exception {
         restartBroker(repositoryRoot, processRuntime, brokers, leaderId);
         restartBrokers(repositoryRoot, processRuntime, brokers, followers);
         waitForTopicState(admin, replicationFactor, replicationFactor, leaderId);
+        waitForLeaderServingData(admin, leaderId);
+        waitForMetadataTopicServingData(admin);
+        assertFalse(
+            hasCommittedCoverage(bootstrapServers, partition, new OffsetRange(0, 1)),
+            "Leader-only acks=1 record was unexpectedly remotely committed"
+        );
+        System.out.println("ACKS1_LEADER_ONLY_REMOTE_UNCOMMITTED rf=" + replicationFactor +
+            " leader=" + leaderId + " range=[0,1) verifiedAfterFullQuorum=true");
         assertExpectedValues(
             consumeAll(bootstrapServers, expectedRecords),
             expectedRecords,
@@ -581,6 +590,25 @@ public class SharedStorageAcksOneIndependentProcessTest {
         System.out.println("ACKS1_DATA_PLANE_READY leader=" + expectedLeader);
     }
 
+    /**
+     * The internal metadata topic is RF3, so it may become unavailable after
+     * deliberately stopping all but one replica. Query it after quorum restores.
+     */
+    private static void waitForMetadataTopicServingData(Admin admin) throws Exception {
+        TopicPartition metadataPartition = new TopicPartition(METADATA_TOPIC, 0);
+        TestUtils.waitForCondition(() -> {
+            try {
+                var offsets = admin.listOffsets(Map.of(metadataPartition, OffsetSpec.latest()))
+                    .all().get(5, TimeUnit.SECONDS);
+                return offsets.containsKey(metadataPartition) &&
+                    offsets.get(metadataPartition).offset() >= 0L;
+            } catch (Exception ignored) {
+                return false;
+            }
+        }, 45_000L, () -> "Restored metadata cannot serve ListOffsets: " + metadataPartition);
+        System.out.println("ACKS1_METADATA_DATA_PLANE_READY partition=" + metadataPartition);
+    }
+
     private static int waitForNewLeader(Admin admin, int oldLeader) throws Exception {
         int[] result = {-1};
         TestUtils.waitForCondition(() -> {
@@ -801,6 +829,13 @@ public class SharedStorageAcksOneIndependentProcessTest {
                     }
                 }
             }
+            // An incomplete read is UNKNOWN evidence, never proof of no COMMITTED
+            // object. Deny the assertion rather than returning a partial empty image.
+            long consumedUntil = consumer.position(metadataPartition);
+            assertTrue(
+                consumedUntil >= end,
+                "Read-committed metadata replay ended early: position=" + consumedUntil + ", LSO=" + end
+            );
         }
         return List.copyOf(latest.values());
     }
