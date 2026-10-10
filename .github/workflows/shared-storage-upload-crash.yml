@@ -141,6 +141,8 @@ jobs:
           grep -q 'errors="0"' "$result_xml"
           grep -q 'skipped="0"' "$result_xml"
           grep -q 'UPLOAD_CRASH_PHASE phase=${{ matrix.phase }}' "$result_xml"
+          # Both the initial and replacement leader must serve data before idempotent sends.
+          test "$(grep -c 'UPLOAD_CRASH_DATA_PLANE_READY leader=' "$result_xml")" -eq 2
           grep -q 'UPLOAD_CRASH_${{ matrix.phase }}_SIGKILL oldLeader=' "$result_xml"
           grep -q 'UPLOAD_CRASH_${{ matrix.phase }}_RECOVERED oldLeader=' "$result_xml"
 

@@ -19,6 +19,7 @@ package org.apache.kafka.storage.internals.shared.s3;
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.AdminClientConfig;
 import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.clients.admin.OffsetSpec;
 import org.apache.kafka.clients.admin.TopicDescription;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
@@ -138,6 +139,7 @@ class S3SharedStorageUploadCrashE2ETest {
                     TopicDescription topic = waitForTopicReady(admin);
                     SharedPartitionId partition = sharedPartitionId(topic.topicId(), 0);
                     int oldLeader = topic.partitions().get(0).leader().id();
+                    waitForServingLeader(admin, oldLeader);
                     List<Integer> replicaIds = topic.partitions().get(0).replicas().stream()
                         .map(node -> node.id())
                         .toList();
@@ -188,6 +190,7 @@ class S3SharedStorageUploadCrashE2ETest {
 
                     int newLeader = waitForNewLeader(admin, oldLeader);
                     assertNotEquals(oldLeader, newLeader);
+                    waitForServingLeader(admin, newLeader);
                     assertTrue(
                         brokers.get(newLeader).process().isAlive(),
                         "Replacement leader is not an independent live JVM"
@@ -580,6 +583,31 @@ class S3SharedStorageUploadCrashE2ETest {
             return true;
         }, 60_000L, () -> "Upload-crash topic never reached leader + RF3/ISR3 readiness");
         return ready[0];
+    }
+
+    /**
+     * RF3/ISR3 controller metadata is not a data-plane readiness guarantee. Verify
+     * the actual elected leader answers a read-only ListOffsets request before
+     * idempotent producer batches are sent, both at startup and after SIGKILL.
+     */
+    private static void waitForServingLeader(Admin admin, int expectedLeader) throws Exception {
+        TopicPartition partition = new TopicPartition(TOPIC, 0);
+        waitForCondition(() -> {
+            try {
+                TopicDescription current = describeTopic(admin);
+                if (current == null || current.partitions().size() != 1 ||
+                    current.partitions().get(0).leader() == null ||
+                    current.partitions().get(0).leader().id() != expectedLeader) {
+                    return false;
+                }
+                var offsets = admin.listOffsets(Map.of(partition, OffsetSpec.latest()))
+                    .all().get(5, TimeUnit.SECONDS);
+                return offsets.containsKey(partition) && offsets.get(partition).offset() >= 0L;
+            } catch (Exception ignored) {
+                return false;
+            }
+        }, 60_000L, () -> "Elected upload-crash leader is not serving data: " + expectedLeader);
+        System.out.println("UPLOAD_CRASH_DATA_PLANE_READY leader=" + expectedLeader);
     }
 
     private static int waitForNewLeader(Admin admin, int oldLeader) throws Exception {

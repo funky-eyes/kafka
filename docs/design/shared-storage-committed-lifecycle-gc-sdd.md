@@ -682,3 +682,62 @@ and no performance gate is bypassed.
 controller-image snapshot/replay integration, authoritative
 commit-time broker/epoch validation, mixed-version rollout, durable
 COMMITTED reference retirement, and physical MinIO lifecycle GC.
+
+
+## Batch 27: isolate metadata-quorum unavailability from acks=1 and harden crash leader readiness
+
+### Batch 26 failure evidence
+
+The full Java 25 Shared Storage suite, real MinIO, performance baseline and
+controller safety tests were green. Two external-JVM gates were not:
+
+1. **RF3 leader-only acks=1**: user partition data-plane readiness was
+   confirmed, but the test then sought offsets in the separately replicated
+   internal __shared_storage_metadata topic with only one broker alive. Its
+   KafkaConsumer.seekToBeginning failed after 60 seconds. This cannot
+   establish loss of user records or a defect in user-partition WAL durability.
+   Internal control-plane metadata has an independent availability boundary.
+2. **AFTER_PREPARE upload crash**: BEFORE arming the crash barrier or killing
+   a broker, the 20-record idempotent warmup timed out. Broker 3 repeatedly
+   rejected producer 1001 sequence zero when current end sequence was 19,
+   at log offset 16. The OutOfOrderSequenceException is a real unresolved
+   idempotent append/duplicate detection signal, not an ordinary timeout.
+   It must be treated as a correctness risk until explained and fixed.
+
+### Changes with unchanged gate semantics
+
+In the acks=1 RF3/RF2/RF1 matrix, leader-only record 0 remains acknowledged
+with no followers. The old requirement to inspect the internal metadata
+topic *while its RF3 replica set is intentionally unavailable* is moved
+past the return of the broker quorum. After all brokers and both data planes
+have recovered, the test MUST verify that no COMMITTED coverage exists for
+record [0,1). Its read_committed metadata scan must also reach the captured
+last stable offset (LSO); early deadline expiry or incomplete replay is
+UNKNOWN, never proof of absence. Only then may it report
+ACKS1_LEADER_ONLY_REMOTE_UNCOMMITTED (verifiedAfterFullQuorum=true).
+The original leader WAL recovery, no automatic failover, exact record
+contents, and asynchronously replicated survivor evidence remain mandatory.
+
+The real-MinIO AFTER_PREPARE/AFTER_PUT/AFTER_COMMIT crash test now requires
+a read-only ListOffsets response from the elected user-partition leader
+before idempotent warmup sends, and again from the replacement leader before
+post-SIGKILL sends. CI demands two distinct
+UPLOAD_CRASH_DATA_PLANE_READY markers before success. This is a targeted
+startup/failover race preflight, NOT proof that the prior out-of-order
+sequence defect was solved. All 120-second producer delivery semantics,
+acks=all, idempotence, crash barriers and MinIO safety assertions remain
+unchanged.
+
+### Escalation if idempotent warmup still fails
+
+Examine UnifiedLog.appendAsLeader, SharedLogSegment.append, producer
+duplicate-batch history after remote recovery, and the WAL GROUP_COMMIT
+completion boundary. Record the received producer epoch/base sequence,
+retained last five batch sequence intervals, local LEO and durable WAL
+batch layout. A repeat of producer 1001 seq=0 versus endSeq=19 at offset
+16 must NOT be fixed by disabling idempotence, widening timeouts or hiding
+a repeated batch.
+
+This batch contains no authoritative KRaft watermark write, COMMITTED
+reference retirement or physical MinIO lifecycle deletion. Full lifecycle
+GC remains outside the historical GA manifest.
