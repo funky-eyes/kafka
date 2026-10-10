@@ -1792,3 +1792,40 @@ random collision. Mandatory anti-skip evidence increases to
 
 No broker incarnation proof, durable WAL/metadata catch-up,
 controller writer permission or COMMITTED S3 deletion is introduced.
+
+## Batch 46: real broker registration identity in Storage Extension context
+
+BrokerLifecycleManager now exposes its immutable process-incarnation UUID,
+already used in controller RegisterBroker requests. BrokerServer passes
+the controller-issued BrokerEpoch and same UUID to the broker-ready
+StorageExtensionBrokerContext. Unknown broker epoch means both values
+are unbound (-1, ZERO_UUID); the five-argument legacy constructor
+remains supported. Malformed half-populated identity pairs are rejected.
+
+This is only an immutable local registration snapshot. A future source
+attestation must independently verify broker identity, epoch, current
+KRaft partition leader, WAL durability and metadata consumer horizon.
+It does not grant a reader, Controller write, lifecycle retirement or
+MinIO physical-delete permission.
+
+Broker lifecycle focused tests verify request identity consistency across
+controller re-registration and a new incarnation after process restart.
+Storage context tests cover legacy behavior, complete binding and
+partial-identity rejection.
+
+## Batch 47: require broker identity through every GA source contract
+
+The main Java 25 job runs the two selected Core broker lifecycle Scala
+tests alongside its existing LogManager regression in one core:test task,
+plus all five StorageExtensionBrokerContext Java tests in one storage:test
+task. The four-module JUnit evidence gate now checks Core as well as
+Storage, Metadata and Server-Common; source preflight handles the
+required Scala method declarations. Total mandatory no-skip methods:
+**265** (previously 258).
+
+The broker lifecycle Java file is now explicitly included in the
+production fingerprint and all 19 required source-workflow
+push/pull_request patterns, so later registration changes invalidate
+the complete GA evidence set. The workflow consistency checker audits
+server production paths. This checkpoint adds neither the KRaft
+authority writer nor COMMITTED object physical GC.

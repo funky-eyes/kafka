@@ -46,6 +46,8 @@ STATIC_IMPORT_RE = re.compile(
 
 
 def java_test_source_path(root: Path, suite: str) -> Path:
+    if suite == "kafka.server.BrokerLifecycleManagerTest":
+        return root / "core/src/test/scala/unit/kafka/server/BrokerLifecycleManagerTest.scala"
     if suite.startswith("org.apache.kafka.storage."):
         module = "storage"
     elif suite.startswith("org.apache.kafka.server.common."):
@@ -72,12 +74,14 @@ def verify_sources(root: Path, required_tests=None) -> int:
         source = path.read_text(encoding="utf-8")
         imported = set(STATIC_IMPORT_RE.findall(source))
         for method in methods:
-            pattern = re.compile(r"\bvoid\s+" + re.escape(method) + r"\s*\(")
+            keyword = "def" if path.suffix == ".scala" else "void"
+            pattern = re.compile(r"\b" + keyword + r"\s+" + re.escape(method) + r"\s*\(")
             if not pattern.search(source):
-                raise ValueError(f"Missing mandatory Java test method: {suite}#{method}")
+                raise ValueError(f"Missing mandatory test method: {suite}#{method}")
             total += 1
 
-        if "*" in imported:
+        # Scala uses Assertions._ instead of Java static imports.
+        if path.suffix == ".scala" or "*" in imported:
             continue
         for assertion in ASSERTION_NAMES:
             # Qualified Assertions.assertX(...) calls do not require a
@@ -96,6 +100,6 @@ if __name__ == "__main__":
         raise SystemExit("Usage: check_shared_storage_epoch_test_sources.py REPO_ROOT")
     try:
         checked = verify_sources(Path(sys.argv[1]))
-        print(f"PASS: {checked} mandatory Java test methods and JUnit assertion imports verified")
+        print(f"PASS: {checked} mandatory Java/Scala test methods and Java JUnit assertion imports verified")
     except (ValueError, OSError) as error:
         raise SystemExit(str(error)) from error

@@ -21,6 +21,13 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 REQUIRED_TESTS = {
+    "org.apache.kafka.storage.internals.log.StorageExtensionBrokerContextTest": (
+        "snapshotsListenersAndNullableBrokerOriginals",
+        "rejectsMissingNetworkIdentity",
+        "defaultBrokerReadyCallbackIsImmediateNoOp",
+        "bindsExplicitBrokerRegistrationSnapshotWithoutGrantingRetirementAuthority",
+        "rejectsPartialOrMalformedRegistrationSnapshots",
+    ),
     "org.apache.kafka.storage.internals.log.StoragePartitionRoleListenerEpochCompatibilityTest": (
         "epochAwareMethodPreservesTheLegacyFunctionalCallback",
         "defaultNoOpListenerAlsoAcceptsEpochAwareCallback",
@@ -315,6 +322,10 @@ REQUIRED_TESTS = {
         "nativeSourceDisappearingAfterMetadataLookupInvalidatesResult",
         "nativeSourceIdentityChangeAfterMetadataLookupInvalidatesResult",
     ),
+    "kafka.server.BrokerLifecycleManagerTest": (
+        "testIncarnationChangesAcrossBrokerProcessRestart",
+        "testKraftJBODMetadataVersionUpdateEvent",
+    ),
 }
 
 
@@ -322,11 +333,14 @@ def verify(
     results_dir: Path,
     controller_results_dir: Path | None = None,
     server_results_dir: Path | None = None,
+    core_results_dir: Path | None = None,
 ) -> int:
     if controller_results_dir is None:
         controller_results_dir = results_dir
     if server_results_dir is None:
         server_results_dir = results_dir
+    if core_results_dir is None:
+        core_results_dir = results_dir
     total = 0
     for suite, expected in REQUIRED_TESTS.items():
         is_metadata_module = suite.startswith((
@@ -336,6 +350,8 @@ def verify(
         ))
         if suite.startswith("org.apache.kafka.server.common."):
             suite_dir = server_results_dir
+        elif suite.startswith("kafka.server."):
+            suite_dir = core_results_dir
         else:
             suite_dir = controller_results_dir if is_metadata_module else results_dir
         xml = suite_dir / ("TEST-" + suite + ".xml")
@@ -368,9 +384,10 @@ def verify(
 
 
 def main() -> int:
-    if len(sys.argv) not in (2, 3, 4):
+    if len(sys.argv) not in (2, 3, 4, 5):
         print(
-            "Usage: check_shared_storage_epoch_test_results.py STORAGE_REPORTS [CONTROLLER_REPORTS] [SERVER_REPORTS]",
+            "Usage: check_shared_storage_epoch_test_results.py STORAGE_REPORTS "
+            "[CONTROLLER_REPORTS] [SERVER_REPORTS] [CORE_REPORTS]",
             file=sys.stderr,
         )
         return 2
@@ -378,7 +395,8 @@ def main() -> int:
         total = verify(
             Path(sys.argv[1]),
             Path(sys.argv[2]) if len(sys.argv) >= 3 else None,
-            Path(sys.argv[3]) if len(sys.argv) == 4 else None,
+            Path(sys.argv[3]) if len(sys.argv) >= 4 else None,
+            Path(sys.argv[4]) if len(sys.argv) == 5 else None,
         )
     except (OSError, ValueError, ET.ParseError) as exc:
         print(f"SHARED_STORAGE_EPOCH_EVIDENCE FAIL: {exc}", file=sys.stderr)

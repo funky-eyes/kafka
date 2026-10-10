@@ -79,12 +79,29 @@ class EpochTestSourcePreflightTest(unittest.TestCase):
                             "    org.junit.jupiter.api.Assertions.assertTrue(true);"))
         self.assertEqual(1, verify_sources(self.root, self.REQUIRED))
 
+    def test_scala_core_source_method_is_required(self):
+        suite = "kafka.server.BrokerLifecycleManagerTest"
+        path = java_test_source_path(self.root, suite)
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            "class BrokerLifecycleManagerTest {\n"
+            "  @Test def testIncarnationChangesAcrossBrokerProcessRestart(): Unit = {}\n"
+            "}\n", encoding="utf-8"
+        )
+        selected = {suite: ("testIncarnationChangesAcrossBrokerProcessRestart",)}
+        self.assertEqual(1, verify_sources(self.root, selected))
+        path.write_text(path.read_text().replace(
+            "testIncarnationChangesAcrossBrokerProcessRestart", "renamed"
+        ))
+        with self.assertRaisesRegex(ValueError, "Missing mandatory test method"):
+            verify_sources(self.root, selected)
+
     def test_missing_mandatory_java_test_method_is_rejected(self):
         self.write(self.source.read_text().replace(
             "quarantineClearsPriorCommitWindowsAndAllUploadEligibility",
             "renamedAndNoLongerCovered"
         ))
-        with self.assertRaisesRegex(ValueError, "Missing mandatory Java test method"):
+        with self.assertRaisesRegex(ValueError, "Missing mandatory test method"):
             verify_sources(self.root, self.REQUIRED)
 
     def test_missing_mandatory_java_file_fails_closed(self):

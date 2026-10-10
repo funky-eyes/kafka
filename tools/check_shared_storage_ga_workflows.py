@@ -161,6 +161,7 @@ def concrete_production_paths(text):
             path in {"build.gradle", "settings.gradle", "storage/shared-storage-s3/build.gradle"}
             or path.startswith("core/src/main/")
             or path.startswith("storage/src/main/")
+            or path.startswith("server/src/main/")
         )
     }
 
