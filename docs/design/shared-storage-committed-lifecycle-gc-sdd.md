@@ -1673,3 +1673,40 @@ further scheduling. The mandatory Java 25 JUnit evidence increases to
 atomic cluster-wide retirement or GC authorization; race windows
 following the final local check require the future source authority
 protocol rather than another speculative lock around remote I/O.
+
+## Batch 41: join real native Kafka source evidence to read-only metadata replay preflight
+
+The older PartitionRetirementEpochPrecheck assessment accepted an observed
+leader epoch and observed LogStart as freely supplied numbers. This is useful
+as a value-domain reference but cannot prove that the caller read the actual
+Kafka source log for the intended immutable Topic ID.
+
+A second, package-local assessNativeSource path now starts from the actual
+SharedUnifiedLog and SharedPartitionRoleListener. It captures a
+SourceLogStartObservation: matching immutable Kafka Topic ID and partition,
+epoch-aware current local leadership and source LogStart/HW/LEO read under
+Kafka's native log monitor. Legacy/unknown roles, identity mismatches,
+inconsistent windows, or a demotion during native observation yield
+NATIVE_SOURCE_WINDOW_UNKNOWN with no value finding.
+
+When a native local observation exists, PartitionLogStartAdvancePrecheck
+still demands replay to the required metadata horizon, never allows a
+proposed LogStart above the actual source value, and preserves explicit
+initial-zero/monotonic watermark semantics. After metadata lookup, the
+preflight checks the exact local leader epoch + generation again; a
+demotion/reassignment during that window discards the result. No Kafka
+native log lock is held across metadata lookups.
+
+Eight Java 25 regression methods test the real source coordinate binding,
+legacy/unknown source, leader demotion in either stage, metadata lag,
+native bounds, and fail-closed metadata replay. Mandatory anti-skip JUnit
+evidence increases from 242 to **250 named methods**.
+
+Every finding remains **advisory**, including LOCAL_EPOCH_OBSERVATION_MATCH.
+The native read cannot authenticate BrokerEpoch or BrokerIncarnationId,
+prove a durable WAL replay horizon, validate a read-committed metadata
+consumer catch-up under the controller's timeline, or reserve a KRaft
+append offset. The result is not a serializable certificate or a
+controller-writer permit. The controller still returns
+SOURCE_LOG_START_NOT_VERIFIED and no physical COMMITTED object GC
+or post-retention S3 DELETE is enabled.

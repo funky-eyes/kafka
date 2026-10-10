@@ -298,6 +298,14 @@ REQUIRED_TESTS = {
         "matchedEpochCannotOverrideReplayHorizon",
         "matchedEpochCannotOverrideSourceLogStartUpperBound",
         "corruptedMetadataImageFailsClosedAfterLocalEpochMatch",
+        "nativeSourceWindowProducesOnlyAdvisoryValueFinding",
+        "nativeSourceRejectsWrongTopicIncarnationOrPartition",
+        "nativeSourceRejectsLegacyEpochAndUnknownWindow",
+        "nativeSourceDemotionDuringKafkaReadFailsClosed",
+        "nativeSourceCannotBypassMetadataReplayHorizon",
+        "nativeSourceCannotProposeLogStartBeyondActualKafkaLogStart",
+        "nativeSourceRoleChangeDuringMetadataReadDiscardsAdvisoryResult",
+        "nativeSourceFailedMetadataReplayRemainsFailClosed",
     ),
 }
 
