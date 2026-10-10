@@ -311,6 +311,7 @@ REQUIRED_TESTS = {
         "nativeSourceFailedMetadataReplayRemainsFailClosed",
         "nativeSourceLogStartRegressionDuringMetadataLookupInvalidatesResult",
         "nativeSourceLogStartAdvanceDuringMetadataLookupAlsoInvalidatesResult",
+        "nativeHighWatermarkAdvanceWithoutLogStartChangeRetainsAdvisoryFinding",
         "nativeSourceDisappearingAfterMetadataLookupInvalidatesResult",
         "nativeSourceIdentityChangeAfterMetadataLookupInvalidatesResult",
     ),

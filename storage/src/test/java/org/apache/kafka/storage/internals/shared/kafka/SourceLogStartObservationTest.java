@@ -159,7 +159,9 @@ class SourceLogStartObservationTest {
         elect(roles, 8);
         SharedUnifiedLog log = mockedLog(TOPIC_ID, 0, goodWindow());
         when(log.topicId()).thenReturn(
-            Optional.of(TOPIC_ID), Optional.of(new Uuid(100L, 200L))
+            Optional.of(TOPIC_ID), Optional.of(new Uuid(
+                TOPIC_ID.getMostSignificantBits() ^ 1L, TOPIC_ID.getLeastSignificantBits()
+            ))
         );
 
         assertTrue(SourceLogStartObservation.capture(roles, log, SHARED_PARTITION).isEmpty());

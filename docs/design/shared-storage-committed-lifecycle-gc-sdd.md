@@ -1774,3 +1774,21 @@ This double observation is deliberately NOT a linearizable attestation
 or an ABA-proof source mutation generation. A source can change again
 after the check, and no broker-incarnation binding, durable WAL proof,
 controller CAS or physical COMMITTED deletion authorization exists.
+
+## Batch 45: make source stability checks precise without freezing normal HW progress
+
+The Batch 44 double-observation fence intentionally compares the Kafka
+source LogStart, not the entire native offset window. A producer can
+advance HW/LEO while the read-only metadata classification executes;
+those advances do not invalidate an otherwise stable retirement
+LogStart value.
+
+A deterministic Java 25 test requires the preflight to retain its
+advisory finding across an HW/LEO-only advance while still rejecting
+LogStart or Topic ID changes. The native-identity mutation test also
+uses a guaranteed-distinct Topic ID rather than an extremely unlikely
+random collision. Mandatory anti-skip evidence increases to
+**258 named methods**.
+
+No broker incarnation proof, durable WAL/metadata catch-up,
+controller writer permission or COMMITTED S3 deletion is introduced.

@@ -313,6 +313,24 @@ class PartitionRetirementEpochPrecheckTest {
     }
 
     @Test
+    void nativeHighWatermarkAdvanceWithoutLogStartChangeRetainsAdvisoryFinding() throws IOException {
+        SharedPartitionRoleListener roles = nativeRoles();
+        elect(roles, 8);
+        SharedUnifiedLog log = nativeLog(TOPIC_ID, 0, goodNativeWindow());
+        when(log.captureNativeSourceWindow()).thenReturn(
+            goodNativeWindow(),
+            Optional.of(new SharedUnifiedLog.NativeSourceWindow(20L, 60L, 100L))
+        );
+
+        var result = nativeCheck(roles, log, imageWithWatermark(10L), 20L, 2L);
+        assertEquals(PartitionRetirementEpochPrecheck.Status.LOCAL_EPOCH_OBSERVATION_MATCH, result.status());
+        assertEquals(
+            PartitionLogStartAdvancePrecheck.Finding.VALUE_DOMAIN_CANDIDATE,
+            result.valueFinding().orElseThrow()
+        );
+    }
+
+    @Test
     void nativeSourceDisappearingAfterMetadataLookupInvalidatesResult() throws IOException {
         SharedPartitionRoleListener roles = nativeRoles();
         elect(roles, 8);
