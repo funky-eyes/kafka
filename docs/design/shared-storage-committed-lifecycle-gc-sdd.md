@@ -632,3 +632,53 @@ checkpoint barriers, and test any proposed batching improvement against
 WAL crash windows, reopen, head reclamation and MinIO durability. A
 faster but non-durable acknowledgement or a retry-to-green cannot be
 a substitute for verified production throughput.
+
+
+## Batch 26: bounded v1 decoder verification and CRC forgery witnesses
+
+The previous Batch 25 Java 25 workflow was blocked by a **static analysis**
+error, not a failing persisted-record semantic test:
+PartitionRetirementAuthoritySnapshotCodec.decode() exceeded Checkstyle
+NPath Complexity (1536 > 500). This checkpoint refactors the single decode
+method into six small, independently reviewable checks: input/length,
+checksum plus header, flags, immutable partition identity, minimum
+authority offset, and canonical optional watermark. All original
+validation and exceptions are retained. No complexity limit is relaxed.
+
+Six additional negative tests cover tampered topic identity, malformed
+negative partition, impossible broker ID, unknown nonterminal leader
+epoch and, importantly, **forged CRC-valid high authority offset** and
+**forged CRC-valid deletion-bit removal**. The latter two tests intentionally
+demonstrate that the offline codec can accept a syntactically valid
+but *unauthenticated* state when an adversary can rewrite the bytes.
+CRC32C cannot establish a committed controller version or Topic Delete
+authority. No consumer of this byte format may interpret successful
+decode() as permission to advance a log-start watermark, retire a
+COMMITTED reference, or delete a physical MinIO object.
+
+The Java 25 mandatory JUnit evidence checker now requires **106 named
+controller/epoch/metadata recovery tests**, with missing/skipped
+tests remaining hard failures.
+
+### Batch 25 measured performance (unchanged threshold)
+
+The Batch 25 performance workflow passed with four LZ4 produce ratios
+of **1.0042, 0.8587, 0.7561, and 1.1160**, a median of about **0.9315**
+against the unchanged 0.60 gate. Hot-read ratios were **0.9913,
+1.0132, 0.9638, and 1.0029**, with median about **0.9971**
+against the unchanged 0.50 gate. The uncompressed diagnostic ratio
+was **0.4906** and is *not* part of the LZ4 release threshold.
+
+The measured WAL mean durability barrier for each LZ4 repetition was
+about **460, 406, 387, and 374 microseconds**, versus **3532
+microseconds** for the Batch 24 worst repetition. These are
+per-batch averages aggregated across brokers, not exclusive request
+latencies. The unchanged benchmark source and pronounced fsync variance
+strengthen the runner/device latency hypothesis but do not establish
+that performance is reliably fixed. Durability barriers remain enabled,
+and no performance gate is bypassed.
+
+**Still blocked:** actual versioned KRaft MetadataRecord deployment,
+controller-image snapshot/replay integration, authoritative
+commit-time broker/epoch validation, mixed-version rollout, durable
+COMMITTED reference retirement, and physical MinIO lifecycle GC.

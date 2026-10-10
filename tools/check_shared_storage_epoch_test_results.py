@@ -121,6 +121,12 @@ REQUIRED_TESTS = {
         "invalidNegativeWatermarkFailsDespiteARecomputedChecksum",
         "terminalEnvelopeCannotResurrectAnActiveBroker",
         "recoveredHigherWatermarkStillRejectsStaleProposal",
+        "recomputedChecksumCannotSwapImmutableTopicId",
+        "negativeEncodedPartitionIsRejectedAfterChecksumRepair",
+        "invalidBrokerIdIsRejectedAfterChecksumRepair",
+        "nonterminalUnknownSourceEpochIsRejectedAfterChecksumRepair",
+        "forgedHigherAuthorityOffsetProvesCrcIsNotAuthentication",
+        "forgedTerminalFlagDemonstratesNeedForControllerProvenance",
     ),
     "org.apache.kafka.storage.internals.shared.metadata.PartitionRetirementCompactionSafetyTest": (
         "liveReplayDetectsBackwardWriteButCompactedReplayCannotRecoverItsHistory",
