@@ -1123,6 +1123,104 @@ class SharedUploadSchedulerTest {
         }
     }
 
+    @Test
+    void quarantineDuringAsyncPutDrainsPriorAdmissionAndRejectsNewOnes() throws Exception {
+        InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
+        CompletableFuture<Void> pendingPut = new CompletableFuture<>();
+        CountDownLatch putStarted = new CountDownLatch(1);
+        AtomicInteger puts = new AtomicInteger();
+        ObjectStore objectStore = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                puts.incrementAndGet();
+                putStarted.countDown();
+                return pendingPut;
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return CompletableFuture.completedFuture(null);
+            }
+        };
+        try (SharedStorageEngine engine = engine("admission-quarantine-after-put")) {
+            append(engine, P0, 0L, 9L, new byte[] {1, 2, 3});
+            SharedCommitProgress progress = leaderProgress(P0, 0L, 10L);
+            SharedObjectUploader uploader = new SharedObjectUploader(
+                objectStore, metadataStore, new SharedObjectPacker(), engine
+            );
+            try (SharedUploadScheduler scheduler = new SharedUploadScheduler(
+                engine, progress, uploader, () -> 100L, () -> 1_000L, 1024L
+            )) {
+                try {
+                    CompletableFuture<Optional<SharedObjectMetadata>> first = scheduler.tryUploadOnce();
+                    assertTrue(putStarted.await(10, TimeUnit.SECONDS));
+                    assertEquals(1L, progress.activeUploadAdmissions());
+
+                    progress.disableForRetirementQuarantine();
+                    assertTrue(scheduler.tryUploadOnce().get(10, TimeUnit.SECONDS).isEmpty());
+                    assertEquals(1, puts.get());
+                    assertEquals(1L, progress.activeUploadAdmissions());
+
+                    pendingPut.complete(null);
+                    assertTrue(first.get(10, TimeUnit.SECONDS).isPresent());
+                    assertEquals(0L, progress.activeUploadAdmissions());
+                    assertEquals(0, scheduler.uploadsInProgress());
+                    assertEquals(0, scheduler.reservedCandidateCount());
+                } finally {
+                    pendingPut.complete(null);
+                }
+            }
+        }
+    }
+
+    @Test
+    void failedObjectPutReleasesAdmissionAndDoesNotReopenQuarantine() throws Exception {
+        InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
+        SharedCommitProgress progress = leaderProgress(P0, 0L, 10L);
+        AtomicInteger puts = new AtomicInteger();
+        ObjectStore objectStore = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                puts.incrementAndGet();
+                progress.disableForRetirementQuarantine();
+                return CompletableFuture.failedFuture(new IllegalStateException("synthetic object PUT failure"));
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return CompletableFuture.completedFuture(null);
+            }
+        };
+        try (SharedStorageEngine engine = engine("admission-error-releases-permit")) {
+            append(engine, P0, 0L, 9L, new byte[] {1, 2, 3});
+            SharedObjectUploader uploader = new SharedObjectUploader(
+                objectStore, metadataStore, new SharedObjectPacker(), engine
+            );
+            try (SharedUploadScheduler scheduler = new SharedUploadScheduler(
+                engine, progress, uploader, () -> 100L, () -> 1_000L, 1024L
+            )) {
+                assertThrows(CompletionException.class, () -> scheduler.tryUploadOnce().join());
+                assertEquals(1, puts.get());
+                assertEquals(0L, progress.activeUploadAdmissions());
+                assertEquals(0, scheduler.uploadsInProgress());
+                assertEquals(0, scheduler.reservedCandidateCount());
+                assertTrue(progress.isDisabledForRetirementQuarantine());
+                assertTrue(scheduler.tryUploadOnce().get(10, TimeUnit.SECONDS).isEmpty());
+                assertEquals(1, puts.get());
+            }
+        }
+    }
+
     private static SharedCommitProgress leaderProgress(
         SharedPartitionId partition,
         long logStartOffset,

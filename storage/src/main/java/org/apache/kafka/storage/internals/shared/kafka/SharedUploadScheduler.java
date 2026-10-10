@@ -425,30 +425,41 @@ public final class SharedUploadScheduler implements AutoCloseable {
         long nowMs
     ) {
         final CompletableFuture<Optional<SharedObjectMetadata>> result;
+        boolean admitted = false;
         try {
             long objectId = objectIdSupplier.getAsLong();
             if (objectId < 0) {
                 throw new IllegalStateException("objectIdSupplier returned a negative object ID");
             }
-            // The allocator is user-supplied and may block or trigger an
-            // identity quarantine after selectionStillCurrent has succeeded.
-            // Reject the newly allocated ID without starting a physical PUT.
-            if (commitProgress.isDisabledForRetirementQuarantine()) {
+            // CAS-linearize the start of this upload against retirement
+            // quarantine. Once admitted, the upload is an in-flight operation
+            // and may drain under the existing durable PUT/COMMIT protocol.
+            if (!commitProgress.tryAcquireUploadAdmission()) {
                 releaseReservation(selection.candidates());
                 releaseUploadSlot();
                 return CompletableFuture.completedFuture(Optional.empty());
             }
+            admitted = true;
             result = uploader
                 .upload(objectId, nowMs, selection.candidates())
                 .thenApply(Optional::of);
         } catch (RuntimeException e) {
+            if (admitted) {
+                commitProgress.releaseUploadAdmission();
+            }
             releaseReservation(selection.candidates());
             recordCandidateFailure(selection.candidates(), e);
             releaseUploadSlot();
             LOG.warn("Shared object upload failed before the asynchronous object PUT started", e);
             return CompletableFuture.failedFuture(e);
         }
-        return result.whenComplete((ignored, error) -> completeUpload(selection.candidates(), error));
+        return result.whenComplete((ignored, error) -> {
+            try {
+                completeUpload(selection.candidates(), error);
+            } finally {
+                commitProgress.releaseUploadAdmission();
+            }
+        });
     }
 
     private void completeUpload(List<SharedStorageEngine.UploadCandidate> candidates, Throwable error) {
