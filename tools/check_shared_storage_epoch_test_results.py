@@ -77,6 +77,7 @@ REQUIRED_TESTS = {
         "quarantineDuringObjectIdAllocationRejectsPutAndReleasesUploadSlot",
         "quarantineDuringAsyncPutDrainsPriorAdmissionAndRejectsNewOnes",
         "failedObjectPutReleasesAdmissionAndDoesNotReopenQuarantine",
+        "roleHandoverDuringObjectIdAllocationRejectsOldCandidateAndRetriesFresh",
     ),
     "org.apache.kafka.storage.internals.shared.kafka.SharedCommitProgressTest": (
         "followsKafkaHighWatermarkExactlyRatherThanTakingMaximum",
@@ -98,6 +99,8 @@ REQUIRED_TESTS = {
         "everyAdmittedUploadReleasesItsOwnCounterEvenAfterQuarantine",
         "admissionReleaseWithoutAnOwnerFailsClosed",
         "concurrentQuarantineAndAdmissionHaveOneCasOrdering",
+        "staleRoleAdmissionRevisionNeverSurvivesLeaderFollowerLeaderAba",
+        "concurrentRoleDemotionAndUploadAdmissionHaveOneCasOrdering",
     ),
     "org.apache.kafka.storage.internals.shared.kafka.SharedPartitionRoleListenerTest": (
         "routesOnlySelectedUserTopicsAndTracksLeaderDemotion",

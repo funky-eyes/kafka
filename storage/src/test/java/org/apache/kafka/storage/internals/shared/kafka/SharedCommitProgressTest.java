@@ -330,6 +330,63 @@ class SharedCommitProgressTest {
     }
 
     @Test
+    void staleRoleAdmissionRevisionNeverSurvivesLeaderFollowerLeaderAba() {
+        SharedCommitProgress progress = new SharedCommitProgress();
+        SharedPartitionId partition = new SharedPartitionId(12L, 13L, 0);
+        progress.onLogLoaded(partition, 0L);
+        progress.onHighWatermarkUpdated(partition, 10L);
+        progress.onLeader(partition);
+        long originalRevision = progress.uploadRoleRevision();
+        assertTrue(progress.tryAcquireUploadAdmission(originalRevision));
+
+        progress.onFollower(partition);
+        progress.onLeader(partition);
+
+        assertFalse(progress.tryAcquireUploadAdmission(originalRevision));
+        assertTrue(progress.uploadRoleRevision() > originalRevision);
+        assertTrue(progress.partitionProgress(partition).orElseThrow().isLeader());
+        assertEquals(1L, progress.activeUploadAdmissions());
+        assertTrue(progress.tryAcquireUploadAdmission(progress.uploadRoleRevision()));
+        progress.releaseUploadAdmission();
+        progress.releaseUploadAdmission();
+        assertEquals(0L, progress.activeUploadAdmissions());
+    }
+
+    @Test
+    void concurrentRoleDemotionAndUploadAdmissionHaveOneCasOrdering() throws Exception {
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            for (int attempt = 0; attempt < 32; attempt++) {
+                SharedCommitProgress progress = new SharedCommitProgress();
+                SharedPartitionId partition = new SharedPartitionId(12L, 13L, 1);
+                progress.onLeader(partition);
+                long revision = progress.uploadRoleRevision();
+                CountDownLatch start = new CountDownLatch(1);
+                CompletableFuture<Boolean> admission = CompletableFuture.supplyAsync(() -> {
+                    await(start);
+                    return progress.tryAcquireUploadAdmission(revision);
+                }, workers);
+                CompletableFuture<Void> demotion = CompletableFuture.runAsync(() -> {
+                    await(start);
+                    progress.onFollower(partition);
+                }, workers);
+                start.countDown();
+
+                boolean accepted = admission.get(10, TimeUnit.SECONDS);
+                demotion.get(10, TimeUnit.SECONDS);
+                assertFalse(progress.tryAcquireUploadAdmission(revision));
+                assertEquals(accepted ? 1L : 0L, progress.activeUploadAdmissions());
+                if (accepted) {
+                    progress.releaseUploadAdmission();
+                }
+                assertEquals(0L, progress.activeUploadAdmissions());
+            }
+        } finally {
+            workers.shutdownNow();
+        }
+    }
+
+    @Test
     void rejectsNegativeOffsets() {
         SharedCommitProgress progress = new SharedCommitProgress();
         SharedPartitionId partition = new SharedPartitionId(1L, 2L, 5);

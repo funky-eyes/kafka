@@ -24,7 +24,7 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Non-blocking bridge from Kafka's native log offsets and replica role into the shared-storage upload plane.
@@ -34,12 +34,13 @@ import java.util.concurrent.atomic.AtomicLong;
  * log-start offset, exclusive high-watermark boundary and current local replica role.</p>
  */
 public final class SharedCommitProgress {
-    private static final long UPLOAD_ADMISSION_CLOSED = Long.MIN_VALUE;
-    private static final long UPLOAD_ADMISSION_COUNT = Long.MAX_VALUE;
     private final ConcurrentMap<SharedPartitionId, PartitionProgress> partitions = new ConcurrentHashMap<>();
-    // The high bit permanently closes upload admission, while the low bits
-    // count already-admitted uploads that may finish after quarantine.
-    private final AtomicLong uploadAdmissions = new AtomicLong();
+    // Role mutations and upload admission share a single CAS state. An odd
+    // role revision means that a Kafka leadership/removal callback is active.
+    // Previously admitted PUTs remain owned until their completion callback.
+    private final AtomicReference<UploadAdmissionState> uploadAdmissions =
+        new AtomicReference<>(new UploadAdmissionState(0L, 0L, false));
+    private final Object roleMutationMonitor = new Object();
     private volatile boolean disabledForQuarantine;
 
     /**
@@ -47,33 +48,47 @@ public final class SharedCommitProgress {
      * can reset the role/epoch tombstone capacity quarantine.
      */
     void disableForRetirementQuarantine() {
-        // Close admissions BEFORE clearing the cached Kafka progress windows.
-        // Concurrent schedulers cannot begin a new admitted upload afterward.
-        uploadAdmissions.getAndUpdate(state -> state | UPLOAD_ADMISSION_CLOSED);
+        // Close admissions atomically, before clearing cached Kafka windows.
+        uploadAdmissions.getAndUpdate(state ->
+            new UploadAdmissionState(state.inFlight(), state.roleRevision(), true)
+        );
         disabledForQuarantine = true;
         partitions.clear();
     }
 
     boolean isDisabledForRetirementQuarantine() {
-        return uploadAdmissions.get() < 0L;
+        return uploadAdmissions.get().closed();
     }
 
     /**
-     * Linearization point for new local asynchronous object uploads.
-     * A successfully admitted upload is already in flight when a subsequent
-     * quarantine occurs; it must release this permit on any completion path.
-     * This does not confer distributed KRaft retirement authorization.
+     * Captures the role revision before selecting WAL candidates. Admission
+     * rejects odd or changed revisions, including leader-follower-leader ABA.
      */
+    long uploadRoleRevision() {
+        return uploadAdmissions.get().roleRevision();
+    }
+
     boolean tryAcquireUploadAdmission() {
+        return tryAcquireUploadAdmission(uploadRoleRevision());
+    }
+
+    /**
+     * CAS-linearized local admission against both irreversible quarantine and
+     * Kafka role changes. A permit acquired before either mutation may drain.
+     */
+    boolean tryAcquireUploadAdmission(long expectedRoleRevision) {
         while (true) {
-            long current = uploadAdmissions.get();
-            if (current < 0L) {
+            UploadAdmissionState current = uploadAdmissions.get();
+            if (current.closed() || (current.roleRevision() & 1L) != 0L
+                || current.roleRevision() != expectedRoleRevision) {
                 return false;
             }
-            if (current == UPLOAD_ADMISSION_COUNT) {
+            if (current.inFlight() == Long.MAX_VALUE) {
                 throw new IllegalStateException("Shared upload admission counter exhausted");
             }
-            if (uploadAdmissions.compareAndSet(current, current + 1L)) {
+            UploadAdmissionState next =
+                new UploadAdmissionState(current.inFlight() + 1L, current.roleRevision(), false);
+            if (uploadAdmissions.compareAndSet(current, next)) {
                 return true;
             }
         }
@@ -81,12 +96,13 @@ public final class SharedCommitProgress {
 
     void releaseUploadAdmission() {
         while (true) {
-            long current = uploadAdmissions.get();
-            long count = current & UPLOAD_ADMISSION_COUNT;
-            if (count == 0L) {
+            UploadAdmissionState current = uploadAdmissions.get();
+            if (current.inFlight() == 0L) {
                 throw new IllegalStateException("Shared upload admission counter underflow");
             }
-            long next = (current & UPLOAD_ADMISSION_CLOSED) | (count - 1L);
+            UploadAdmissionState next = new UploadAdmissionState(
+                current.inFlight() - 1L, current.roleRevision(), current.closed()
+            );
             if (uploadAdmissions.compareAndSet(current, next)) {
                 return;
             }
@@ -94,7 +110,7 @@ public final class SharedCommitProgress {
     }
 
     long activeUploadAdmissions() {
-        return uploadAdmissions.get() & UPLOAD_ADMISSION_COUNT;
+        return uploadAdmissions.get().inFlight();
     }
 
     public void onLogLoaded(SharedPartitionId partition, long logStartOffset) {
@@ -186,11 +202,59 @@ public final class SharedCommitProgress {
         if (disabledForQuarantine) {
             return;
         }
-        partitions.compute(partition, (ignored, current) -> disabledForQuarantine ? null : new PartitionProgress(
-            current == null ? 0L : current.logStartOffset(),
-            current == null ? 0L : current.highWatermark(),
-            role
-        ));
+        synchronized (roleMutationMonitor) {
+            if (!beginRoleMutation()) {
+                return;
+            }
+            try {
+                partitions.compute(partition, (ignored, current) -> disabledForQuarantine ? null :
+                    new PartitionProgress(
+                        current == null ? 0L : current.logStartOffset(),
+                        current == null ? 0L : current.highWatermark(),
+                        role
+                    ));
+            } finally {
+                endRoleMutation();
+            }
+        }
+    }
+
+    private boolean beginRoleMutation() {
+        while (true) {
+            UploadAdmissionState current = uploadAdmissions.get();
+            if (current.closed()) {
+                return false;
+            }
+            // Exhausting the version must never wrap and revive a stale token.
+            if (current.roleRevision() >= Long.MAX_VALUE - 2L) {
+                disableForRetirementQuarantine();
+                return false;
+            }
+            if ((current.roleRevision() & 1L) != 0L) {
+                throw new IllegalStateException("Shared role mutations must be serialized");
+            }
+            UploadAdmissionState next = new UploadAdmissionState(
+                current.inFlight(), current.roleRevision() + 1L, false
+            );
+            if (uploadAdmissions.compareAndSet(current, next)) {
+                return true;
+            }
+        }
+    }
+
+    private void endRoleMutation() {
+        while (true) {
+            UploadAdmissionState current = uploadAdmissions.get();
+            if ((current.roleRevision() & 1L) == 0L) {
+                throw new IllegalStateException("Shared role mutation was not in progress");
+            }
+            UploadAdmissionState next = new UploadAdmissionState(
+                current.inFlight(), current.roleRevision() + 1L, current.closed()
+            );
+            if (uploadAdmissions.compareAndSet(current, next)) {
+                return;
+            }
+        }
     }
 
     public OptionalLong highWatermark(SharedPartitionId partition) {
@@ -214,7 +278,19 @@ public final class SharedCommitProgress {
 
     public void remove(SharedPartitionId partition) {
         Objects.requireNonNull(partition, "partition");
-        partitions.remove(partition);
+        synchronized (roleMutationMonitor) {
+            if (!beginRoleMutation()) {
+                return;
+            }
+            try {
+                partitions.remove(partition);
+            } finally {
+                endRoleMutation();
+            }
+        }
+    }
+
+    private record UploadAdmissionState(long inFlight, long roleRevision, boolean closed) {
     }
 
     public enum ReplicaRole {

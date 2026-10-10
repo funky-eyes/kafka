@@ -434,7 +434,7 @@ public final class SharedUploadScheduler implements AutoCloseable {
             // CAS-linearize the start of this upload against retirement
             // quarantine. Once admitted, the upload is an in-flight operation
             // and may drain under the existing durable PUT/COMMIT protocol.
-            if (!commitProgress.tryAcquireUploadAdmission()) {
+            if (!commitProgress.tryAcquireUploadAdmission(selection.roleRevision())) {
                 releaseReservation(selection.candidates());
                 releaseUploadSlot();
                 return CompletableFuture.completedFuture(Optional.empty());
@@ -704,6 +704,7 @@ public final class SharedUploadScheduler implements AutoCloseable {
     }
 
     private CandidateSelection selectCandidateBatch() {
+        long roleRevision = commitProgress.uploadRoleRevision();
         Map<SharedPartitionId, SharedCommitProgress.PartitionProgress> snapshot = commitProgress.snapshot();
         PriorityQueue<CursorHead> heads = new PriorityQueue<>(
             Comparator.comparingLong(head -> head.candidate().location().walOffset())
@@ -786,7 +787,8 @@ public final class SharedUploadScheduler implements AutoCloseable {
             eligibleCandidateObserved,
             Optional.ofNullable(byteTriggerWitness),
             Map.copyOf(remoteRevisions),
-            Map.copyOf(walMutationRevisions)
+            Map.copyOf(walMutationRevisions),
+            roleRevision
         );
     }
 
@@ -891,7 +893,8 @@ public final class SharedUploadScheduler implements AutoCloseable {
         boolean eligibleCandidateObserved,
         Optional<SharedStorageEngine.UploadCandidate> byteTriggerWitness,
         Map<SharedPartitionId, Long> remoteRevisions,
-        Map<SharedPartitionId, Long> walMutationRevisions
+        Map<SharedPartitionId, Long> walMutationRevisions,
+        long roleRevision
     ) {
     }
 

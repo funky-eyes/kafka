@@ -1221,6 +1221,47 @@ class SharedUploadSchedulerTest {
         }
     }
 
+    @Test
+    void roleHandoverDuringObjectIdAllocationRejectsOldCandidateAndRetriesFresh() throws Exception {
+        InMemoryObjectStore objectStore = new InMemoryObjectStore();
+        InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
+        try (SharedStorageEngine engine = engine("role-aba-during-allocation")) {
+            append(engine, P0, 0L, 9L, new byte[] {1, 2, 3});
+            SharedCommitProgress progress = leaderProgress(P0, 0L, 10L);
+            AtomicInteger allocations = new AtomicInteger();
+            SharedObjectUploader uploader = new SharedObjectUploader(
+                objectStore, metadataStore, new SharedObjectPacker(), engine
+            );
+            try (SharedUploadScheduler scheduler = new SharedUploadScheduler(
+                engine, progress, uploader,
+                () -> {
+                    int index = allocations.getAndIncrement();
+                    if (index == 0) {
+                        progress.onFollower(P0);
+                        progress.onLeader(P0);
+                    }
+                    return 100L + index;
+                },
+                () -> 1_000L,
+                1024L
+            )) {
+                assertTrue(scheduler.tryUploadOnce().get(10, TimeUnit.SECONDS).isEmpty());
+                assertEquals(1, allocations.get());
+                assertFalse(objectStore.contains(100L));
+                assertEquals(0L, progress.activeUploadAdmissions());
+                assertEquals(0, scheduler.uploadsInProgress());
+                assertEquals(0, scheduler.reservedCandidateCount());
+                assertFalse(scheduler.lastFailure().isPresent());
+
+                assertTrue(scheduler.tryUploadOnce().get(10, TimeUnit.SECONDS).isPresent());
+                assertTrue(objectStore.contains(101L));
+                assertEquals(2, allocations.get());
+                assertEquals(0L, progress.activeUploadAdmissions());
+                assertEquals(0, scheduler.reservedCandidateCount());
+            }
+        }
+    }
+
     private static SharedCommitProgress leaderProgress(
         SharedPartitionId partition,
         long logStartOffset,

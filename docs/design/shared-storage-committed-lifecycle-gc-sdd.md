@@ -1564,3 +1564,59 @@ Topic Delete tombstone survival across failover/snapshot and a
 reference-retirement grace barrier before retryable MinIO
 physical deletion. Production authority emission and physical
 COMMITTED GC remain off.
+
+## Batch 38: fence selected uploads across Kafka leader ABA before local admission
+
+### Source selection and admission had different leadership moments
+
+The Batch 37 CAS gate atomically separated quarantine from new S3 upload
+admission. It did not bind admission to the Kafka role under which a WAL
+candidate was selected. A leader could select a batch, lose leadership,
+then regain leadership before object ID allocation. With identical
+logStart/HW and unchanged remote/WAL revisions, the old selection passed
+revalidation and the new CAS accepted it. This is a local role-ABA race
+and does not depend on KRaft source certificate or object-store failure.
+
+### Non-blocking object admission with a role revision
+
+SharedCommitProgress now combines role revision, existing in-flight count,
+and the irreversible quarantine flag in one CAS state. Local leader,
+follower and removal callbacks serialize only their own in-memory
+mutation and publish an odd revision before changing cached role state,
+then an even revision after completion. An overflow closes admission
+permanently rather than wrapping to an old version. Neither callback
+does remote I/O, waits for PUT or takes Kafka's native log monitor.
+
+The scheduler captures the role revision when selecting a candidate
+batch. Before invoking the object uploader, a CAS admission verifies
+that the revision is unchanged, even, and not quarantined. This rejects
+old selections across LEADER -> FOLLOWER -> LEADER and partition removal
+even if Kafka offsets and remote/WAL revisions appear identical.
+The old reservation and upload slot are released without a PUT or
+a misleading candidate failure. A fresh scan is eligible immediately
+after a valid new leader callback.
+
+An upload admitted before role mutation remains in flight and follows
+the prior durable PUT/COMMIT protocol. Local admission is NOT a KRaft
+lease, a COMMITTED reference retirement certificate, a forced S3 PUT
+cancellation, or a cross-broker garbage-collection authorization.
+
+### Deterministic evidence and GA scope
+
+Two SharedCommitProgressTest cases validate stale-version rejection,
+in-flight permit accounting across ABA and 32 CAS-vs-demotion races.
+One SharedUploadSchedulerTest triggers full follower/leader ABA inside
+object-ID allocation, verifies zero stale PUT, leaked slot, reservation
+or spurious failure, then proves fresh rescheduling can succeed.
+
+The Java 25 mandatory storage/metadata/server-common JUnit evidence
+increases from 236 to **239 named methods**, with strict no-skip
+verification. These source changes invalidate the exact-candidate GA
+fingerprint and require a fresh normalized MinIO GA Seal to requalify
+the new HEAD. The prior 32ffa9a6... tree retains its historical
+19/19 MinIO GA PASS; this batch makes no claim about native AWS S3.
+
+The trusted BrokerEpoch/Incarnation and LeaderEpoch source certificate,
+WAL/metadata replay horizon, Controller atomic append, durable reference
+retirement, reader/upload quiescence and physical object GC remain
+unimplemented and disabled.
