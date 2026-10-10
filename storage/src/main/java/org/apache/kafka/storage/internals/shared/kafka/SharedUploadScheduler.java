@@ -444,7 +444,8 @@ public final class SharedUploadScheduler implements AutoCloseable {
             // Object ID allocation is pluggable and may overlap native Kafka
             // LogStart/HW changes, WAL truncation or remote coverage updates.
             // A role-revision CAS alone cannot validate those source windows.
-            if (!selectionStillCurrent(selection, validateByteTriggerWitness)) {
+            // Scheduler stop may also occur while the object ID supplier runs.
+            if (closed.get() || !selectionStillCurrent(selection, validateByteTriggerWitness)) {
                 admitted = false;
                 commitProgress.releaseUploadAdmission();
                 releaseReservation(selection.candidates());

@@ -1651,3 +1651,25 @@ final validation can still overlap an already-admitted upload. Durable
 source attestation, KRaft controller CAS, reader quiescence and physical
 COMMITTED GC remain disabled. A future certificate must supply the
 cross-broker durability/identity barrier; a local last-check cannot do so.
+
+## Batch 40: fence scheduler stop during object-ID allocation
+
+The Batch 39 post-admission source-window revalidation did not include
+the scheduler lifecycle flag. A stop() that returned during a pluggable
+object-ID allocation could still be followed by a new remote PUT despite
+the shutdown having already begun.
+
+A final local closed-state check, combined with the existing source
+and role revision revalidation, now discards that not-yet-PUT batch.
+The scheduler releases its newly acquired upload admission, WAL
+reservations, and upload slot, without reporting a candidate failure.
+The already-admitted and already-running asynchronous PUT drain contract
+is unchanged; stop() does not cancel those operations.
+
+A deterministic scheduler test closes the scheduler inside the object
+ID supplier and verifies zero PUT, zero coverage, zero leaks, and no
+further scheduling. The mandatory Java 25 JUnit evidence increases to
+**242 named tests**. This remains local shutdown hardening, not an
+atomic cluster-wide retirement or GC authorization; race windows
+following the final local check require the future source authority
+protocol rather than another speculative lock around remote I/O.

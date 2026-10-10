@@ -80,6 +80,7 @@ REQUIRED_TESTS = {
         "roleHandoverDuringObjectIdAllocationRejectsOldCandidateAndRetriesFresh",
         "highWatermarkRegressionDuringObjectIdAllocationRejectsStalePut",
         "nativeLogStartAdvanceDuringObjectIdAllocationRejectsStalePut",
+        "schedulerStopDuringObjectIdAllocationRejectsNewPutWithoutLeakingAdmission",
     ),
     "org.apache.kafka.storage.internals.shared.kafka.SharedCommitProgressTest": (
         "followsKafkaHighWatermarkExactlyRatherThanTakingMaximum",

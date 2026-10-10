@@ -1341,6 +1341,43 @@ class SharedUploadSchedulerTest {
         }
     }
 
+    @Test
+    void schedulerStopDuringObjectIdAllocationRejectsNewPutWithoutLeakingAdmission() throws Exception {
+        InMemoryObjectStore objectStore = new InMemoryObjectStore();
+        InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
+        try (SharedStorageEngine engine = engine("stop-during-object-id-allocation")) {
+            append(engine, P0, 0L, 9L, new byte[] {1, 2, 3});
+            SharedCommitProgress progress = leaderProgress(P0, 0L, 10L);
+            AtomicReference<SharedUploadScheduler> schedulerRef = new AtomicReference<>();
+            AtomicInteger allocations = new AtomicInteger();
+            SharedObjectUploader uploader = new SharedObjectUploader(
+                objectStore, metadataStore, new SharedObjectPacker(), engine
+            );
+            try (SharedUploadScheduler scheduler = new SharedUploadScheduler(
+                engine, progress, uploader,
+                () -> {
+                    allocations.incrementAndGet();
+                    assertFalse(schedulerRef.get().stop());
+                    return 100L;
+                },
+                () -> 1_000L,
+                1024L
+            )) {
+                schedulerRef.set(scheduler);
+                assertTrue(scheduler.tryUploadOnce().get(10, TimeUnit.SECONDS).isEmpty());
+                assertEquals(1, allocations.get());
+                assertFalse(objectStore.contains(100L));
+                assertFalse(engine.remoteIndex().coverage(P0).covers(new OffsetRange(0L, 10L)));
+                assertEquals(0L, progress.activeUploadAdmissions());
+                assertEquals(0, scheduler.reservedCandidateCount());
+                assertEquals(0, scheduler.uploadsInProgress());
+                assertFalse(scheduler.lastFailure().isPresent());
+                assertThrows(CompletionException.class, () -> scheduler.tryUploadOnce().join());
+                assertEquals(1, allocations.get());
+            }
+        }
+    }
+
     private static SharedCommitProgress leaderProgress(
         SharedPartitionId partition,
         long logStartOffset,
