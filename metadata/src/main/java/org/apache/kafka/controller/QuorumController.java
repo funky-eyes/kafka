@@ -72,6 +72,7 @@ import org.apache.kafka.common.metadata.MetadataRecordType;
 import org.apache.kafka.common.metadata.NoOpRecord;
 import org.apache.kafka.common.metadata.PartitionChangeRecord;
 import org.apache.kafka.common.metadata.PartitionRecord;
+import org.apache.kafka.common.metadata.PartitionRetirementAuthorityRecord;
 import org.apache.kafka.common.metadata.ProducerIdsRecord;
 import org.apache.kafka.common.metadata.RegisterBrokerRecord;
 import org.apache.kafka.common.metadata.RegisterControllerRecord;
@@ -1235,6 +1236,9 @@ public final class QuorumController implements Controller {
             case PARTITION_RECORD:
                 replicationControl.replay((PartitionRecord) message);
                 break;
+            case PARTITION_RETIREMENT_AUTHORITY_RECORD:
+                partitionRetirementControl.replay((PartitionRetirementAuthorityRecord) message);
+                break;
             case CONFIG_RECORD:
                 configurationControl.replay((ConfigRecord) message);
                 break;
@@ -1421,6 +1425,9 @@ public final class QuorumController implements Controller {
      */
     private final ReplicationControlManager replicationControl;
 
+    /** Replay-only KRaft retirement authority mirror, with no write event or producer. */
+    private final PartitionRetirementControlManager partitionRetirementControl;
+
     /**
      * Manages SCRAM credentials, if there are any.
      */
@@ -1521,6 +1528,7 @@ public final class QuorumController implements Controller {
         this.time = time;
         this.controllerMetrics = controllerMetrics;
         this.snapshotRegistry = new SnapshotRegistry(logContext);
+        this.partitionRetirementControl = new PartitionRetirementControlManager(snapshotRegistry);
         this.deferredEventQueue = new DeferredEventQueue(logContext);
         this.resourceExists = new ConfigResourceExistenceChecker();
         this.clientQuotaControlManager = new ClientQuotaControlManager.Builder().
