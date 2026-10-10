@@ -29,7 +29,8 @@ import java.util.Optional;
  *
  * <p>Captures an epoch-aware leadership ticket, verifies that the actual
  * SharedUnifiedLog has the SAME immutable Kafka Topic ID and partition, reads
- * logStart/HW/LEO under Kafka's native log lock, and rechecks the ticket.
+ * logStart/HW/LEO under Kafka's native log lock, then rechecks both
+ * source identity and the leadership ticket.
  * Broker registration/incarnation, WAL durable horizon, controller quorum
  * commit and cross-broker replay are NOT proved by this process-local view.</p>
  */
@@ -53,7 +54,10 @@ final class SourceLogStartObservation {
             return Optional.empty();
         }
         Optional<SharedUnifiedLog.NativeSourceWindow> window = log.captureNativeSourceWindow();
-        if (window.isEmpty() || !roleListener.stillRetirementLeader(ticket.get())) {
+        // The native window and Topic ID are read separately. A source log
+        // replacement must not associate offsets with the first identity.
+        if (window.isEmpty() || !matchesSourcePartition(log, partition)
+            || !roleListener.stillRetirementLeader(ticket.get())) {
             return Optional.empty();
         }
         return Optional.of(new LocalObservation(

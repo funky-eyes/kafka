@@ -1729,3 +1729,19 @@ deterministic regression. The mandatory Java 25 safety count reaches
 
 Both paths remain read-only and non-authorizing. Production KRaft
 controller emission, durable reference GC, and S3 DELETE stay disabled.
+
+## Batch 43: fence source identity mutation during native offset capture
+
+SourceLogStartObservation.capture() previously checked the immutable Topic
+ID and partition only before reading the native source window. A source
+log identity change between those operations could misassociate offsets
+with an earlier source even though the local leader ticket remained valid.
+
+The capture now rechecks both Topic ID and partition after reading actual
+LogStart/HW/LEO, before returning any read-only observation. Two
+deterministic tests alter the mocked log identity between checks and
+require that no observation is returned. Mandatory Java 25 anti-skip
+evidence increases from 251 to **253 named methods**.
+
+Neither identity check is a cluster-wide linearizable lease. Controller
+authority emission and COMMITTED physical deletion stay disabled.

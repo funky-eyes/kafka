@@ -154,6 +154,30 @@ class SourceLogStartObservationTest {
     }
 
     @Test
+    void topicIdChangedDuringNativeReadRejectsTheEarlierIdentityCheck() throws IOException {
+        SharedPartitionRoleListener roles = roles();
+        elect(roles, 8);
+        SharedUnifiedLog log = mockedLog(TOPIC_ID, 0, goodWindow());
+        when(log.topicId()).thenReturn(
+            Optional.of(TOPIC_ID), Optional.of(new Uuid(100L, 200L))
+        );
+
+        assertTrue(SourceLogStartObservation.capture(roles, log, SHARED_PARTITION).isEmpty());
+    }
+
+    @Test
+    void partitionChangedDuringNativeReadRejectsTheEarlierIdentityCheck() throws IOException {
+        SharedPartitionRoleListener roles = roles();
+        elect(roles, 8);
+        SharedUnifiedLog log = mockedLog(TOPIC_ID, 0, goodWindow());
+        when(log.topicPartition()).thenReturn(
+            new TopicPartition("shared-topic", 0), new TopicPartition("shared-topic", 1)
+        );
+
+        assertTrue(SourceLogStartObservation.capture(roles, log, SHARED_PARTITION).isEmpty());
+    }
+
+    @Test
     void nativeWindowRejectsUnknownOrContradictoryOffsetRanges() {
         assertTrue(SharedUnifiedLog.NativeSourceWindow.fromBounds(-1L, 0L, 1L).isEmpty());
         assertTrue(SharedUnifiedLog.NativeSourceWindow.fromBounds(10L, 9L, 11L).isEmpty());

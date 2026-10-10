@@ -70,6 +70,8 @@ REQUIRED_TESTS = {
         "removedTopicIdRejectsDelayedSameEpochLeaderAndNativeSnapshot",
         "freshReassignmentWithHigherEpochMayRecaptureLocalSourceView",
         "nativeWindowRejectsUnknownOrContradictoryOffsetRanges",
+        "topicIdChangedDuringNativeReadRejectsTheEarlierIdentityCheck",
+        "partitionChangedDuringNativeReadRejectsTheEarlierIdentityCheck",
     ),
     "org.apache.kafka.storage.internals.shared.kafka.SharedUploadSchedulerTest": (
         "quarantineBeforeUploadDoesNotAllocateAnObjectIdOrReserveASlot",
