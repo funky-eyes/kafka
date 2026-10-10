@@ -45,6 +45,8 @@ on:
       - 'metadata/src/test/java/org/apache/kafka/image/PartitionRetirementAuthorityImageTest.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/PartitionRetirementControlManagerTest.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/PartitionRetirementFeatureGateTest.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementCandidatePrecheck.java'
+      - 'metadata/src/test/java/org/apache/kafka/controller/PartitionRetirementCandidatePrecheckTest.java'
       - 'server-common/src/main/java/org/apache/kafka/server/common/PartitionRetirementAuthorityVersion.java'
       - 'server-common/src/main/java/org/apache/kafka/server/common/Feature.java'
       - 'server-common/src/test/java/org/apache/kafka/server/common/PartitionRetirementAuthorityVersionTest.java'
@@ -103,6 +105,8 @@ on:
       - 'metadata/src/test/java/org/apache/kafka/image/PartitionRetirementAuthorityImageTest.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/PartitionRetirementControlManagerTest.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/PartitionRetirementFeatureGateTest.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementCandidatePrecheck.java'
+      - 'metadata/src/test/java/org/apache/kafka/controller/PartitionRetirementCandidatePrecheckTest.java'
       - 'server-common/src/main/java/org/apache/kafka/server/common/PartitionRetirementAuthorityVersion.java'
       - 'server-common/src/main/java/org/apache/kafka/server/common/Feature.java'
       - 'server-common/src/test/java/org/apache/kafka/server/common/PartitionRetirementAuthorityVersionTest.java'
@@ -195,6 +199,7 @@ jobs:
           ./gradlew :metadata:checkstyleMain :metadata:checkstyleTest :metadata:test --no-scan \
             --tests 'org.apache.kafka.controller.PartitionRetirementControllerPrecheckTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementControlManagerTest' \
+            --tests 'org.apache.kafka.controller.PartitionRetirementCandidatePrecheckTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementFeatureGateTest' \
             --tests 'org.apache.kafka.metadata.PartitionRetirementAuthorityStateTest' \
             --tests 'org.apache.kafka.image.PartitionRetirementAuthorityImageTest' \

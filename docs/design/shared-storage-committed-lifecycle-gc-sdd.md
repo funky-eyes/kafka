@@ -883,3 +883,99 @@ FeatureLevelRecord replay can precede metadata.version=4.4 only as
 an in-memory record; the effective authority feature stays disabled
 until BOTH required levels are present. A production controller
 rejects the unsupported experimental feature record outright.
+
+
+## Batch 30: durable broker incarnation fencing and serialized CAS preflight
+
+This checkpoint closes a protocol field omission in the experimental API key
+29 (PartitionRetirementAuthorityRecord) and grounds candidate validation in
+the real Kafka controller write-event queue. It **does not** enable the
+record's production emission or COMMITTED physical-object retirement.
+
+### Record 29 now persists full registered-broker identity
+
+Two required v0 fields are added to the still-dormant KRaft record:
+
+- BrokerEpoch: the controller-issued broker registration epoch, or -1 when
+  no authenticated registration proof exists.
+- BrokerIncarnationId: the UUID from RegisterBrokerRecord, or ZERO_UUID when
+  the identity is absent.
+
+The immutable PartitionRetirementAuthorityState.Value carries both fields
+through record encoding, timeline replay, broker image, and future snapshots.
+A five-argument compatibility constructor remains for the existing
+non-emitting reference tests, but its active broker identity is explicitly
+**unbound**, not safe for production authority emission.
+
+Canonical validation rejects half-populated epoch/UUID pairs, negative
+broker epochs, and any broker identity retained by NO_LEADER or a
+terminally deleted Topic ID. Once a value has a bound broker identity,
+a later active value may not silently drop its proof. A different
+incarnation/registration epoch cannot take over at the same source
+partition LeaderEpoch, even if it reuses the same numeric BrokerId.
+A new source LeaderEpoch may carry a different registered incarnation
+after appropriate controller validation.
+
+**Compatibility note:** the experimental record's v0 binary wire layout
+is deliberately expanded before first production use. The older
+Batch 28/29 v0 schema has not been emitted to KRaft by production code.
+If any external test cluster was manually seeded with the experimental
+old v0 bytes, it must be reset or migrated in a separately validated
+pre-release protocol; do not silently treat incompatible old bytes as
+equivalent.
+
+### Controller candidate precheck runs in serialized write queue
+
+QuorumController.preflightPartitionRetirement posts a **record-free**
+ControllerWriteEvent, so its validation is ordered with current KRaft
+controller state transitions rather than an unsequenced external read.
+The checker compares:
+
+1. Negotiated experimental cluster feature (production still disabled).
+2. The actual next KRaft write position versus requested authority offset.
+3. Compare-and-swap of expected historical authority offset with
+   PartitionRetirementControlManager's replayed current generation.
+4. Immutable Topic ID, current recovered leader/epoch, ISR membership,
+   and prior irrevocable deletion tombstone.
+5. Live ClusterControlManager registration: unfenced broker, not in
+   controlled shutdown, exact broker epoch and incarnation UUID.
+6. Monotonic source LeaderEpoch and accepted log-start watermark;
+   no same-epoch resurrection or broker replacement.
+
+A matching candidate is **not** granted a write token. It returns
+SOURCE_LOG_START_NOT_VERIFIED, and the event emits zero KRaft records.
+This is intentional: Kafka Controller does not yet have a trusted
+source-partition LogStart attestation path. A broker's claimed
+log-start, even with valid registration, is NOT sufficient evidence
+for authoritative watermark advancement. The CAS currently proves
+only preconditions at one point in the controller queue; it does
+not reserve an offset for a later writer.
+
+The targeted Java 25 gate gains seven persisted identity invariants
+and sixteen real-controller-metadata candidate tests, raising required
+cross-module JUnit coverage from **147 to 170 named methods**.
+A missing report, any skip or any failed case remains a release blocker.
+
+### Remaining hard blockers before true authority commit
+
+1. Design and verify an authenticated source-log-start attestation,
+   bound to Topic ID, partition, BrokerEpoch, BrokerIncarnationId,
+   LeaderEpoch, committed WAL horizon, and replay/catch-up evidence.
+   Reject old acknowledgments, restarted brokers and speculative
+   log-start values.
+2. Implement one atomic controller write event with a **fresh** full
+   recheck, exact KRaft assigned record offset, Feature v1 eligibility
+   and durable post-commit result. Never convert the preflight result
+   into a reusable write authorization.
+3. Serialize Topic Delete with terminal retirement fencing so that
+   a deleted Topic ID cannot lose its tombstone through KRaft snapshot
+   replacement, controller failover or metadata compaction.
+4. Test Controller failover, mixed-version feature enablement/rollback,
+   source-log-loss and broker re-registration on real KRaft batches.
+   No old reader may encounter an unsupported metadata API key.
+5. Only then design and test multi-partition COMMITTED reference
+   retirement, reader/upload quiescence and actual MinIO physical GC.
+
+Current 19/19 historical GA PASS continues to cover existing Shared
+Storage runtime only. This batch neither activates Watermark Writer nor
+authorizes physical deletion.
