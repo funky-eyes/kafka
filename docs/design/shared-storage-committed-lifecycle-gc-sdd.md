@@ -1394,3 +1394,78 @@ This was a new preflight invocation defect, not a Java or object
 storage runtime regression. The compilation repair and original 229
 mandatory Java tests remain unchanged. The canonical-head CI rerun
 must still pass all release gates before declaring Batch 35 PASS.
+
+
+## Batch 36: last synchronous upload quarantine fence and recovery GA evidence ownership
+
+### Source-SHA GA evidence classification after Batch 35
+
+The Batch 35 Java 25 Shared Storage tests and three-broker real MinIO
+integration job both PASS on the repaired source. Normalize Author also
+PASS; the final GA Evidence Seal remains BLOCKED on **one of 19 gates**:
+Shared Storage Local State Loss Recovery. Its latest matching run was
+a Batch 34 test-compilation failure caused by the missing assertTrue
+static import, not a local-loss runtime correctness failure.
+
+The recovery workflow's push.paths did not include
+SharedCommitProgressTest.java, although the workflow executes
+:storage:test and therefore recompiles it. The repaired test source
+alone could not invalidate this recovery gate's manifest contract
+or schedule new evidence; the seal correctly rejected the stale
+failure rather than interpreting other successful workflows as proof.
+
+The Local State Loss Recovery workflow now watches both
+SharedCommitProgressTest.java and SharedUploadSchedulerTest.java for
+push and pull-request events. Its GA workflow contract fingerprint
+therefore includes these compiled quarantine-safety test inputs.
+A separate GA workflow consistency regression verifies these
+dependencies in both event filters. Changes to either Java test
+now trigger genuine recovery validation instead of relying on a
+failed older source tree.
+
+This adds **no duplicate runtime JUnit tasks** to the recovery job:
+it still runs its existing focused storage recovery, fetcher,
+three-broker local-state loss and remote checkpoint-loss tests,
+using MinIO and Java 25. New source-file triggers merely keep the
+job's evidence fresh.
+
+### Narrow quarantine race during object ID allocation
+
+Before this change, SharedUploadScheduler.selectionStillCurrent()
+correctly rejected a partition quarantined during selection, but
+startUpload() used a pluggable object ID supplier and then immediately
+called SharedObjectUploader.upload(). An allocator could synchronously
+trigger quarantine **after** the last selection check and still
+cause a new object PUT, despite disabled local upload eligibility.
+
+startUpload() now rechecks the quarantine latch **after** obtaining
+a valid object ID and **before** invoking the asynchronous uploader.
+If disabled, it releases candidate reservations and the acquired
+upload slot, returns an empty result, does not PUT, and does not
+record a spurious upload failure. Consuming an otherwise unused
+monotonic object ID is safe; object IDs must not be recycled.
+
+A deterministic SharedUploadSchedulerTest makes the allocator
+latch quarantine during that precise gap. It verifies zero PUT,
+zero reservations, zero in-flight slots, no remote coverage,
+no false failure diagnostic and no later allocator invocation.
+
+**Concurrency limit:** a fresh quarantine from another thread may
+still race in the nanoseconds after this final volatile check and
+before asynchronous upload initiation. This change closes the
+allocator-triggered synchronous gap but does NOT claim atomic
+distributed revocation or cancellation of already-started uploads.
+A future true authorization fence must linearize producer admission,
+persist WAL and metadata durability, and revoke the right to
+publish before COMMITTED reference retirement; that protocol is
+still unimplemented.
+
+### Evidence and release impact
+
+Mandatory retirement/source epoch JUnit witnesses increase from
+**229 to 230** with the new allocator-quarantine regression. The
+strict anti-skip source and JUnit XML checks remain mandatory.
+The existing Java 25, MinIO, WAL crash and recovery workflows must
+revalidate the new commit before GA PASS can be claimed. This batch
+does not activate the KRaft authority producer, COMMITTED object
+reference GC, or physical MinIO deletion.

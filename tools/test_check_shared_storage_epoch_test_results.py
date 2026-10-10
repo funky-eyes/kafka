@@ -43,8 +43,8 @@ class EpochEvidenceCheckerTest(unittest.TestCase):
                 ET.SubElement(case, "failure")
         ET.ElementTree(xml).write(self.root / ("TEST-" + suite + ".xml"), encoding="utf-8")
 
-    def test_all_229_methods_pass(self):
-        self.assertEqual(229, verify(self.root))
+    def test_all_230_methods_pass(self):
+        self.assertEqual(230, verify(self.root))
 
     def test_missing_controller_module_report_fails_closed(self):
         controller = "org.apache.kafka.controller.PartitionRetirementControllerPrecheckTest"
@@ -64,7 +64,7 @@ class EpochEvidenceCheckerTest(unittest.TestCase):
                     xml_name = "TEST-" + suite + ".xml"
                     (other / xml_name).write_bytes((self.root / xml_name).read_bytes())
                     (self.root / xml_name).unlink()
-            self.assertEqual(229, verify(self.root, other))
+            self.assertEqual(230, verify(self.root, other))
 
     def test_third_module_feature_report_must_be_present(self):
         feature = "org.apache.kafka.server.common.PartitionRetirementAuthorityVersionTest"
@@ -91,7 +91,7 @@ class EpochEvidenceCheckerTest(unittest.TestCase):
                     )):
                         (metadata / filename).write_bytes(source.read_bytes())
                         source.unlink()
-                self.assertEqual(229, verify(self.root, metadata, server))
+                self.assertEqual(230, verify(self.root, metadata, server))
 
     def test_missing_controller_image_report_fails_closed(self):
         suite = "org.apache.kafka.image.PartitionRetirementAuthorityImageTest"

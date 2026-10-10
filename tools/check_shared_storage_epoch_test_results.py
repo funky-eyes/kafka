@@ -74,6 +74,7 @@ REQUIRED_TESTS = {
     "org.apache.kafka.storage.internals.shared.kafka.SharedUploadSchedulerTest": (
         "quarantineBeforeUploadDoesNotAllocateAnObjectIdOrReserveASlot",
         "quarantineBetweenSelectionAndPutRejectsStaleUploadCandidate",
+        "quarantineDuringObjectIdAllocationRejectsPutAndReleasesUploadSlot",
     ),
     "org.apache.kafka.storage.internals.shared.kafka.SharedCommitProgressTest": (
         "followsKafkaHighWatermarkExactlyRatherThanTakingMaximum",
