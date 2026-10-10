@@ -59,8 +59,20 @@ public final class LocalRetirementLeadershipFence {
         setRole(partition, false, leaderEpoch);
     }
 
+    /**
+     * Keep the highest observed KRaft source epoch after unassignment.
+     * Forgetting it allows a delayed LEADER(E) to look like a first
+     * assignment and reopen uploads after the partition was removed.
+     * A subsequent assignment requires a strictly newer explicit epoch.
+     */
     public void onRemoved(SharedPartitionId partition) {
-        roles.remove(Objects.requireNonNull(partition, "partition"));
+        Objects.requireNonNull(partition, "partition");
+        roles.compute(partition, (ignored, old) -> new Role(
+            nextGeneration.updateAndGet(value -> Math.addExact(value, 1L)),
+            false,
+            old == null ? UNKNOWN_LEADER_EPOCH : old.leaderEpoch(),
+            true
+        ));
     }
 
     private static void requireEpoch(int leaderEpoch) {
@@ -81,11 +93,26 @@ public final class LocalRetirementLeadershipFence {
             // epoch: a delayed old LEADER callback cannot undo demotion. Repeated
             // LEADER notifications at the current epoch remain valid and refresh
             // the local generation, preserving Kafka's duplicate-callback behavior.
-            boolean epochCanPromote = old == null || old.leader()
-                || observedMaxEpoch == UNKNOWN_LEADER_EPOCH || leaderEpoch > observedMaxEpoch;
+            boolean removed = old != null && old.removed();
+            boolean freshEpoch = leaderEpoch >= 0 && leaderEpoch > observedMaxEpoch;
+            boolean epochCanPromote = old == null || freshEpoch
+                || (!removed && (old.leader() || observedMaxEpoch == UNKNOWN_LEADER_EPOCH));
             boolean newLeader = leader && leaderEpoch >= observedMaxEpoch && epochCanPromote;
-            return new Role(generation, newLeader, Math.max(observedMaxEpoch, leaderEpoch));
+            return new Role(
+                generation, newLeader, Math.max(observedMaxEpoch, leaderEpoch),
+                removed && !newLeader
+            );
         });
+    }
+
+    /**
+     * Fail-closed marker retained after KRaft unassignment. Callers must not
+     * recreate upload progress from callbacks rejected by this tombstone.
+     */
+    public boolean isRemoved(SharedPartitionId partition) {
+        Objects.requireNonNull(partition, "partition");
+        Role current = roles.get(partition);
+        return current != null && current.removed();
     }
 
     public Optional<LeaderTicket> captureLeader(SharedPartitionId partition) {
@@ -150,6 +177,6 @@ public final class LocalRetirementLeadershipFence {
         }
     }
 
-    private record Role(long generation, boolean leader, int leaderEpoch) {
+    private record Role(long generation, boolean leader, int leaderEpoch, boolean removed) {
     }
 }

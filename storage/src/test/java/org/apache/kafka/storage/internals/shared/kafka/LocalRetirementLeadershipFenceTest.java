@@ -83,8 +83,12 @@ class LocalRetirementLeadershipFenceTest {
         assertTrue(fence.captureLeader(PARTITION).isEmpty());
         assertFalse(fence.stillLeader(old));
 
+        // Reassignment after removal must carry a fresh explicit Kafka epoch.
+        // The legacy callback cannot distinguish a genuine assignment from a stale one.
         fence.onLeader(PARTITION);
-        var readded = fence.captureLeader(PARTITION).orElseThrow();
+        assertTrue(fence.captureLeader(PARTITION).isEmpty());
+        fence.onLeader(PARTITION, 1);
+        var readded = fence.captureEpochLeader(PARTITION).orElseThrow();
         assertNotEquals(old.localGeneration(), readded.localGeneration());
         assertFalse(fence.stillLeader(old));
     }
@@ -197,6 +201,78 @@ class LocalRetirementLeadershipFenceTest {
         assertThrows(IllegalArgumentException.class, () -> fence.onLeader(PARTITION, -1));
         assertThrows(IllegalArgumentException.class, () -> fence.onFollower(PARTITION, -1));
         assertTrue(fence.captureEpochLeader(PARTITION).isEmpty());
+    }
+
+    @Test
+    void removedEpochTombstoneFencesEqualAndLowerLeaderCallbacks() {
+        LocalRetirementLeadershipFence fence = new LocalRetirementLeadershipFence();
+        fence.onLeader(PARTITION, 20);
+        var first = fence.captureEpochLeader(PARTITION).orElseThrow();
+        fence.onRemoved(PARTITION);
+
+        fence.onLeader(PARTITION, 19);
+        fence.onLeader(PARTITION, 20);
+        assertTrue(fence.captureLeader(PARTITION).isEmpty());
+        assertFalse(fence.stillLeader(first));
+
+        fence.onLeader(PARTITION, 21);
+        assertTrue(fence.captureEpochLeader(PARTITION).isPresent());
+        assertFalse(fence.stillLeader(first));
+    }
+
+    @Test
+    void removedUnversionedAssignmentRequiresExplicitEpochForReadmission() {
+        LocalRetirementLeadershipFence fence = new LocalRetirementLeadershipFence();
+        fence.onLeader(PARTITION);
+        fence.onRemoved(PARTITION);
+        fence.onLeader(PARTITION);
+        assertTrue(fence.captureLeader(PARTITION).isEmpty());
+
+        fence.onLeader(PARTITION, 0);
+        assertTrue(fence.captureEpochLeader(PARTITION).isPresent());
+    }
+
+    @Test
+    void removedPartitionTracksLaterFollowerEpochBeforeReassignment() {
+        LocalRetirementLeadershipFence fence = new LocalRetirementLeadershipFence();
+        fence.onLeader(PARTITION, 10);
+        fence.onRemoved(PARTITION);
+        fence.onFollower(PARTITION, 15);
+        fence.onLeader(PARTITION, 14);
+        fence.onLeader(PARTITION, 15);
+        assertTrue(fence.captureLeader(PARTITION).isEmpty());
+
+        fence.onLeader(PARTITION, 16);
+        assertTrue(fence.captureEpochLeader(PARTITION).isPresent());
+    }
+
+    @Test
+    void repeatedRemovalKeepsLatestFenceAndInvalidatesPriorLeaderTickets() {
+        LocalRetirementLeadershipFence fence = new LocalRetirementLeadershipFence();
+        fence.onLeader(PARTITION, 1);
+        var first = fence.captureEpochLeader(PARTITION).orElseThrow();
+        fence.onRemoved(PARTITION);
+        fence.onRemoved(PARTITION);
+
+        assertTrue(fence.captureLeader(PARTITION).isEmpty());
+        assertFalse(fence.stillLeader(first));
+        fence.onLeader(PARTITION, 1);
+        assertTrue(fence.captureLeader(PARTITION).isEmpty());
+
+        fence.onLeader(PARTITION, 2);
+        assertTrue(fence.captureEpochLeader(PARTITION).isPresent());
+    }
+
+    @Test
+    void deletedTopicIdTombstoneDoesNotFenceRecreatedTopicId() {
+        LocalRetirementLeadershipFence fence = new LocalRetirementLeadershipFence();
+        fence.onLeader(PARTITION, 30);
+        fence.onRemoved(PARTITION);
+
+        fence.onLeader(RECREATED_TOPIC, 0);
+        assertTrue(fence.captureEpochLeader(RECREATED_TOPIC).isPresent());
+        fence.onLeader(PARTITION, 30);
+        assertTrue(fence.captureLeader(PARTITION).isEmpty());
     }
 
     @Test

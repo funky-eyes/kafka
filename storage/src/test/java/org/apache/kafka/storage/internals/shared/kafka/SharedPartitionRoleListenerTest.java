@@ -325,6 +325,73 @@ class SharedPartitionRoleListenerTest {
         ).isEmpty());
     }
 
+    @Test
+    void lateSameEpochLeaderAfterRemovalCannotRecreateUploadProgress() {
+        SharedCommitProgress progress = new SharedCommitProgress();
+        SharedPartitionRoleListener listener = new SharedPartitionRoleListener(configuration(Map.of()), progress);
+        Uuid topicId = Uuid.randomUuid();
+        TopicIdPartition topic = topicPartition(topicId, "shared-topic", 6);
+        SharedPartitionId id = sharedPartitionId(topicId, 6);
+        listener.onLeadershipChangeWithEpochs(Map.of(topic, 10), Map.of());
+        assertTrue(progress.partitionProgress(id).orElseThrow().isLeader());
+        listener.onPartitionsRemoved(List.of(topic));
+
+        listener.onLeadershipChangeWithEpochs(Map.of(topic, 10), Map.of());
+
+        assertFalse(progress.partitionProgress(id).isPresent());
+        assertTrue(listener.captureEpochRetirementLeader(id).isEmpty());
+    }
+
+    @Test
+    void removedPartitionRejectsLateFollowerAndLegacyLeaderWithoutPhantomProgress() {
+        SharedCommitProgress progress = new SharedCommitProgress();
+        SharedPartitionRoleListener listener = new SharedPartitionRoleListener(configuration(Map.of()), progress);
+        Uuid topicId = Uuid.randomUuid();
+        TopicIdPartition topic = topicPartition(topicId, "shared-topic", 7);
+        SharedPartitionId id = sharedPartitionId(topicId, 7);
+        listener.onLeadershipChangeWithEpochs(Map.of(topic, 10), Map.of());
+        listener.onPartitionsRemoved(List.of(topic));
+
+        listener.onLeadershipChangeWithEpochs(Map.of(), Map.of(topic, 9));
+        listener.onLeadershipChange(List.of(topic), List.of());
+
+        assertFalse(progress.partitionProgress(id).isPresent());
+        assertTrue(listener.captureRetirementLeader(id).isEmpty());
+    }
+
+    @Test
+    void onlyNewerExplicitEpochCanReassignRemovedUploadLeader() {
+        SharedCommitProgress progress = new SharedCommitProgress();
+        SharedPartitionRoleListener listener = new SharedPartitionRoleListener(configuration(Map.of()), progress);
+        Uuid topicId = Uuid.randomUuid();
+        TopicIdPartition topic = topicPartition(topicId, "shared-topic", 8);
+        SharedPartitionId id = sharedPartitionId(topicId, 8);
+        listener.onLeadershipChangeWithEpochs(Map.of(topic, 10), Map.of());
+        listener.onPartitionsRemoved(List.of(topic));
+
+        listener.onLeadershipChangeWithEpochs(Map.of(topic, 11), Map.of());
+
+        assertTrue(progress.partitionProgress(id).orElseThrow().isLeader());
+        assertEquals(11, listener.captureEpochRetirementLeader(id).orElseThrow().leaderEpoch());
+    }
+
+    @Test
+    void recreationWithNewTopicIdIsIndependentOfRemovedEpochTombstone() {
+        SharedCommitProgress progress = new SharedCommitProgress();
+        SharedPartitionRoleListener listener = new SharedPartitionRoleListener(configuration(Map.of()), progress);
+        Uuid deleted = Uuid.randomUuid();
+        Uuid recreated = Uuid.randomUuid();
+        TopicIdPartition old = topicPartition(deleted, "shared-topic", 0);
+        TopicIdPartition replacement = topicPartition(recreated, "shared-topic", 0);
+        listener.onLeadershipChangeWithEpochs(Map.of(old, 20), Map.of());
+        listener.onPartitionsRemoved(List.of(old));
+
+        listener.onLeadershipChangeWithEpochs(Map.of(replacement, 0), Map.of());
+
+        assertFalse(progress.partitionProgress(sharedPartitionId(deleted, 0)).isPresent());
+        assertTrue(progress.partitionProgress(sharedPartitionId(recreated, 0)).orElseThrow().isLeader());
+    }
+
     private SharedStorageConfiguration configuration(Map<String, ?> originals) {
         return SharedStorageConfiguration.from(new StorageExtensionContext(
             originals,

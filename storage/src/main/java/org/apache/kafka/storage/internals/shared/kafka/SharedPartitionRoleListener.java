@@ -36,6 +36,9 @@ public final class SharedPartitionRoleListener implements StoragePartitionRoleLi
     private final SharedStorageConfiguration configuration;
     private final SharedCommitProgress commitProgress;
     private final LocalRetirementLeadershipFence retirementFence = new LocalRetirementLeadershipFence();
+    // Keep remove/reassign and upload-role publication ordered per listener,
+    // without I/O or coordination with Kafka's native log monitor.
+    private final Object roleCallbackLock = new Object();
 
     public SharedPartitionRoleListener(
         SharedStorageConfiguration configuration,
@@ -70,14 +73,16 @@ public final class SharedPartitionRoleListener implements StoragePartitionRoleLi
     @Override
     public void onPartitionsRemoved(Collection<TopicIdPartition> partitions) {
         Objects.requireNonNull(partitions, "partitions");
-        partitions.forEach(partition -> {
-            Objects.requireNonNull(partition, "partition");
-            if (configuration.useSharedStorage(partition.topic())) {
-                SharedPartitionId id = sharedPartitionId(partition);
-                retirementFence.onRemoved(id);
-                commitProgress.remove(id);
-            }
-        });
+        synchronized (roleCallbackLock) {
+            partitions.forEach(partition -> {
+                Objects.requireNonNull(partition, "partition");
+                if (configuration.useSharedStorage(partition.topic())) {
+                    SharedPartitionId id = sharedPartitionId(partition);
+                    retirementFence.onRemoved(id);
+                    commitProgress.remove(id);
+                }
+            });
+        }
     }
 
     private void updateRole(TopicIdPartition partition, boolean leader, int leaderEpoch) {
@@ -86,30 +91,35 @@ public final class SharedPartitionRoleListener implements StoragePartitionRoleLi
             return;
         }
         SharedPartitionId sharedPartition = sharedPartitionId(partition);
+        synchronized (roleCallbackLock) {
+            applyRoleCallback(sharedPartition, leader, leaderEpoch);
+        }
+    }
+
+    private void applyRoleCallback(SharedPartitionId partition, boolean leader, int epoch) {
         if (leader) {
-            // A negative/unknown epoch can carry a legacy notification, but can
-            // never issue an epoch-aware retirement writer ticket.
-            if (leaderEpoch >= 0) {
-                retirementFence.onLeader(sharedPartition, leaderEpoch);
+            if (epoch >= 0) {
+                retirementFence.onLeader(partition, epoch);
             } else {
-                retirementFence.onLeader(sharedPartition);
+                retirementFence.onLeader(partition);
             }
-            // A delayed equal/lower-epoch LEADER callback can be rejected
-            // by the local epoch fence. It must not re-enable uploads via
-            // SharedCommitProgress when retirement leadership stayed revoked.
-            if (retirementFence.captureLeader(sharedPartition).isPresent()) {
-                commitProgress.onLeader(sharedPartition);
-            } else {
-                commitProgress.onFollower(sharedPartition);
-            }
+        } else if (epoch >= 0) {
+            retirementFence.onFollower(partition, epoch);
         } else {
-            // Invalidate local retirement work before publishing follower progress.
-            if (leaderEpoch >= 0) {
-                retirementFence.onFollower(sharedPartition, leaderEpoch);
-            } else {
-                retirementFence.onFollower(sharedPartition);
-            }
-            commitProgress.onFollower(sharedPartition);
+            retirementFence.onFollower(partition);
+        }
+
+        // The tombstone remains until an explicit newer epoch reassigns the
+        // partition. A stale leader/follower callback after removal must NOT
+        // recreate an upload-progress entry with a fresh default offset 0.
+        if (retirementFence.isRemoved(partition)) {
+            commitProgress.remove(partition);
+            return;
+        }
+        if (retirementFence.captureLeader(partition).isPresent()) {
+            commitProgress.onLeader(partition);
+        } else {
+            commitProgress.onFollower(partition);
         }
     }
 
