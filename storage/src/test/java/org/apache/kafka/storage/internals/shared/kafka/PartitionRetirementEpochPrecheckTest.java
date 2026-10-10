@@ -153,6 +153,23 @@ class PartitionRetirementEpochPrecheckTest {
     }
 
     @Test
+    void demotionDuringLegacyMetadataReadCannotReturnStaleEpochMatch() {
+        LocalRetirementLeadershipFence fence = new LocalRetirementLeadershipFence();
+        fence.onLeader(PARTITION, 5);
+        var ticket = fence.captureEpochLeader(PARTITION).orElseThrow();
+        SharedMetadataImage image = mock(SharedMetadataImage.class);
+        when(image.partitionLogStartEvidence(PARTITION)).thenAnswer(ignored -> {
+            fence.onFollower(PARTITION, 6);
+            return new SharedMetadataImage.PartitionLogStartEvidence(2L, OptionalLong.of(10L));
+        });
+
+        var result = check(fence, ticket, 5, image, 20L, 20L, 2L);
+
+        assertEquals(PartitionRetirementEpochPrecheck.Status.LOCAL_TICKET_STALE, result.status());
+        assertTrue(result.valueFinding().isEmpty());
+    }
+
+    @Test
     void nativeSourceWindowProducesOnlyAdvisoryValueFinding() throws IOException {
         SharedPartitionRoleListener roles = nativeRoles();
         elect(roles, 8);

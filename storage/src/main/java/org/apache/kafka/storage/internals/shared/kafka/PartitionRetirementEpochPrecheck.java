@@ -63,16 +63,15 @@ public final class PartitionRetirementEpochPrecheck {
         if (observedKafkaLeaderEpoch != ticket.leaderEpoch()) {
             return new Assessment(Status.KAFKA_EPOCH_MISMATCH, Optional.empty());
         }
-        return new Assessment(
-            Status.LOCAL_EPOCH_OBSERVATION_MATCH,
-            Optional.of(PartitionLogStartAdvancePrecheck.assess(
-                image,
-                ticket.partition(),
-                requestedLogStart,
-                observedKafkaLogStart,
-                requiredMetadataOffset
-            ))
+        PartitionLogStartAdvancePrecheck.Finding value = PartitionLogStartAdvancePrecheck.assess(
+            image, ticket.partition(), requestedLogStart, observedKafkaLogStart, requiredMetadataOffset
         );
+        // Metadata replay can overlap a demotion even when the first ticket
+        // check succeeds. Return no advisory result from a stale generation.
+        if (!fence.stillLeader(ticket)) {
+            return new Assessment(Status.LOCAL_TICKET_STALE, Optional.empty());
+        }
+        return new Assessment(Status.LOCAL_EPOCH_OBSERVATION_MATCH, Optional.of(value));
     }
 
     /**

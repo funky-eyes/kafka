@@ -298,6 +298,7 @@ REQUIRED_TESTS = {
         "matchedEpochCannotOverrideReplayHorizon",
         "matchedEpochCannotOverrideSourceLogStartUpperBound",
         "corruptedMetadataImageFailsClosedAfterLocalEpochMatch",
+        "demotionDuringLegacyMetadataReadCannotReturnStaleEpochMatch",
         "nativeSourceWindowProducesOnlyAdvisoryValueFinding",
         "nativeSourceRejectsWrongTopicIncarnationOrPartition",
         "nativeSourceRejectsLegacyEpochAndUnknownWindow",

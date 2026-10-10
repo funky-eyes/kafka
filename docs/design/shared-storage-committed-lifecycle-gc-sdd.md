@@ -1710,3 +1710,22 @@ append offset. The result is not a serializable certificate or a
 controller-writer permit. The controller still returns
 SOURCE_LOG_START_NOT_VERIFIED and no physical COMMITTED object GC
 or post-retention S3 DELETE is enabled.
+
+## Batch 42: retire stale advisory evidence after metadata-replay demotion
+
+The legacy PartitionRetirementEpochPrecheck.assess path previously checked
+its caller-supplied local leader ticket only before reading the
+SharedMetadataImage. A demotion during that read could return
+LOCAL_EPOCH_OBSERVATION_MATCH even after local leadership was lost.
+
+After calculating the advisory value classification, it now rechecks
+that exact ticket and discards the finding with LOCAL_TICKET_STALE if
+the generation changed. This matches Batch 41's actual-native path
+without changing the public method signature, inventing source
+authenticity, or adding Kafka/MinIO I/O under callback locks.
+A Mockito-triggered demotion during metadata lookup is covered by a
+deterministic regression. The mandatory Java 25 safety count reaches
+**251 tests**; absent/skipped methods remain release blockers.
+
+Both paths remain read-only and non-authorizing. Production KRaft
+controller emission, durable reference GC, and S3 DELETE stay disabled.
