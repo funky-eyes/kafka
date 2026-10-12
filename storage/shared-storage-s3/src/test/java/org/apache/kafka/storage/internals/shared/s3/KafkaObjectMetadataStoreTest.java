@@ -29,6 +29,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -143,6 +144,68 @@ class KafkaObjectMetadataStoreTest {
         tracker.fail(new RuntimeException("consumer failed"));
 
         tracker.awaitApplied(42L).get(10, TimeUnit.SECONDS);
+    }
+
+    @Test
+    void capturedReadCommittedLsoWaitsForAppliedConsumerPositionAcrossCompactionGaps() throws Exception {
+        KafkaObjectMetadataStore.ReplayHorizonRequest request =
+            new KafkaObjectMetadataStore.ReplayHorizonRequest();
+        request.captureTarget(42L);
+        assertFalse(request.completeIfApplied(37L));
+        assertFalse(request.future().isDone());
+        // Kafka compaction can omit offset 41: last record offset is not
+        // evidence that the read-committed consumer cursor is behind LSO 42.
+        assertTrue(request.completeIfApplied(42L));
+        var snapshot = request.future().get(10, TimeUnit.SECONDS);
+        assertEquals(42L, snapshot.capturedStableEndExclusive());
+        assertEquals(42L, snapshot.appliedPositionExclusive());
+    }
+
+    @Test
+    void emptyReadCommittedMetadataTopicCanCaptureZeroWithoutRecords() throws Exception {
+        KafkaObjectMetadataStore.ReplayHorizonRequest request =
+            new KafkaObjectMetadataStore.ReplayHorizonRequest();
+        request.captureTarget(0L);
+        assertTrue(request.completeIfApplied(0L));
+        assertEquals(0L, request.future().get(10, TimeUnit.SECONDS).capturedStableEndExclusive());
+    }
+
+    @Test
+    void replayHorizonPreservesCapturedLsoSeparatelyFromLaterConsumerProgress() throws Exception {
+        KafkaObjectMetadataStore.ReplayHorizonRequest request =
+            new KafkaObjectMetadataStore.ReplayHorizonRequest();
+        request.captureTarget(12L);
+        assertTrue(request.completeIfApplied(20L));
+        var snapshot = request.future().get(10, TimeUnit.SECONDS);
+        assertEquals(12L, snapshot.capturedStableEndExclusive());
+        assertEquals(20L, snapshot.appliedPositionExclusive());
+        assertThrows(IllegalArgumentException.class, () ->
+            new KafkaObjectMetadataStore.ReadCommittedReplayHorizon(12L, 11L));
+    }
+
+    @Test
+    void malformedOrUncapturedReadCommittedHorizonFailsClosed() {
+        KafkaObjectMetadataStore.ReplayHorizonRequest request =
+            new KafkaObjectMetadataStore.ReplayHorizonRequest();
+        assertThrows(IllegalStateException.class, () -> request.completeIfApplied(0L));
+        assertThrows(IllegalArgumentException.class, () -> request.captureTarget(-1L));
+        request.captureTarget(7L);
+        assertThrows(IllegalArgumentException.class, () -> request.captureTarget(9L));
+        assertThrows(IllegalStateException.class, () -> request.completeIfApplied(-1L));
+        assertFalse(request.future().isDone());
+    }
+
+    @Test
+    void failedReadCommittedHorizonNeverReopensAfterLateConsumerProgress() throws Exception {
+        KafkaObjectMetadataStore.ReplayHorizonRequest request =
+            new KafkaObjectMetadataStore.ReplayHorizonRequest();
+        request.captureTarget(20L);
+        RuntimeException failure = new IllegalStateException("metadata consumer stopped");
+        request.fail(failure);
+        assertFalse(request.completeIfApplied(20L));
+        ExecutionException observed = assertThrows(
+            ExecutionException.class, () -> request.future().get(10, TimeUnit.SECONDS));
+        assertSame(failure, observed.getCause());
     }
 
     @Test

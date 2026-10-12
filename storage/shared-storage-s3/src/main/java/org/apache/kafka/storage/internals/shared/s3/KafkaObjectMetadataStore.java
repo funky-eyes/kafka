@@ -599,6 +599,9 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
         }
 
         boolean completeIfApplied(long consumerPositionExclusive) {
+            if (future.isDone()) {
+                return false;
+            }
             if (!hasTarget() || consumerPositionExclusive < 0L) {
                 throw new IllegalStateException("Unknown metadata consumer position or target");
             }
