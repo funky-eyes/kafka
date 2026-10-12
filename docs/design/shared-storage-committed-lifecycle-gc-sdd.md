@@ -2046,3 +2046,18 @@ consumer's future evidence and the actual SharedUnifiedLog, plus a
 fresh controller broker-epoch/incarnation check, before an eventual
 KRaft writer can authorize durable retirement. Physical GC remains
 completely disabled.
+
+## Batch 62: prevent dangling JavaDoc from obscuring all GA correctness results
+
+Batch 59-61 compilation was blocked in KafkaObjectMetadataStore
+because two JavaDoc comments were adjacent before one record declaration.
+Java 25's dangling-doc-comments warning was promoted to a compilation
+failure by -Werror. This was not a failed Kafka/S3 correctness assertion,
+but did prevent every dependent runtime suite from executing.
+
+Attach the preview comment only to the preview record and move the
+bounded-mailbox comment immediately before its actual class. Extend
+the already-executed pre-Gradle source checker to reject consecutive
+JavaDoc blocks in the Shared Storage Java production trees. Two small
+unit tests verify negative and positive cases. Do not disable -Werror,
+change dependencies, relax CI, or grant any retirement/GC authority.

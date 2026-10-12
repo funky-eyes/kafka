@@ -664,11 +664,6 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
     }
 
     /**
-     * Bounded, cancellation-safe mailbox. Completed requests are removed
-     * before releasing their slot, preventing canceled callers from filling
-     * the consumer queue while the Kafka client is blocked in a network call.
-     */
-    /**
      * Immutable historical preview only. No controller-issued identity,
      * WAL durability certificate or source-leadership lease is attached.
      */
@@ -684,6 +679,11 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
         }
     }
 
+    /**
+     * Bounded, cancellation-safe mailbox. Completed requests are removed
+     * before releasing their slot, preventing canceled callers from filling
+     * the consumer queue while the Kafka client is blocked in a network call.
+     */
     static final class ReplayHorizonMailbox {
         private final Semaphore permits;
         private final ConcurrentLinkedQueue<ReplayHorizonRequest> queue = new ConcurrentLinkedQueue<>();

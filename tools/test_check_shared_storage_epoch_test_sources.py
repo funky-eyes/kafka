@@ -22,7 +22,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tools.check_shared_storage_epoch_test_sources import java_test_source_path, verify_sources
+from tools.check_shared_storage_epoch_test_sources import (
+    java_test_source_path, verify_no_adjacent_javadocs, verify_sources,
+)
 
 
 class EpochTestSourcePreflightTest(unittest.TestCase):
@@ -46,6 +48,39 @@ class EpochTestSourcePreflightTest(unittest.TestCase):
 
     def write(self, text):
         self.source.write_text(text, encoding="utf-8")
+
+    def test_production_adjacent_javadocs_fail_before_gradle(self):
+        path = self.root / (
+            "storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/"
+            "internals/shared/s3/KafkaObjectMetadataStore.java"
+        )
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            "class KafkaObjectMetadataStore {\n"
+            "  /** first */\n"
+            "  /** second */\n"
+            "  record Preview(int value) {}\n"
+            "}\n", encoding="utf-8"
+        )
+        with self.assertRaisesRegex(ValueError, "Adjacent JavaDoc blocks"):
+            verify_no_adjacent_javadocs(self.root)
+        with self.assertRaisesRegex(ValueError, "Adjacent JavaDoc blocks"):
+            verify_sources(self.root, self.REQUIRED)
+
+    def test_single_production_javadoc_block_is_accepted(self):
+        path = self.root / (
+            "storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/"
+            "internals/shared/s3/KafkaObjectMetadataStore.java"
+        )
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            "class KafkaObjectMetadataStore {\n"
+            "  /** one block */\n"
+            "  record Preview(int value) {}\n"
+            "}\n", encoding="utf-8"
+        )
+        self.assertEqual(1, verify_no_adjacent_javadocs(self.root))
+        self.assertEqual(1, verify_sources(self.root, self.REQUIRED))
 
     def test_correct_source_and_import_pass(self):
         self.assertEqual(1, verify_sources(self.root, self.REQUIRED))

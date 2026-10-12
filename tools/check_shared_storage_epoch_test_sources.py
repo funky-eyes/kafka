@@ -43,6 +43,27 @@ ASSERTION_NAMES = (
 STATIC_IMPORT_RE = re.compile(
     r"(?m)^\s*import\s+static\s+org\.junit\.jupiter\.api\.Assertions\.(\w+|\*)\s*;"
 )
+# javac -Xlint:dangling-doc-comments -Werror rejects adjacent doc blocks.
+# Catch that deterministic formatting mistake before scheduling the full GA matrix.
+ADJACENT_JAVADOC_RE = re.compile(r"/\*\*.*?\*/\s*/\*\*", re.DOTALL)
+PRODUCTION_JAVA_ROOTS = (
+    "storage/src/main/java/org/apache/kafka/storage/internals/shared",
+    "storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3",
+)
+
+
+def verify_no_adjacent_javadocs(root: Path) -> int:
+    checked = 0
+    for directory in PRODUCTION_JAVA_ROOTS:
+        source_root = root / directory
+        if not source_root.is_dir():
+            continue
+        for path in source_root.rglob("*.java"):
+            source = path.read_text(encoding="utf-8")
+            if ADJACENT_JAVADOC_RE.search(source):
+                raise ValueError(f"Adjacent JavaDoc blocks will fail -Werror: {path}")
+            checked += 1
+    return checked
 
 
 def java_test_source_path(root: Path, suite: str) -> Path:
@@ -64,6 +85,7 @@ def java_test_source_path(root: Path, suite: str) -> Path:
 
 
 def verify_sources(root: Path, required_tests=None) -> int:
+    verify_no_adjacent_javadocs(root)
     if required_tests is None:
         required_tests = REQUIRED_TESTS
     total = 0
