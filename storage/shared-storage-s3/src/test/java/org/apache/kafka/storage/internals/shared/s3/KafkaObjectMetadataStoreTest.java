@@ -324,6 +324,39 @@ class KafkaObjectMetadataStoreTest {
     }
 
     @Test
+    void kafkaMetadataReplayProbeTimeoutOnlyFailsThatFuture() throws Exception {
+        var request = new KafkaObjectMetadataStore.ReplayHorizonRequest();
+        TimeoutException timeout = new TimeoutException("metadata LSO unavailable");
+        KafkaObjectMetadataStore.failOnlyOptionalProbeTimeout(request, timeout);
+        ExecutionException observed = assertThrows(
+            ExecutionException.class, () -> request.future().get(10, TimeUnit.SECONDS)
+        );
+        assertSame(timeout, observed.getCause());
+    }
+
+    @Test
+    void fatalMetadataConsumerErrorsCannotBeIsolatedAsProbeTimeouts() {
+        var request = new KafkaObjectMetadataStore.ReplayHorizonRequest();
+        RuntimeException fatal = new IllegalStateException("invalid Kafka consumer state");
+        assertSame(fatal, assertThrows(
+            IllegalStateException.class,
+            () -> KafkaObjectMetadataStore.failOnlyOptionalProbeTimeout(request, fatal)
+        ));
+        assertFalse(request.future().isDone());
+    }
+
+    @Test
+    void kafkaConsumerWakeupRemainsAnOuterLifecycleSignal() {
+        var request = new KafkaObjectMetadataStore.ReplayHorizonRequest();
+        var wakeup = new org.apache.kafka.common.errors.WakeupException();
+        assertSame(wakeup, assertThrows(
+            org.apache.kafka.common.errors.WakeupException.class,
+            () -> KafkaObjectMetadataStore.failOnlyOptionalProbeTimeout(request, wakeup)
+        ));
+        assertFalse(request.future().isDone());
+    }
+
+    @Test
     void retriesOnlyTransientMetadataTopicCreationFailures() {
         assertTrue(KafkaObjectMetadataStore.isTransientTopicCreationFailure(
             new InvalidReplicationFactorException("not enough brokers yet")));

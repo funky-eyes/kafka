@@ -353,12 +353,24 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
                     return;
                 }
                 horizonRequests.remove(request);
-            } catch (TimeoutException e) {
-                // Only a transient timeout of this OPTIONAL diagnostic is
-                // isolated; authorization, corruption and other Kafka errors
-                // must still fail the authoritative metadata consumer.
-                request.fail(e);
+            } catch (RuntimeException e) {
+                failOnlyOptionalProbeTimeout(request, e);
             }
+        }
+    }
+
+    /**
+     * The diagnostic may fail independently only for a Kafka client timeout.
+     * Authentication, invalid consumer state and unexpected runtime errors
+     * must propagate to runLiveConsumer's fail-closed image failure path.
+     */
+    static void failOnlyOptionalProbeTimeout(ReplayHorizonRequest request, RuntimeException cause) {
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(cause, "cause");
+        if (cause instanceof TimeoutException) {
+            request.fail(cause);
+        } else {
+            throw cause;
         }
     }
 

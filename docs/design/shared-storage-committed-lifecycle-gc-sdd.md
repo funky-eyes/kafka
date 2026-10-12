@@ -1959,3 +1959,19 @@ capacity release, later cursor movement not reopening evidence,
 monotonic wrap-around and preservation of already-completed evidence.
 The strict S3 horizon anti-skip count reaches **12 methods**. No
 retirement authority writer or physical COMMITTED GC is enabled.
+
+## Batch 58: mandatory evidence for timeout-only probe isolation
+
+The optional read-committed replay probe must never launder a fatal
+Kafka client exception into an innocuous failed diagnostic future.
+Its catch path delegates to a small fail-closed classifier that
+is independently tested: only Kafka TimeoutException completes the
+single probe future, while unexpected IllegalStateException or Kafka
+WakeupException retains its original object and propagates to the
+existing metadata consumer failure or shutdown path.
+
+Three deterministic JUnit tests lock that boundary. The S3-only
+no-skip replay horizon evidence grows from 12 to **15 methods**; the
+265-method Java/Scala identity gate and real MinIO runtime suites
+continue unchanged. These additions issue no KRaft writer command,
+no metadata watermark record and no physical COMMITTED S3 DELETE.

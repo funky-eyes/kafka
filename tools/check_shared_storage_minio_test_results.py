@@ -36,6 +36,9 @@ HORIZON_CASES = {
         "replayHorizonMailboxDoesNotConsumeTwoPermitsForTheSameRequest",
         "waitingReplayHorizonExpiresOnMonotonicDeadlineAndReleasesCapacity",
         "replayHorizonDeadlineIsWrapSafeAndNeverRevokesCompletedEvidence",
+        "kafkaMetadataReplayProbeTimeoutOnlyFailsThatFuture",
+        "fatalMetadataConsumerErrorsCannotBeIsolatedAsProbeTimeouts",
+        "kafkaConsumerWakeupRemainsAnOuterLifecycleSignal",
     },
 }
 
