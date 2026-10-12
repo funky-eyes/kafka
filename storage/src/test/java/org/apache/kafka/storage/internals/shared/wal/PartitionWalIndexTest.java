@@ -18,8 +18,13 @@ package org.apache.kafka.storage.internals.shared.wal;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PartitionWalIndexTest {
@@ -72,6 +77,100 @@ class PartitionWalIndexTest {
 
         index.truncate(key, 10L);
         assertTrue(index.mutationRevision(key) > afterReplacement);
+    }
+
+    @Test
+    void destructiveMutationHasNoStableRevisionWhileItIsInProgress() throws Exception {
+        PartitionWalIndex.MutationGate gate = new PartitionWalIndex.MutationGate();
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CompletableFuture<Void> mutation = CompletableFuture.runAsync(() ->
+            gate.destructiveChange(() -> {
+                entered.countDown();
+                try {
+                    if (!release.await(5L, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("Timed out holding WAL mutation");
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("Interrupted WAL mutation", e);
+                }
+            })
+        );
+        try {
+            assertTrue(entered.await(5L, TimeUnit.SECONDS));
+            assertEquals(-1L, gate.observedRevision(),
+                "An in-flight destructive mutation must not supply stable source evidence");
+        } finally {
+            release.countDown();
+        }
+        mutation.get(10L, TimeUnit.SECONDS);
+        assertEquals(1L, gate.observedRevision());
+    }
+
+    @Test
+    void failedDestructiveMutationRestoresReadableRevision() {
+        PartitionWalIndex.MutationGate gate = new PartitionWalIndex.MutationGate();
+        assertThrows(IllegalStateException.class, () ->
+            gate.destructiveChange(() -> {
+                throw new IllegalStateException("test mutation failure");
+            })
+        );
+        assertEquals(1L, gate.observedRevision(),
+            "A failed mutation must not leave the generation permanently odd");
+    }
+
+    @Test
+    void reclamationFencesOnlyModifiedPartition() {
+        PartitionWalIndex index = new PartitionWalIndex();
+        WalPartitionKey reclaimed = new WalPartitionKey(1L, 2L, 3);
+        WalPartitionKey surviving = new WalPartitionKey(1L, 2L, 4);
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 0, 9, new byte[]{1}),
+            new WalAppendResult(100L, 100));
+        index.apply(WalRecord.data(1L, 2L, 4, 7, 0, 9, new byte[]{2}),
+            new WalAppendResult(200L, 100));
+        long before = index.mutationRevision(reclaimed);
+        long survivorBefore = index.mutationRevision(surviving);
+
+        index.removeBefore(150L);
+        assertTrue(index.find(reclaimed, 0L).isEmpty());
+        assertTrue(index.find(surviving, 0L).isPresent());
+        assertTrue(index.mutationRevision(reclaimed) > before);
+        assertEquals(survivorBefore, index.mutationRevision(surviving));
+        long completed = index.mutationRevision(reclaimed);
+        index.removeBefore(150L);
+        assertEquals(completed, index.mutationRevision(reclaimed));
+    }
+
+    @Test
+    void clearFencesEveryFormerPartitionAndKeepsGenerationAfterReplay() {
+        PartitionWalIndex index = new PartitionWalIndex();
+        WalPartitionKey first = new WalPartitionKey(1L, 2L, 3);
+        WalPartitionKey second = new WalPartitionKey(1L, 2L, 4);
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 0, 9, new byte[]{1}),
+            new WalAppendResult(100L, 100));
+        index.apply(WalRecord.data(1L, 2L, 4, 7, 0, 9, new byte[]{2}),
+            new WalAppendResult(200L, 100));
+        index.clear();
+        assertTrue(index.find(first, 0L).isEmpty());
+        assertTrue(index.find(second, 0L).isEmpty());
+        assertEquals(1L, index.mutationRevision(first));
+        assertEquals(1L, index.mutationRevision(second));
+
+        index.apply(WalRecord.data(1L, 2L, 3, 8, 0, 9, new byte[]{3}),
+            new WalAppendResult(300L, 100));
+        assertEquals(1L, index.mutationRevision(first));
+        assertTrue(index.find(first, 0L).isPresent());
+    }
+
+    @Test
+    void emptyTruncateIsStillAGenerationFence() {
+        PartitionWalIndex index = new PartitionWalIndex();
+        WalPartitionKey key = new WalPartitionKey(1L, 2L, 3);
+        assertEquals(0L, index.mutationRevision(key));
+        index.truncate(key, 100L);
+        assertEquals(1L, index.mutationRevision(key));
+        assertTrue(index.find(key, 100L).isEmpty());
     }
 
     @Test

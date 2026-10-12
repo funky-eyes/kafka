@@ -91,6 +91,28 @@ class SharedStorageEngineWalDurabilityFenceTest {
         }
     }
 
+    @Test
+    void duplicateWalGroupAddressesCannotPublishAnyIndexedBatch() throws Exception {
+        CompletableFuture<List<WalAppendResult>> barrier = new CompletableFuture<>();
+        try (SharedStorageEngine engine = engine(barrier)) {
+            CompletableFuture<List<WalLocation>> append = engine.appendOwnedBatchGroup(PARTITION, batches());
+            barrier.complete(List.of(new WalAppendResult(1L, 61), new WalAppendResult(1L, 61)));
+            assertThrows(CompletionException.class, append::join);
+            assertTrue(engine.localLocations(PARTITION, 0L, 20L).isEmpty());
+        }
+    }
+
+    @Test
+    void descendingWalGroupAddressesCannotPublishAnyIndexedBatch() throws Exception {
+        CompletableFuture<List<WalAppendResult>> barrier = new CompletableFuture<>();
+        try (SharedStorageEngine engine = engine(barrier)) {
+            CompletableFuture<List<WalLocation>> append = engine.appendOwnedBatchGroup(PARTITION, batches());
+            barrier.complete(List.of(new WalAppendResult(62L, 61), new WalAppendResult(1L, 61)));
+            assertThrows(CompletionException.class, append::join);
+            assertTrue(engine.localLocations(PARTITION, 0L, 20L).isEmpty());
+        }
+    }
+
     private static SharedStorageEngine engine(CompletableFuture<List<WalAppendResult>> barrier) throws IOException {
         SharedWal wal = mock(SharedWal.class);
         when(wal.appendBatch(anyList())).thenReturn(barrier);

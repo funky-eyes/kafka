@@ -32,7 +32,7 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class PartitionWalIndex {
     private final ConcurrentHashMap<WalPartitionKey, ConcurrentNavigableMap<Long, WalLocation>> locations =
         new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<WalPartitionKey, AtomicLong> mutationRevisions = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<WalPartitionKey, MutationGate> mutationRevisions = new ConcurrentHashMap<>();
 
     public void apply(WalRecord record, WalAppendResult appendResult) {
         WalPartitionKey key = WalPartitionKey.of(record);
@@ -47,16 +47,21 @@ public final class PartitionWalIndex {
             record.firstOffset(),
             record.lastOffset()
         );
-        ConcurrentNavigableMap<Long, WalLocation> partitionLocations =
-            locations.computeIfAbsent(key, ignored -> new ConcurrentSkipListMap<>());
-        Map.Entry<Long, WalLocation> floor = partitionLocations.floorEntry(record.firstOffset());
-        Map.Entry<Long, WalLocation> ceiling = partitionLocations.ceilingEntry(record.firstOffset());
-        boolean destructiveMutation =
-            (floor != null && floor.getValue().lastOffset() >= record.firstOffset()) ||
-                ceiling != null;
-        WalLocation previous = partitionLocations.put(record.firstOffset(), location);
-        if (destructiveMutation || (previous != null && !previous.equals(location))) {
-            bumpMutationRevision(key);
+        MutationGate gate = gate(key);
+        synchronized (gate) {
+            ConcurrentNavigableMap<Long, WalLocation> partitionLocations =
+                locations.computeIfAbsent(key, ignored -> new ConcurrentSkipListMap<>());
+            Map.Entry<Long, WalLocation> floor = partitionLocations.floorEntry(record.firstOffset());
+            Map.Entry<Long, WalLocation> ceiling = partitionLocations.ceilingEntry(record.firstOffset());
+            boolean destructiveMutation =
+                (floor != null && floor.getValue().lastOffset() >= record.firstOffset()) ||
+                    ceiling != null;
+            if (destructiveMutation) {
+                gate.destructiveChange(() -> partitionLocations.put(record.firstOffset(), location));
+            } else {
+                // A pure tail append cannot invalidate a prior source LogStart observation.
+                partitionLocations.put(record.firstOffset(), location);
+            }
         }
     }
 
@@ -125,19 +130,23 @@ public final class PartitionWalIndex {
         if (truncateOffset < 0) {
             throw new IllegalArgumentException("truncateOffset must be non-negative");
         }
-        // A TRUNCATE is a generation fence even when it currently removes no indexed entry.
-        bumpMutationRevision(key);
-        ConcurrentNavigableMap<Long, WalLocation> partitionLocations = locations.get(key);
-        if (partitionLocations == null) {
-            return;
-        }
-        partitionLocations.tailMap(truncateOffset, true).clear();
-        Map.Entry<Long, WalLocation> floor = partitionLocations.floorEntry(truncateOffset);
-        if (floor != null && floor.getValue().lastOffset() >= truncateOffset) {
-            partitionLocations.remove(floor.getKey(), floor.getValue());
-        }
-        if (partitionLocations.isEmpty()) {
-            locations.remove(key, partitionLocations);
+        MutationGate gate = gate(key);
+        synchronized (gate) {
+            // A TRUNCATE fences readers even when no indexed range currently overlaps it.
+            gate.destructiveChange(() -> {
+                ConcurrentNavigableMap<Long, WalLocation> partitionLocations = locations.get(key);
+                if (partitionLocations == null) {
+                    return;
+                }
+                partitionLocations.tailMap(truncateOffset, true).clear();
+                Map.Entry<Long, WalLocation> floor = partitionLocations.floorEntry(truncateOffset);
+                if (floor != null && floor.getValue().lastOffset() >= truncateOffset) {
+                    partitionLocations.remove(floor.getKey(), floor.getValue());
+                }
+                if (partitionLocations.isEmpty()) {
+                    locations.remove(key, partitionLocations);
+                }
+            });
         }
     }
 
@@ -151,21 +160,30 @@ public final class PartitionWalIndex {
         if (walOffsetExclusive < 0) {
             return;
         }
-        for (Map.Entry<WalPartitionKey, ConcurrentNavigableMap<Long, WalLocation>> partition : locations.entrySet()) {
-            ConcurrentNavigableMap<Long, WalLocation> partitionLocations = partition.getValue();
-            boolean changed = false;
-            for (Map.Entry<Long, WalLocation> entry : partitionLocations.entrySet()) {
-                WalLocation location = entry.getValue();
-                if (location.walOffset() < walOffsetExclusive &&
-                    partitionLocations.remove(entry.getKey(), location)) {
-                    changed = true;
+        for (WalPartitionKey key : locations.keySet()) {
+            MutationGate gate = gate(key);
+            synchronized (gate) {
+                ConcurrentNavigableMap<Long, WalLocation> partitionLocations = locations.get(key);
+                if (partitionLocations == null) {
+                    continue;
                 }
-            }
-            if (changed) {
-                bumpMutationRevision(partition.getKey());
-            }
-            if (partitionLocations.isEmpty()) {
-                locations.remove(partition.getKey(), partitionLocations);
+                // Do not invalidate an unrelated partition whose WAL entries survive reclamation.
+                boolean changed = partitionLocations.values().stream()
+                    .anyMatch(location -> location.walOffset() < walOffsetExclusive);
+                if (!changed) {
+                    continue;
+                }
+                gate.destructiveChange(() -> {
+                    for (Map.Entry<Long, WalLocation> entry : partitionLocations.entrySet()) {
+                        WalLocation location = entry.getValue();
+                        if (location.walOffset() < walOffsetExclusive) {
+                            partitionLocations.remove(entry.getKey(), location);
+                        }
+                    }
+                    if (partitionLocations.isEmpty()) {
+                        locations.remove(key, partitionLocations);
+                    }
+                });
             }
         }
     }
@@ -178,24 +196,57 @@ public final class PartitionWalIndex {
         removeBefore(WalAppendResult.firstOffsetAfterExtent(segmentId));
     }
 
-    /** Clears every indexed WAL address before replaying the surviving logical recovery window. */
+    /** Clears indexed WAL addresses before replaying the surviving recovery window. */
     public void clear() {
-        locations.keySet().forEach(this::bumpMutationRevision);
-        locations.clear();
+        for (WalPartitionKey key : locations.keySet()) {
+            MutationGate gate = gate(key);
+            synchronized (gate) {
+                ConcurrentNavigableMap<Long, WalLocation> partitionLocations = locations.get(key);
+                if (partitionLocations != null) {
+                    gate.destructiveChange(() -> {
+                        partitionLocations.clear();
+                        locations.remove(key, partitionLocations);
+                    });
+                }
+            }
+        }
     }
 
     /**
-     * Returns a generation that changes only when existing logical WAL index state is destructively replaced or
-     * removed. Ordinary tail appends deliberately do not advance this revision so active producers cannot starve
-     * bounded upload selection.
+     * Returns -1 while the partition's index is being destructively mutated.
+     * A stable generation never grants WAL fsync, Controller CAS or COMMITTED GC authority.
+     * Ordinary tail appends do not advance this revision.
      */
     public long mutationRevision(WalPartitionKey key) {
-        AtomicLong revision = mutationRevisions.get(key);
-        return revision == null ? 0L : revision.get();
+        MutationGate gate = mutationRevisions.get(key);
+        return gate == null ? 0L : gate.observedRevision();
     }
 
-    private void bumpMutationRevision(WalPartitionKey key) {
-        mutationRevisions.computeIfAbsent(key, ignored -> new AtomicLong()).incrementAndGet();
+    private MutationGate gate(WalPartitionKey key) {
+        return mutationRevisions.computeIfAbsent(key, ignored -> new MutationGate());
+    }
+
+    /**
+     * Single-partition seqlock. Writers hold this object's monitor while deciding
+     * whether an update is destructive. Read-only probes never acquire that monitor:
+     * odd sequence values fail closed rather than blocking behind a WAL update.
+     */
+    static final class MutationGate {
+        private final AtomicLong sequence = new AtomicLong();
+
+        long observedRevision() {
+            long observed = sequence.get();
+            return observed < 0L || (observed & 1L) != 0L ? -1L : observed >>> 1;
+        }
+
+        synchronized void destructiveChange(Runnable change) {
+            sequence.incrementAndGet();
+            try {
+                change.run();
+            } finally {
+                sequence.incrementAndGet();
+            }
+        }
     }
 
     public int partitionCount() {

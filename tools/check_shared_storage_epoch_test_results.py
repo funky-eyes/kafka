@@ -147,11 +147,20 @@ REQUIRED_TESTS = {
         "quarantineTriggeredByRemovalAlsoDisablesAllRemainingLeaders",
         "subsequentKafkaHighWatermarkCannotResurrectQuarantinedUploadWindow",
     ),
+    "org.apache.kafka.storage.internals.shared.wal.PartitionWalIndexTest": (
+        "destructiveMutationHasNoStableRevisionWhileItIsInProgress",
+        "failedDestructiveMutationRestoresReadableRevision",
+        "reclamationFencesOnlyModifiedPartition",
+        "clearFencesEveryFormerPartitionAndKeepsGenerationAfterReplay",
+        "emptyTruncateIsStillAGenerationFence",
+    ),
     "org.apache.kafka.storage.internals.shared.SharedStorageEngineWalDurabilityFenceTest": (
         "pendingWalBarrierKeepsEveryGroupBatchInvisible",
         "failedWalBarrierCannotPublishAnyIndexedGroupBatch",
         "partialWalBarrierResultCannotPublishIndexedPrefix",
         "nullWalBarrierResultCannotPublishIndexedPrefix",
+        "duplicateWalGroupAddressesCannotPublishAnyIndexedBatch",
+        "descendingWalGroupAddressesCannotPublishAnyIndexedBatch",
     ),
     "org.apache.kafka.controller.PartitionRetirementControllerPrecheckTest": (
         "currentRecoveredLeaderInIsrMatchesButIsNotWriteAuthorization",

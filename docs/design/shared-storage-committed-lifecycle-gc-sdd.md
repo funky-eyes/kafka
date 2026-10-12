@@ -2154,3 +2154,44 @@ and null-result WAL futures; strict source-identity evidence reaches
 It is NOT a new fsync certificate, a cross-broker durability attestation, a
 Controller-authorized CAS write or permission to physically delete any
 COMMITTED remote object. Those remain disabled.
+
+
+## Batch 69: restore the missing-incarnation Controller regression after BrokerId validation
+
+The Batch 66 Controller regression exposed an accidental Mockito test fixture:
+the existing missing-incarnation case used an unstubbed integer BrokerId,
+which defaults to zero. It now explicitly supplies the registered BrokerId
+one, preserving the BROKER_INCARNATION_MISMATCH negative assertion rather
+than weakening the production BROKER_ID_MISMATCH validation.
+
+## Batch 70: two-phase per-partition WAL index mutation fence
+
+The old PartitionWalIndex revision advanced after data replacement or
+reclamation and before truncate/clear completed. A source preflight could
+therefore read equal revisions while a destructive mutation was still in
+progress. Per-partition MutationGate now exposes an odd sequence as -1,
+a new stable generation only after completion, and finalizes the sequence
+even when a mutation operation fails. Tail append observations remain stable.
+A concurrent probe is read-only and never acquires the mutation writer lock.
+
+## Batch 71: apply the mutation fence to reclaim, clear, and empty truncate
+
+Selective index reclaim and whole-index replay reconstruction now use the
+same per-partition mutation boundaries as replacement and truncate. Reclaim
+does not bump a partition with no removed WAL locations. An explicit
+TRUNCATE remains a generation fence even if the partition has no local
+index. Five deterministic tests cover a blocked writer, failed writer,
+selective reclaim, recovery clear and empty truncate. These remain
+broker-local observations; this is not a WAL fsync, source durability
+certificate, Controller claim or physical garbage collection permit.
+
+## Batch 72: fail an inconsistent durable WAL group before publishing any offsets
+
+SharedStorageEngine already prevalidates group result cardinality and nulls
+before index publication. The group must also return strictly increasing
+logical WAL addresses. Duplicate and reversed WAL locations now fail
+the complete group future without publishing any indexed Kafka batch.
+Two deterministic asynchronous regression tests cover both cases. The
+Java/Scala mandatory non-skipped regression inventory now contains
+**295 named methods**. The KRaft authority writer and physical COMMITTED
+object GC remain disabled.

@@ -137,6 +137,15 @@ public final class SharedStorageEngine implements AutoCloseable {
                     + ", results=" + durableResults.size());
         }
         List<WalLocation> locations = new ArrayList<>(records.size());
+        // Successful WAL groups must not reuse or reverse logical addresses.
+        // Validate every result before exposing the first Kafka range to readers.
+        long previousWalOffset = -1L;
+        for (WalAppendResult result : durableResults) {
+            if (result.offset() <= previousWalOffset) {
+                throw new IllegalStateException("WAL append group returned non-increasing logical offsets");
+            }
+            previousWalOffset = result.offset();
+        }
         for (int i = 0; i < records.size(); i++) {
             WalRecord record = records.get(i);
             WalAppendResult result = durableResults.get(i);

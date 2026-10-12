@@ -190,6 +190,9 @@ class PartitionRetirementCandidatePrecheckTest {
     void brokerRegistrationWithoutIncarnationFailsClosedInsteadOfThrowing() {
         Fixture f = fixture();
         BrokerRegistration registration = mock(BrokerRegistration.class);
+        // Mockito's default int zero is a different, valid BrokerId.
+        // Exercise the missing-incarnation path with the correct broker identity.
+        when(registration.id()).thenReturn(1);
         when(registration.epoch()).thenReturn(300L);
         when(registration.incarnationId()).thenReturn(null);
         when(f.cluster.registration(1)).thenReturn(registration);
