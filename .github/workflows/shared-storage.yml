@@ -245,6 +245,13 @@ jobs:
           set -o pipefail
           ./gradlew :storage:shared-storage-s3:test --no-scan 2>&1 | tee shared-storage-s3-test.log
 
+      - name: Require read-committed metadata replay horizon JUnit evidence
+        shell: bash
+        run: |
+          python3 tools/test_check_shared_storage_minio_test_results.py
+          python3 tools/check_shared_storage_minio_test_results.py \
+            --metadata-horizon storage/shared-storage-s3/build/test-results/test
+
       - name: Upload test logs
         if: always()
         uses: actions/upload-artifact@v4

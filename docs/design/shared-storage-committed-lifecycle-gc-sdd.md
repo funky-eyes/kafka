@@ -1829,3 +1829,56 @@ push/pull_request patterns, so later registration changes invalidate
 the complete GA evidence set. The workflow consistency checker audits
 server production paths. This checkpoint adds neither the KRaft
 authority writer nor COMMITTED object physical GC.
+
+## Batch 50: live read-committed metadata consumer replay horizon (non-authorizing)
+
+The existing SharedMetadataImage tracks the offset of its last *applied
+record*, not KafkaConsumer's next consumed position. On the compacted
+`__shared_storage_metadata` topic, records may have offset gaps. Thus
+the last applied record offset can lag a fully caught-up read-committed
+consumer cursor, even though all visible data through the captured Last
+Stable Offset (LSO) has been processed. The two numbers are not
+interchangeable, and neither is durable Controller authority.
+
+KafkaObjectMetadataStore now exposes a read-only asynchronous
+`captureReadCommittedReplayHorizon()` request. It is served only by the
+already-running, manually assigned metadata Consumer thread, which
+uses the previously enforced `read_committed` isolation level. The
+thread captures its current Kafka `endOffsets` LSO-exclusive boundary
+and returns a `ReadCommittedReplayHorizon` only **after** applying
+polled records and observing `consumer.position >= capturedLSO`.
+Polls may cross compacted offset gaps or start with an empty topic.
+There is no second Kafka Consumer, no extra producer, no periodic
+endOffsets network calls without a request, and no metadata writer.
+
+The request queue is bounded to at most 16 inspections per poll
+iteration; calls are still asynchronous. Shutdown, unavailable metadata
+image and terminal KafkaConsumer failure fail outstanding requests.
+A late position callback cannot reopen a failed future. A returned
+snapshot reports *historical catch-up to the sampled LSO*, not that
+the metadata topic remains at that end offset or that another Broker
+has committed its state. No logical or physical COMMITTED retirement
+is enabled by this read-only API.
+
+## Batch 51–53: deterministic replay-cursor and strict S3 evidence checks
+
+Five KafkaObjectMetadataStoreTest methods verify an LSO-exclusive
+boundary with compacted gaps, empty metadata topic, position beyond a
+sampled horizon, rejected negative/missing inputs, and terminal
+failure fencing. The existing full S3 module test task executes them;
+its JUnit XML is checked immediately afterward by reusing the MinIO
+test evidence checker with a separate `--metadata-horizon` scope.
+Five required tests must appear exactly once, without skips/errors or
+failures. This mode does **not** modify the real-MinIO eight-case
+evidence contract or add another Gradle test invocation. The existing
+265-mandatory Java/Scala controller/storage/Core gate is unchanged;
+the separate S3-runtime strict gate adds 5 independent methods.
+
+This is a necessary read-committed replay component, not a complete
+Source Attestation. Before any Controller authority write, the
+captured broker lifecycle identity must be revalidated against the
+current KRaft registration and source leader epoch, WAL/replica
+durability must be proven, and the actual KRaft writer must serialize
+monotonic retirement with its authoritative append. Until those
+proofs, read/upload quiescence and durable reference retirement are
+established, physical COMMITTED MinIO DELETE remains forbidden.
