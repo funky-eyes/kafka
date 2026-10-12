@@ -83,6 +83,79 @@ class PartitionLogStartAdvancePrecheckTest {
     }
 
     @Test
+    void compactedMetadataGapUsesReadCommittedConsumerPositionNotLastRecordOffset() {
+        SharedMetadataImage image = imageWithWatermark(20L);
+        // Last applied record offset = 5. Kafka may compact away records
+        // through offset 11 even though the read-committed cursor is at 12.
+        assertEquals(Finding.METADATA_REPLAY_BEHIND, assess(image, PARTITION, 30L, 30L, 11L));
+        assertEquals(
+            Finding.VALUE_DOMAIN_CANDIDATE,
+            PartitionLogStartAdvancePrecheck.assessReadCommitted(image, PARTITION, 30L, 30L, 12L, 12L)
+        );
+    }
+
+    @Test
+    void emptyReadCommittedMetadataTopicStillRequiresExplicitInitialZero() {
+        SharedMetadataImage image = readyImage();
+        assertEquals(
+            Finding.INITIAL_ZERO_CANDIDATE,
+            PartitionLogStartAdvancePrecheck.assessReadCommitted(image, PARTITION, 0L, 10L, 0L, 0L)
+        );
+        assertEquals(
+            Finding.INITIAL_ZERO_REQUIRED,
+            PartitionLogStartAdvancePrecheck.assessReadCommitted(image, PARTITION, 10L, 10L, 0L, 0L)
+        );
+    }
+
+    @Test
+    void laggingReadCommittedConsumerCannotClassifyRetirementValue() {
+        SharedMetadataImage image = imageWithWatermark(20L);
+        assertEquals(
+            Finding.METADATA_REPLAY_BEHIND,
+            PartitionLogStartAdvancePrecheck.assessReadCommitted(image, PARTITION, 30L, 30L, 42L, 41L)
+        );
+    }
+
+    @Test
+    void newerConsumerPositionMayExceedCapturedReadCommittedHorizon() {
+        SharedMetadataImage image = imageWithWatermark(20L);
+        assertEquals(
+            Finding.VALUE_DOMAIN_CANDIDATE,
+            PartitionLogStartAdvancePrecheck.assessReadCommitted(image, PARTITION, 30L, 30L, 12L, 19L)
+        );
+    }
+
+    @Test
+    void readCommittedEvidenceKeepsTopicIncarnationsIndependent() {
+        SharedMetadataImage image = imageWithWatermark(20L);
+        assertEquals(
+            Finding.INITIAL_ZERO_REQUIRED,
+            PartitionLogStartAdvancePrecheck.assessReadCommitted(image, RECREATED, 10L, 10L, 8L, 8L)
+        );
+        assertEquals(
+            Finding.REGRESSED_BELOW_REPLAYED_WATERMARK,
+            PartitionLogStartAdvancePrecheck.assessReadCommitted(image, PARTITION, 19L, 30L, 8L, 8L)
+        );
+    }
+
+    @Test
+    void invalidReadCommittedOffsetsAndUnreadyImageFailClosed() {
+        SharedMetadataImage ready = readyImage();
+        assertThrows(IllegalArgumentException.class, () ->
+            PartitionLogStartAdvancePrecheck.assessReadCommitted(ready, PARTITION, -1L, 0L, 0L, 0L));
+        assertThrows(IllegalArgumentException.class, () ->
+            PartitionLogStartAdvancePrecheck.assessReadCommitted(ready, PARTITION, 0L, -1L, 0L, 0L));
+        assertThrows(IllegalArgumentException.class, () ->
+            PartitionLogStartAdvancePrecheck.assessReadCommitted(ready, PARTITION, 0L, 0L, -1L, 0L));
+        assertThrows(IllegalArgumentException.class, () ->
+            PartitionLogStartAdvancePrecheck.assessReadCommitted(ready, PARTITION, 0L, 0L, 0L, -1L));
+        assertThrows(IllegalStateException.class, () ->
+            PartitionLogStartAdvancePrecheck.assessReadCommitted(
+                new SharedMetadataImage(), PARTITION, 0L, 0L, 0L, 0L
+            ));
+    }
+
+    @Test
     void recoveringAndFailedImagesFailClosed() {
         SharedMetadataImage image = new SharedMetadataImage();
         assertThrows(IllegalStateException.class, () -> assess(image, PARTITION, 0L, 0L, -1L));

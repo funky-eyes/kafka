@@ -21,6 +21,14 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 REQUIRED_TESTS = {
+    "org.apache.kafka.storage.internals.shared.metadata.PartitionLogStartAdvancePrecheckTest": (
+        "compactedMetadataGapUsesReadCommittedConsumerPositionNotLastRecordOffset",
+        "emptyReadCommittedMetadataTopicStillRequiresExplicitInitialZero",
+        "laggingReadCommittedConsumerCannotClassifyRetirementValue",
+        "newerConsumerPositionMayExceedCapturedReadCommittedHorizon",
+        "readCommittedEvidenceKeepsTopicIncarnationsIndependent",
+        "invalidReadCommittedOffsetsAndUnreadyImageFailClosed",
+    ),
     "org.apache.kafka.storage.internals.log.StorageExtensionBrokerContextTest": (
         "snapshotsListenersAndNullableBrokerOriginals",
         "rejectsMissingNetworkIdentity",

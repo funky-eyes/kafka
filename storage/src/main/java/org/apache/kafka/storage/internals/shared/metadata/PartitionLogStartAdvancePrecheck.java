@@ -58,11 +58,49 @@ public final class PartitionLogStartAdvancePrecheck {
         if (evidence.lastConsumedMetadataOffset() < requiredMetadataOffset) {
             return Finding.METADATA_REPLAY_BEHIND;
         }
+        return classifyValue(evidence.explicitLogStart(), requestedStartOffset, observedKafkaLogStart);
+    }
+
+    /**
+     * Read-only value check using the actual read-committed KafkaConsumer
+     * next-position at a previously sampled Last Stable Offset (exclusive).
+     *
+     * <p>Compacted Kafka logs may omit record offsets. The last applied record
+     * offset can therefore lag the LSO even when the same consumer has applied
+     * every visible record through that boundary. The metadata store must
+     * supply BOTH offsets after its consumer has completed the intervening
+     * poll(s). Caller-supplied numbers are advisory, not authenticated proof.</p>
+     */
+    public static Finding assessReadCommitted(
+        SharedMetadataImage image,
+        SharedPartitionId partition,
+        long requestedStartOffset,
+        long observedKafkaLogStart,
+        long stableEndExclusive,
+        long appliedPositionExclusive
+    ) {
+        Objects.requireNonNull(image, "image");
+        Objects.requireNonNull(partition, "partition");
+        if (requestedStartOffset < 0L || observedKafkaLogStart < 0L
+            || stableEndExclusive < 0L || appliedPositionExclusive < 0L) {
+            throw new IllegalArgumentException("Invalid read-committed retirement precheck offsets");
+        }
+        // Always check image readiness first, including empty/compacted logs.
+        SharedMetadataImage.PartitionLogStartEvidence evidence = image.partitionLogStartEvidence(partition);
+        if (appliedPositionExclusive < stableEndExclusive) {
+            return Finding.METADATA_REPLAY_BEHIND;
+        }
+        return classifyValue(evidence.explicitLogStart(), requestedStartOffset, observedKafkaLogStart);
+    }
+
+    private static Finding classifyValue(
+        OptionalLong previous,
+        long requestedStartOffset,
+        long observedKafkaLogStart
+    ) {
         if (requestedStartOffset > observedKafkaLogStart) {
             return Finding.EXCEEDS_OBSERVED_KAFKA_LOG_START;
         }
-
-        OptionalLong previous = evidence.explicitLogStart();
         if (previous.isEmpty()) {
             // First write for a topic incarnation must explicitly persist zero.
             // Never infer a missing generation-specific watermark from another topic.

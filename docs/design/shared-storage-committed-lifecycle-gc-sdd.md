@@ -1975,3 +1975,25 @@ no-skip replay horizon evidence grows from 12 to **15 methods**; the
 265-method Java/Scala identity gate and real MinIO runtime suites
 continue unchanged. These additions issue no KRaft writer command,
 no metadata watermark record and no physical COMMITTED S3 DELETE.
+
+## Batch 59: compacted metadata read-committed cursor preflight (read-only)
+
+The legacy PartitionLogStartAdvancePrecheck checks lastConsumedMetadataOffset
+against a requested record offset. That offset is not the Kafka consumer's
+next-position: a compacted __shared_storage_metadata log may have record
+offset gaps, so the final applied record can be behind the previously
+captured Last Stable Offset even when the actual read-committed consumer
+has already replayed through it.
+
+A new assessReadCommitted overload keeps the same source-log bounds,
+per-topic immutable ID separation, explicit initial zero and monotonic
+watermark logic, but checks captured LSO-exclusive against the actual
+post-apply read-committed Consumer position. The old precheck remains
+untouched for compatibility and retains its conservative behavior.
+Neither pathway can write PARTITION_LOG_START or authorize deletion.
+
+Six deterministic Java 25 tests prove gap-safe classification, an
+empty metadata topic, lagging consumer rejection, later progress,
+topic-recreation separation and strict invalid/unready rejection.
+The mandatory anti-skip Storage/Metadata/Core/Server-Common test
+matrix grows from 265 to **271 named methods**.
