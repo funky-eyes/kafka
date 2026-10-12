@@ -335,6 +335,10 @@ REQUIRED_TESTS = {
         "nativeSourceReadCommittedStillRejectsLaggingConsumer",
         "nativeSourceReadCommittedRoleChangeDuringReplayDiscardsClassification",
         "nativeSourceReadCommittedLogStartChangeDuringReplayRejectsEvidence",
+        "stableWalMutationGenerationRetainsReadOnlyNativeSourceFinding",
+        "walTruncationDuringMetadataClassificationDiscardsSourceFinding",
+        "unavailableLocalWalRevisionFailsWithoutUsingNativeSource",
+        "stableWalRevisionNeverRescuesStaleNativeSourceWindow",
     ),
     "kafka.server.BrokerLifecycleManagerTest": (
         "testIncarnationChangesAcrossBrokerProcessRestart",

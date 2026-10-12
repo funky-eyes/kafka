@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.storage.internals.shared.kafka;
 
+import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
 import org.apache.kafka.storage.internals.shared.metadata.PartitionLogStartAdvancePrecheck;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataImage;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
@@ -129,6 +130,42 @@ public final class PartitionRetirementEpochPrecheck {
         );
     }
 
+    /**
+     * Advisory source classification additionally fenced by the broker-local
+     * durable-WAL index mutation generation. Destructive truncate, replacement
+     * and reclamation may invalidate a local source observation while the
+     * read-committed metadata value is being inspected.
+     *
+     * <p>This is NOT a WAL fsync certificate, replicated durability barrier,
+     * Controller epoch check or a retirement/delete permit.</p>
+     */
+    static Assessment assessNativeSourceReadCommittedWithWalMutationFence(
+        SharedStorageEngine storage,
+        SharedPartitionRoleListener roleListener,
+        SharedUnifiedLog sourceLog,
+        SharedPartitionId partition,
+        SharedMetadataImage image,
+        long requestedLogStart,
+        long stableEndExclusive,
+        long appliedPositionExclusive
+    ) throws IOException {
+        Objects.requireNonNull(storage, "storage");
+        Objects.requireNonNull(partition, "partition");
+        long before = storage.walMutationRevision(partition);
+        if (before < 0L) {
+            return new Assessment(Status.LOCAL_WAL_REVISION_UNKNOWN, Optional.empty());
+        }
+        Assessment assessment = assessNativeSourceReadCommitted(
+            roleListener, sourceLog, partition, image, requestedLogStart,
+            stableEndExclusive, appliedPositionExclusive
+        );
+        long after = storage.walMutationRevision(partition);
+        if (after < 0L || after != before) {
+            return new Assessment(Status.LOCAL_WAL_REVISION_CHANGED, Optional.empty());
+        }
+        return assessment;
+    }
+
     private static Assessment assessNativeSourceWithClassifier(
         SharedPartitionRoleListener roleListener,
         SharedUnifiedLog sourceLog,
@@ -178,7 +215,9 @@ public final class PartitionRetirementEpochPrecheck {
         LOCAL_EPOCH_OBSERVATION_MATCH,
         NATIVE_SOURCE_WINDOW_UNKNOWN,
         NATIVE_SOURCE_WINDOW_STALE,
-        LOCAL_ROLE_CHANGED_DURING_METADATA_CHECK
+        LOCAL_ROLE_CHANGED_DURING_METADATA_CHECK,
+        LOCAL_WAL_REVISION_UNKNOWN,
+        LOCAL_WAL_REVISION_CHANGED
     }
 
     /** The value classification exists only for matching local epoch evidence. */

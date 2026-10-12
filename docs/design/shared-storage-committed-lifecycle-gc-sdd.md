@@ -2096,3 +2096,26 @@ preserving legitimate BrokerId zero and explicitly unregistered
 legacy contexts. Mandatory source-identity JUnit evidence increases
 from 275 to **277 named methods**. This does not authenticate a
 controller registration or grant deletion privileges.
+
+## Batch 65: bind native Kafka source re-observation to local WAL index mutation generation
+
+SharedStorageEngine already exposes walMutationRevision(partition).
+This generation advances when surviving indexed WAL ranges are
+destructively replaced, truncated or reclaimed. Add an optional
+read-only assessment variant that samples this revision before the
+real Kafka leader/source LogStart and replay metadata checks and
+revalidates it afterward. A changed or unavailable revision removes
+any advisory value finding. Normal non-destructive appends do not
+advance that revision and therefore need not starve a preview.
+
+Four deterministic Java 25 tests prove stable revision preservation,
+destructive mutation rejection, unavailable-revision fail-closed
+behavior and independence from the existing source-LogStart drift
+fence. The required Java/Scala anti-skip matrix rises from 277 to
+**281 methods**.
+
+This is a *local mutation observation only*. The WAL append future
+crossing its durability barrier is a separate condition; this revision
+does not prove fsync, replicated ACK, Controller leadership, broker
+registration validity, committed reference retirement or any
+permission to delete COMMITTED S3 objects.

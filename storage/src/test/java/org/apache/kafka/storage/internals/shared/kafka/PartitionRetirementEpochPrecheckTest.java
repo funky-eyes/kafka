@@ -21,6 +21,7 @@ import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.utils.MockTime;
 import org.apache.kafka.storage.internals.log.StorageExtensionContext;
+import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
 import org.apache.kafka.storage.internals.shared.metadata.PartitionLogStartAdvancePrecheck;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataImage;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec;
@@ -472,6 +473,70 @@ class PartitionRetirementEpochPrecheckTest {
         );
         var result = PartitionRetirementEpochPrecheck.assessNativeSourceReadCommitted(
             roles, log, PARTITION, imageWithWatermark(10L), 20L, 12L, 12L
+        );
+        assertEquals(PartitionRetirementEpochPrecheck.Status.NATIVE_SOURCE_WINDOW_STALE, result.status());
+        assertTrue(result.valueFinding().isEmpty());
+    }
+
+    @Test
+    void stableWalMutationGenerationRetainsReadOnlyNativeSourceFinding() throws IOException {
+        SharedPartitionRoleListener roles = nativeRoles();
+        elect(roles, 8);
+        SharedStorageEngine storage = mock(SharedStorageEngine.class);
+        when(storage.walMutationRevision(PARTITION)).thenReturn(4L);
+
+        var result = PartitionRetirementEpochPrecheck.assessNativeSourceReadCommittedWithWalMutationFence(
+            storage, roles, nativeLog(TOPIC_ID, 0, goodNativeWindow()),
+            PARTITION, imageWithWatermark(10L), 20L, 12L, 12L
+        );
+        assertEquals(PartitionRetirementEpochPrecheck.Status.LOCAL_EPOCH_OBSERVATION_MATCH, result.status());
+        assertEquals(
+            PartitionLogStartAdvancePrecheck.Finding.VALUE_DOMAIN_CANDIDATE,
+            result.valueFinding().orElseThrow()
+        );
+    }
+
+    @Test
+    void walTruncationDuringMetadataClassificationDiscardsSourceFinding() throws IOException {
+        SharedPartitionRoleListener roles = nativeRoles();
+        elect(roles, 8);
+        SharedStorageEngine storage = mock(SharedStorageEngine.class);
+        when(storage.walMutationRevision(PARTITION)).thenReturn(4L, 5L);
+
+        var result = PartitionRetirementEpochPrecheck.assessNativeSourceReadCommittedWithWalMutationFence(
+            storage, roles, nativeLog(TOPIC_ID, 0, goodNativeWindow()),
+            PARTITION, imageWithWatermark(10L), 20L, 12L, 12L
+        );
+        assertEquals(PartitionRetirementEpochPrecheck.Status.LOCAL_WAL_REVISION_CHANGED, result.status());
+        assertTrue(result.valueFinding().isEmpty());
+    }
+
+    @Test
+    void unavailableLocalWalRevisionFailsWithoutUsingNativeSource() throws IOException {
+        SharedStorageEngine storage = mock(SharedStorageEngine.class);
+        when(storage.walMutationRevision(PARTITION)).thenReturn(-1L);
+
+        var result = PartitionRetirementEpochPrecheck.assessNativeSourceReadCommittedWithWalMutationFence(
+            storage, nativeRoles(), nativeLog(TOPIC_ID, 0, goodNativeWindow()),
+            PARTITION, imageWithWatermark(10L), 20L, 12L, 12L
+        );
+        assertEquals(PartitionRetirementEpochPrecheck.Status.LOCAL_WAL_REVISION_UNKNOWN, result.status());
+        assertTrue(result.valueFinding().isEmpty());
+    }
+
+    @Test
+    void stableWalRevisionNeverRescuesStaleNativeSourceWindow() throws IOException {
+        SharedPartitionRoleListener roles = nativeRoles();
+        elect(roles, 8);
+        SharedStorageEngine storage = mock(SharedStorageEngine.class);
+        when(storage.walMutationRevision(PARTITION)).thenReturn(7L);
+        SharedUnifiedLog log = nativeLog(TOPIC_ID, 0, goodNativeWindow());
+        when(log.captureNativeSourceWindow()).thenReturn(
+            goodNativeWindow(),
+            Optional.of(new SharedUnifiedLog.NativeSourceWindow(21L, 50L, 80L))
+        );
+        var result = PartitionRetirementEpochPrecheck.assessNativeSourceReadCommittedWithWalMutationFence(
+            storage, roles, log, PARTITION, imageWithWatermark(10L), 20L, 12L, 12L
         );
         assertEquals(PartitionRetirementEpochPrecheck.Status.NATIVE_SOURCE_WINDOW_STALE, result.status());
         assertTrue(result.valueFinding().isEmpty());
