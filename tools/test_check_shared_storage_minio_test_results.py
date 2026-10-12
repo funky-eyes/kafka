@@ -19,7 +19,7 @@ import unittest
 from pathlib import Path
 from xml.etree import ElementTree
 
-from check_shared_storage_minio_test_results import PACKAGE, REQUIRED_CASES, validate_reports
+from check_shared_storage_minio_test_results import PACKAGE, HORIZON_CASES, REQUIRED_CASES, validate_reports
 
 
 class MinIOJUnitEvidenceTest(unittest.TestCase):
@@ -28,9 +28,9 @@ class MinIOJUnitEvidenceTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
 
-    def report(self, omit=(), skipped=(), failed=(), duplicate=()):
+    def report(self, omit=(), skipped=(), failed=(), duplicate=(), cases=REQUIRED_CASES):
         suite = ElementTree.Element("testsuite")
-        for short_class, methods in REQUIRED_CASES.items():
+        for short_class, methods in cases.items():
             for method in sorted(methods):
                 name = short_class + "." + method
                 if name in omit:
@@ -92,6 +92,27 @@ class MinIOJUnitEvidenceTest(unittest.TestCase):
     def test_rejects_duplicate_case(self):
         self.report(duplicate={"S3ObjectStoreTest.roundTripsPutRangeReadAndDeleteAgainstConfiguredS3"})
         self.assertTrue(any("executed 2 times" in error for error in validate_reports(self.root)))
+
+    def test_accepts_all_horizon_methods_in_independent_s3_module_suite(self):
+        self.report(cases=HORIZON_CASES)
+        self.assertEqual([], validate_reports(self.root, HORIZON_CASES, "metadata replay"))
+
+    def test_missing_horizon_method_fails_closed(self):
+        self.report(
+            omit={"KafkaObjectMetadataStoreTest."
+                  "capturedReadCommittedLsoWaitsForAppliedConsumerPositionAcrossCompactionGaps"},
+            cases=HORIZON_CASES,
+        )
+        errors = validate_reports(self.root, HORIZON_CASES, "metadata replay")
+        self.assertTrue(any("MISSING" in error for error in errors))
+
+    def test_skipped_horizon_method_fails_closed(self):
+        self.report(
+            skipped={"KafkaObjectMetadataStoreTest.failedReadCommittedHorizonNeverReopensAfterLateConsumerProgress"},
+            cases=HORIZON_CASES,
+        )
+        errors = validate_reports(self.root, HORIZON_CASES, "metadata replay")
+        self.assertTrue(any("SKIPPED" in error for error in errors))
 
     def test_rejects_invalid_xml(self):
         (self.root / "TEST-invalid.xml").write_text("<testsuite><testcase>")

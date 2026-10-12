@@ -608,8 +608,7 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
             if (consumerPositionExclusive < target) {
                 return false;
             }
-            future.complete(new ReadCommittedReplayHorizon(target, consumerPositionExclusive));
-            return true;
+            return future.complete(new ReadCommittedReplayHorizon(target, consumerPositionExclusive));
         }
 
         void fail(Throwable failure) {
