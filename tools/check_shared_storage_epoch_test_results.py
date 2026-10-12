@@ -35,6 +35,8 @@ REQUIRED_TESTS = {
         "defaultBrokerReadyCallbackIsImmediateNoOp",
         "bindsExplicitBrokerRegistrationSnapshotWithoutGrantingRetirementAuthority",
         "rejectsPartialOrMalformedRegistrationSnapshots",
+        "negativeBrokerIdCannotClaimAnUnboundOrRegisteredBrokerIdentity",
+        "brokerIdZeroIsValidButDoesNotMakeLegacyContextRegistered",
     ),
     "org.apache.kafka.storage.internals.log.StoragePartitionRoleListenerEpochCompatibilityTest": (
         "epochAwareMethodPreservesTheLegacyFunctionalCallback",

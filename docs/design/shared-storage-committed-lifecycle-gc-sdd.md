@@ -2080,3 +2080,19 @@ horizon evidence list increases from 18 to **22** methods.
 
 No Broker incarnation, KRaft Controller writer, WAL durable
 certificate or physical COMMITTED GC permission is claimed here.
+
+## Batch 64: reject invalid BrokerId in both storage broker-context constructors
+
+StorageExtensionBrokerContext previously enforced a paired BrokerEpoch
+and IncarnationId, but allowed a negative BrokerId in a supposedly
+registered snapshot. A Kafka BrokerId is non-negative. Rejecting the
+invalid local identity at construction prevents downstream observers
+from treating an impossible BrokerId as a populated registration.
+
+Both the original five-parameter constructor and the seven-parameter
+registration snapshot now share the same validation. Two Java 25
+tests require negative IDs to fail closed in both paths while
+preserving legitimate BrokerId zero and explicitly unregistered
+legacy contexts. Mandatory source-identity JUnit evidence increases
+from 275 to **277 named methods**. This does not authenticate a
+controller registration or grant deletion privileges.

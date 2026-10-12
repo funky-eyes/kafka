@@ -111,6 +111,36 @@ class StorageExtensionBrokerContextTest {
     }
 
     @Test
+    void negativeBrokerIdCannotClaimAnUnboundOrRegisteredBrokerIdentity() {
+        Endpoint endpoint = new Endpoint("PLAINTEXT", SecurityProtocol.PLAINTEXT, "127.0.0.1", 9092);
+        List<Endpoint> endpoints = List.of(endpoint);
+
+        assertThrows(IllegalArgumentException.class, () -> new StorageExtensionBrokerContext(
+            "cluster-a", -1, endpoints, Map.of(), Time.SYSTEM
+        ));
+        assertThrows(IllegalArgumentException.class, () -> new StorageExtensionBrokerContext(
+            "cluster-a", -1, endpoints, Map.of(), Time.SYSTEM, 5L, new Uuid(1L, 2L)
+        ));
+    }
+
+    @Test
+    void brokerIdZeroIsValidButDoesNotMakeLegacyContextRegistered() {
+        Endpoint endpoint = new Endpoint("PLAINTEXT", SecurityProtocol.PLAINTEXT, "127.0.0.1", 9092);
+        List<Endpoint> endpoints = List.of(endpoint);
+        StorageExtensionBrokerContext legacy = new StorageExtensionBrokerContext(
+            "cluster-a", 0, endpoints, Map.of(), Time.SYSTEM
+        );
+        StorageExtensionBrokerContext registered = new StorageExtensionBrokerContext(
+            "cluster-a", 0, endpoints, Map.of(), Time.SYSTEM, 0L, new Uuid(1L, 2L)
+        );
+
+        assertEquals(0, legacy.brokerId());
+        assertFalse(legacy.hasBrokerIdentitySnapshot());
+        assertEquals(0, registered.brokerId());
+        assertTrue(registered.hasBrokerIdentitySnapshot());
+    }
+
+    @Test
     void defaultBrokerReadyCallbackIsImmediateNoOp() throws Exception {
         Endpoint endpoint = new Endpoint("PLAINTEXT", SecurityProtocol.PLAINTEXT, "127.0.0.1", 9092);
         StorageExtensionBrokerContext context = new StorageExtensionBrokerContext(

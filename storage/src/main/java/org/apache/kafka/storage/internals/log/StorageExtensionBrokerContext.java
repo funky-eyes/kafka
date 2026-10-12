@@ -66,6 +66,9 @@ public record StorageExtensionBrokerContext(
         if (clusterId == null || clusterId.isBlank()) {
             throw new IllegalArgumentException("clusterId must not be blank");
         }
+        if (brokerId < 0) {
+            throw new IllegalArgumentException("brokerId must be non-negative");
+        }
         Objects.requireNonNull(listeners, "listeners");
         Objects.requireNonNull(originals, "originals");
         Objects.requireNonNull(time, "time");
