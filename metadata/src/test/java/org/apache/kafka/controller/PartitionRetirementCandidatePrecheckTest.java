@@ -101,6 +101,21 @@ class PartitionRetirementCandidatePrecheckTest {
     }
 
     @Test
+    void registrationPayloadWithWrongBrokerIdCannotSatisfyCas() {
+        Fixture f = fixture();
+        BrokerRegistration wrongId = new BrokerRegistration.Builder()
+            .setId(2)
+            .setEpoch(300L)
+            .setIncarnationId(INCARNATION)
+            .setFenced(false)
+            .setInControlledShutdown(false)
+            .build();
+        when(f.cluster.registration(1)).thenReturn(wrongId);
+        assertEquals(Finding.BROKER_ID_MISMATCH, evaluate(f, candidate()));
+        assertNull(f.authority.get(KEY));
+    }
+
+    @Test
     void fencedBrokerCannotSatisfyPrecommitCas() {
         Fixture f = fixture();
         when(f.cluster.registration(1)).thenReturn(broker(300L, INCARNATION, true, false));

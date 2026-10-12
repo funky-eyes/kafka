@@ -43,6 +43,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 class PartitionRetirementEpochPrecheckTest {
     private static final SharedPartitionId PARTITION = new SharedPartitionId(1L, 2L, 0);
@@ -522,6 +523,34 @@ class PartitionRetirementEpochPrecheckTest {
         );
         assertEquals(PartitionRetirementEpochPrecheck.Status.LOCAL_WAL_REVISION_UNKNOWN, result.status());
         assertTrue(result.valueFinding().isEmpty());
+    }
+
+    @Test
+    void invalidReadCommittedOffsetsCannotBeMaskedByUnavailableWalRevision() throws IOException {
+        SharedStorageEngine storage = mock(SharedStorageEngine.class);
+        SharedPartitionRoleListener roles = nativeRoles();
+        SharedUnifiedLog log = nativeLog(TOPIC_ID, 0, goodNativeWindow());
+        SharedMetadataImage image = readyImage();
+        assertThrows(IllegalArgumentException.class, () ->
+            PartitionRetirementEpochPrecheck.assessNativeSourceReadCommittedWithWalMutationFence(
+                storage, roles, log, PARTITION, image, -1L, 12L, 12L));
+        assertThrows(IllegalArgumentException.class, () ->
+            PartitionRetirementEpochPrecheck.assessNativeSourceReadCommittedWithWalMutationFence(
+                storage, roles, log, PARTITION, image, 0L, -1L, 12L));
+        assertThrows(IllegalArgumentException.class, () ->
+            PartitionRetirementEpochPrecheck.assessNativeSourceReadCommittedWithWalMutationFence(
+                storage, roles, log, PARTITION, image, 0L, 12L, -1L));
+        verifyNoInteractions(storage);
+    }
+
+    @Test
+    void missingMetadataImageCannotBeMaskedByUnavailableWalRevision() throws IOException {
+        SharedStorageEngine storage = mock(SharedStorageEngine.class);
+        assertThrows(NullPointerException.class, () ->
+            PartitionRetirementEpochPrecheck.assessNativeSourceReadCommittedWithWalMutationFence(
+                storage, nativeRoles(), nativeLog(TOPIC_ID, 0, goodNativeWindow()),
+                PARTITION, null, 0L, 12L, 12L));
+        verifyNoInteractions(storage);
     }
 
     @Test

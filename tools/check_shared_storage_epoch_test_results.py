@@ -147,6 +147,12 @@ REQUIRED_TESTS = {
         "quarantineTriggeredByRemovalAlsoDisablesAllRemainingLeaders",
         "subsequentKafkaHighWatermarkCannotResurrectQuarantinedUploadWindow",
     ),
+    "org.apache.kafka.storage.internals.shared.SharedStorageEngineWalDurabilityFenceTest": (
+        "pendingWalBarrierKeepsEveryGroupBatchInvisible",
+        "failedWalBarrierCannotPublishAnyIndexedGroupBatch",
+        "partialWalBarrierResultCannotPublishIndexedPrefix",
+        "nullWalBarrierResultCannotPublishIndexedPrefix",
+    ),
     "org.apache.kafka.controller.PartitionRetirementControllerPrecheckTest": (
         "currentRecoveredLeaderInIsrMatchesButIsNotWriteAuthorization",
         "missingPartitionOrDeletedTopicIsNotAnAuthoritySource",
@@ -171,6 +177,7 @@ REQUIRED_TESTS = {
         "recreatedOrMissingTopicRegistrationFailsClosed",
         "staleSourceLeaderEpochFailsDespiteCurrentBroker",
         "missingBrokerRegistrationFailsClosed",
+        "registrationPayloadWithWrongBrokerIdCannotSatisfyCas",
         "fencedBrokerCannotSatisfyPrecommitCas",
         "brokerInControlledShutdownCannotSatisfyPrecommitCas",
         "restartedBrokerEpochCannotReusePriorIncarnationClaim",
@@ -339,6 +346,8 @@ REQUIRED_TESTS = {
         "walTruncationDuringMetadataClassificationDiscardsSourceFinding",
         "unavailableLocalWalRevisionFailsWithoutUsingNativeSource",
         "stableWalRevisionNeverRescuesStaleNativeSourceWindow",
+        "invalidReadCommittedOffsetsCannotBeMaskedByUnavailableWalRevision",
+        "missingMetadataImageCannotBeMaskedByUnavailableWalRevision",
     ),
     "kafka.server.BrokerLifecycleManagerTest": (
         "testIncarnationChangesAcrossBrokerProcessRestart",

@@ -2119,3 +2119,38 @@ crossing its durability barrier is a separate condition; this revision
 does not prove fsync, replicated ACK, Controller leadership, broker
 registration validity, committed reference retirement or any
 permission to delete COMMITTED S3 objects.
+
+
+## Batch 66: revalidate broker registration record identity on the controller preflight
+
+The Controller preflight already looks up the current broker ID, epoch,
+incarnation, fenced state and controlled-shutdown state. It now also checks
+that the returned BrokerRegistration record's own ID equals the candidate
+BrokerId. This fail-closed guard prevents a malformed or mismatched value
+from being treated as current registration evidence, even when epoch and
+incarnation happen to match. A deterministic controller test holds the
+registration lookup result at the wrong ID and asserts no authority write.
+The strict source-identity gate increases from 281 to **282 methods**.
+
+## Batch 67: validate WAL-fenced read-committed inputs before probing local revision
+
+The advisory WAL-mutation-fenced source preflight now checks its metadata
+image and read-committed offsets before consulting walMutationRevision().
+Otherwise an unavailable WAL revision could mask a negative LogStart, LSO or
+consumer cursor, or a null image, as an ordinary unavailable-fence finding.
+Two deterministic tests ensure malformed input never reaches the storage
+probe. The strict identity gate rises from 282 to **284 methods**.
+
+## Batch 68: reject malformed WAL group durability results before index publication
+
+SharedStorageEngine's successful append group already applies the WAL index
+only after its SharedWal appendBatch future succeeds. It now copies and
+validates the complete result list before applying its first index entry.
+An incomplete group or a null result therefore cannot partially publish a
+local Kafka offset range even if a faulty backend signals success.
+Four deterministic tests cover pending, exceptionally completed, incomplete
+and null-result WAL futures; strict source-identity evidence reaches
+**288 methods**. This validates the local future-to-index ordering only.
+It is NOT a new fsync certificate, a cross-broker durability attestation, a
+Controller-authorized CAS write or permission to physically delete any
+COMMITTED remote object. Those remain disabled.

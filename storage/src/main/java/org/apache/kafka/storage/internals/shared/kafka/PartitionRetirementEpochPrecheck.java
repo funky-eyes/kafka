@@ -151,6 +151,10 @@ public final class PartitionRetirementEpochPrecheck {
     ) throws IOException {
         Objects.requireNonNull(storage, "storage");
         Objects.requireNonNull(partition, "partition");
+        Objects.requireNonNull(image, "image");
+        if (requestedLogStart < 0L || stableEndExclusive < 0L || appliedPositionExclusive < 0L) {
+            throw new IllegalArgumentException("Invalid native read-committed retirement preflight offsets");
+        }
         long before = storage.walMutationRevision(partition);
         if (before < 0L) {
             return new Assessment(Status.LOCAL_WAL_REVISION_UNKNOWN, Optional.empty());

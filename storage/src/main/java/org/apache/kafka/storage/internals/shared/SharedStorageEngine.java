@@ -128,14 +128,18 @@ public final class SharedStorageEngine implements AutoCloseable {
     }
 
     private List<WalLocation> applyDurableGroup(List<WalRecord> records, List<WalAppendResult> results) {
-        if (records.size() != results.size()) {
+        // A durable group must not expose an indexed prefix if the backend returns
+        // a malformed result list. Validate and freeze all results before publishing.
+        List<WalAppendResult> durableResults = List.copyOf(results);
+        if (records.size() != durableResults.size()) {
             throw new IllegalStateException(
-                "WAL append group result mismatch: records=" + records.size() + ", results=" + results.size());
+                "WAL append group result mismatch: records=" + records.size()
+                    + ", results=" + durableResults.size());
         }
         List<WalLocation> locations = new ArrayList<>(records.size());
         for (int i = 0; i < records.size(); i++) {
             WalRecord record = records.get(i);
-            WalAppendResult result = results.get(i);
+            WalAppendResult result = durableResults.get(i);
             walIndex.apply(record, result);
             locations.add(new WalLocation(
                 result.offset(),

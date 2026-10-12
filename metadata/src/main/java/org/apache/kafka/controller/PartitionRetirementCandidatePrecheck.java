@@ -76,6 +76,7 @@ final class PartitionRetirementCandidatePrecheck {
         TOPIC_TERMINALLY_DELETED,
         LEADER_REGISTRATION_MISMATCH,
         BROKER_NOT_REGISTERED,
+        BROKER_ID_MISMATCH,
         BROKER_FENCED,
         BROKER_SHUTTING_DOWN,
         BROKER_EPOCH_MISMATCH,
@@ -156,6 +157,9 @@ final class PartitionRetirementCandidatePrecheck {
     private static Finding checkBroker(BrokerRegistration registration, Candidate candidate) {
         if (registration == null) {
             return Finding.BROKER_NOT_REGISTERED;
+        }
+        if (registration.id() != candidate.brokerId()) {
+            return Finding.BROKER_ID_MISMATCH;
         }
         if (registration.fenced()) {
             return Finding.BROKER_FENCED;
