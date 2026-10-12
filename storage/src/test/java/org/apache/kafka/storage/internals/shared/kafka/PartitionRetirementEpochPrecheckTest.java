@@ -411,6 +411,72 @@ class PartitionRetirementEpochPrecheckTest {
         );
     }
 
+    @Test
+    void nativeSourceReadCommittedCompactionGapCanYieldAdvisoryValueFinding() throws IOException {
+        SharedPartitionRoleListener roles = nativeRoles();
+        elect(roles, 8);
+        var result = PartitionRetirementEpochPrecheck.assessNativeSourceReadCommitted(
+            roles, nativeLog(TOPIC_ID, 0, goodNativeWindow()), PARTITION,
+            imageWithWatermark(10L), 20L, 12L, 12L
+        );
+        assertEquals(PartitionRetirementEpochPrecheck.Status.LOCAL_EPOCH_OBSERVATION_MATCH, result.status());
+        assertEquals(
+            PartitionLogStartAdvancePrecheck.Finding.VALUE_DOMAIN_CANDIDATE,
+            result.valueFinding().orElseThrow()
+        );
+    }
+
+    @Test
+    void nativeSourceReadCommittedStillRejectsLaggingConsumer() throws IOException {
+        SharedPartitionRoleListener roles = nativeRoles();
+        elect(roles, 8);
+        var result = PartitionRetirementEpochPrecheck.assessNativeSourceReadCommitted(
+            roles, nativeLog(TOPIC_ID, 0, goodNativeWindow()), PARTITION,
+            imageWithWatermark(10L), 20L, 42L, 41L
+        );
+        assertEquals(PartitionRetirementEpochPrecheck.Status.LOCAL_EPOCH_OBSERVATION_MATCH, result.status());
+        assertEquals(
+            PartitionLogStartAdvancePrecheck.Finding.METADATA_REPLAY_BEHIND,
+            result.valueFinding().orElseThrow()
+        );
+    }
+
+    @Test
+    void nativeSourceReadCommittedRoleChangeDuringReplayDiscardsClassification() throws IOException {
+        SharedPartitionRoleListener roles = nativeRoles();
+        elect(roles, 8);
+        SharedMetadataImage image = mock(SharedMetadataImage.class);
+        when(image.partitionLogStartEvidence(PARTITION)).thenAnswer(ignored -> {
+            roles.onLeadershipChangeWithEpochs(Map.of(), Map.of(KAFKA_PARTITION, 9));
+            return new SharedMetadataImage.PartitionLogStartEvidence(2L, OptionalLong.of(10L));
+        });
+        var result = PartitionRetirementEpochPrecheck.assessNativeSourceReadCommitted(
+            roles, nativeLog(TOPIC_ID, 0, goodNativeWindow()), PARTITION,
+            image, 20L, 12L, 12L
+        );
+        assertEquals(
+            PartitionRetirementEpochPrecheck.Status.LOCAL_ROLE_CHANGED_DURING_METADATA_CHECK,
+            result.status()
+        );
+        assertTrue(result.valueFinding().isEmpty());
+    }
+
+    @Test
+    void nativeSourceReadCommittedLogStartChangeDuringReplayRejectsEvidence() throws IOException {
+        SharedPartitionRoleListener roles = nativeRoles();
+        elect(roles, 8);
+        SharedUnifiedLog log = nativeLog(TOPIC_ID, 0, goodNativeWindow());
+        when(log.captureNativeSourceWindow()).thenReturn(
+            goodNativeWindow(),
+            Optional.of(new SharedUnifiedLog.NativeSourceWindow(21L, 50L, 80L))
+        );
+        var result = PartitionRetirementEpochPrecheck.assessNativeSourceReadCommitted(
+            roles, log, PARTITION, imageWithWatermark(10L), 20L, 12L, 12L
+        );
+        assertEquals(PartitionRetirementEpochPrecheck.Status.NATIVE_SOURCE_WINDOW_STALE, result.status());
+        assertTrue(result.valueFinding().isEmpty());
+    }
+
     private static PartitionRetirementEpochPrecheck.Assessment check(
         LocalRetirementLeadershipFence fence,
         LocalRetirementLeadershipFence.LeaderTicket ticket,

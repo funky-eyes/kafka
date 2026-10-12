@@ -2023,3 +2023,26 @@ horizon anti-skip requirement grows from 15 to **18 tests**.
 No normal COMMIT or orphan-cleanup flow is changed. No KRaft
 PartitionRetirementAuthorityRecord or physical COMMITTED DELETE
 is emitted.
+
+## Batch 61: native Kafka source and compacted metadata replay in one advisory preflight
+
+PartitionRetirementEpochPrecheck now provides
+assessNativeSourceReadCommitted(), which combines two actual
+SourceLogStartObservation reads (immutable Topic ID and partition,
+epoch-aware local leader generation and Kafka native LogStart/HW/LEO)
+with the gap-safe LSO/consumer-position value-domain classifier.
+Both old last-record-offset and new read-committed entrypoints reuse
+the exact same before/after Kafka role/source revalidation to prevent
+drift between compatibility paths.
+
+Four Java 25 tests cover a compacted metadata offset gap, a genuinely
+behind consumer position, demotion during metadata lookup and Kafka
+LogStart change during the replay check. Mandatory anti-skip evidence
+increases from 271 to **275 named Java/Scala tests**.
+
+This operation is still read-only and relies on caller-supplied
+LSO/position values. It must be invoked with the real metadata store
+consumer's future evidence and the actual SharedUnifiedLog, plus a
+fresh controller broker-epoch/incarnation check, before an eventual
+KRaft writer can authorize durable retirement. Physical GC remains
+completely disabled.

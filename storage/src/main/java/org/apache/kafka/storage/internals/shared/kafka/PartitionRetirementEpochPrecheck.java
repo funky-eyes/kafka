@@ -23,6 +23,7 @@ import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 import java.io.IOException;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.LongFunction;
 
 /**
  * Read-only join of a local KRaft epoch notification with the metadata replay value precheck.
@@ -91,21 +92,59 @@ public final class PartitionRetirementEpochPrecheck {
         long requestedLogStart,
         long requiredMetadataOffset
     ) throws IOException {
-        Objects.requireNonNull(roleListener, "roleListener");
-        Objects.requireNonNull(sourceLog, "sourceLog");
-        Objects.requireNonNull(partition, "partition");
         Objects.requireNonNull(image, "image");
         if (requestedLogStart < 0L || requiredMetadataOffset < -1L) {
             throw new IllegalArgumentException("Invalid native retirement preflight offsets");
         }
+        return assessNativeSourceWithClassifier(roleListener, sourceLog, partition, observed ->
+            PartitionLogStartAdvancePrecheck.assess(
+                image, partition, requestedLogStart, observed, requiredMetadataOffset
+            )
+        );
+    }
+
+    /**
+     * Combines two actual native Kafka leader/LogStart observations around the
+     * gap-safe replay position classification. All findings remain advisory.
+     * LSO and consumer position must originate from one read-committed
+     * metadata-consumer sample, not a caller-invented progress counter.
+     */
+    static Assessment assessNativeSourceReadCommitted(
+        SharedPartitionRoleListener roleListener,
+        SharedUnifiedLog sourceLog,
+        SharedPartitionId partition,
+        SharedMetadataImage image,
+        long requestedLogStart,
+        long stableEndExclusive,
+        long appliedPositionExclusive
+    ) throws IOException {
+        Objects.requireNonNull(image, "image");
+        if (requestedLogStart < 0L || stableEndExclusive < 0L || appliedPositionExclusive < 0L) {
+            throw new IllegalArgumentException("Invalid native read-committed retirement preflight offsets");
+        }
+        return assessNativeSourceWithClassifier(roleListener, sourceLog, partition, observed ->
+            PartitionLogStartAdvancePrecheck.assessReadCommitted(
+                image, partition, requestedLogStart, observed, stableEndExclusive, appliedPositionExclusive
+            )
+        );
+    }
+
+    private static Assessment assessNativeSourceWithClassifier(
+        SharedPartitionRoleListener roleListener,
+        SharedUnifiedLog sourceLog,
+        SharedPartitionId partition,
+        LongFunction<PartitionLogStartAdvancePrecheck.Finding> classify
+    ) throws IOException {
+        Objects.requireNonNull(roleListener, "roleListener");
+        Objects.requireNonNull(sourceLog, "sourceLog");
+        Objects.requireNonNull(partition, "partition");
+        Objects.requireNonNull(classify, "classify");
         var captured = SourceLogStartObservation.capture(roleListener, sourceLog, partition);
         if (captured.isEmpty()) {
             return new Assessment(Status.NATIVE_SOURCE_WINDOW_UNKNOWN, Optional.empty());
         }
         SourceLogStartObservation.LocalObservation source = captured.get();
-        PartitionLogStartAdvancePrecheck.Finding value = PartitionLogStartAdvancePrecheck.assess(
-            image, partition, requestedLogStart, source.offsets().logStartOffset(), requiredMetadataOffset
-        );
+        PartitionLogStartAdvancePrecheck.Finding value = classify.apply(source.offsets().logStartOffset());
         // Metadata replay may race with Kafka demotion, reassignment or removal.
         // The previously captured local generation must not be reused.
         var currentTicket = roleListener.captureEpochRetirementLeader(partition);

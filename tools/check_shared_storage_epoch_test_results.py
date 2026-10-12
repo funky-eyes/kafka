@@ -329,6 +329,10 @@ REQUIRED_TESTS = {
         "nativeHighWatermarkAdvanceWithoutLogStartChangeRetainsAdvisoryFinding",
         "nativeSourceDisappearingAfterMetadataLookupInvalidatesResult",
         "nativeSourceIdentityChangeAfterMetadataLookupInvalidatesResult",
+        "nativeSourceReadCommittedCompactionGapCanYieldAdvisoryValueFinding",
+        "nativeSourceReadCommittedStillRejectsLaggingConsumer",
+        "nativeSourceReadCommittedRoleChangeDuringReplayDiscardsClassification",
+        "nativeSourceReadCommittedLogStartChangeDuringReplayRejectsEvidence",
     ),
     "kafka.server.BrokerLifecycleManagerTest": (
         "testIncarnationChangesAcrossBrokerProcessRestart",
