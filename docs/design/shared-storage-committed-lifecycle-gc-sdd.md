@@ -1920,3 +1920,23 @@ releases its mailbox slot and does not revoke an independent waiting
 request. The strict S3 horizon anti-skip gate rises to **8 methods**.
 This is read-only diagnostic isolation, not a change to metadata
 authoritative writes, durability ACK or COMMITTED GC.
+
+## Batch 56: narrow optional metadata probe failure isolation and close cancellation gap
+
+An optional read-committed replay probe can fail with Kafka TimeoutException
+while ordinary metadata polling is otherwise healthy. Only that specific
+client timeout now fails the individual diagnostic future. WakeupException,
+authentication/authorization failures and other unexpected Kafka runtime
+errors still propagate to the normal image-failure path; an unauthenticated
+or corrupted metadata consumer is never treated as merely a failed probe.
+
+The bounded mailbox now enqueues before registering its completion callback,
+and rejects duplicate in-flight request identities. Canceling a request
+between the enqueue and callback steps thus releases the permit, instead
+of leaving an orphaned canceled queue element. Two deterministic tests
+verify already-completed requests, duplicate admission rejection, capacity
+return after cancellation and absence of leaked queue members. The
+independent S3 replay-horizon evidence list grows from 8 to **10** tests.
+
+This is non-authorizing runtime maintenance. It adds no KRaft authority
+producer, COMMITTED reference retirement or S3 physical lifecycle GC.

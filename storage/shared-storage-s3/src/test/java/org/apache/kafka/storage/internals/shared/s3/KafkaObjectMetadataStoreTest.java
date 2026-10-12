@@ -259,6 +259,42 @@ class KafkaObjectMetadataStoreTest {
     }
 
     @Test
+    void replayHorizonMailboxNeverAdmitsAnAlreadyFailedOrCanceledFuture() {
+        var mailbox = new KafkaObjectMetadataStore.ReplayHorizonMailbox(1);
+        var canceled = new KafkaObjectMetadataStore.ReplayHorizonRequest();
+        canceled.future().cancel(false);
+        var failed = new KafkaObjectMetadataStore.ReplayHorizonRequest();
+        failed.fail(new IllegalStateException("consumer closed"));
+
+        assertFalse(mailbox.offer(canceled));
+        assertFalse(mailbox.offer(failed));
+        assertEquals(0, mailbox.pending());
+        var fresh = new KafkaObjectMetadataStore.ReplayHorizonRequest();
+        assertTrue(mailbox.offer(fresh));
+        assertEquals(1, mailbox.pending());
+        fresh.future().cancel(false);
+        assertEquals(0, mailbox.pending());
+    }
+
+    @Test
+    void replayHorizonMailboxDoesNotConsumeTwoPermitsForTheSameRequest() {
+        var mailbox = new KafkaObjectMetadataStore.ReplayHorizonMailbox(2);
+        var request = new KafkaObjectMetadataStore.ReplayHorizonRequest();
+        assertTrue(mailbox.offer(request));
+        assertFalse(mailbox.offer(request));
+        assertEquals(1, mailbox.pending());
+        request.fail(new IllegalStateException("metadata unavailable"));
+        assertEquals(0, mailbox.pending());
+        var one = new KafkaObjectMetadataStore.ReplayHorizonRequest();
+        var two = new KafkaObjectMetadataStore.ReplayHorizonRequest();
+        assertTrue(mailbox.offer(one));
+        assertTrue(mailbox.offer(two));
+        one.future().cancel(false);
+        two.future().cancel(false);
+        assertEquals(0, mailbox.pending());
+    }
+
+    @Test
     void retriesOnlyTransientMetadataTopicCreationFailures() {
         assertTrue(KafkaObjectMetadataStore.isTransientTopicCreationFailure(
             new InvalidReplicationFactorException("not enough brokers yet")));

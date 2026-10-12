@@ -32,6 +32,8 @@ HORIZON_CASES = {
         "pendingHorizonMailboxRejectsExcessRequestsWithoutBlockingTheConsumer",
         "closingReplayHorizonMailboxFailsAndReleasesEveryOutstandingRequest",
         "oneReplayHorizonProbeFailureDoesNotFailOtherPendingProbes",
+        "replayHorizonMailboxNeverAdmitsAnAlreadyFailedOrCanceledFuture",
+        "replayHorizonMailboxDoesNotConsumeTwoPermitsForTheSameRequest",
     },
 }
 

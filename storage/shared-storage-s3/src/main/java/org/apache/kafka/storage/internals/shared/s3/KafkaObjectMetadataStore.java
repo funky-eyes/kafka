@@ -31,6 +31,7 @@ import org.apache.kafka.common.errors.InvalidReplicationFactorException;
 import org.apache.kafka.common.errors.ProducerFencedException;
 import org.apache.kafka.common.errors.RetriableException;
 import org.apache.kafka.common.errors.TopicExistsException;
+import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.errors.WakeupException;
 import org.apache.kafka.storage.internals.shared.metadata.BrokerObjectId;
 import org.apache.kafka.storage.internals.shared.metadata.ObjectMetadataStore;
@@ -345,12 +346,10 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
                     return;
                 }
                 horizonRequests.remove(request);
-            } catch (WakeupException e) {
-                // Broker close still interrupts this consumer in the normal way.
-                throw e;
-            } catch (RuntimeException e) {
-                // A timeout of this OPTIONAL diagnostic must not poison the
-                // authoritative COMMIT/cleanup metadata replay consumer.
+            } catch (TimeoutException e) {
+                // Only a transient timeout of this OPTIONAL diagnostic is
+                // isolated; authorization, corruption and other Kafka errors
+                // must still fail the authoritative metadata consumer.
                 request.fail(e);
             }
         }
@@ -610,16 +609,19 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
             permits = new Semaphore(maxPending);
         }
 
-        boolean offer(ReplayHorizonRequest request) {
+        synchronized boolean offer(ReplayHorizonRequest request) {
             Objects.requireNonNull(request, "request");
-            if (request.future().isDone() || !permits.tryAcquire()) {
+            if (request.future().isDone() || queue.contains(request) || !permits.tryAcquire()) {
                 return false;
             }
+            // Register completion AFTER enqueue. Cancellation before callback
+            // registration then immediately invokes it and releases this slot;
+            // it cannot leave a canceled orphan in the queue.
+            queue.add(request);
             request.future().whenComplete((value, failure) -> {
                 queue.remove(request);
                 permits.release();
             });
-            queue.add(request);
             return true;
         }
 
