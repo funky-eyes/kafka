@@ -242,6 +242,23 @@ class KafkaObjectMetadataStoreTest {
     }
 
     @Test
+    void oneReplayHorizonProbeFailureDoesNotFailOtherPendingProbes() throws Exception {
+        var mailbox = new KafkaObjectMetadataStore.ReplayHorizonMailbox(2);
+        var timedOut = new KafkaObjectMetadataStore.ReplayHorizonRequest();
+        var next = new KafkaObjectMetadataStore.ReplayHorizonRequest();
+        assertTrue(mailbox.offer(timedOut));
+        assertTrue(mailbox.offer(next));
+
+        timedOut.fail(new TimeoutException("read-committed LSO lookup timed out"));
+        assertTrue(timedOut.future().isCompletedExceptionally());
+        assertSame(next, mailbox.peek());
+        next.captureTarget(4L);
+        assertTrue(next.completeIfApplied(4L));
+        assertEquals(4L, next.future().get(10, TimeUnit.SECONDS).capturedStableEndExclusive());
+        assertEquals(0, mailbox.pending());
+    }
+
+    @Test
     void retriesOnlyTransientMetadataTopicCreationFailures() {
         assertTrue(KafkaObjectMetadataStore.isTransientTopicCreationFailure(
             new InvalidReplicationFactorException("not enough brokers yet")));

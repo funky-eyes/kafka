@@ -1901,3 +1901,22 @@ The independent strict horizon evidence increases from 5 to
 **7 required non-skipped methods** without changing the existing
 265-method cross-module source-identity gate or real-MinIO E2E
 evidence. This is still read-only infrastructure, not COMMITTED GC.
+
+## Batch 55: isolate optional replay probe network errors from COMMIT replay
+
+Sampling a read-committed LSO uses KafkaConsumer.endOffsets and position
+on its single normal metadata consumer thread. That optional probe
+must NOT reuse Kafka's long default API timeout or promote a temporary
+endOffsets timeout into global metadata-image failure. The diagnostic
+now uses explicit two-second Kafka client timeouts for both methods.
+A WakeupException from real broker close continues to the existing
+consumer shutdown path, but other probe-specific runtime errors
+fail only that waiting horizon future. The next normal metadata poll
+may continue applying COMMIT/cleanup records or independently fail
+for genuine Kafka consumer errors.
+
+An additional deterministic S3 test checks that a failed request
+releases its mailbox slot and does not revoke an independent waiting
+request. The strict S3 horizon anti-skip gate rises to **8 methods**.
+This is read-only diagnostic isolation, not a change to metadata
+authoritative writes, durability ACK or COMMITTED GC.

@@ -69,6 +69,9 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
     private static final TopicPartition METADATA_PARTITION =
         new TopicPartition(SharedMetadataClientConfiguration.TOPIC_NAME, 0);
     private static final Duration POLL_TIMEOUT = Duration.ofMillis(100L);
+    // This diagnostic must never block live metadata replay on Kafka's
+    // much longer default API timeout.
+    private static final Duration REPLAY_HORIZON_LOOKUP_TIMEOUT = Duration.ofSeconds(2);
     private static final long TOPIC_CREATE_RETRY_BACKOFF_MS = 250L;
     private static final long CLOSE_JOIN_TIMEOUT_MS = 30_000L;
     private static final int MAX_PENDING_REPLAY_HORIZONS = 32;
@@ -325,20 +328,31 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
                 horizonRequests.remove(request);
                 continue;
             }
-            if (!request.hasTarget()) {
-                long stableEnd = consumer.endOffsets(List.of(METADATA_PARTITION)).get(METADATA_PARTITION);
-                request.captureTarget(stableEnd);
+            try {
+                if (!request.hasTarget()) {
+                    long stableEnd = consumer.endOffsets(
+                        List.of(METADATA_PARTITION), REPLAY_HORIZON_LOOKUP_TIMEOUT
+                    ).get(METADATA_PARTITION);
+                    request.captureTarget(stableEnd);
+                }
+                long appliedPosition = consumer.position(METADATA_PARTITION, REPLAY_HORIZON_LOOKUP_TIMEOUT);
+                if (closed.get() || !image.isReady()) {
+                    failReadCommittedHorizonRequests(
+                        new IllegalStateException("Shared metadata consumer is no longer authoritative"));
+                    return;
+                }
+                if (!request.completeIfApplied(appliedPosition)) {
+                    return;
+                }
+                horizonRequests.remove(request);
+            } catch (WakeupException e) {
+                // Broker close still interrupts this consumer in the normal way.
+                throw e;
+            } catch (RuntimeException e) {
+                // A timeout of this OPTIONAL diagnostic must not poison the
+                // authoritative COMMIT/cleanup metadata replay consumer.
+                request.fail(e);
             }
-            long appliedPosition = consumer.position(METADATA_PARTITION);
-            if (closed.get() || !image.isReady()) {
-                failReadCommittedHorizonRequests(
-                    new IllegalStateException("Shared metadata consumer is no longer authoritative"));
-                return;
-            }
-            if (!request.completeIfApplied(appliedPosition)) {
-                return;
-            }
-            horizonRequests.remove(request);
         }
     }
 
