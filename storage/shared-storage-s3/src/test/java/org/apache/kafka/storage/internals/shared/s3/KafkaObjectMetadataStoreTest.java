@@ -295,6 +295,35 @@ class KafkaObjectMetadataStoreTest {
     }
 
     @Test
+    void waitingReplayHorizonExpiresOnMonotonicDeadlineAndReleasesCapacity() throws Exception {
+        var mailbox = new KafkaObjectMetadataStore.ReplayHorizonMailbox(1);
+        var request = new KafkaObjectMetadataStore.ReplayHorizonRequest(100L);
+        assertTrue(mailbox.offer(request));
+        request.captureTarget(42L);
+        assertFalse(request.completeIfApplied(41L));
+        assertFalse(request.failIfExpired(1_099L, 1_000L));
+        assertTrue(request.failIfExpired(1_100L, 1_000L));
+        assertEquals(0, mailbox.pending());
+        assertFalse(request.completeIfApplied(42L));
+        assertTrue(request.future().isCompletedExceptionally());
+        assertTrue(mailbox.offer(new KafkaObjectMetadataStore.ReplayHorizonRequest()));
+    }
+
+    @Test
+    void replayHorizonDeadlineIsWrapSafeAndNeverRevokesCompletedEvidence() {
+        var timedOut = new KafkaObjectMetadataStore.ReplayHorizonRequest(Long.MAX_VALUE - 4L);
+        assertFalse(timedOut.failIfExpired(Long.MIN_VALUE + 4L, 10L));
+        assertTrue(timedOut.failIfExpired(Long.MIN_VALUE + 5L, 10L));
+
+        var complete = new KafkaObjectMetadataStore.ReplayHorizonRequest(10L);
+        complete.captureTarget(0L);
+        assertTrue(complete.completeIfApplied(0L));
+        assertFalse(complete.failIfExpired(100L, 20L));
+        assertFalse(complete.future().isCompletedExceptionally());
+        assertThrows(IllegalArgumentException.class, () -> complete.failIfExpired(100L, 0L));
+    }
+
+    @Test
     void retriesOnlyTransientMetadataTopicCreationFailures() {
         assertTrue(KafkaObjectMetadataStore.isTransientTopicCreationFailure(
             new InvalidReplicationFactorException("not enough brokers yet")));

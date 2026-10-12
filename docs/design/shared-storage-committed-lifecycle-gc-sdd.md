@@ -1940,3 +1940,22 @@ independent S3 replay-horizon evidence list grows from 8 to **10** tests.
 
 This is non-authorizing runtime maintenance. It adds no KRaft authority
 producer, COMMITTED reference retirement or S3 physical lifecycle GC.
+
+## Batch 57: monotonic expiration for stalled replay-horizon diagnostic futures
+
+Bounding Kafka endOffsets()/position() calls does not guarantee
+completion if the metadata consumer never advances to the sampled
+read-committed LSO (or if other diagnostic requests fill the queue).
+Each request now has a ten-second monotonic age bound, evaluated by
+the same consumer thread both before and after a Kafka client lookup.
+Expiration completes the future exceptionally and automatically
+releases the bounded mailbox permit. This does not add a timer
+thread or an external broker API call. An indefinitely blocked Kafka
+client still requires its own normal consumer failure/shutdown handling;
+the age check can only run when the consumer thread regains control.
+
+Two deterministic tests verify incomplete replay after a deadline,
+capacity release, later cursor movement not reopening evidence,
+monotonic wrap-around and preservation of already-completed evidence.
+The strict S3 horizon anti-skip count reaches **12 methods**. No
+retirement authority writer or physical COMMITTED GC is enabled.

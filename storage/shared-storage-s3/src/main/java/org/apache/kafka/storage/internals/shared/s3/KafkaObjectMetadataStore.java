@@ -73,6 +73,7 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
     // This diagnostic must never block live metadata replay on Kafka's
     // much longer default API timeout.
     private static final Duration REPLAY_HORIZON_LOOKUP_TIMEOUT = Duration.ofSeconds(2);
+    private static final long REPLAY_HORIZON_MAX_WAIT_NANOS = Duration.ofSeconds(10).toNanos();
     private static final long TOPIC_CREATE_RETRY_BACKOFF_MS = 250L;
     private static final long CLOSE_JOIN_TIMEOUT_MS = 30_000L;
     private static final int MAX_PENDING_REPLAY_HORIZONS = 32;
@@ -329,6 +330,9 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
                 horizonRequests.remove(request);
                 continue;
             }
+            if (request.failIfExpired(System.nanoTime(), REPLAY_HORIZON_MAX_WAIT_NANOS)) {
+                continue;
+            }
             try {
                 if (!request.hasTarget()) {
                     long stableEnd = consumer.endOffsets(
@@ -341,6 +345,9 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
                     failReadCommittedHorizonRequests(
                         new IllegalStateException("Shared metadata consumer is no longer authoritative"));
                     return;
+                }
+                if (request.failIfExpired(System.nanoTime(), REPLAY_HORIZON_MAX_WAIT_NANOS)) {
+                    continue;
                 }
                 if (!request.completeIfApplied(appliedPosition)) {
                     return;
@@ -647,7 +654,27 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
 
     static final class ReplayHorizonRequest {
         private final CompletableFuture<ReadCommittedReplayHorizon> future = new CompletableFuture<>();
+        private final long createdAtNanos;
         private long target = -1L;
+
+        ReplayHorizonRequest() {
+            this(System.nanoTime());
+        }
+
+        ReplayHorizonRequest(long createdAtNanos) {
+            this.createdAtNanos = createdAtNanos;
+        }
+
+        boolean failIfExpired(long nowNanos, long maxWaitNanos) {
+            if (maxWaitNanos <= 0L) {
+                throw new IllegalArgumentException("maxWaitNanos must be positive");
+            }
+            if (future.isDone() || nowNanos - createdAtNanos < maxWaitNanos) {
+                return false;
+            }
+            return future.completeExceptionally(
+                new TimeoutException("Read-committed metadata replay did not reach its captured horizon in time"));
+        }
 
         CompletableFuture<ReadCommittedReplayHorizon> future() {
             return future;

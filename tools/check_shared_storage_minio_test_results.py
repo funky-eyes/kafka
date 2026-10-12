@@ -34,6 +34,8 @@ HORIZON_CASES = {
         "oneReplayHorizonProbeFailureDoesNotFailOtherPendingProbes",
         "replayHorizonMailboxNeverAdmitsAnAlreadyFailedOrCanceledFuture",
         "replayHorizonMailboxDoesNotConsumeTwoPermitsForTheSameRequest",
+        "waitingReplayHorizonExpiresOnMonotonicDeadlineAndReleasesCapacity",
+        "replayHorizonDeadlineIsWrapSafeAndNeverRevokesCompletedEvidence",
     },
 }
 
