@@ -51,6 +51,7 @@ import java.util.TreeMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
@@ -70,6 +71,7 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
     private static final Duration POLL_TIMEOUT = Duration.ofMillis(100L);
     private static final long TOPIC_CREATE_RETRY_BACKOFF_MS = 250L;
     private static final long CLOSE_JOIN_TIMEOUT_MS = 30_000L;
+    private static final int MAX_PENDING_REPLAY_HORIZONS = 32;
 
     private final SharedMetadataClientConfiguration configuration;
     private final Admin admin;
@@ -79,7 +81,7 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
     private final SharedMetadataImage image;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final AppliedOffsetTracker appliedOffsets = new AppliedOffsetTracker();
-    private final ConcurrentLinkedQueue<ReplayHorizonRequest> horizonRequests = new ConcurrentLinkedQueue<>();
+    private final ReplayHorizonMailbox horizonRequests = new ReplayHorizonMailbox(MAX_PENDING_REPLAY_HORIZONS);
     private volatile Thread consumerThread;
 
     private KafkaObjectMetadataStore(
@@ -300,12 +302,14 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
                 new IllegalStateException("Shared metadata consumer is not authoritative"));
         }
         ReplayHorizonRequest request = new ReplayHorizonRequest();
-        horizonRequests.add(request);
-        // Close/failure may race between the READY check and queue insertion.
+        if (!horizonRequests.offer(request)) {
+            return CompletableFuture.failedFuture(
+                new IllegalStateException("Too many pending metadata replay horizon requests"));
+        }
+        // Close/failure may race between READY and insertion; the mailbox
+        // callback releases capacity immediately when the request is failed.
         if (closed.get() || !image.isReady()) {
-            if (horizonRequests.remove(request)) {
-                request.fail(new IllegalStateException("Shared metadata consumer is no longer authoritative"));
-            }
+            request.fail(new IllegalStateException("Shared metadata consumer is no longer authoritative"));
         }
         return request.future();
     }
@@ -318,7 +322,7 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
                 return;
             }
             if (request.future().isDone()) {
-                horizonRequests.poll();
+                horizonRequests.remove(request);
                 continue;
             }
             if (!request.hasTarget()) {
@@ -334,15 +338,12 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
             if (!request.completeIfApplied(appliedPosition)) {
                 return;
             }
-            horizonRequests.poll();
+            horizonRequests.remove(request);
         }
     }
 
     private void failReadCommittedHorizonRequests(Throwable failure) {
-        ReplayHorizonRequest request;
-        while ((request = horizonRequests.poll()) != null) {
-            request.fail(failure);
-        }
+        horizonRequests.failAll(failure);
     }
 
     private void applyRecords(ConsumerRecords<byte[], byte[]> records) {
@@ -576,6 +577,55 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
             if (capturedStableEndExclusive < 0L || appliedPositionExclusive < capturedStableEndExclusive) {
                 throw new IllegalArgumentException("Metadata replay is not caught up to the captured LSO");
             }
+        }
+    }
+
+    /**
+     * Bounded, cancellation-safe mailbox. Completed requests are removed
+     * before releasing their slot, preventing canceled callers from filling
+     * the consumer queue while the Kafka client is blocked in a network call.
+     */
+    static final class ReplayHorizonMailbox {
+        private final Semaphore permits;
+        private final ConcurrentLinkedQueue<ReplayHorizonRequest> queue = new ConcurrentLinkedQueue<>();
+
+        ReplayHorizonMailbox(int maxPending) {
+            if (maxPending <= 0) {
+                throw new IllegalArgumentException("maxPending must be positive");
+            }
+            permits = new Semaphore(maxPending);
+        }
+
+        boolean offer(ReplayHorizonRequest request) {
+            Objects.requireNonNull(request, "request");
+            if (request.future().isDone() || !permits.tryAcquire()) {
+                return false;
+            }
+            request.future().whenComplete((value, failure) -> {
+                queue.remove(request);
+                permits.release();
+            });
+            queue.add(request);
+            return true;
+        }
+
+        ReplayHorizonRequest peek() {
+            return queue.peek();
+        }
+
+        void remove(ReplayHorizonRequest request) {
+            queue.remove(request);
+        }
+
+        void failAll(Throwable failure) {
+            ReplayHorizonRequest request;
+            while ((request = queue.poll()) != null) {
+                request.fail(failure);
+            }
+        }
+
+        int pending() {
+            return queue.size();
         }
     }
 

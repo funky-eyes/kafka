@@ -29,6 +29,8 @@ HORIZON_CASES = {
         "replayHorizonPreservesCapturedLsoSeparatelyFromLaterConsumerProgress",
         "malformedOrUncapturedReadCommittedHorizonFailsClosed",
         "failedReadCommittedHorizonNeverReopensAfterLateConsumerProgress",
+        "pendingHorizonMailboxRejectsExcessRequestsWithoutBlockingTheConsumer",
+        "closingReplayHorizonMailboxFailsAndReleasesEveryOutstandingRequest",
     },
 }
 

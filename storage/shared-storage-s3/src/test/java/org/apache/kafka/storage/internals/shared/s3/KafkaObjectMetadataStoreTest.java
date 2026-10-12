@@ -209,6 +209,39 @@ class KafkaObjectMetadataStoreTest {
     }
 
     @Test
+    void pendingHorizonMailboxRejectsExcessRequestsWithoutBlockingTheConsumer() {
+        KafkaObjectMetadataStore.ReplayHorizonMailbox mailbox =
+            new KafkaObjectMetadataStore.ReplayHorizonMailbox(1);
+        var first = new KafkaObjectMetadataStore.ReplayHorizonRequest();
+        var excess = new KafkaObjectMetadataStore.ReplayHorizonRequest();
+
+        assertTrue(mailbox.offer(first));
+        assertFalse(mailbox.offer(excess));
+        assertEquals(1, mailbox.pending());
+        first.future().cancel(false);
+        assertEquals(0, mailbox.pending());
+        assertTrue(mailbox.offer(excess));
+        assertEquals(1, mailbox.pending());
+        excess.fail(new IllegalStateException("consumer failed"));
+        assertEquals(0, mailbox.pending());
+    }
+
+    @Test
+    void closingReplayHorizonMailboxFailsAndReleasesEveryOutstandingRequest() {
+        KafkaObjectMetadataStore.ReplayHorizonMailbox mailbox =
+            new KafkaObjectMetadataStore.ReplayHorizonMailbox(2);
+        var first = new KafkaObjectMetadataStore.ReplayHorizonRequest();
+        var second = new KafkaObjectMetadataStore.ReplayHorizonRequest();
+        assertTrue(mailbox.offer(first));
+        assertTrue(mailbox.offer(second));
+        mailbox.failAll(new IllegalStateException("consumer closed"));
+        assertTrue(first.future().isCompletedExceptionally());
+        assertTrue(second.future().isCompletedExceptionally());
+        assertEquals(0, mailbox.pending());
+        assertTrue(mailbox.offer(new KafkaObjectMetadataStore.ReplayHorizonRequest()));
+    }
+
+    @Test
     void retriesOnlyTransientMetadataTopicCreationFailures() {
         assertTrue(KafkaObjectMetadataStore.isTransientTopicCreationFailure(
             new InvalidReplicationFactorException("not enough brokers yet")));

@@ -1882,3 +1882,22 @@ durability must be proven, and the actual KRaft writer must serialize
 monotonic retirement with its authoritative append. Until those
 proofs, read/upload quiescence and durable reference retirement are
 established, physical COMMITTED MinIO DELETE remains forbidden.
+
+## Batch 54: bound read-committed replay request lifetime
+
+The optional replay-horizon diagnostic may be queried concurrently.
+An unbounded pending-request queue would permit memory growth while
+KafkaConsumer is blocked in endOffsets or network recovery. The
+mailbox now grants at most 32 active permits, rejects excess requests
+immediately, and removes completed, canceled, or failed requests
+before returning capacity. Broker close and consumer failure fail
+all outstanding futures, even if a network request cannot finish.
+Only 16 queued candidates are examined per consumer poll, so client
+work remains bounded.
+
+Two additional deterministic S3 JUnit witnesses cover capacity
+rejection, request cancellation, failure release and close draining.
+The independent strict horizon evidence increases from 5 to
+**7 required non-skipped methods** without changing the existing
+265-method cross-module source-identity gate or real-MinIO E2E
+evidence. This is still read-only infrastructure, not COMMITTED GC.
