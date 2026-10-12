@@ -420,6 +420,68 @@ class KafkaObjectMetadataStoreTest {
     }
 
     @Test
+    void canceledReadCommittedPartitionPreviewCancelsUnderlyingHorizon() {
+        SharedMetadataImage image = new SharedMetadataImage();
+        image.markReady();
+        var upstream = new CompletableFuture<KafkaObjectMetadataStore.ReadCommittedReplayHorizon>();
+        var preview = KafkaObjectMetadataStore.composeReadCommittedPartitionLogStart(
+            image, new SharedPartitionId(5L, 6L, 0), 0L, 0L, upstream
+        );
+        assertFalse(upstream.isDone());
+        assertTrue(preview.cancel(false));
+        assertTrue(upstream.isCancelled());
+    }
+
+    @Test
+    void failedReadCommittedHorizonCannotProduceAValuePreview() {
+        SharedMetadataImage image = new SharedMetadataImage();
+        image.markReady();
+        var upstream = new CompletableFuture<KafkaObjectMetadataStore.ReadCommittedReplayHorizon>();
+        var preview = KafkaObjectMetadataStore.composeReadCommittedPartitionLogStart(
+            image, new SharedPartitionId(5L, 6L, 0), 0L, 0L, upstream
+        );
+        RuntimeException error = new IllegalStateException("metadata replay failed");
+        upstream.completeExceptionally(error);
+        ExecutionException failed = assertThrows(
+            ExecutionException.class, () -> preview.get(10, TimeUnit.SECONDS)
+        );
+        assertSame(error, failed.getCause());
+    }
+
+    @Test
+    void failedMetadataImageAfterHorizonRequestNeverReturnsPreviewFinding() {
+        SharedMetadataImage image = new SharedMetadataImage();
+        image.markReady();
+        var upstream = new CompletableFuture<KafkaObjectMetadataStore.ReadCommittedReplayHorizon>();
+        var preview = KafkaObjectMetadataStore.composeReadCommittedPartitionLogStart(
+            image, new SharedPartitionId(5L, 6L, 0), 0L, 0L, upstream
+        );
+        image.markFailed(new IllegalStateException("metadata image poisoned"));
+        upstream.complete(new KafkaObjectMetadataStore.ReadCommittedReplayHorizon(0L, 0L));
+        ExecutionException failed = assertThrows(
+            ExecutionException.class, () -> preview.get(10, TimeUnit.SECONDS)
+        );
+        assertTrue(failed.getCause() instanceof IllegalStateException);
+    }
+
+    @Test
+    void completedReadCommittedHorizonClassifiesWithoutMutatingMetadataImage() {
+        SharedMetadataImage image = new SharedMetadataImage();
+        image.markReady();
+        SharedPartitionId partition = new SharedPartitionId(5L, 6L, 0);
+        var upstream = new CompletableFuture<KafkaObjectMetadataStore.ReadCommittedReplayHorizon>();
+        var preview = KafkaObjectMetadataStore.composeReadCommittedPartitionLogStart(
+            image, partition, 0L, 5L, upstream
+        );
+        assertTrue(upstream.complete(new KafkaObjectMetadataStore.ReadCommittedReplayHorizon(3L, 4L)));
+        var finding = preview.join();
+        assertEquals(partition, finding.partition());
+        assertEquals(3L, finding.replayHorizon().capturedStableEndExclusive());
+        assertEquals(PartitionLogStartAdvancePrecheck.Finding.INITIAL_ZERO_CANDIDATE, finding.finding());
+        assertTrue(image.partitionLogStartsSnapshot().isEmpty());
+    }
+
+    @Test
     void retriesOnlyTransientMetadataTopicCreationFailures() {
         assertTrue(KafkaObjectMetadataStore.isTransientTopicCreationFailure(
             new InvalidReplicationFactorException("not enough brokers yet")));

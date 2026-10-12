@@ -2061,3 +2061,22 @@ the already-executed pre-Gradle source checker to reject consecutive
 JavaDoc blocks in the Shared Storage Java production trees. Two small
 unit tests verify negative and positive cases. Do not disable -Werror,
 change dependencies, relax CI, or grant any retirement/GC authority.
+
+## Batch 63: fail closed across asynchronous read-committed replay preview completion
+
+The S3 metadata preview now delegates the LSO future and image
+classification to a package-visible, deterministic asynchronous
+composition helper. This does not expose a new producer or authorize
+a retirement: it allows the cancellation and failure ordering to be
+verified before the MetadataConsumer network call completes.
+
+Four S3 regression witnesses require (1) downstream cancellation to
+cancel and release the upstream replay-horizon request, (2) a failed
+LSO query to propagate its original failure, (3) an image poisoned
+after the LSO request but before completion to reject the finding,
+and (4) a successful empty-image preview to preserve the immutable
+topic partition and avoid metadata mutation. The strict S3 replay
+horizon evidence list increases from 18 to **22** methods.
+
+No Broker incarnation, KRaft Controller writer, WAL durable
+certificate or physical COMMITTED GC permission is claimed here.

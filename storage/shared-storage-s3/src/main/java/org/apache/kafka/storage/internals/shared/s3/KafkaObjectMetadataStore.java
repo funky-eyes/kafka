@@ -339,12 +339,34 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
             return CompletableFuture.failedFuture(
                 new IllegalArgumentException("Source log start offsets must be non-negative"));
         }
-        CompletableFuture<ReadCommittedReplayHorizon> horizon = captureReadCommittedReplayHorizon();
+        return composeReadCommittedPartitionLogStart(
+            image, partition, requestedLogStart, observedKafkaLogStart, captureReadCommittedReplayHorizon()
+        );
+    }
+
+    /**
+     * Exposes no authorization: composing the asynchronous sample with image
+     * classification must propagate cancellation and fail closed if replay
+     * failed between requesting the LSO and receiving its applied position.
+     */
+    static CompletableFuture<ReadCommittedPartitionLogStartPreflight> composeReadCommittedPartitionLogStart(
+        SharedMetadataImage image,
+        SharedPartitionId partition,
+        long requestedLogStart,
+        long observedKafkaLogStart,
+        CompletableFuture<ReadCommittedReplayHorizon> horizon
+    ) {
+        Objects.requireNonNull(image, "image");
+        Objects.requireNonNull(partition, "partition");
+        Objects.requireNonNull(horizon, "horizon");
+        if (requestedLogStart < 0L || observedKafkaLogStart < 0L) {
+            throw new IllegalArgumentException("Source log start offsets must be non-negative");
+        }
         CompletableFuture<ReadCommittedPartitionLogStartPreflight> preview = horizon.thenApply(captured ->
             classifyReadCommittedPartitionLogStart(image, partition, requestedLogStart, observedKafkaLogStart, captured)
         );
-        // Canceling the derived advisory future must release the underlying
-        // bounded consumer mailbox slot, not silently keep a useless probe alive.
+        // Canceling the derived advisory future must release its queued
+        // request's mailbox permit, including before the consumer sees it.
         preview.whenComplete((ignored, failed) -> {
             if (preview.isCancelled()) {
                 horizon.cancel(false);

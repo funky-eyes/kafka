@@ -42,6 +42,10 @@ HORIZON_CASES = {
         "compactedMetadataReplayPreviewUsesRealCursorDespiteMissingRecordOffsets",
         "replayPreviewPreservesImmutableTopicIdAndInitialZero",
         "readCommittedPreviewStillRejectsSourceBoundsAndUnavailableImage",
+        "canceledReadCommittedPartitionPreviewCancelsUnderlyingHorizon",
+        "failedReadCommittedHorizonCannotProduceAValuePreview",
+        "failedMetadataImageAfterHorizonRequestNeverReturnsPreviewFinding",
+        "completedReadCommittedHorizonClassifiesWithoutMutatingMetadataImage",
     },
 }
 
