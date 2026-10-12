@@ -33,9 +33,9 @@ class PartitionWalIndexTest {
         PartitionWalIndex index = new PartitionWalIndex();
         WalPartitionKey key = new WalPartitionKey(1L, 2L, 3);
 
-        index.apply(WalRecord.data(1L, 2L, 3, 7, 10, 19, new byte[]{1}), new WalAppendResult(1, 0, 100));
-        index.apply(WalRecord.data(1L, 2L, 3, 7, 20, 29, new byte[]{2}), new WalAppendResult(1, 100, 100));
-        index.apply(WalRecord.data(1L, 2L, 3, 7, 30, 39, new byte[]{3}), new WalAppendResult(1, 200, 100));
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 10, 19, new byte[]{1}), new WalAppendResult(1, 0, 61));
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 20, 29, new byte[]{2}), new WalAppendResult(1, 100, 61));
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 30, 39, new byte[]{3}), new WalAppendResult(1, 200, 61));
 
         index.apply(WalRecord.truncate(1L, 2L, 3, 8, 25), new WalAppendResult(1, 300, 60));
 
@@ -51,9 +51,9 @@ class PartitionWalIndexTest {
         PartitionWalIndex index = new PartitionWalIndex();
         WalPartitionKey key = new WalPartitionKey(10L, 20L, 1);
 
-        index.apply(WalRecord.data(10L, 20L, 1, 3, 100, 109, new byte[]{1}), new WalAppendResult(2, 0, 100));
+        index.apply(WalRecord.data(10L, 20L, 1, 3, 100, 109, new byte[]{1}), new WalAppendResult(2, 0, 61));
         index.apply(WalRecord.truncate(10L, 20L, 1, 4, 100), new WalAppendResult(2, 100, 60));
-        index.apply(WalRecord.data(10L, 20L, 1, 4, 100, 109, new byte[]{2}), new WalAppendResult(3, 0, 100));
+        index.apply(WalRecord.data(10L, 20L, 1, 4, 100, 109, new byte[]{2}), new WalAppendResult(3, 0, 61));
 
         WalLocation location = index.find(key, 105).orElseThrow();
         assertEquals(3, location.segmentId());
@@ -65,13 +65,13 @@ class PartitionWalIndexTest {
         PartitionWalIndex index = new PartitionWalIndex();
         WalPartitionKey key = new WalPartitionKey(1L, 2L, 3);
 
-        index.apply(WalRecord.data(1L, 2L, 3, 7, 0, 9, new byte[]{1}), new WalAppendResult(1, 0, 100));
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 0, 9, new byte[]{1}), new WalAppendResult(1, 0, 61));
         long afterFirstAppend = index.mutationRevision(key);
-        index.apply(WalRecord.data(1L, 2L, 3, 7, 10, 19, new byte[]{2}), new WalAppendResult(1, 100, 100));
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 10, 19, new byte[]{2}), new WalAppendResult(1, 100, 61));
         assertEquals(afterFirstAppend, index.mutationRevision(key),
             "Ordinary tail appends must not invalidate active upload selection");
 
-        index.apply(WalRecord.data(1L, 2L, 3, 8, 0, 9, new byte[]{3}), new WalAppendResult(1, 200, 100));
+        index.apply(WalRecord.data(1L, 2L, 3, 8, 0, 9, new byte[]{3}), new WalAppendResult(1, 200, 61));
         long afterReplacement = index.mutationRevision(key);
         assertTrue(afterReplacement > afterFirstAppend);
 
@@ -126,9 +126,9 @@ class PartitionWalIndexTest {
         WalPartitionKey reclaimed = new WalPartitionKey(1L, 2L, 3);
         WalPartitionKey surviving = new WalPartitionKey(1L, 2L, 4);
         index.apply(WalRecord.data(1L, 2L, 3, 7, 0, 9, new byte[]{1}),
-            new WalAppendResult(100L, 100));
+            new WalAppendResult(100L, 61));
         index.apply(WalRecord.data(1L, 2L, 4, 7, 0, 9, new byte[]{2}),
-            new WalAppendResult(200L, 100));
+            new WalAppendResult(200L, 61));
         long before = index.mutationRevision(reclaimed);
         long survivorBefore = index.mutationRevision(surviving);
 
@@ -148,9 +148,9 @@ class PartitionWalIndexTest {
         WalPartitionKey first = new WalPartitionKey(1L, 2L, 3);
         WalPartitionKey second = new WalPartitionKey(1L, 2L, 4);
         index.apply(WalRecord.data(1L, 2L, 3, 7, 0, 9, new byte[]{1}),
-            new WalAppendResult(100L, 100));
+            new WalAppendResult(100L, 61));
         index.apply(WalRecord.data(1L, 2L, 4, 7, 0, 9, new byte[]{2}),
-            new WalAppendResult(200L, 100));
+            new WalAppendResult(200L, 61));
         index.clear();
         assertTrue(index.find(first, 0L).isEmpty());
         assertTrue(index.find(second, 0L).isEmpty());
@@ -158,7 +158,7 @@ class PartitionWalIndexTest {
         assertEquals(1L, index.mutationRevision(second));
 
         index.apply(WalRecord.data(1L, 2L, 3, 8, 0, 9, new byte[]{3}),
-            new WalAppendResult(300L, 100));
+            new WalAppendResult(300L, 61));
         assertEquals(1L, index.mutationRevision(first));
         assertTrue(index.find(first, 0L).isPresent());
     }
@@ -173,14 +173,112 @@ class PartitionWalIndexTest {
         assertTrue(index.find(key, 100L).isEmpty());
     }
 
+
+    @Test
+    void malformedReplayPayloadLengthCannotCreateAnIndex() {
+        PartitionWalIndex index = new PartitionWalIndex();
+        WalPartitionKey key = new WalPartitionKey(1L, 2L, 3);
+        WalRecord record = WalRecord.data(1L, 2L, 3, 7, 0L, 9L, new byte[]{1});
+
+        assertThrows(IllegalArgumentException.class,
+            () -> index.apply(record, new WalAppendResult(100L, 62)));
+        assertEquals(0, index.partitionCount());
+        assertEquals(0L, index.mutationRevision(key));
+    }
+
+    @Test
+    void malformedReplayReplacementCannotRemovePreviousRange() {
+        PartitionWalIndex index = new PartitionWalIndex();
+        WalPartitionKey key = new WalPartitionKey(1L, 2L, 3);
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 0L, 9L, new byte[]{1}),
+            new WalAppendResult(100L, 61));
+        long priorRevision = index.mutationRevision(key);
+
+        assertThrows(IllegalArgumentException.class, () ->
+            index.apply(WalRecord.data(1L, 2L, 3, 8, 0L, 9L, new byte[]{2}),
+                new WalAppendResult(200L, 62)));
+        assertEquals(100L, index.find(key, 0L).orElseThrow().walOffset());
+        assertEquals(priorRevision, index.mutationRevision(key));
+    }
+
+    @Test
+    void internalGroupCommitMarkerCannotEnterUserPartitionIndex() {
+        PartitionWalIndex index = new PartitionWalIndex();
+
+        assertThrows(IllegalArgumentException.class, () ->
+            index.apply(WalRecord.groupCommit(77L, 2), new WalAppendResult(100L, 60)));
+        assertEquals(0, index.partitionCount());
+    }
+
+    @Test
+    void overlappingPredecessorAndSuccessorAreEvictedAsWholeBatches() {
+        PartitionWalIndex index = new PartitionWalIndex();
+        WalPartitionKey key = new WalPartitionKey(1L, 2L, 3);
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 0L, 9L, new byte[]{1}),
+            new WalAppendResult(100L, 61));
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 10L, 19L, new byte[]{2}),
+            new WalAppendResult(200L, 61));
+        long before = index.mutationRevision(key);
+        index.apply(WalRecord.data(1L, 2L, 3, 8, 5L, 14L, new byte[]{3}),
+            new WalAppendResult(300L, 61));
+
+        assertTrue(index.find(key, 0L).isEmpty());
+        assertEquals(300L, index.find(key, 5L).orElseThrow().walOffset());
+        assertEquals(300L, index.find(key, 10L).orElseThrow().walOffset());
+        assertTrue(index.find(key, 15L).isEmpty());
+        assertEquals(1, index.ranges(key).size());
+        assertTrue(index.mutationRevision(key) > before);
+    }
+
+    @Test
+    void oneReplacementEvictsEveryOverlappedSuccessorButKeepsLaterTail() {
+        PartitionWalIndex index = new PartitionWalIndex();
+        WalPartitionKey key = new WalPartitionKey(1L, 2L, 3);
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 10L, 19L, new byte[]{1}),
+            new WalAppendResult(100L, 61));
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 20L, 29L, new byte[]{2}),
+            new WalAppendResult(200L, 61));
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 30L, 39L, new byte[]{3}),
+            new WalAppendResult(300L, 61));
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 40L, 49L, new byte[]{4}),
+            new WalAppendResult(400L, 61));
+        index.apply(WalRecord.data(1L, 2L, 3, 8, 5L, 34L, new byte[]{5}),
+            new WalAppendResult(500L, 61));
+
+        assertEquals(500L, index.find(key, 10L).orElseThrow().walOffset());
+        assertEquals(500L, index.find(key, 30L).orElseThrow().walOffset());
+        assertTrue(index.find(key, 35L).isEmpty());
+        assertEquals(400L, index.find(key, 45L).orElseThrow().walOffset());
+        assertEquals(2, index.ranges(key).size());
+    }
+
+    @Test
+    void insertingIntoGapKeepsUnrelatedBatchesButFencesRevision() {
+        PartitionWalIndex index = new PartitionWalIndex();
+        WalPartitionKey key = new WalPartitionKey(1L, 2L, 3);
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 0L, 9L, new byte[]{1}),
+            new WalAppendResult(100L, 61));
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 30L, 39L, new byte[]{2}),
+            new WalAppendResult(200L, 61));
+        long before = index.mutationRevision(key);
+
+        index.apply(WalRecord.data(1L, 2L, 3, 8, 20L, 29L, new byte[]{3}),
+            new WalAppendResult(300L, 61));
+        assertEquals(100L, index.find(key, 5L).orElseThrow().walOffset());
+        assertEquals(300L, index.find(key, 25L).orElseThrow().walOffset());
+        assertEquals(200L, index.find(key, 35L).orElseThrow().walOffset());
+        assertEquals(3, index.ranges(key).size());
+        assertTrue(index.mutationRevision(key) > before);
+    }
+
     @Test
     void shouldWalkPartitionRangesWithoutMaterializingBacklog() {
         PartitionWalIndex index = new PartitionWalIndex();
         WalPartitionKey key = new WalPartitionKey(1L, 2L, 3);
 
-        index.apply(WalRecord.data(1L, 2L, 3, 7, 10, 19, new byte[]{1}), new WalAppendResult(1, 0, 100));
-        index.apply(WalRecord.data(1L, 2L, 3, 7, 30, 39, new byte[]{2}), new WalAppendResult(1, 100, 100));
-        index.apply(WalRecord.data(1L, 2L, 3, 7, 40, 49, new byte[]{3}), new WalAppendResult(1, 200, 100));
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 10, 19, new byte[]{1}), new WalAppendResult(1, 0, 61));
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 30, 39, new byte[]{2}), new WalAppendResult(1, 100, 61));
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 40, 49, new byte[]{3}), new WalAppendResult(1, 200, 61));
 
         WalLocation containing = index.rangeAtOrAfter(key, 15L).orElseThrow();
         assertEquals(10L, containing.firstOffset());

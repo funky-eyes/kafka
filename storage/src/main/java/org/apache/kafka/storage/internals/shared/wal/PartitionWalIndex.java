@@ -35,14 +35,22 @@ public final class PartitionWalIndex {
     private final ConcurrentHashMap<WalPartitionKey, MutationGate> mutationRevisions = new ConcurrentHashMap<>();
 
     public void apply(WalRecord record, WalAppendResult appendResult) {
+        // Internal commit markers belong to the physical WAL protocol, not
+        // to user partitions. A replay callback must never index one as DATA.
+        if (record.type() != WalRecordType.DATA && record.type() != WalRecordType.TRUNCATE) {
+            throw new IllegalArgumentException("Unsupported record type in partition WAL index: " + record.type());
+        }
         WalPartitionKey key = WalPartitionKey.of(record);
         if (record.type() == WalRecordType.TRUNCATE) {
             truncate(key, record.truncateOffset());
             return;
         }
+        // Replay bypasses SharedStorageEngine's future-to-index validation.
+        // Check that its returned WAL span exactly matches the decoded DATA.
         WalLocation location = new WalLocation(
             appendResult.offset(),
             appendResult.length(),
+            record.payload().remaining(),
             record.leaderEpoch(),
             record.firstOffset(),
             record.lastOffset()
@@ -57,7 +65,17 @@ public final class PartitionWalIndex {
                 (floor != null && floor.getValue().lastOffset() >= record.firstOffset()) ||
                     ceiling != null;
             if (destructiveMutation) {
-                gate.destructiveChange(() -> partitionLocations.put(record.firstOffset(), location));
+                gate.destructiveChange(() -> {
+                    // RecordBatch ranges are indivisible: an older batch
+                    // overlapped by this replacement cannot be left readable.
+                    if (floor != null && floor.getValue().lastOffset() >= record.firstOffset()) {
+                        partitionLocations.remove(floor.getKey(), floor.getValue());
+                    }
+                    // Drop every overlapped successor before publishing the
+                    // new record, not just an identical first-offset entry.
+                    partitionLocations.subMap(record.firstOffset(), true, record.lastOffset(), true).clear();
+                    partitionLocations.put(record.firstOffset(), location);
+                });
             } else {
                 // A pure tail append cannot invalidate a prior source LogStart observation.
                 partitionLocations.put(record.firstOffset(), location);

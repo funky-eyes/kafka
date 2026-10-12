@@ -2240,3 +2240,57 @@ WAL result-to-index publication invariants only. They do not authenticate
 a cross-broker WAL durability certificate, KRaft Controller writer CAS,
 reader/upload quiescence, or physical COMMITTED S3 garbage collection;
 all production COMMITTED retirement writes and deletes remain disabled.
+
+
+## Batch 77: preserve WAL logical-address overflow defense and satisfy SpotBugs
+
+The Batch 73-76 source-SHA GA Seal was blocked by one precise
+`RV_RETURN_VALUE_IGNORED_NO_SIDE_EFFECT` warning in
+`SharedStorageEngine.validatedLocation`. Ignoring the return of
+`Math.addExact` was not accepted by SpotBugs. Use an explicit checked
+logical-address upper-bound condition, retaining the previous fail-closed
+behavior for invalid WAL offsets without suppressing static analysis.
+Previously added single and grouped WAL overflow tests remain mandatory.
+
+## Batch 78: fail closed on invalid WAL replay payloads or internal commit markers
+
+The WAL backends consume GROUP_COMMIT markers internally and replay
+only DATA and TRUNCATE records to the partition index. Index replay
+now rejects an unexpected GROUP_COMMIT and checks DATA append-result
+length against its decoded payload before touching any index entry.
+Two replay-length tests and one internal-marker test protect the
+recovery path independently of SharedStorageEngine's asynchronous
+append-result validation. Old synthetic test fixtures now use the
+true one-byte DATA record encoding length, 60 + 1 bytes.
+
+## Batch 79: canonicalize overlapping WAL index ranges before publication
+
+A replacement DATA range can intersect a prior RecordBatch and
+multiple following batches. Merely inserting a new first-offset key
+left overlapped, stale successors accessible through floor lookups.
+The destructive mutation gate now removes any overlapped predecessor
+and every overlapping successor *before* publishing the replacement.
+RecordBatch ranges are indivisible; partially overlapped old batches
+are removed in full. A non-overlapping later tail remains readable.
+Tests cover predecessor plus successor overlap, multiple successors,
+and a disjoint gap insertion. The mutation revision changes for any
+destructive or out-of-order insertion but not ordinary tail appends.
+
+## Batch 80: reject overlapping or reversed Kafka record batches before WAL admission
+
+One Kafka MemoryRecords append maps to a single atomic WAL batch
+group. Batches within that group must be ordered and must not
+overlap by Kafka offsets; accepting duplicate, intersecting or
+reversed offset windows would create misleading index state.
+`appendOwnedBatchGroup` now rejects malformed groups before
+`SharedWal.appendBatch` is invoked. A gap between batches remains
+legal, as does a gap in the physical WAL address space. Four
+deterministic tests check invalid requests cause zero WAL group
+admissions and a valid gapped request still succeeds.
+
+This iteration adds **10 mandatory Java/Scala tests** (304 -> 314)
+without changing Kafka metadata record encodings or remote object
+semantics. Local mutation generations, local WAL append futures and
+Controller read-only preflights still do NOT form a signed durability
+certificate or an atomic KRaft CAS; all production COMMITTED-object
+physical retirement remains disabled.

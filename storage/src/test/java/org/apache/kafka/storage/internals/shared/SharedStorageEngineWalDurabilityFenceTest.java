@@ -37,6 +37,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /** A local WAL future is an index publication barrier, not KRaft retirement authority. */
@@ -230,6 +232,66 @@ class SharedStorageEngineWalDurabilityFenceTest {
             assertEquals(before, engine.walMutationRevision(PARTITION));
             assertEquals(1, engine.localLocations(PARTITION, 0L, 10L).size());
         }
+    }
+
+
+    @Test
+    void duplicateKafkaBatchOffsetsNeverReachWalAdmission() throws Exception {
+        SharedWal wal = mock(SharedWal.class);
+        try (SharedStorageEngine engine = new SharedStorageEngine(wal)) {
+            CompletableFuture<List<WalLocation>> rejected = engine.appendOwnedBatchGroup(
+                PARTITION, List.of(batch(0L, 9L), batch(0L, 9L))
+            );
+            assertThrows(CompletionException.class, rejected::join);
+            verify(wal, never()).appendBatch(anyList());
+            assertTrue(engine.localLocations(PARTITION, 0L, 20L).isEmpty());
+        }
+    }
+
+    @Test
+    void overlappingKafkaBatchOffsetsNeverReachWalAdmission() throws Exception {
+        SharedWal wal = mock(SharedWal.class);
+        try (SharedStorageEngine engine = new SharedStorageEngine(wal)) {
+            CompletableFuture<List<WalLocation>> rejected = engine.appendOwnedBatchGroup(
+                PARTITION, List.of(batch(0L, 9L), batch(9L, 19L))
+            );
+            assertThrows(CompletionException.class, rejected::join);
+            verify(wal, never()).appendBatch(anyList());
+            assertTrue(engine.localLocations(PARTITION, 0L, 20L).isEmpty());
+        }
+    }
+
+    @Test
+    void reversedKafkaBatchOffsetsNeverReachWalAdmission() throws Exception {
+        SharedWal wal = mock(SharedWal.class);
+        try (SharedStorageEngine engine = new SharedStorageEngine(wal)) {
+            CompletableFuture<List<WalLocation>> rejected = engine.appendOwnedBatchGroup(
+                PARTITION, List.of(batch(20L, 29L), batch(0L, 9L))
+            );
+            assertThrows(CompletionException.class, rejected::join);
+            verify(wal, never()).appendBatch(anyList());
+            assertTrue(engine.localLocations(PARTITION, 0L, 30L).isEmpty());
+        }
+    }
+
+    @Test
+    void gappedKafkaBatchOffsetsCanStillCrossOneDurableWalBarrier() throws Exception {
+        SharedWal wal = mock(SharedWal.class);
+        when(wal.appendBatch(anyList())).thenReturn(CompletableFuture.completedFuture(List.of(
+            new WalAppendResult(1L, 61), new WalAppendResult(100L, 61)
+        )));
+        try (SharedStorageEngine engine = new SharedStorageEngine(wal)) {
+            List<WalLocation> durable = engine.appendOwnedBatchGroup(
+                PARTITION, List.of(batch(0L, 9L), batch(20L, 29L))
+            ).join();
+            assertEquals(List.of(0L, 20L), durable.stream().map(WalLocation::firstOffset).toList());
+            assertEquals(2, engine.localLocations(PARTITION, 0L, 30L).size());
+            verify(wal).appendBatch(anyList());
+        }
+    }
+
+    private static SharedStorageEngine.OwnedDataBatch batch(long first, long last) {
+        return new SharedStorageEngine.OwnedDataBatch(3, first, last, ByteBuffer.wrap(new byte[] {1}));
     }
 
     private static SharedStorageEngine singleEngine(CompletableFuture<WalAppendResult> barrier) throws IOException {

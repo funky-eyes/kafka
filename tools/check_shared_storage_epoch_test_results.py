@@ -153,6 +153,12 @@ REQUIRED_TESTS = {
         "reclamationFencesOnlyModifiedPartition",
         "clearFencesEveryFormerPartitionAndKeepsGenerationAfterReplay",
         "emptyTruncateIsStillAGenerationFence",
+        "malformedReplayPayloadLengthCannotCreateAnIndex",
+        "malformedReplayReplacementCannotRemovePreviousRange",
+        "internalGroupCommitMarkerCannotEnterUserPartitionIndex",
+        "overlappingPredecessorAndSuccessorAreEvictedAsWholeBatches",
+        "oneReplacementEvictsEveryOverlappedSuccessorButKeepsLaterTail",
+        "insertingIntoGapKeepsUnrelatedBatchesButFencesRevision",
     ),
     "org.apache.kafka.storage.internals.shared.SharedStorageEngineWalDurabilityFenceTest": (
         "pendingWalBarrierKeepsEveryGroupBatchInvisible",
@@ -170,6 +176,10 @@ REQUIRED_TESTS = {
         "invalidSingleOwnedAppendResultNeverPublishesIndex",
         "singleWalAddressOverflowCannotPublishIndex",
         "invalidTruncateResultCannotRemoveIndexedBytes",
+        "duplicateKafkaBatchOffsetsNeverReachWalAdmission",
+        "overlappingKafkaBatchOffsetsNeverReachWalAdmission",
+        "reversedKafkaBatchOffsetsNeverReachWalAdmission",
+        "gappedKafkaBatchOffsetsCanStillCrossOneDurableWalBarrier",
     ),
     "org.apache.kafka.controller.PartitionRetirementControllerPrecheckTest": (
         "currentRecoveredLeaderInIsrMatchesButIsNotWriteAuthorization",

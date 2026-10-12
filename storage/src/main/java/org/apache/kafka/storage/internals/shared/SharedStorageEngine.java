@@ -111,8 +111,17 @@ public final class SharedStorageEngine implements AutoCloseable {
         }
 
         List<WalRecord> records = new ArrayList<>(batches.size());
+        long priorLastOffset = -1L;
         for (OwnedDataBatch batch : batches) {
             Objects.requireNonNull(batch, "batch");
+            // Kafka record batches must be disjoint and ordered within
+            // one WAL group. Reject malformed input before any WAL admission.
+            if (batch.firstOffset() <= priorLastOffset) {
+                return CompletableFuture.failedFuture(
+                    new IllegalArgumentException("Kafka batch group offsets overlap or move backwards")
+                );
+            }
+            priorLastOffset = batch.lastOffset();
             records.add(WalRecord.dataOwned(
                 partition.topicIdHigh(),
                 partition.topicIdLow(),
@@ -162,7 +171,11 @@ public final class SharedStorageEngine implements AutoCloseable {
             result.offset(), result.length(), record.payload().remaining(),
             record.leaderEpoch(), record.firstOffset(), record.lastOffset()
         );
-        Math.addExact(location.walOffset(), location.length());
+        // Retain overflow checking without discarding Math.addExact's result:
+        // SpotBugs correctly rejects calling a pure method for its side effects.
+        if (location.walOffset() > Long.MAX_VALUE - location.length()) {
+            throw new IllegalStateException("WAL location extends beyond the logical address space");
+        }
         return location;
     }
 
