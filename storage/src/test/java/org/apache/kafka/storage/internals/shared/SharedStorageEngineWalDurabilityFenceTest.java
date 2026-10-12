@@ -20,6 +20,7 @@ import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 import org.apache.kafka.storage.internals.shared.wal.SharedWal;
 import org.apache.kafka.storage.internals.shared.wal.WalAppendResult;
 import org.apache.kafka.storage.internals.shared.wal.WalLocation;
+import org.apache.kafka.storage.internals.shared.wal.WalRecord;
 
 import org.junit.jupiter.api.Test;
 
@@ -33,6 +34,7 @@ import java.util.concurrent.CompletionException;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -111,6 +113,129 @@ class SharedStorageEngineWalDurabilityFenceTest {
             assertThrows(CompletionException.class, append::join);
             assertTrue(engine.localLocations(PARTITION, 0L, 20L).isEmpty());
         }
+    }
+
+
+    @Test
+    void firstWalGroupLengthMismatchDoesNotPublishIndexedPrefix() throws Exception {
+        CompletableFuture<List<WalAppendResult>> barrier = new CompletableFuture<>();
+        try (SharedStorageEngine engine = engine(barrier)) {
+            CompletableFuture<List<WalLocation>> append = engine.appendOwnedBatchGroup(PARTITION, batches());
+            barrier.complete(List.of(new WalAppendResult(1L, 62), new WalAppendResult(63L, 61)));
+            assertThrows(CompletionException.class, append::join);
+            assertTrue(engine.localLocations(PARTITION, 0L, 20L).isEmpty());
+        }
+    }
+
+    @Test
+    void laterWalGroupLengthMismatchDoesNotPublishIndexedPrefix() throws Exception {
+        CompletableFuture<List<WalAppendResult>> barrier = new CompletableFuture<>();
+        try (SharedStorageEngine engine = engine(barrier)) {
+            CompletableFuture<List<WalLocation>> append = engine.appendOwnedBatchGroup(PARTITION, batches());
+            barrier.complete(List.of(new WalAppendResult(1L, 61), new WalAppendResult(62L, 62)));
+            assertThrows(CompletionException.class, append::join);
+            assertTrue(engine.localLocations(PARTITION, 0L, 20L).isEmpty());
+            assertTrue(engine.uploadCandidates(PARTITION, 0L, 20L).isEmpty());
+        }
+    }
+
+    @Test
+    void overlappingWalGroupAddressesCannotPublishAnyIndexedBatch() throws Exception {
+        CompletableFuture<List<WalAppendResult>> barrier = new CompletableFuture<>();
+        try (SharedStorageEngine engine = engine(barrier)) {
+            CompletableFuture<List<WalLocation>> append = engine.appendOwnedBatchGroup(PARTITION, batches());
+            barrier.complete(List.of(new WalAppendResult(1L, 61), new WalAppendResult(50L, 61)));
+            assertThrows(CompletionException.class, append::join);
+            assertTrue(engine.localLocations(PARTITION, 0L, 20L).isEmpty());
+        }
+    }
+
+    @Test
+    void walGroupOffsetOverflowCannotPublishAnyIndexedBatch() throws Exception {
+        CompletableFuture<List<WalAppendResult>> barrier = new CompletableFuture<>();
+        try (SharedStorageEngine engine = engine(barrier)) {
+            CompletableFuture<List<WalLocation>> append = engine.appendOwnedBatchGroup(PARTITION, batches());
+            barrier.complete(List.of(
+                new WalAppendResult(1L, 61),
+                new WalAppendResult(Long.MAX_VALUE - 20L, 61)
+            ));
+            assertThrows(CompletionException.class, append::join);
+            assertTrue(engine.localLocations(PARTITION, 0L, 20L).isEmpty());
+        }
+    }
+
+    @Test
+    void gappedWalGroupAddressesRemainValid() throws Exception {
+        CompletableFuture<List<WalAppendResult>> barrier = new CompletableFuture<>();
+        try (SharedStorageEngine engine = engine(barrier)) {
+            CompletableFuture<List<WalLocation>> append = engine.appendOwnedBatchGroup(PARTITION, batches());
+            barrier.complete(List.of(new WalAppendResult(1L, 61), new WalAppendResult(128L, 61)));
+            assertEquals(2, append.join().size());
+            assertEquals(List.of(0L, 10L),
+                engine.localLocations(PARTITION, 0L, 20L).stream()
+                    .map(WalLocation::firstOffset).toList());
+        }
+    }
+
+    @Test
+    void invalidSingleCopiedAppendResultNeverPublishesIndex() throws Exception {
+        CompletableFuture<WalAppendResult> barrier = new CompletableFuture<>();
+        try (SharedStorageEngine engine = singleEngine(barrier)) {
+            CompletableFuture<WalLocation> append =
+                engine.appendData(PARTITION, 3, 0L, 9L, ByteBuffer.wrap(new byte[] {1}));
+            barrier.complete(new WalAppendResult(1L, 62));
+            assertThrows(CompletionException.class, append::join);
+            assertTrue(engine.localLocations(PARTITION, 0L, 10L).isEmpty());
+        }
+    }
+
+    @Test
+    void invalidSingleOwnedAppendResultNeverPublishesIndex() throws Exception {
+        CompletableFuture<WalAppendResult> barrier = new CompletableFuture<>();
+        try (SharedStorageEngine engine = singleEngine(barrier)) {
+            CompletableFuture<WalLocation> append =
+                engine.appendOwnedData(PARTITION, 3, 0L, 9L, ByteBuffer.wrap(new byte[] {1}));
+            barrier.complete(new WalAppendResult(1L, 62));
+            assertThrows(CompletionException.class, append::join);
+            assertTrue(engine.localLocations(PARTITION, 0L, 10L).isEmpty());
+        }
+    }
+
+    @Test
+    void singleWalAddressOverflowCannotPublishIndex() throws Exception {
+        CompletableFuture<WalAppendResult> barrier = new CompletableFuture<>();
+        try (SharedStorageEngine engine = singleEngine(barrier)) {
+            CompletableFuture<WalLocation> append =
+                engine.appendData(PARTITION, 3, 0L, 9L, ByteBuffer.wrap(new byte[] {1}));
+            barrier.complete(new WalAppendResult(Long.MAX_VALUE - 20L, 61));
+            assertThrows(CompletionException.class, append::join);
+            assertTrue(engine.localLocations(PARTITION, 0L, 10L).isEmpty());
+        }
+    }
+
+    @Test
+    void invalidTruncateResultCannotRemoveIndexedBytes() throws Exception {
+        SharedWal wal = mock(SharedWal.class);
+        CompletableFuture<WalAppendResult> failedTruncate = new CompletableFuture<>();
+        when(wal.append(any(WalRecord.class))).thenReturn(
+            CompletableFuture.completedFuture(new WalAppendResult(1L, 61)), failedTruncate
+        );
+        try (SharedStorageEngine engine = new SharedStorageEngine(wal)) {
+            engine.appendData(PARTITION, 3, 0L, 9L, ByteBuffer.wrap(new byte[] {1})).join();
+            long before = engine.walMutationRevision(PARTITION);
+            assertEquals(1, engine.localLocations(PARTITION, 0L, 10L).size());
+            CompletableFuture<Void> truncate = engine.truncate(PARTITION, 4, 0L);
+            failedTruncate.complete(new WalAppendResult(62L, 61));
+            assertThrows(CompletionException.class, truncate::join);
+            assertEquals(before, engine.walMutationRevision(PARTITION));
+            assertEquals(1, engine.localLocations(PARTITION, 0L, 10L).size());
+        }
+    }
+
+    private static SharedStorageEngine singleEngine(CompletableFuture<WalAppendResult> barrier) throws IOException {
+        SharedWal wal = mock(SharedWal.class);
+        when(wal.append(any(WalRecord.class))).thenReturn(barrier);
+        return new SharedStorageEngine(wal);
     }
 
     private static SharedStorageEngine engine(CompletableFuture<List<WalAppendResult>> barrier) throws IOException {

@@ -136,30 +136,34 @@ public final class SharedStorageEngine implements AutoCloseable {
                 "WAL append group result mismatch: records=" + records.size()
                     + ", results=" + durableResults.size());
         }
+        // Validate all payload sizes and WAL address spans before publishing
+        // even the first Kafka offset range into the in-memory WAL index.
         List<WalLocation> locations = new ArrayList<>(records.size());
-        // Successful WAL groups must not reuse or reverse logical addresses.
-        // Validate every result before exposing the first Kafka range to readers.
-        long previousWalOffset = -1L;
-        for (WalAppendResult result : durableResults) {
-            if (result.offset() <= previousWalOffset) {
-                throw new IllegalStateException("WAL append group returned non-increasing logical offsets");
+        long previousWalEnd = -1L;
+        for (int i = 0; i < records.size(); i++) {
+            WalLocation location = validatedLocation(records.get(i), durableResults.get(i));
+            if (location.walOffset() < previousWalEnd) {
+                throw new IllegalStateException("WAL append group returned overlapping logical addresses");
             }
-            previousWalOffset = result.offset();
+            previousWalEnd = Math.addExact(location.walOffset(), location.length());
+            locations.add(location);
         }
         for (int i = 0; i < records.size(); i++) {
-            WalRecord record = records.get(i);
-            WalAppendResult result = durableResults.get(i);
-            walIndex.apply(record, result);
-            locations.add(new WalLocation(
-                result.offset(),
-                result.length(),
-                record.payload().remaining(),
-                record.leaderEpoch(),
-                record.firstOffset(),
-                record.lastOffset()
-            ));
+            walIndex.apply(records.get(i), durableResults.get(i));
         }
         return List.copyOf(locations);
+    }
+
+    private static WalLocation validatedLocation(WalRecord record, WalAppendResult result) {
+        Objects.requireNonNull(result, "result");
+        // WalLocation verifies the result's encoded length against the
+        // original durable record payload (including zero-length TRUNCATE).
+        WalLocation location = new WalLocation(
+            result.offset(), result.length(), record.payload().remaining(),
+            record.leaderEpoch(), record.firstOffset(), record.lastOffset()
+        );
+        Math.addExact(location.walOffset(), location.length());
+        return location;
     }
 
     private CompletableFuture<WalLocation> appendRecord(
@@ -180,15 +184,9 @@ public final class SharedStorageEngine implements AutoCloseable {
                 partition.topicIdHigh(), partition.topicIdLow(), partition.partition(), leaderEpoch,
                 firstOffset, lastOffset, kafkaRecordBatch);
         return wal.append(record).thenApply(result -> {
+            WalLocation location = validatedLocation(record, result);
             walIndex.apply(record, result);
-            return new WalLocation(
-                result.offset(),
-                result.length(),
-                record.payload().remaining(),
-                leaderEpoch,
-                firstOffset,
-                lastOffset
-            );
+            return location;
         });
     }
 
@@ -205,7 +203,10 @@ public final class SharedStorageEngine implements AutoCloseable {
             leaderEpoch,
             truncateOffset
         );
-        return wal.append(record).thenAccept(result -> walIndex.apply(record, result));
+        return wal.append(record).thenAccept(result -> {
+            validatedLocation(record, result);
+            walIndex.apply(record, result);
+        });
     }
 
     public Optional<WalRecord> readLocal(SharedPartitionId partition, long offset) throws IOException {

@@ -2195,3 +2195,48 @@ Two deterministic asynchronous regression tests cover both cases. The
 Java/Scala mandatory non-skipped regression inventory now contains
 **295 named methods**. The KRaft authority writer and physical COMMITTED
 object GC remain disabled.
+
+
+## Batch 73: prevalidate the full durable WAL group before index publication
+
+The returned WAL append-group future only reports success after the backend's
+local durability barrier, but its result list remains an untrusted contract
+boundary. Prior to this batch, a malformed later result length could leave a
+durable group partially visible in PartitionWalIndex before WalLocation
+validated its payload length. Construct and validate every returned
+WalLocation first, then apply the index. Two deterministic tests cover
+first- and later-record length mismatch without index publication.
+
+## Batch 74: reject overlapping and overflowing logical WAL result spans
+
+Strictly increasing WAL *start* addresses alone can accept two records that
+overlap in their encoded byte spans. A group now checks the prior exclusive
+end address and uses checked long addition for the complete record span
+before publishing any indexed batch. Physical allocation gaps remain
+valid, including ring and rotating-file boundaries. Three deterministic
+tests cover overlapping addresses, address overflow and permitted gaps.
+
+## Batch 75: validate single-record WAL durability results before publication
+
+Copied and owned DATA append paths previously updated the WAL index ahead
+of constructing their validated returned WalLocation. Both paths now use
+the same validated-location helper as group appends, including overflow
+rejection, before applying any index change. Three deterministic tests
+prove incorrect encoded length or address overflow cannot expose
+an indexed Kafka batch.
+
+## Batch 76: reject an invalid durable TRUNCATE result before altering its index
+
+A completed TRUNCATE future previously removed indexed batches without
+validating that its returned WAL address and header-only encoded length
+represented the requested control record. The preflight now validates the
+zero-payload TRUNCATE record before invoking the index mutation. A
+deterministic test retains a prior DATA range and its mutation revision
+when the TRUNCATE backend reports an invalid encoded length.
+
+The mandatory Java/Scala source-identity and durability test registry
+increases from 295 to **304 named methods**. All these changes enforce local
+WAL result-to-index publication invariants only. They do not authenticate
+a cross-broker WAL durability certificate, KRaft Controller writer CAS,
+reader/upload quiescence, or physical COMMITTED S3 garbage collection;
+all production COMMITTED retirement writes and deletes remain disabled.
