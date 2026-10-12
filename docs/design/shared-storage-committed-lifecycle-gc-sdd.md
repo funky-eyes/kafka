@@ -1997,3 +1997,29 @@ empty metadata topic, lagging consumer rejection, later progress,
 topic-recreation separation and strict invalid/unready rejection.
 The mandatory anti-skip Storage/Metadata/Core/Server-Common test
 matrix grows from 265 to **271 named methods**.
+
+## Batch 60: bind live read-committed replay evidence to the metadata value preflight
+
+KafkaObjectMetadataStore now exposes the read-only
+previewReadCommittedPartitionLogStart(partition, requestedLogStart,
+observedKafkaLogStart) workflow. It first obtains a real LSO/consumer
+cursor witness from its own running metadata consumer and then reads
+the partition-scoped SharedMetadataImage to classify only a possible
+log-start value. The response retains the immutable Topic ID and
+partition, captured replay cursor, and value finding as diagnostics.
+Canceling the dependent result cancels its queued LSO request and
+releases bounded mailbox capacity.
+
+This combines the real compacted-log cursor semantics of Batch 59
+with the already-running S3 metadata consumer; it is not a fabricated
+caller-supplied last-applied offset. Source LogStart remains
+caller-supplied at this layer and may go stale; it must be observed
+and rechecked against the Kafka UnifiedLog and current broker
+registration before an eventual Controller writer can decide.
+
+Three S3 tests enforce genuine metadata gaps, topic incarnation
+separation, and fail-closed image/source bounds. The strict S3
+horizon anti-skip requirement grows from 15 to **18 tests**.
+No normal COMMIT or orphan-cleanup flow is changed. No KRaft
+PartitionRetirementAuthorityRecord or physical COMMITTED DELETE
+is emitted.

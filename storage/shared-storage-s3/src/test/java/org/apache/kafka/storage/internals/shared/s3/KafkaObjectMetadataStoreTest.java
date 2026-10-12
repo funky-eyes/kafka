@@ -19,6 +19,10 @@ package org.apache.kafka.storage.internals.shared.s3;
 import org.apache.kafka.common.errors.InvalidReplicationFactorException;
 import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
+import org.apache.kafka.storage.internals.shared.metadata.PartitionLogStartAdvancePrecheck;
+import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataImage;
+import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec;
+import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 
 import org.junit.jupiter.api.Test;
 
@@ -354,6 +358,65 @@ class KafkaObjectMetadataStoreTest {
             () -> KafkaObjectMetadataStore.failOnlyOptionalProbeTimeout(request, wakeup)
         ));
         assertFalse(request.future().isDone());
+    }
+
+    @Test
+    void compactedMetadataReplayPreviewUsesRealCursorDespiteMissingRecordOffsets() {
+        SharedPartitionId partition = new SharedPartitionId(4L, 5L, 0);
+        SharedMetadataImage image = new SharedMetadataImage();
+        image.applyFromMetadataLog(
+            SharedMetadataRecordCodec.partitionLogStartKey(partition),
+            SharedMetadataRecordCodec.partitionLogStartValue(20L),
+            5L
+        );
+        image.markReady();
+        var cursor = new KafkaObjectMetadataStore.ReadCommittedReplayHorizon(12L, 12L);
+
+        var result = KafkaObjectMetadataStore.classifyReadCommittedPartitionLogStart(
+            image, partition, 30L, 30L, cursor
+        );
+        assertEquals(partition, result.partition());
+        assertSame(cursor, result.replayHorizon());
+        assertEquals(PartitionLogStartAdvancePrecheck.Finding.VALUE_DOMAIN_CANDIDATE, result.finding());
+    }
+
+    @Test
+    void replayPreviewPreservesImmutableTopicIdAndInitialZero() {
+        SharedMetadataImage image = new SharedMetadataImage();
+        image.markReady();
+        SharedPartitionId original = new SharedPartitionId(4L, 5L, 0);
+        SharedPartitionId recreated = new SharedPartitionId(4L, 6L, 0);
+        var cursor = new KafkaObjectMetadataStore.ReadCommittedReplayHorizon(0L, 0L);
+
+        var result = KafkaObjectMetadataStore.classifyReadCommittedPartitionLogStart(
+            image, original, 0L, 10L, cursor
+        );
+        assertEquals(PartitionLogStartAdvancePrecheck.Finding.INITIAL_ZERO_CANDIDATE, result.finding());
+        assertEquals(recreated, KafkaObjectMetadataStore.classifyReadCommittedPartitionLogStart(
+            image, recreated, 0L, 10L, cursor
+        ).partition());
+        assertEquals(PartitionLogStartAdvancePrecheck.Finding.INITIAL_ZERO_REQUIRED,
+            KafkaObjectMetadataStore.classifyReadCommittedPartitionLogStart(
+                image, recreated, 2L, 10L, cursor
+            ).finding());
+    }
+
+    @Test
+    void readCommittedPreviewStillRejectsSourceBoundsAndUnavailableImage() {
+        SharedPartitionId partition = new SharedPartitionId(4L, 5L, 0);
+        SharedMetadataImage ready = new SharedMetadataImage();
+        ready.markReady();
+        var cursor = new KafkaObjectMetadataStore.ReadCommittedReplayHorizon(2L, 3L);
+        assertEquals(PartitionLogStartAdvancePrecheck.Finding.EXCEEDS_OBSERVED_KAFKA_LOG_START,
+            KafkaObjectMetadataStore.classifyReadCommittedPartitionLogStart(
+                ready, partition, 11L, 10L, cursor
+            ).finding());
+        assertThrows(IllegalStateException.class, () ->
+            KafkaObjectMetadataStore.classifyReadCommittedPartitionLogStart(
+                new SharedMetadataImage(), partition, 0L, 0L, cursor
+            ));
+        assertThrows(IllegalArgumentException.class, () ->
+            new KafkaObjectMetadataStore.ReadCommittedReplayHorizon(3L, 2L));
     }
 
     @Test

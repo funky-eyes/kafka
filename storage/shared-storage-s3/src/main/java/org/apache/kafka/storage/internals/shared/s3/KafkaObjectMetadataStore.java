@@ -35,9 +35,11 @@ import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.errors.WakeupException;
 import org.apache.kafka.storage.internals.shared.metadata.BrokerObjectId;
 import org.apache.kafka.storage.internals.shared.metadata.ObjectMetadataStore;
+import org.apache.kafka.storage.internals.shared.metadata.PartitionLogStartAdvancePrecheck;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataImage;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
+import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 
 import java.io.IOException;
 import java.time.Duration;
@@ -317,6 +319,55 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
             request.fail(new IllegalStateException("Shared metadata consumer is no longer authoritative"));
         }
         return request.future();
+    }
+
+    /**
+     * Asynchronously previews one partition's watermark value after the actual
+     * read-committed metadata consumer has passed its sampled stable horizon.
+     *
+     * <p>This is not source-log identity validation: the caller's source start
+     * must be captured from the actual UnifiedLog and rechecked separately.
+     * A matching result must never be sent as KRaft authority or S3 GC permit.</p>
+     */
+    public CompletableFuture<ReadCommittedPartitionLogStartPreflight> previewReadCommittedPartitionLogStart(
+        SharedPartitionId partition,
+        long requestedLogStart,
+        long observedKafkaLogStart
+    ) {
+        Objects.requireNonNull(partition, "partition");
+        if (requestedLogStart < 0L || observedKafkaLogStart < 0L) {
+            return CompletableFuture.failedFuture(
+                new IllegalArgumentException("Source log start offsets must be non-negative"));
+        }
+        CompletableFuture<ReadCommittedReplayHorizon> horizon = captureReadCommittedReplayHorizon();
+        CompletableFuture<ReadCommittedPartitionLogStartPreflight> preview = horizon.thenApply(captured ->
+            classifyReadCommittedPartitionLogStart(image, partition, requestedLogStart, observedKafkaLogStart, captured)
+        );
+        // Canceling the derived advisory future must release the underlying
+        // bounded consumer mailbox slot, not silently keep a useless probe alive.
+        preview.whenComplete((ignored, failed) -> {
+            if (preview.isCancelled()) {
+                horizon.cancel(false);
+            }
+        });
+        return preview;
+    }
+
+    static ReadCommittedPartitionLogStartPreflight classifyReadCommittedPartitionLogStart(
+        SharedMetadataImage image,
+        SharedPartitionId partition,
+        long requestedLogStart,
+        long observedKafkaLogStart,
+        ReadCommittedReplayHorizon horizon
+    ) {
+        Objects.requireNonNull(image, "image");
+        Objects.requireNonNull(partition, "partition");
+        Objects.requireNonNull(horizon, "horizon");
+        PartitionLogStartAdvancePrecheck.Finding finding = PartitionLogStartAdvancePrecheck.assessReadCommitted(
+            image, partition, requestedLogStart, observedKafkaLogStart,
+            horizon.capturedStableEndExclusive(), horizon.appliedPositionExclusive()
+        );
+        return new ReadCommittedPartitionLogStartPreflight(partition, horizon, finding);
     }
 
     private void serveReadCommittedHorizonRequests() {
@@ -617,6 +668,22 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
      * before releasing their slot, preventing canceled callers from filling
      * the consumer queue while the Kafka client is blocked in a network call.
      */
+    /**
+     * Immutable historical preview only. No controller-issued identity,
+     * WAL durability certificate or source-leadership lease is attached.
+     */
+    public record ReadCommittedPartitionLogStartPreflight(
+        SharedPartitionId partition,
+        ReadCommittedReplayHorizon replayHorizon,
+        PartitionLogStartAdvancePrecheck.Finding finding
+    ) {
+        public ReadCommittedPartitionLogStartPreflight {
+            Objects.requireNonNull(partition, "partition");
+            Objects.requireNonNull(replayHorizon, "replayHorizon");
+            Objects.requireNonNull(finding, "finding");
+        }
+    }
+
     static final class ReplayHorizonMailbox {
         private final Semaphore permits;
         private final ConcurrentLinkedQueue<ReplayHorizonRequest> queue = new ConcurrentLinkedQueue<>();

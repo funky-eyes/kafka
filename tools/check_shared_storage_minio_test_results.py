@@ -39,6 +39,9 @@ HORIZON_CASES = {
         "kafkaMetadataReplayProbeTimeoutOnlyFailsThatFuture",
         "fatalMetadataConsumerErrorsCannotBeIsolatedAsProbeTimeouts",
         "kafkaConsumerWakeupRemainsAnOuterLifecycleSignal",
+        "compactedMetadataReplayPreviewUsesRealCursorDespiteMissingRecordOffsets",
+        "replayPreviewPreservesImmutableTopicIdAndInitialZero",
+        "readCommittedPreviewStillRejectsSourceBoundsAndUnavailableImage",
     },
 }
 
