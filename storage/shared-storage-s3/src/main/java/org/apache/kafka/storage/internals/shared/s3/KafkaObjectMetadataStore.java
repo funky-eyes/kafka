@@ -49,6 +49,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
@@ -78,6 +79,7 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
     private final SharedMetadataImage image;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final AppliedOffsetTracker appliedOffsets = new AppliedOffsetTracker();
+    private final ConcurrentLinkedQueue<ReplayHorizonRequest> horizonRequests = new ConcurrentLinkedQueue<>();
     private volatile Thread consumerThread;
 
     private KafkaObjectMetadataStore(
@@ -266,15 +268,80 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
         try {
             while (!closed.get()) {
                 applyRecords(consumer.poll(POLL_TIMEOUT));
+                // All KafkaConsumer operations run on this one consumer thread.
+                // The previous poll's records have been applied before checking
+                // its position against a read-committed end-offset snapshot.
+                serveReadCommittedHorizonRequests();
             }
         } catch (WakeupException e) {
             if (!closed.get()) {
                 image.markFailed(e);
                 failAppliedOffsetWaiters(e);
+                failReadCommittedHorizonRequests(e);
             }
         } catch (Throwable t) {
             image.markFailed(t);
             failAppliedOffsetWaiters(t);
+            failReadCommittedHorizonRequests(t);
+        }
+    }
+
+    /**
+     * Captures a read-committed end offset using the existing metadata consumer,
+     * then resolves only once its applied consumer position reaches that offset.
+     *
+     * <p>Only a local, historical metadata replay observation: the metadata topic
+     * may advance immediately, and this says nothing about Kafka source durability,
+     * BrokerEpoch, KRaft authority CAS or COMMITTED-object deletion rights.</p>
+     */
+    public CompletableFuture<ReadCommittedReplayHorizon> captureReadCommittedReplayHorizon() {
+        if (closed.get() || !image.isReady()) {
+            return CompletableFuture.failedFuture(
+                new IllegalStateException("Shared metadata consumer is not authoritative"));
+        }
+        ReplayHorizonRequest request = new ReplayHorizonRequest();
+        horizonRequests.add(request);
+        // Close/failure may race between the READY check and queue insertion.
+        if (closed.get() || !image.isReady()) {
+            if (horizonRequests.remove(request)) {
+                request.fail(new IllegalStateException("Shared metadata consumer is no longer authoritative"));
+            }
+        }
+        return request.future();
+    }
+
+    private void serveReadCommittedHorizonRequests() {
+        // Bound the work performed after one poll if callers enqueue repeatedly.
+        for (int remaining = 16; remaining > 0; remaining--) {
+            ReplayHorizonRequest request = horizonRequests.peek();
+            if (request == null) {
+                return;
+            }
+            if (request.future().isDone()) {
+                horizonRequests.poll();
+                continue;
+            }
+            if (!request.hasTarget()) {
+                long stableEnd = consumer.endOffsets(List.of(METADATA_PARTITION)).get(METADATA_PARTITION);
+                request.captureTarget(stableEnd);
+            }
+            long appliedPosition = consumer.position(METADATA_PARTITION);
+            if (closed.get() || !image.isReady()) {
+                failReadCommittedHorizonRequests(
+                    new IllegalStateException("Shared metadata consumer is no longer authoritative"));
+                return;
+            }
+            if (!request.completeIfApplied(appliedPosition)) {
+                return;
+            }
+            horizonRequests.poll();
+        }
+    }
+
+    private void failReadCommittedHorizonRequests(Throwable failure) {
+        ReplayHorizonRequest request;
+        while ((request = horizonRequests.poll()) != null) {
+            request.fail(failure);
         }
     }
 
@@ -478,7 +545,9 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
         if (!closed.compareAndSet(false, true)) {
             return;
         }
-        failAppliedOffsetWaiters(new IllegalStateException("Shared metadata store is closed"));
+        IllegalStateException closedError = new IllegalStateException("Shared metadata store is closed");
+        failAppliedOffsetWaiters(closedError);
+        failReadCommittedHorizonRequests(closedError);
         consumer.wakeup();
         Thread thread = consumerThread;
         boolean interrupted = false;
@@ -495,6 +564,53 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
         }
         if (closeFailure != null) {
             throw closeFailure;
+        }
+    }
+
+    /**
+     * A single historical read-committed LSO catch-up observation. Neither
+     * number authenticates a current controller generation or source log start.
+     */
+    public record ReadCommittedReplayHorizon(long capturedStableEndExclusive, long appliedPositionExclusive) {
+        public ReadCommittedReplayHorizon {
+            if (capturedStableEndExclusive < 0L || appliedPositionExclusive < capturedStableEndExclusive) {
+                throw new IllegalArgumentException("Metadata replay is not caught up to the captured LSO");
+            }
+        }
+    }
+
+    static final class ReplayHorizonRequest {
+        private final CompletableFuture<ReadCommittedReplayHorizon> future = new CompletableFuture<>();
+        private long target = -1L;
+
+        CompletableFuture<ReadCommittedReplayHorizon> future() {
+            return future;
+        }
+
+        boolean hasTarget() {
+            return target >= 0L;
+        }
+
+        void captureTarget(long stableEndExclusive) {
+            if (stableEndExclusive < 0L || hasTarget()) {
+                throw new IllegalArgumentException("Invalid or repeated read-committed replay target");
+            }
+            target = stableEndExclusive;
+        }
+
+        boolean completeIfApplied(long consumerPositionExclusive) {
+            if (!hasTarget() || consumerPositionExclusive < 0L) {
+                throw new IllegalStateException("Unknown metadata consumer position or target");
+            }
+            if (consumerPositionExclusive < target) {
+                return false;
+            }
+            future.complete(new ReadCommittedReplayHorizon(target, consumerPositionExclusive));
+            return true;
+        }
+
+        void fail(Throwable failure) {
+            future.completeExceptionally(Objects.requireNonNull(failure, "failure"));
         }
     }
 
