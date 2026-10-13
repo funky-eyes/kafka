@@ -100,3 +100,25 @@ current-BrokerEpoch/Incarnation source-horizon witness whose WAL
 durability/replay evidence originates in the broker, not in user-supplied
 offsets. The Controller must revalidate that origin inside its serialized
 KRaft event before changing authority.
+
+## Batches 105–108: broker-local WAL write admission activity
+
+Index destructive-generation checks alone missed ordinary tail writes
+still waiting for `SharedWal` durability and index publication.
+The broker now observes every DATA/group/TRUNCATE Future via one atomic
+per-partition admission state. Read-only native source classification
+fails closed if any WAL append was pending or was admitted/completed
+during the sample. Stable tail appends no longer silently pass a stale
+source probe.
+
+**Not an authenticated proof:** This does not establish that bytes
+survive broker restart or replica loss. It has no broker-incarnation
+binding and no Controller-side acceptance protocol. Never promote
+a local admission revision, mutation revision, or metadata replay
+position into an authority writer or COMMITTED delete permit.
+
+Next integration work: define the durable/replay horizon with a
+concrete backend-originated witness, bind it to the current registered
+BrokerEpoch/IncarnationId, and recheck provenance inside a serialized
+Controller KRaft event. Keep all authority writes disabled until that
+end-to-end proof has fault-injection evidence.

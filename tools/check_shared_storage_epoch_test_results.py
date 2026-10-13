@@ -177,6 +177,8 @@ REQUIRED_TESTS = {
         "overlappingWalByteSpansCannotPublishADataGroupPrefix",
         "outOfOrderNonOverlappingGroupInsertionAdvancesOneMutationGeneration",
         "multipleOverlappingGroupReplacementsShareOneMutationGeneration",
+        "overlappingWalAdmissionsRequireEveryFutureToFinish",
+        "synchronousNullWalFutureFailsClosedAndReleasesAdmission",
     ),
     "org.apache.kafka.storage.internals.shared.SharedStorageEngineWalDurabilityFenceTest": (
         "pendingWalBarrierKeepsEveryGroupBatchInvisible",
@@ -211,6 +213,13 @@ REQUIRED_TESTS = {
         "equalLaterWalGroupAddressCannotPublishAnEarlierPrefix",
         "validReplacementGroupAdvancesOneMutationGeneration",
         "walBackendCannotMutateSubmittedBatchMembership",
+        "pendingCopiedWalAppendMakesLocalAdmissionRevisionUnavailable",
+        "ownedWalAppendFailureStillClosesItsAdmission",
+        "groupedWalAppendAdmissionCoversTheWholeDurableBarrier",
+        "truncateAlsoTracksAdmissionThroughIndexPublication",
+        "synchronousWalBackendFailureDoesNotStrandAdmission",
+        "pendingWriteDoesNotFenceUnrelatedPartitionAdmission",
+        "invalidDurableWalResultAlsoCompletesAdmissionWithoutPublishingIndex",
     ),
     "org.apache.kafka.controller.PartitionRetirementControllerPrecheckTest": (
         "currentRecoveredLeaderInIsrMatchesButIsNotWriteAuthorization",
@@ -421,6 +430,10 @@ REQUIRED_TESTS = {
         "unrelatedMetadataReplayAdvanceInvalidatesReadCommittedClassification",
         "watermarkChangeAtUnchangedReplayPositionInvalidatesClassification",
         "stableWalGenerationDoesNotOverrideConcurrentMetadataReplay",
+        "pendingWalWriteRejectsAdvisorySourceClassificationBeforeMetadataRead",
+        "completedTailWriteDuringMetadataClassificationInvalidatesAdvisoryFinding",
+        "newlyPendingWalWriteAfterSourceCaptureInvalidatesAdvisoryFinding",
+        "stableWalAdmissionAndMutationGenerationsRetainReadOnlyClassification",
     ),
     "kafka.server.BrokerLifecycleManagerTest": (
         "testIncarnationChangesAcrossBrokerProcessRestart",

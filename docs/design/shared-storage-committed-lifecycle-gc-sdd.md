@@ -2553,3 +2553,48 @@ pair of native source and metadata snapshots. They are not durable WAL
 certificates, authenticated BrokerEpoch/Incarnation witnesses, a current
 Controller KRaft CAS, or a remote-object deletion permit. No Controller
 record writer and no COMMITTED physical GC are enabled.
+
+## Batch 105: make pending durable WAL writes visible to source preflight
+
+The broker-local `walMutationRevision` deliberately ignores ordinary
+tail appends, so a stable destructive generation alone cannot show the
+absence of uncompleted WAL Futures. `PartitionWalIndex` now maintains a
+second, independently observed WAL admission generation. Each admission
+and completion atomically changes a *single* packed 64-bit state containing
+the generation and in-flight count. A sample returns -1 while any
+write is outstanding. This avoids a stale "pending = 0" read caused by
+two independent atomic counters. Capacity exhaustion fails closed.
+
+## Batch 106: cover copied/owned DATA, groups and TRUNCATE through publication
+
+`SharedStorageEngine` now tracks the full Future including its index
+publication continuation. Copied DATA, owned DATA, durable group append and
+TRUNCATE all enter the admission fence **before** calling `SharedWal`.
+Success, backend failure, invalid durable result and synchronous backend
+exceptions must release exactly one admission. Backend callbacks only
+perform atomic state updates and never acquire WAL maintenance or Kafka
+native log locks.
+
+## Batch 107: compare admission generations around native source classification
+
+The native source/read-committed metadata precheck now checks both
+`walMutationRevision` and `walAdmissionRevision` around its read-only
+classification. If an append was pending before capture it returns
+`LOCAL_WAL_ADMISSION_IN_FLIGHT`; if a new admission or completion occurs
+across capture it returns `LOCAL_WAL_ADMISSION_CHANGED`, without any
+value finding. Destructive WAL mutation checks retain priority.
+
+## Batch 108: deterministic ordering, failure and independence regressions
+
+Thirteen named Java tests cover WAL Future admission/completion of copied
+and owned data, group and TRUNCATE, synchronous and asynchronous failure,
+independent partition fences, multiple concurrent pending futures, null
+backend results, and the read-only precheck's before/after generation
+behavior. The strict test-name manifest grows from **359 to 372**.
+
+**Scope:** This is a local, short-lived admission activity observation,
+not a durable-WAL replay horizon, fsync attestation, broker-incarnation
+authentication, signed cross-broker certificate, KRaft authorization,
+or permission to delete a COMMITTED object. Actual full-GC milestones
+remain P0 trusted source provenance, P1 Controller atomic CAS, P2 durable
+reference retirement and P3 safe physical MinIO deletion.

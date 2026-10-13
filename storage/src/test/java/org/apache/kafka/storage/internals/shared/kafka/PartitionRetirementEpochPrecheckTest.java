@@ -660,6 +660,78 @@ class PartitionRetirementEpochPrecheckTest {
         assertTrue(result.valueFinding().isEmpty());
     }
 
+
+    @Test
+    void pendingWalWriteRejectsAdvisorySourceClassificationBeforeMetadataRead() throws IOException {
+        SharedPartitionRoleListener roles = nativeRoles();
+        elect(roles, 8);
+        SharedStorageEngine storage = mock(SharedStorageEngine.class);
+        SharedMetadataImage image = mock(SharedMetadataImage.class);
+        when(storage.walMutationRevision(PARTITION)).thenReturn(3L);
+        when(storage.walAdmissionRevision(PARTITION)).thenReturn(-1L);
+
+        var result = PartitionRetirementEpochPrecheck.assessNativeSourceReadCommittedWithWalMutationFence(
+            storage, roles, nativeLog(TOPIC_ID, 0, goodNativeWindow()),
+            PARTITION, image, 20L, 12L, 12L
+        );
+        assertEquals(PartitionRetirementEpochPrecheck.Status.LOCAL_WAL_ADMISSION_IN_FLIGHT, result.status());
+        assertTrue(result.valueFinding().isEmpty());
+        verifyNoInteractions(image);
+    }
+
+    @Test
+    void completedTailWriteDuringMetadataClassificationInvalidatesAdvisoryFinding() throws IOException {
+        SharedPartitionRoleListener roles = nativeRoles();
+        elect(roles, 8);
+        SharedStorageEngine storage = mock(SharedStorageEngine.class);
+        when(storage.walMutationRevision(PARTITION)).thenReturn(3L);
+        // A tail append does not change walMutationRevision, but must
+        // change the separate admission sequence.
+        when(storage.walAdmissionRevision(PARTITION)).thenReturn(4L, 6L);
+
+        var result = PartitionRetirementEpochPrecheck.assessNativeSourceReadCommittedWithWalMutationFence(
+            storage, roles, nativeLog(TOPIC_ID, 0, goodNativeWindow()),
+            PARTITION, imageWithWatermark(10L), 20L, 12L, 12L
+        );
+        assertEquals(PartitionRetirementEpochPrecheck.Status.LOCAL_WAL_ADMISSION_CHANGED, result.status());
+        assertTrue(result.valueFinding().isEmpty());
+    }
+
+    @Test
+    void newlyPendingWalWriteAfterSourceCaptureInvalidatesAdvisoryFinding() throws IOException {
+        SharedPartitionRoleListener roles = nativeRoles();
+        elect(roles, 8);
+        SharedStorageEngine storage = mock(SharedStorageEngine.class);
+        when(storage.walMutationRevision(PARTITION)).thenReturn(3L);
+        when(storage.walAdmissionRevision(PARTITION)).thenReturn(4L, -1L);
+
+        var result = PartitionRetirementEpochPrecheck.assessNativeSourceReadCommittedWithWalMutationFence(
+            storage, roles, nativeLog(TOPIC_ID, 0, goodNativeWindow()),
+            PARTITION, imageWithWatermark(10L), 20L, 12L, 12L
+        );
+        assertEquals(PartitionRetirementEpochPrecheck.Status.LOCAL_WAL_ADMISSION_CHANGED, result.status());
+        assertTrue(result.valueFinding().isEmpty());
+    }
+
+    @Test
+    void stableWalAdmissionAndMutationGenerationsRetainReadOnlyClassification() throws IOException {
+        SharedPartitionRoleListener roles = nativeRoles();
+        elect(roles, 8);
+        SharedStorageEngine storage = mock(SharedStorageEngine.class);
+        when(storage.walMutationRevision(PARTITION)).thenReturn(3L);
+        when(storage.walAdmissionRevision(PARTITION)).thenReturn(4L);
+
+        var result = PartitionRetirementEpochPrecheck.assessNativeSourceReadCommittedWithWalMutationFence(
+            storage, roles, nativeLog(TOPIC_ID, 0, goodNativeWindow()),
+            PARTITION, imageWithWatermark(10L), 20L, 12L, 12L
+        );
+        assertEquals(PartitionRetirementEpochPrecheck.Status.LOCAL_EPOCH_OBSERVATION_MATCH, result.status());
+        assertEquals(
+            PartitionLogStartAdvancePrecheck.Finding.VALUE_DOMAIN_CANDIDATE,
+            result.valueFinding().orElseThrow()
+        );
+    }
+
     private static PartitionRetirementEpochPrecheck.Assessment check(
         LocalRetirementLeadershipFence fence,
         LocalRetirementLeadershipFence.LeaderTicket ticket,

@@ -136,7 +136,8 @@ public final class PartitionRetirementEpochPrecheck {
      * and reclamation may invalidate a local source observation while the
      * read-committed metadata value is being inspected.
      *
-     * <p>This is NOT a WAL fsync certificate, replicated durability barrier,
+     * <p>Both destructive mutations and ordinary WAL admissions are observed.
+     * This is NOT a WAL fsync certificate, replicated durability barrier,
      * Controller epoch check or a retirement/delete permit.</p>
      */
     static Assessment assessNativeSourceReadCommittedWithWalMutationFence(
@@ -159,13 +160,24 @@ public final class PartitionRetirementEpochPrecheck {
         if (before < 0L) {
             return new Assessment(Status.LOCAL_WAL_REVISION_UNKNOWN, Optional.empty());
         }
+        // MutationRevision deliberately ignores ordinary tail writes. Reject
+        // an in-flight durable WAL Future, then fence any write admitted or
+        // completed while source and metadata replay were being classified.
+        long admissionBefore = storage.walAdmissionRevision(partition);
+        if (admissionBefore < 0L) {
+            return new Assessment(Status.LOCAL_WAL_ADMISSION_IN_FLIGHT, Optional.empty());
+        }
         Assessment assessment = assessNativeSourceReadCommitted(
             roleListener, sourceLog, partition, image, requestedLogStart,
             stableEndExclusive, appliedPositionExclusive
         );
+        long admissionAfter = storage.walAdmissionRevision(partition);
         long after = storage.walMutationRevision(partition);
         if (after < 0L || after != before) {
             return new Assessment(Status.LOCAL_WAL_REVISION_CHANGED, Optional.empty());
+        }
+        if (admissionAfter < 0L || admissionAfter != admissionBefore) {
+            return new Assessment(Status.LOCAL_WAL_ADMISSION_CHANGED, Optional.empty());
         }
         return assessment;
     }
@@ -235,7 +247,9 @@ public final class PartitionRetirementEpochPrecheck {
         LOCAL_ROLE_CHANGED_DURING_METADATA_CHECK,
         METADATA_REPLAY_CHANGED_DURING_SOURCE_CHECK,
         LOCAL_WAL_REVISION_UNKNOWN,
-        LOCAL_WAL_REVISION_CHANGED
+        LOCAL_WAL_REVISION_CHANGED,
+        LOCAL_WAL_ADMISSION_IN_FLIGHT,
+        LOCAL_WAL_ADMISSION_CHANGED
     }
 
     /** The value classification exists only for matching local epoch evidence. */

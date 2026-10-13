@@ -152,8 +152,9 @@ public final class SharedStorageEngine implements AutoCloseable {
         // Transfer an immutable group definition to the asynchronous WAL.
         // The backend cannot change the members while the future is pending.
         List<WalRecord> immutableRecords = List.copyOf(records);
-        return wal.appendBatch(immutableRecords).thenApply(results ->
-            walIndex.applyDataGroup(immutableRecords, List.copyOf(results)));
+        return walIndex.trackDurableWrite(walKey(partition), () ->
+            wal.appendBatch(immutableRecords).thenApply(results ->
+                walIndex.applyDataGroup(immutableRecords, List.copyOf(results))));
     }
 
     private static WalLocation validatedLocation(WalRecord record, WalAppendResult result) {
@@ -185,11 +186,12 @@ public final class SharedStorageEngine implements AutoCloseable {
             : WalRecord.data(
                 partition.topicIdHigh(), partition.topicIdLow(), partition.partition(), leaderEpoch,
                 firstOffset, lastOffset, kafkaRecordBatch);
-        return wal.append(record).thenApply(result -> {
-            WalLocation location = validatedLocation(record, result);
-            walIndex.apply(record, result);
-            return location;
-        });
+        return walIndex.trackDurableWrite(walKey(partition), () ->
+            wal.append(record).thenApply(result -> {
+                WalLocation location = validatedLocation(record, result);
+                walIndex.apply(record, result);
+                return location;
+            }));
     }
 
     public CompletableFuture<Void> truncate(
@@ -205,10 +207,11 @@ public final class SharedStorageEngine implements AutoCloseable {
             leaderEpoch,
             truncateOffset
         );
-        return wal.append(record).thenAccept(result -> {
-            validatedLocation(record, result);
-            walIndex.apply(record, result);
-        });
+        return walIndex.trackDurableWrite(walKey(partition), () ->
+            wal.append(record).thenAccept(result -> {
+                validatedLocation(record, result);
+                walIndex.apply(record, result);
+            }));
     }
 
     public Optional<WalRecord> readLocal(SharedPartitionId partition, long offset) throws IOException {
@@ -485,6 +488,16 @@ public final class SharedStorageEngine implements AutoCloseable {
     public long walMutationRevision(SharedPartitionId partition) {
         Objects.requireNonNull(partition, "partition");
         return walIndex.mutationRevision(walKey(partition));
+    }
+
+    /**
+     * Local WAL admission/completion revision, including non-destructive tail
+     * appends. -1 means a pending write or a raced observation. A stable value
+     * is NOT durable WAL replay proof and cannot authorize COMMITTED GC.
+     */
+    public long walAdmissionRevision(SharedPartitionId partition) {
+        Objects.requireNonNull(partition, "partition");
+        return walIndex.walAdmissionRevision(walKey(partition));
     }
 
     public boolean isUploadCandidateCurrent(
