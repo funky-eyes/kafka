@@ -143,3 +143,26 @@ backend-originated recovered/durable evidence and native Kafka source
 observations, including failure and ABA scenarios. Only after current
 Controller registration revalidation and an atomic feature-gated KRaft
 write path may a durable retirement transition be considered.
+
+## Batches 113–116: replay-to-broker-ready local identity pairing
+
+The Java 25 startup replay JavaDoc error is fixed without relaxing
+compiler warnings. The extension now records an optional local pairing
+of its immutable recovered WAL inventory and the complete broker-ready
+BrokerId/Epoch/IncarnationId/ClusterId snapshot supplied by Kafka.
+Legacy unbound context, wrong broker ID or a changed registration
+revokes or prevents this local pairing. Re-binding to a new incarnation
+without re-opening/replaying the WAL is forbidden, including ABA.
+
+An integration test reopens the real Ring WAL under a new broker
+extension and validates that the new broker identity is paired only
+with records the new extension actually recovered. This is still only
+a **local diagnostic**. Broker-ready identity has not been freshly
+authenticated against the Controller; it must never be treated as a
+source durable horizon certificate or a COMMITTED GC permit.
+
+Next: a Controller-verifiable protocol binding the true Kafka native
+Source LogStart window, backend-recovered and new fsynced WAL evidence,
+and current KRaft BrokerRegistration inside the serialized Controller
+event. No authority write until crash, leader-change, registration
+ABA, log-truncation and metadata-replay fault cases all fail closed.

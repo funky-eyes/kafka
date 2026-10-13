@@ -497,11 +497,6 @@ public final class SharedStorageEngine implements AutoCloseable {
     }
 
     /**
-     * Local WAL admission/completion revision, including non-destructive tail
-     * appends. -1 means a pending write or a raced observation. A stable value
-     * is NOT durable WAL replay proof and cannot authorize COMMITTED GC.
-     */
-    /**
      * Frozen inventory from the backend WAL's startup replay, before live
      * append traffic. Not live WAL coverage and never a GC authorization.
      */
@@ -509,6 +504,11 @@ public final class SharedStorageEngine implements AutoCloseable {
         return startupWalReplayEvidence;
     }
 
+    /**
+     * Local WAL admission/completion revision, including non-destructive tail
+     * appends. -1 means a pending write or a raced observation. A stable value
+     * is NOT durable WAL replay proof and cannot authorize COMMITTED GC.
+     */
     public long walAdmissionRevision(SharedPartitionId partition) {
         Objects.requireNonNull(partition, "partition");
         return walIndex.walAdmissionRevision(walKey(partition));

@@ -2646,3 +2646,55 @@ cross-broker replication, reader/upload quiescence, controller commit or
 safe COMMITTED deletion. KRaft authority writers and physical GC remain
 disabled. P0 still requires an authenticated broker-originated durability
 and replay horizon revalidated at the Controller's serialized CAS event.
+
+## Batch 113: restore the Java 25 -Werror startup evidence integration gate
+
+The first Batch 109-112 source-SHA run failed in `storage:compileJava`
+with the Java 25 `dangling-doc-comments` warning (treated as an error)
+because two method JavaDoc blocks became adjacent in
+`SharedStorageEngine`. The shared Java preflight caught the same
+incorrect doc attachment. Every other workflow stopped at the common
+preflight or compile barrier. Separate and attach JavaDoc to the
+correct startup replay getter and WAL admission revision method. Do
+not relax `-Werror`, Checkstyle, or the release/PR test contracts.
+
+## Batch 114: join real Kafka broker-ready identity to startup WAL replay
+
+`SharedStorageExtension` receives Kafka's actual
+`StorageExtensionBrokerContext` after the broker starts its listeners.
+Only when the callback contains a complete BrokerEpoch and
+BrokerIncarnationId and matches the extension's startup BrokerId may
+it pair that local registration snapshot with the immutable,
+backend-originated `StartupWalReplayEvidence`. This new
+`BrokerStartupReplayObservation` has no public constructor or
+authority writer. An unbound legacy context leaves it absent, without
+breaking Kafka request processing.
+
+## Batch 115: revoke replay pairing across incarnation/epoch/cluster ABA
+
+The extension permits only one initial broker-ready pairing per WAL
+startup lifecycle. A repeated identical callback is idempotent; a
+BrokerId, BrokerEpoch, IncarnationId or ClusterId mismatch invalidates
+the pairing. The old pairing never reappears on a later ABA callback
+within the same extension lifetime. An unbound first callback cannot
+be upgraded without a complete new extension startup and WAL replay.
+Closing the extension invalidates the local pairing.
+
+## Batch 116: real Ring WAL reopen + broker identity regressions
+
+A real broker-extension runtime test writes to the Ring WAL, closes
+the original extension, reopens the same WAL from a new extension and
+pairs only the newly replayed records with a new BrokerEpoch and
+IncarnationId on broker-ready. Further tests cover no ready callback,
+unbound identity, wrong broker ID, changed ClusterId/IncarnationId,
+repeated callbacks, revocation at close and callback-before-start.
+The previously existing two WAL runtime tests are also registered as
+strict named mandatory evidence. The mandatory source-identity list
+grows from **379 to 391 methods** across 25 suites.
+
+**Still NOT an authority certificate:** The broker-ready values are
+Kafka lifecycle snapshots, not rechecked current KRaft registration or
+authenticated, durable source-log provenance. There is no guarantee
+the recovered WAL byte inventory covers an entire Kafka LogStart
+window or the other brokers. No Controller KRaft writer, durable
+COMMITTED-reference retirement or physical object DELETE is enabled.

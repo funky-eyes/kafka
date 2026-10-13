@@ -17,6 +17,7 @@
 package org.apache.kafka.storage.internals.shared.kafka;
 
 import org.apache.kafka.storage.internals.log.KafkaStorageExtension;
+import org.apache.kafka.storage.internals.log.StorageExtensionBrokerContext;
 import org.apache.kafka.storage.internals.log.StorageExtensionContext;
 import org.apache.kafka.storage.internals.log.StoragePartitionRoleListener;
 import org.apache.kafka.storage.internals.log.UnifiedLogFactory;
@@ -25,6 +26,8 @@ import org.apache.kafka.storage.internals.shared.wal.SharedWal;
 
 import java.io.IOException;
 import java.util.Objects;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * Broker-wide shared WAL extension.
@@ -37,6 +40,9 @@ public final class SharedStorageExtension implements KafkaStorageExtension {
     private SharedCommitProgress commitProgress;
     private UnifiedLogFactory unifiedLogFactory;
     private StoragePartitionRoleListener partitionRoleListener;
+    private int startedBrokerId = -1;
+    private boolean brokerReadyObserved;
+    private BrokerStartupReplayObservation brokerStartupReplayObservation;
 
     @Override
     public synchronized void start(StorageExtensionContext context) throws IOException {
@@ -55,11 +61,17 @@ public final class SharedStorageExtension implements KafkaStorageExtension {
                 new SharedUnifiedLogFactory(storage, commitProgress)
             );
             partitionRoleListener = new SharedPartitionRoleListener(configuration, commitProgress);
+            startedBrokerId = context.brokerId();
+            brokerReadyObserved = false;
+            brokerStartupReplayObservation = null;
         } catch (Throwable t) {
             storage = null;
             commitProgress = null;
             unifiedLogFactory = null;
             partitionRoleListener = null;
+            startedBrokerId = -1;
+            brokerReadyObserved = false;
+            brokerStartupReplayObservation = null;
             try {
                 wal.close();
             } catch (Throwable closeError) {
@@ -76,6 +88,53 @@ public final class SharedStorageExtension implements KafkaStorageExtension {
             }
             throw new IOException("Unable to initialize shared storage extension", t);
         }
+    }
+
+    /**
+     * Pair the real post-registration broker-ready identity snapshot with the
+     * already frozen backend replay inventory. Missing/mismatched identity
+     * invalidates this optional diagnostic without breaking ordinary Kafka
+     * startup. It is never a live Controller registration certificate.
+     */
+    @Override
+    public synchronized CompletableFuture<Void> onBrokerReady(StorageExtensionBrokerContext context) {
+        Objects.requireNonNull(context, "context");
+        if (storage == null) {
+            throw new IllegalStateException("Shared storage extension has not been started");
+        }
+        if (brokerReadyObserved) {
+            // A changed registration in the same extension lifetime cannot
+            // rebind WAL recovered before the callback. Identical repeated
+            // callbacks are idempotent; every other callback revokes the
+            // pairing until a new extension startup and WAL replay.
+            if (!sameBrokerReadyIdentity(context, brokerStartupReplayObservation)) {
+                brokerStartupReplayObservation = null;
+            }
+            return CompletableFuture.completedFuture(null);
+        }
+        brokerReadyObserved = true;
+        if (context.brokerId() == startedBrokerId && context.hasBrokerIdentitySnapshot()) {
+            brokerStartupReplayObservation = new BrokerStartupReplayObservation(
+                context, storage.startupWalReplayEvidence()
+            );
+        }
+        return CompletableFuture.completedFuture(null);
+    }
+
+    private static boolean sameBrokerReadyIdentity(
+        StorageExtensionBrokerContext context,
+        BrokerStartupReplayObservation previous
+    ) {
+        return previous != null && context.hasBrokerIdentitySnapshot()
+            && context.clusterId().equals(previous.clusterId())
+            && context.brokerId() == previous.brokerId()
+            && context.brokerEpoch() == previous.brokerEpoch()
+            && context.brokerIncarnationId().equals(previous.brokerIncarnationId());
+    }
+
+    /** Local startup-only diagnostic; absent for legacy/unbound broker identity. */
+    public synchronized Optional<BrokerStartupReplayObservation> brokerStartupReplayObservation() {
+        return Optional.ofNullable(brokerStartupReplayObservation);
     }
 
     @Override
@@ -115,6 +174,9 @@ public final class SharedStorageExtension implements KafkaStorageExtension {
         commitProgress = null;
         unifiedLogFactory = null;
         partitionRoleListener = null;
+        brokerStartupReplayObservation = null;
+        brokerReadyObserved = false;
+        startedBrokerId = -1;
         if (currentStorage != null) {
             currentStorage.close();
         }
