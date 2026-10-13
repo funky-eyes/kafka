@@ -480,6 +480,95 @@ class PartitionRetirementEpochPrecheckTest {
     }
 
     @Test
+    void nativeHighWatermarkRegressionWithoutLogStartChangeFailsClosed() throws IOException {
+        SharedPartitionRoleListener roles = nativeRoles();
+        elect(roles, 8);
+        SharedUnifiedLog log = nativeLog(TOPIC_ID, 0, goodNativeWindow());
+        when(log.captureNativeSourceWindow()).thenReturn(
+            goodNativeWindow(),
+            Optional.of(new SharedUnifiedLog.NativeSourceWindow(20L, 49L, 80L))
+        );
+
+        var result = nativeCheck(roles, log, imageWithWatermark(10L), 20L, 2L);
+        assertEquals(PartitionRetirementEpochPrecheck.Status.NATIVE_SOURCE_WINDOW_STALE, result.status());
+        assertTrue(result.valueFinding().isEmpty());
+    }
+
+    @Test
+    void nativeLogEndRegressionWithoutLogStartChangeFailsClosed() throws IOException {
+        SharedPartitionRoleListener roles = nativeRoles();
+        elect(roles, 8);
+        SharedUnifiedLog log = nativeLog(TOPIC_ID, 0, goodNativeWindow());
+        when(log.captureNativeSourceWindow()).thenReturn(
+            goodNativeWindow(),
+            Optional.of(new SharedUnifiedLog.NativeSourceWindow(20L, 50L, 79L))
+        );
+
+        var result = nativeCheck(roles, log, imageWithWatermark(10L), 20L, 2L);
+        assertEquals(PartitionRetirementEpochPrecheck.Status.NATIVE_SOURCE_WINDOW_STALE, result.status());
+        assertTrue(result.valueFinding().isEmpty());
+    }
+
+    @Test
+    void unrelatedMetadataReplayAdvanceInvalidatesReadCommittedClassification() throws IOException {
+        SharedPartitionRoleListener roles = nativeRoles();
+        elect(roles, 8);
+        SharedMetadataImage image = mock(SharedMetadataImage.class);
+        var initial = new SharedMetadataImage.PartitionLogStartEvidence(2L, OptionalLong.of(10L));
+        var advanced = new SharedMetadataImage.PartitionLogStartEvidence(3L, OptionalLong.of(10L));
+        when(image.partitionLogStartEvidence(PARTITION)).thenReturn(initial, initial, advanced);
+
+        var result = PartitionRetirementEpochPrecheck.assessNativeSourceReadCommitted(
+            roles, nativeLog(TOPIC_ID, 0, goodNativeWindow()), PARTITION,
+            image, 20L, 12L, 12L
+        );
+        assertEquals(
+            PartitionRetirementEpochPrecheck.Status.METADATA_REPLAY_CHANGED_DURING_SOURCE_CHECK,
+            result.status()
+        );
+        assertTrue(result.valueFinding().isEmpty());
+    }
+
+    @Test
+    void watermarkChangeAtUnchangedReplayPositionInvalidatesClassification() throws IOException {
+        SharedPartitionRoleListener roles = nativeRoles();
+        elect(roles, 8);
+        SharedMetadataImage image = mock(SharedMetadataImage.class);
+        var initial = new SharedMetadataImage.PartitionLogStartEvidence(2L, OptionalLong.of(10L));
+        var updated = new SharedMetadataImage.PartitionLogStartEvidence(2L, OptionalLong.of(20L));
+        when(image.partitionLogStartEvidence(PARTITION)).thenReturn(initial, initial, updated);
+
+        var result = nativeCheck(roles, nativeLog(TOPIC_ID, 0, goodNativeWindow()), image, 20L, 2L);
+        assertEquals(
+            PartitionRetirementEpochPrecheck.Status.METADATA_REPLAY_CHANGED_DURING_SOURCE_CHECK,
+            result.status()
+        );
+        assertTrue(result.valueFinding().isEmpty());
+    }
+
+    @Test
+    void stableWalGenerationDoesNotOverrideConcurrentMetadataReplay() throws IOException {
+        SharedPartitionRoleListener roles = nativeRoles();
+        elect(roles, 8);
+        SharedStorageEngine storage = mock(SharedStorageEngine.class);
+        when(storage.walMutationRevision(PARTITION)).thenReturn(7L);
+        SharedMetadataImage image = mock(SharedMetadataImage.class);
+        var initial = new SharedMetadataImage.PartitionLogStartEvidence(2L, OptionalLong.of(10L));
+        var changed = new SharedMetadataImage.PartitionLogStartEvidence(3L, OptionalLong.of(10L));
+        when(image.partitionLogStartEvidence(PARTITION)).thenReturn(initial, initial, changed);
+
+        var result = PartitionRetirementEpochPrecheck.assessNativeSourceReadCommittedWithWalMutationFence(
+            storage, roles, nativeLog(TOPIC_ID, 0, goodNativeWindow()),
+            PARTITION, image, 20L, 12L, 12L
+        );
+        assertEquals(
+            PartitionRetirementEpochPrecheck.Status.METADATA_REPLAY_CHANGED_DURING_SOURCE_CHECK,
+            result.status()
+        );
+        assertTrue(result.valueFinding().isEmpty());
+    }
+
+    @Test
     void stableWalMutationGenerationRetainsReadOnlyNativeSourceFinding() throws IOException {
         SharedPartitionRoleListener roles = nativeRoles();
         elect(roles, 8);

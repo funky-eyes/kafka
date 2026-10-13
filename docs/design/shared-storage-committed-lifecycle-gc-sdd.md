@@ -2524,3 +2524,32 @@ caller-supplied advisory preflight receipt.
 
 See [MinIO GA freeze](shared-storage-minio-ga-freeze-2026-10-13.md)
 and [next implementation boundary](committed-lifecycle-gc-next-boundary.md).
+
+## Batches 101–104: native-source and metadata-replay horizon double-checks
+
+This development-only checkpoint addresses two gaps in the advisory P0
+broker-side observation. After two native `SharedUnifiedLog` observations,
+matching Topic ID, partition, local role generation and LogStart alone are
+insufficient: an in-place truncate can keep LogStart constant while reducing
+High Watermark or LogEndOffset. The second sample must not regress either
+HW or LEO from the first. Ordinary monotonic HW/LEO advance remains legal.
+
+The metadata classifier reads `SharedMetadataImage`, which can replay new
+records between the first native source sample and the final source sample.
+The precheck now snapshots the target partition's explicit LogStart and
+the image's last consumed metadata offset before classification, then
+compares both after source revalidation. Even replay of an unrelated
+metadata record invalidates the old observation, rather than returning
+an advisory finding derived from an obsolete image generation.
+
+Five regression cases cover HW regression, LEO regression, consumed metadata
+position advance, changed LogStart at unchanged local replay position and
+the fact that a stable local WAL mutation revision cannot override a
+concurrently changed metadata image. The named Java/Scala manifest grows
+from 354 to **359**.
+
+**Safety boundary:** All results remain advisory, including a stable
+pair of native source and metadata snapshots. They are not durable WAL
+certificates, authenticated BrokerEpoch/Incarnation witnesses, a current
+Controller KRaft CAS, or a remote-object deletion permit. No Controller
+record writer and no COMMITTED physical GC are enabled.

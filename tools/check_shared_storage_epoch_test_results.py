@@ -416,6 +416,11 @@ REQUIRED_TESTS = {
         "stableWalRevisionNeverRescuesStaleNativeSourceWindow",
         "invalidReadCommittedOffsetsCannotBeMaskedByUnavailableWalRevision",
         "missingMetadataImageCannotBeMaskedByUnavailableWalRevision",
+        "nativeHighWatermarkRegressionWithoutLogStartChangeFailsClosed",
+        "nativeLogEndRegressionWithoutLogStartChangeFailsClosed",
+        "unrelatedMetadataReplayAdvanceInvalidatesReadCommittedClassification",
+        "watermarkChangeAtUnchangedReplayPositionInvalidatesClassification",
+        "stableWalGenerationDoesNotOverrideConcurrentMetadataReplay",
     ),
     "kafka.server.BrokerLifecycleManagerTest": (
         "testIncarnationChangesAcrossBrokerProcessRestart",

@@ -80,3 +80,23 @@ emitter or COMMITTED physical deletion is added.
 source-horizon observation that survives broker restart and cannot be
 forged or reused across LeaderEpoch/Incarnation changes. Prove the data
 origin before implementing any KRaft write operation.
+
+## Batches 101–104: source window / metadata replay generation hardening
+
+The native source double-check now fails closed when HW or LEO regresses
+even if LogStart, LeaderEpoch and the local role generation remain equal.
+It also checks the metadata image's consumed offset **and** explicit
+partition LogStart before and after read-committed classification.
+This closes a stale advisory-result path after concurrent replay.
+
+This is NOT the Controller-verifiable source/WAL durability certificate
+needed for P0. In particular, local source samples, caller-provided
+stable-end/applied-position counters and a local WAL mutation revision
+remain unauthenticated. Do not implement a KRaft write or physical
+COMMITTED DELETE based on these findings.
+
+Next actual integration prerequisite: design and test an authenticated
+current-BrokerEpoch/Incarnation source-horizon witness whose WAL
+durability/replay evidence originates in the broker, not in user-supplied
+offsets. The Controller must revalidate that origin inside its serialized
+KRaft event before changing authority.
