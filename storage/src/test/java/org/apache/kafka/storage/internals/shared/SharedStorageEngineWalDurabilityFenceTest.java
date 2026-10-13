@@ -405,6 +405,75 @@ class SharedStorageEngineWalDurabilityFenceTest {
         verify(wal).close();
     }
 
+    @Test
+    void staleLaterWalGroupMemberCannotPublishAnEarlierPrefix() throws Exception {
+        SharedWal wal = mock(SharedWal.class);
+        when(wal.append(any(WalRecord.class))).thenReturn(
+            CompletableFuture.completedFuture(new WalAppendResult(300L, 61)));
+        when(wal.appendBatch(anyList())).thenReturn(CompletableFuture.completedFuture(List.of(
+            new WalAppendResult(100L, 61), new WalAppendResult(161L, 61))));
+        try (SharedStorageEngine engine = new SharedStorageEngine(wal)) {
+            engine.appendData(PARTITION, 3, 10L, 19L, ByteBuffer.wrap(new byte[] {1})).join();
+            long before = engine.walMutationRevision(PARTITION);
+            CompletableFuture<List<WalLocation>> group =
+                engine.appendOwnedBatchGroup(PARTITION, batches());
+            assertThrows(CompletionException.class, group::join);
+            assertEquals(1, engine.localLocations(PARTITION, 0L, 20L).size());
+            assertEquals(10L, engine.localLocations(PARTITION, 0L, 20L).get(0).firstOffset());
+            assertEquals(300L, engine.localLocations(PARTITION, 0L, 20L).get(0).walOffset());
+            assertEquals(before, engine.walMutationRevision(PARTITION));
+        }
+    }
+
+    @Test
+    void equalLaterWalGroupAddressCannotPublishAnEarlierPrefix() throws Exception {
+        SharedWal wal = mock(SharedWal.class);
+        when(wal.append(any(WalRecord.class))).thenReturn(
+            CompletableFuture.completedFuture(new WalAppendResult(300L, 61)));
+        when(wal.appendBatch(anyList())).thenReturn(CompletableFuture.completedFuture(List.of(
+            new WalAppendResult(100L, 61), new WalAppendResult(300L, 61))));
+        try (SharedStorageEngine engine = new SharedStorageEngine(wal)) {
+            engine.appendData(PARTITION, 3, 10L, 19L, ByteBuffer.wrap(new byte[] {1})).join();
+            CompletableFuture<List<WalLocation>> group =
+                engine.appendOwnedBatchGroup(PARTITION, batches());
+            assertThrows(CompletionException.class, group::join);
+            assertEquals(1, engine.localLocations(PARTITION, 0L, 20L).size());
+            assertEquals(300L, engine.localLocations(PARTITION, 0L, 20L).get(0).walOffset());
+        }
+    }
+
+    @Test
+    void validReplacementGroupAdvancesOneMutationGeneration() throws Exception {
+        SharedWal wal = mock(SharedWal.class);
+        when(wal.append(any(WalRecord.class))).thenReturn(
+            CompletableFuture.completedFuture(new WalAppendResult(300L, 61)));
+        when(wal.appendBatch(anyList())).thenReturn(CompletableFuture.completedFuture(List.of(
+            new WalAppendResult(500L, 61), new WalAppendResult(561L, 61))));
+        try (SharedStorageEngine engine = new SharedStorageEngine(wal)) {
+            engine.appendData(PARTITION, 3, 10L, 19L, ByteBuffer.wrap(new byte[] {1})).join();
+            long before = engine.walMutationRevision(PARTITION);
+            assertEquals(2, engine.appendOwnedBatchGroup(PARTITION, batches()).join().size());
+            assertEquals(List.of(0L, 10L), engine.localLocations(PARTITION, 0L, 20L)
+                .stream().map(WalLocation::firstOffset).toList());
+            assertEquals(before + 1L, engine.walMutationRevision(PARTITION));
+        }
+    }
+
+    @Test
+    void walBackendCannotMutateSubmittedBatchMembership() throws Exception {
+        SharedWal wal = mock(SharedWal.class);
+        when(wal.appendBatch(anyList())).thenAnswer(invocation -> {
+            List<WalRecord> submitted = invocation.getArgument(0);
+            assertThrows(UnsupportedOperationException.class, submitted::clear);
+            return CompletableFuture.completedFuture(List.of(
+                new WalAppendResult(100L, 61), new WalAppendResult(161L, 61)));
+        });
+        try (SharedStorageEngine engine = new SharedStorageEngine(wal)) {
+            assertEquals(2, engine.appendOwnedBatchGroup(PARTITION, batches()).join().size());
+            assertEquals(2, engine.localLocations(PARTITION, 0L, 20L).size());
+        }
+    }
+
     private static SharedStorageEngine defaultSingleAppendEngine(
         CompletableFuture<List<WalAppendResult>> backend
     ) throws IOException {

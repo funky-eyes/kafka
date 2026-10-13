@@ -167,6 +167,11 @@ REQUIRED_TESTS = {
         "staleOverlappingReplayCannotReplaceNewerWalLocation",
         "duplicatedWalAddressCannotReplaceItsPreviousRange",
         "staleOverlappingSuccessorCannotPartiallyEvictPredecessor",
+        "dataGroupCannotCrossPartitionOwnership",
+        "dataGroupCannotContainTruncateControlRecord",
+        "dataGroupCannotReverseKafkaOffsetsAfterFirstValidRecord",
+        "invalidLaterDataGroupEncodingCannotPublishAnIndexedPrefix",
+        "pureTailDataGroupDoesNotAdvanceMutationRevision",
     ),
     "org.apache.kafka.storage.internals.shared.SharedStorageEngineWalDurabilityFenceTest": (
         "pendingWalBarrierKeepsEveryGroupBatchInvisible",
@@ -197,6 +202,10 @@ REQUIRED_TESTS = {
         "failedColdReplaySuppressesWalCloseFailure",
         "replayAndCloseReturningSameFailureCannotSelfSuppress",
         "normalColdReplayTransfersWalOwnershipToEngine",
+        "staleLaterWalGroupMemberCannotPublishAnEarlierPrefix",
+        "equalLaterWalGroupAddressCannotPublishAnEarlierPrefix",
+        "validReplacementGroupAdvancesOneMutationGeneration",
+        "walBackendCannotMutateSubmittedBatchMembership",
     ),
     "org.apache.kafka.controller.PartitionRetirementControllerPrecheckTest": (
         "currentRecoveredLeaderInIsrMatchesButIsNotWriteAuthorization",

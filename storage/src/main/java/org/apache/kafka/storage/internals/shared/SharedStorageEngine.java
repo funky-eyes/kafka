@@ -149,34 +149,11 @@ public final class SharedStorageEngine implements AutoCloseable {
             ));
         }
 
-        return wal.appendBatch(records).thenApply(results -> applyDurableGroup(records, results));
-    }
-
-    private List<WalLocation> applyDurableGroup(List<WalRecord> records, List<WalAppendResult> results) {
-        // A durable group must not expose an indexed prefix if the backend returns
-        // a malformed result list. Validate and freeze all results before publishing.
-        List<WalAppendResult> durableResults = List.copyOf(results);
-        if (records.size() != durableResults.size()) {
-            throw new IllegalStateException(
-                "WAL append group result mismatch: records=" + records.size()
-                    + ", results=" + durableResults.size());
-        }
-        // Validate all payload sizes and WAL address spans before publishing
-        // even the first Kafka offset range into the in-memory WAL index.
-        List<WalLocation> locations = new ArrayList<>(records.size());
-        long previousWalEnd = -1L;
-        for (int i = 0; i < records.size(); i++) {
-            WalLocation location = validatedLocation(records.get(i), durableResults.get(i));
-            if (location.walOffset() < previousWalEnd) {
-                throw new IllegalStateException("WAL append group returned overlapping logical addresses");
-            }
-            previousWalEnd = Math.addExact(location.walOffset(), location.length());
-            locations.add(location);
-        }
-        for (int i = 0; i < records.size(); i++) {
-            walIndex.apply(records.get(i), durableResults.get(i));
-        }
-        return List.copyOf(locations);
+        // Transfer an immutable group definition to the asynchronous WAL.
+        // The backend cannot change the members while the future is pending.
+        List<WalRecord> immutableRecords = List.copyOf(records);
+        return wal.appendBatch(immutableRecords).thenApply(results ->
+            walIndex.applyDataGroup(immutableRecords, List.copyOf(results)));
     }
 
     private static WalLocation validatedLocation(WalRecord record, WalAppendResult result) {

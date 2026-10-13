@@ -19,6 +19,7 @@ package org.apache.kafka.storage.internals.shared.wal;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentNavigableMap;
@@ -69,22 +70,90 @@ public final class PartitionWalIndex {
                 // Replayed WAL records must be visited in durable logical order.
                 // Refuse a stale overlapping record before evicting current DATA.
                 requireNewerOverlap(partitionLocations, floor, location);
-                gate.destructiveChange(() -> {
-                    // RecordBatch ranges are indivisible: an older batch
-                    // overlapped by this replacement cannot be left readable.
-                    if (floor != null && floor.getValue().lastOffset() >= record.firstOffset()) {
-                        partitionLocations.remove(floor.getKey(), floor.getValue());
-                    }
-                    // Drop every overlapped successor before publishing the
-                    // new record, not just an identical first-offset entry.
-                    partitionLocations.subMap(record.firstOffset(), true, record.lastOffset(), true).clear();
-                    partitionLocations.put(record.firstOffset(), location);
-                });
+                gate.destructiveChange(() -> replaceOverlappingRanges(partitionLocations, location));
             } else {
                 // A pure tail append cannot invalidate a prior source LogStart observation.
                 partitionLocations.put(record.firstOffset(), location);
             }
         }
+    }
+
+    /**
+     * Validate the complete durable DATA group against one partition-index
+     * snapshot before publishing any member. All records already crossed the
+     * backend WAL durability barrier; this only guards index publication.
+     *
+     * <p>Do not acquire the engine's WAL maintenance lock here: File/Ring WAL
+     * futures can complete while the WAL writer still holds its I/O lock.</p>
+     */
+    public List<WalLocation> applyDataGroup(List<WalRecord> records, List<WalAppendResult> results) {
+        Objects.requireNonNull(records, "records");
+        Objects.requireNonNull(results, "results");
+        if (records.isEmpty() || records.size() != results.size()) {
+            throw new IllegalArgumentException("DATA WAL group has invalid cardinality");
+        }
+        WalPartitionKey key = WalPartitionKey.of(Objects.requireNonNull(records.get(0), "first record"));
+        MutationGate gate = gate(key);
+        synchronized (gate) {
+            ConcurrentNavigableMap<Long, WalLocation> current = locations.get(key);
+            long indexedLastOffset = current == null || current.isEmpty()
+                ? -1L : current.lastEntry().getValue().lastOffset();
+            List<WalLocation> candidates = new ArrayList<>(records.size());
+            long previousLastOffset = -1L;
+            long previousWalEnd = -1L;
+            boolean destructive = false;
+            for (int i = 0; i < records.size(); i++) {
+                WalRecord record = Objects.requireNonNull(records.get(i), "DATA record");
+                WalAppendResult result = Objects.requireNonNull(results.get(i), "WAL result");
+                if (record.type() != WalRecordType.DATA || !key.equals(WalPartitionKey.of(record))) {
+                    throw new IllegalArgumentException("WAL group must contain DATA from one partition");
+                }
+                WalLocation candidate = new WalLocation(
+                    result.offset(), result.length(), record.payload().remaining(),
+                    record.leaderEpoch(), record.firstOffset(), record.lastOffset()
+                );
+                if (candidate.firstOffset() <= previousLastOffset || candidate.walOffset() < previousWalEnd) {
+                    throw new IllegalArgumentException("WAL group offsets overlap or move backwards");
+                }
+                previousLastOffset = candidate.lastOffset();
+                previousWalEnd = Math.addExact(candidate.walOffset(), candidate.length());
+                // Most groups are pure tail appends: no tree-search preflight
+                // is needed when the complete new Kafka range follows the index.
+                if (current != null && candidate.firstOffset() <= indexedLastOffset) {
+                    Map.Entry<Long, WalLocation> floor = current.floorEntry(candidate.firstOffset());
+                    Map.Entry<Long, WalLocation> ceiling = current.ceilingEntry(candidate.firstOffset());
+                    if ((floor != null && floor.getValue().lastOffset() >= candidate.firstOffset())
+                        || ceiling != null) {
+                        destructive = true;
+                        requireNewerOverlap(current, floor, candidate);
+                    }
+                }
+                candidates.add(candidate);
+            }
+            ConcurrentNavigableMap<Long, WalLocation> partitionLocations =
+                locations.computeIfAbsent(key, ignored -> new ConcurrentSkipListMap<>());
+            if (destructive) {
+                // One odd/even generation spans the entire replacement group.
+                gate.destructiveChange(() -> candidates.forEach(
+                    location -> replaceOverlappingRanges(partitionLocations, location)));
+            } else {
+                // Pure tail appends stay inexpensive and do not invalidate source probes.
+                candidates.forEach(location -> partitionLocations.put(location.firstOffset(), location));
+            }
+            return List.copyOf(candidates);
+        }
+    }
+
+    private static void replaceOverlappingRanges(
+        ConcurrentNavigableMap<Long, WalLocation> indexed,
+        WalLocation candidate
+    ) {
+        Map.Entry<Long, WalLocation> floor = indexed.floorEntry(candidate.firstOffset());
+        if (floor != null && floor.getValue().lastOffset() >= candidate.firstOffset()) {
+            indexed.remove(floor.getKey(), floor.getValue());
+        }
+        indexed.subMap(candidate.firstOffset(), true, candidate.lastOffset(), true).clear();
+        indexed.put(candidate.firstOffset(), candidate);
     }
 
     private static void requireNewerOverlap(

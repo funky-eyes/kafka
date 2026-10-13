@@ -2397,3 +2397,53 @@ reader/upload quiescence fences remain unimplemented.
 The mandatory Java/Scala test manifest increases from **324 to 334
 methods**. Batch 81-84 remains the latest fully validated GA baseline
 until this new source tree completes all release workflows and GA Seal.
+
+
+## Batch 89: preflight the full durable WAL group before indexing any member
+
+SharedStorageEngine previously validated every returned WAL append result
+for shape and address ordering, then called PartitionWalIndex.apply for each
+DATA record. The later call could reject a stale overlapping record after
+earlier group members were already published to the index. The new
+PartitionWalIndex.applyDataGroup validates every member against one
+partition lock, including the existing overlapping DATA addresses, before
+writing a single index entry. A stale or duplicate later member now
+rejects the entire index publication. Two deterministic regression cases
+verify that no valid prefix becomes indexed on these failures.
+
+## Batch 90: one mutation-generation boundary for a replacing DATA group
+
+When at least one member is an index replacement or out-of-order
+insertion, the entire validated group is applied under one seqlock-style
+destructive mutation generation. Kafka read-committed source probes
+observing an in-progress destructive group see an unavailable revision.
+A successful replacement group advances the broker-local mutation
+generation once, not once per overlapping member. This does not
+make the entire concurrent read API transactional; the WAL record group
+was already made durable by the backend before the index update.
+
+## Batch 91: reject malformed direct DATA group input before mutation
+
+Direct index group callers must supply one partition's DATA records,
+strictly increasing Kafka batch offsets, and non-overlapping increasing
+logical WAL byte ranges. The index rejects a group crossing partitions,
+containing TRUNCATE, reversing Kafka offsets, or returning an incorrect
+encoded length before any previously indexed DATA is removed.
+Four deterministic tests cover these malformed input classes.
+
+## Batch 92: freeze submitted WAL groups and preserve tail fast path
+
+SharedStorageEngine now passes an immutable record-list snapshot to
+the asynchronous SharedWal.appendBatch backend so it cannot alter group
+membership while the durable future is pending. The index fast path
+avoids per-record tree-search preflights for normal Kafka tail appends,
+which do not invalidate the mutation generation. Two deterministic
+tests verify immutable admission and unchanged tail revision.
+Release performance gating retains the existing thresholds.
+
+The mandatory Java/Scala named test inventory is increased from
+**334 to 343**. Batch 85-88 is the last complete normalized GA PASS
+until the new CI matrix and seal finish. These changes validate
+broker-local WAL index publication only. They are neither cross-broker
+WAL durability certificates nor Controller-authorized KRaft CAS records.
+COMMITTED remote physical deletion remains disabled.

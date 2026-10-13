@@ -374,6 +374,70 @@ class PartitionWalIndexTest {
     }
 
     @Test
+    void dataGroupCannotCrossPartitionOwnership() {
+        PartitionWalIndex index = new PartitionWalIndex();
+        assertThrows(IllegalArgumentException.class, () -> index.applyDataGroup(
+            java.util.List.of(
+                WalRecord.data(1L, 2L, 3, 7, 0L, 9L, new byte[] {1}),
+                WalRecord.data(1L, 2L, 4, 7, 10L, 19L, new byte[] {2})
+            ),
+            java.util.List.of(new WalAppendResult(100L, 61), new WalAppendResult(161L, 61))
+        ));
+        assertEquals(0, index.partitionCount());
+    }
+
+    @Test
+    void dataGroupCannotContainTruncateControlRecord() {
+        PartitionWalIndex index = new PartitionWalIndex();
+        assertThrows(IllegalArgumentException.class, () -> index.applyDataGroup(
+            java.util.List.of(
+                WalRecord.data(1L, 2L, 3, 7, 0L, 9L, new byte[] {1}),
+                WalRecord.truncate(1L, 2L, 3, 8, 10L)
+            ),
+            java.util.List.of(new WalAppendResult(100L, 61), new WalAppendResult(161L, 60))
+        ));
+        assertEquals(0, index.partitionCount());
+    }
+
+    @Test
+    void dataGroupCannotReverseKafkaOffsetsAfterFirstValidRecord() {
+        PartitionWalIndex index = new PartitionWalIndex();
+        assertThrows(IllegalArgumentException.class, () -> index.applyDataGroup(
+            java.util.List.of(
+                WalRecord.data(1L, 2L, 3, 7, 10L, 19L, new byte[] {1}),
+                WalRecord.data(1L, 2L, 3, 7, 0L, 9L, new byte[] {2})
+            ),
+            java.util.List.of(new WalAppendResult(100L, 61), new WalAppendResult(161L, 61))
+        ));
+        assertEquals(0, index.partitionCount());
+    }
+
+    @Test
+    void invalidLaterDataGroupEncodingCannotPublishAnIndexedPrefix() {
+        PartitionWalIndex index = new PartitionWalIndex();
+        assertThrows(IllegalArgumentException.class, () -> index.applyDataGroup(
+            java.util.List.of(
+                WalRecord.data(1L, 2L, 3, 7, 0L, 9L, new byte[] {1}),
+                WalRecord.data(1L, 2L, 3, 7, 10L, 19L, new byte[] {2})
+            ),
+            java.util.List.of(new WalAppendResult(100L, 61), new WalAppendResult(161L, 62))
+        ));
+        assertEquals(0, index.partitionCount());
+    }
+
+    @Test
+    void pureTailDataGroupDoesNotAdvanceMutationRevision() {
+        PartitionWalIndex index = new PartitionWalIndex();
+        WalPartitionKey key = new WalPartitionKey(1L, 2L, 3);
+        index.applyDataGroup(java.util.List.of(
+            WalRecord.data(1L, 2L, 3, 7, 0L, 9L, new byte[] {1}),
+            WalRecord.data(1L, 2L, 3, 7, 10L, 19L, new byte[] {2})
+        ), java.util.List.of(new WalAppendResult(100L, 61), new WalAppendResult(161L, 61)));
+        assertEquals(2, index.ranges(key).size());
+        assertEquals(0L, index.mutationRevision(key));
+    }
+
+    @Test
     void shouldWalkPartitionRangesWithoutMaterializingBacklog() {
         PartitionWalIndex index = new PartitionWalIndex();
         WalPartitionKey key = new WalPartitionKey(1L, 2L, 3);
