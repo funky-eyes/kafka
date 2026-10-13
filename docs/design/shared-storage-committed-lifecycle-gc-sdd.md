@@ -2447,3 +2447,48 @@ until the new CI matrix and seal finish. These changes validate
 broker-local WAL index publication only. They are neither cross-broker
 WAL durability certificates nor Controller-authorized KRaft CAS records.
 COMMITTED remote physical deletion remains disabled.
+
+
+## Batch 93: satisfy WAL group Checkstyle complexity without weakening gates
+
+The Batch 89-92 Java 25 job failed at `storage:checkstyleMain` because
+PartitionWalIndex.applyDataGroup had NPath Complexity 990 against a hard
+limit of 500. All other 18 source-SHA workflows completed successfully,
+including real MinIO/KRaft, Ring WAL and the performance baseline, but
+the normalized GA Seal remained BLOCKED. Split group cardinality, candidate
+validation, current-index overlap checks and publication into focused
+private methods. Preserve one per-partition gate, all-or-nothing
+validation before publication, and the existing NPath limit. Do not
+suppress the warning.
+
+## Batch 94: fail closed on malformed group result cardinality and nulls
+
+Direct index-group callers must provide at least one DATA record and
+exactly one non-null result for each member. An empty list, mismatched
+sizes or a null later result cannot publish an earlier Kafka prefix.
+Two deterministic tests assert that no partition index appears on
+those errors.
+
+## Batch 95: reject overlapping logical WAL byte spans before publication
+
+When Kafka ranges are disjoint but backend WAL byte spans overlap, the
+full group must fail before writing any index entry. The validation
+loop keeps the prior exclusive WAL end, including encoded header bytes.
+One deterministic direct-index test prevents publishing a valid prefix
+when a later WAL span overlaps.
+
+## Batch 96: preserve gap insertion and multiple-replacement semantics
+
+An out-of-order Kafka offset insertion into an index gap is an index
+mutation fence even without overlap; replacing several existing
+RecordBatches in a single durable group increments the broker-local
+mutation revision exactly once. Two tests cover non-overlapping gaps,
+multiple replacements, retained tail ranges and one generation advance.
+The ordinary tail-only path still avoids tree searches.
+
+The strict mandatory Java/Scala named test inventory grows from
+**343 to 348 methods**. This iteration does not alter the shared WAL
+fsync contract, KRaft metadata encodings, controller writer or remote
+retirement protocol. The most recent fully validated GA baseline is
+Batch 85-88 until a new source-SHA run passes the complete normalized
+Seal. COMMITTED remote-object physical deletion remains disabled.

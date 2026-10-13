@@ -172,6 +172,11 @@ REQUIRED_TESTS = {
         "dataGroupCannotReverseKafkaOffsetsAfterFirstValidRecord",
         "invalidLaterDataGroupEncodingCannotPublishAnIndexedPrefix",
         "pureTailDataGroupDoesNotAdvanceMutationRevision",
+        "emptyOrMismatchedDataGroupFailsBeforeAnyIndexPublication",
+        "nullLaterDataGroupResultCannotPublishAnEarlierPrefix",
+        "overlappingWalByteSpansCannotPublishADataGroupPrefix",
+        "outOfOrderNonOverlappingGroupInsertionAdvancesOneMutationGeneration",
+        "multipleOverlappingGroupReplacementsShareOneMutationGeneration",
     ),
     "org.apache.kafka.storage.internals.shared.SharedStorageEngineWalDurabilityFenceTest": (
         "pendingWalBarrierKeepsEveryGroupBatchInvisible",

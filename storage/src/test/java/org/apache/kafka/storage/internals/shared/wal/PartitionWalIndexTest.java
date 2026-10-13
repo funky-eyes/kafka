@@ -437,6 +437,77 @@ class PartitionWalIndexTest {
         assertEquals(0L, index.mutationRevision(key));
     }
 
+
+    @Test
+    void emptyOrMismatchedDataGroupFailsBeforeAnyIndexPublication() {
+        PartitionWalIndex index = new PartitionWalIndex();
+        WalRecord data = WalRecord.data(1L, 2L, 3, 7, 0L, 9L, new byte[] {1});
+        assertThrows(IllegalArgumentException.class, () ->
+            index.applyDataGroup(java.util.List.of(), java.util.List.of()));
+        assertThrows(IllegalArgumentException.class, () ->
+            index.applyDataGroup(java.util.List.of(data), java.util.List.of()));
+        assertEquals(0, index.partitionCount());
+    }
+
+    @Test
+    void nullLaterDataGroupResultCannotPublishAnEarlierPrefix() {
+        PartitionWalIndex index = new PartitionWalIndex();
+        assertThrows(NullPointerException.class, () ->
+            index.applyDataGroup(java.util.List.of(
+                    WalRecord.data(1L, 2L, 3, 7, 0L, 9L, new byte[] {1}),
+                    WalRecord.data(1L, 2L, 3, 7, 10L, 19L, new byte[] {2})
+                ), java.util.Arrays.asList(new WalAppendResult(100L, 61), null)));
+        assertEquals(0, index.partitionCount());
+    }
+
+    @Test
+    void overlappingWalByteSpansCannotPublishADataGroupPrefix() {
+        PartitionWalIndex index = new PartitionWalIndex();
+        assertThrows(IllegalArgumentException.class, () ->
+            index.applyDataGroup(java.util.List.of(
+                WalRecord.data(1L, 2L, 3, 7, 0L, 9L, new byte[] {1}),
+                WalRecord.data(1L, 2L, 3, 7, 10L, 19L, new byte[] {2})
+            ), java.util.List.of(new WalAppendResult(100L, 61), new WalAppendResult(150L, 61))));
+        assertEquals(0, index.partitionCount());
+    }
+
+    @Test
+    void outOfOrderNonOverlappingGroupInsertionAdvancesOneMutationGeneration() {
+        PartitionWalIndex index = new PartitionWalIndex();
+        WalPartitionKey key = new WalPartitionKey(1L, 2L, 3);
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 0L, 9L, new byte[] {1}),
+            new WalAppendResult(100L, 61));
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 40L, 49L, new byte[] {2}),
+            new WalAppendResult(200L, 61));
+        long before = index.mutationRevision(key);
+        index.applyDataGroup(java.util.List.of(
+            WalRecord.data(1L, 2L, 3, 8, 20L, 29L, new byte[] {3}),
+            WalRecord.data(1L, 2L, 3, 8, 30L, 39L, new byte[] {4})
+        ), java.util.List.of(new WalAppendResult(300L, 61), new WalAppendResult(361L, 61)));
+        assertEquals(java.util.List.of(0L, 20L, 30L, 40L),
+            index.ranges(key).stream().map(WalLocation::firstOffset).toList());
+        assertEquals(before + 1L, index.mutationRevision(key));
+    }
+
+    @Test
+    void multipleOverlappingGroupReplacementsShareOneMutationGeneration() {
+        PartitionWalIndex index = new PartitionWalIndex();
+        WalPartitionKey key = new WalPartitionKey(1L, 2L, 3);
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 0L, 9L, new byte[] {1}),
+            new WalAppendResult(100L, 61));
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 10L, 19L, new byte[] {2}),
+            new WalAppendResult(200L, 61));
+        long before = index.mutationRevision(key);
+        index.applyDataGroup(java.util.List.of(
+            WalRecord.data(1L, 2L, 3, 8, 0L, 9L, new byte[] {3}),
+            WalRecord.data(1L, 2L, 3, 8, 10L, 19L, new byte[] {4})
+        ), java.util.List.of(new WalAppendResult(300L, 61), new WalAppendResult(361L, 61)));
+        assertEquals(300L, index.find(key, 0L).orElseThrow().walOffset());
+        assertEquals(361L, index.find(key, 10L).orElseThrow().walOffset());
+        assertEquals(2, index.ranges(key).size());
+        assertEquals(before + 1L, index.mutationRevision(key));
+    }
+
     @Test
     void shouldWalkPartitionRangesWithoutMaterializingBacklog() {
         PartitionWalIndex index = new PartitionWalIndex();
