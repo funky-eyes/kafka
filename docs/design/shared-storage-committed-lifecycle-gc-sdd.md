@@ -2598,3 +2598,51 @@ authentication, signed cross-broker certificate, KRaft authorization,
 or permission to delete a COMMITTED object. Actual full-GC milestones
 remain P0 trusted source provenance, P1 Controller atomic CAS, P2 durable
 reference retirement and P3 safe physical MinIO deletion.
+
+## Batch 109: capture backend-originated startup WAL replay inventory
+
+A successful `SharedStorageEngine` construction now records immutable
+`StartupWalReplayEvidence` from the very same `SharedWal.replay` callback
+that reconstructs the local partition index. It reports counts of DATA
+and TRUNCATE records by Topic ID/partition and the highest observed logical
+WAL record end. It reports what actually survived startup recovery, not
+what a producer or preflight caller claims to have persisted. The
+snapshot is deliberately frozen after construction; it is not advanced
+by live append acknowledgments.
+
+## Batch 110: keep recovery provenance private and fail on broken ordering
+
+The new inventory has no public constructor or public mutator; an internal
+Builder consumes only actual replayed user records. The Builder rejects
+GROUP_COMMIT markers presented as user data and rejects overlapping or
+regressed logical WAL addresses, including cross-partition interleaving.
+An invalid backend replay aborts engine construction and closes the WAL.
+The returned partition map is an immutable defensive copy.
+
+## Batch 111: File and Ring durable recovery evidence tests
+
+Two actual-backend tests close and reopen File WAL and Ring WAL with a
+durable two-partition DATA group followed by a TRUNCATE. The recovered
+inventory contains only user records made visible by the backend's
+group-commit recovery or ring superblock checkpoint, including TRUNCATE.
+The local index independently verifies that the truncated Kafka range
+is not readable. Neither record counts nor the maximum logical WAL
+address implies contiguous live Kafka coverage.
+
+## Batch 112: crash-incomplete group and post-start mutation boundaries
+
+A File WAL test removes the GROUP_COMMIT segment after a successful write
+and validates that recovery produces EMPTY inventory and no indexed DATA.
+Other tests cover empty WAL, malicious out-of-order replay, immutable
+summary copies and the fact that only a subsequent process restart may
+include live appends in the startup inventory. Seven new mandatory
+Java/JUnit tests grow the named strict source inventory from **372 to 379**.
+
+**Authorization boundary:** This inventory is incomplete when physical
+WAL prefixes were reclaimed, is not bound to current BrokerEpoch /
+BrokerIncarnationId, and is neither a signed record nor a durable
+WAL-to-Source-LogStart continuity certificate. It does not establish
+cross-broker replication, reader/upload quiescence, controller commit or
+safe COMMITTED deletion. KRaft authority writers and physical GC remain
+disabled. P0 still requires an authenticated broker-originated durability
+and replay horizon revalidated at the Controller's serialized CAS event.

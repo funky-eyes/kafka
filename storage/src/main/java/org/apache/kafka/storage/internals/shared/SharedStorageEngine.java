@@ -52,6 +52,7 @@ import java.util.concurrent.ExecutionException;
 public final class SharedStorageEngine implements AutoCloseable {
     private final SharedWal wal;
     private final PartitionWalIndex walIndex = new PartitionWalIndex();
+    private final StartupWalReplayEvidence startupWalReplayEvidence;
     private final RemoteObjectIndex remoteIndex = new RemoteObjectIndex();
     private final LocalRemoteObjectCheckpoint remoteCheckpoint;
     private final ConcurrentLinkedQueue<SharedObjectMetadata> pendingRemoteCheckpoints = new ConcurrentLinkedQueue<>();
@@ -73,7 +74,12 @@ public final class SharedStorageEngine implements AutoCloseable {
             if (remoteCheckpoint != null) {
                 remoteIndex.restore(remoteCheckpoint.references());
             }
-            wal.replay(walIndex::apply);
+            StartupWalReplayEvidence.Builder recovery = new StartupWalReplayEvidence.Builder();
+            wal.replay((record, location) -> {
+                walIndex.apply(record, location);
+                recovery.accept(record, location);
+            });
+            startupWalReplayEvidence = recovery.snapshot();
         } catch (IOException | RuntimeException failure) {
             // Construction has not returned an AutoCloseable owner. Release the
             // WAL backend on replay/restore failure without hiding the cause.
@@ -495,6 +501,14 @@ public final class SharedStorageEngine implements AutoCloseable {
      * appends. -1 means a pending write or a raced observation. A stable value
      * is NOT durable WAL replay proof and cannot authorize COMMITTED GC.
      */
+    /**
+     * Frozen inventory from the backend WAL's startup replay, before live
+     * append traffic. Not live WAL coverage and never a GC authorization.
+     */
+    public StartupWalReplayEvidence startupWalReplayEvidence() {
+        return startupWalReplayEvidence;
+    }
+
     public long walAdmissionRevision(SharedPartitionId partition) {
         Objects.requireNonNull(partition, "partition");
         return walIndex.walAdmissionRevision(walKey(partition));

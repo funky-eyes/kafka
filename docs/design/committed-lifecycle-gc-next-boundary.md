@@ -122,3 +122,24 @@ concrete backend-originated witness, bind it to the current registered
 BrokerEpoch/IncarnationId, and recheck provenance inside a serialized
 Controller KRaft event. Keep all authority writes disabled until that
 end-to-end proof has fault-injection evidence.
+
+## Batches 109–112: genuine backend replay inventory, still diagnostic
+
+Startup `SharedStorageEngine` now receives an immutable per-partition
+inventory from the real `SharedWal.replay` event stream. Tests reopen
+File WAL and Ring WAL across the respective durable group-commit and
+superblock checkpoint boundaries; a missing File GROUP_COMMIT cannot
+invent a recovered DATA range. Invalid WAL address order aborts recovery.
+
+The inventory is constructed privately in the storage implementation and
+cannot be advanced by a live append or forged using a public constructor.
+It is **not** sufficient to authorize LogStart advancement or GC:
+reclaimed prefixes are absent, the highest recovered logical WAL address
+does not mean complete Kafka offset coverage, and there is no
+BrokerEpoch/Incarnation binding or Controller replay horizon.
+
+Next milestone: formally bind a current registered broker identity to
+backend-originated recovered/durable evidence and native Kafka source
+observations, including failure and ABA scenarios. Only after current
+Controller registration revalidation and an atomic feature-gated KRaft
+write path may a durable retirement transition be considered.

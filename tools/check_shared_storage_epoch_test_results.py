@@ -180,6 +180,15 @@ REQUIRED_TESTS = {
         "overlappingWalAdmissionsRequireEveryFutureToFinish",
         "synchronousNullWalFutureFailsClosedAndReleasesAdmission",
     ),
+    "org.apache.kafka.storage.internals.shared.StartupWalReplayEvidenceTest": (
+        "emptyBackendHasNoManufacturedReplayHorizon",
+        "fileBackendReopenInventoriesOnlyCommittedDataAndTruncate",
+        "ringBackendReopenInventoriesCheckpointedDataAndTruncate",
+        "subsequentLiveAppendCannotChangeFrozenStartupEvidence",
+        "malformedBackendReplayOrderClosesWalWithoutReturningEvidence",
+        "missingFileGroupCommitCannotInventARecoveredRecord",
+        "returnedPartitionSummaryIsAnImmutableDefensiveCopy",
+    ),
     "org.apache.kafka.storage.internals.shared.SharedStorageEngineWalDurabilityFenceTest": (
         "pendingWalBarrierKeepsEveryGroupBatchInvisible",
         "failedWalBarrierCannotPublishAnyIndexedGroupBatch",
