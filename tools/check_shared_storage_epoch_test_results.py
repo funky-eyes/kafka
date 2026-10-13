@@ -159,6 +159,11 @@ REQUIRED_TESTS = {
         "overlappingPredecessorAndSuccessorAreEvictedAsWholeBatches",
         "oneReplacementEvictsEveryOverlappedSuccessorButKeepsLaterTail",
         "insertingIntoGapKeepsUnrelatedBatchesButFencesRevision",
+        "malformedTruncateReplayDoesNotEvictExistingData",
+        "overflowingTruncateReplayDoesNotAdvanceMutationRevision",
+        "overflowingDataReplayCannotPublishAnIndex",
+        "directWalLocationConstructorRejectsOverflowedSpan",
+        "exactEndOfAddressSpaceRemainsValid",
     ),
     "org.apache.kafka.storage.internals.shared.SharedStorageEngineWalDurabilityFenceTest": (
         "pendingWalBarrierKeepsEveryGroupBatchInvisible",
@@ -180,6 +185,11 @@ REQUIRED_TESTS = {
         "overlappingKafkaBatchOffsetsNeverReachWalAdmission",
         "reversedKafkaBatchOffsetsNeverReachWalAdmission",
         "gappedKafkaBatchOffsetsCanStillCrossOneDurableWalBarrier",
+        "nullSingleWalGroupResultCannotPublishIndex",
+        "emptySingleWalGroupResultCannotPublishIndex",
+        "extraSingleWalGroupResultCannotPublishIndex",
+        "nullMemberSingleWalGroupResultCannotPublishIndex",
+        "validDefaultSingleWalAppendPublishesExactlyOneBatch",
     ),
     "org.apache.kafka.controller.PartitionRetirementControllerPrecheckTest": (
         "currentRecoveredLeaderInIsrMatchesButIsNotWriteAuthorization",

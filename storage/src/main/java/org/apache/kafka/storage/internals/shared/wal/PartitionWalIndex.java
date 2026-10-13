@@ -41,12 +41,9 @@ public final class PartitionWalIndex {
             throw new IllegalArgumentException("Unsupported record type in partition WAL index: " + record.type());
         }
         WalPartitionKey key = WalPartitionKey.of(record);
-        if (record.type() == WalRecordType.TRUNCATE) {
-            truncate(key, record.truncateOffset());
-            return;
-        }
-        // Replay bypasses SharedStorageEngine's future-to-index validation.
-        // Check that its returned WAL span exactly matches the decoded DATA.
+        // Cold replay does not pass through SharedStorageEngine's append
+        // future: validate both DATA and header-only TRUNCATE before changing
+        // any indexed range or its mutation revision.
         WalLocation location = new WalLocation(
             appendResult.offset(),
             appendResult.length(),
@@ -55,6 +52,10 @@ public final class PartitionWalIndex {
             record.firstOffset(),
             record.lastOffset()
         );
+        if (record.type() == WalRecordType.TRUNCATE) {
+            truncate(key, record.truncateOffset());
+            return;
+        }
         MutationGate gate = gate(key);
         synchronized (gate) {
             ConcurrentNavigableMap<Long, WalLocation> partitionLocations =

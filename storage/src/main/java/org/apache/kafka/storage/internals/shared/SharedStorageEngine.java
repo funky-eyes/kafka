@@ -56,6 +56,9 @@ public final class SharedStorageEngine implements AutoCloseable {
     private final LocalRemoteObjectCheckpoint remoteCheckpoint;
     private final ConcurrentLinkedQueue<SharedObjectMetadata> pendingRemoteCheckpoints = new ConcurrentLinkedQueue<>();
     private final Object checkpointMaintenanceLock = new Object();
+    // File/Ring WALs complete append futures while holding their writer I/O
+    // lock. Never acquire this maintenance lock in a completion callback:
+    // reclamation takes it before entering WAL I/O, creating a lock cycle.
     private final Object walMaintenanceLock = new Object();
     private volatile SharedObjectReader remoteReader;
 
@@ -171,11 +174,7 @@ public final class SharedStorageEngine implements AutoCloseable {
             result.offset(), result.length(), record.payload().remaining(),
             record.leaderEpoch(), record.firstOffset(), record.lastOffset()
         );
-        // Retain overflow checking without discarding Math.addExact's result:
-        // SpotBugs correctly rejects calling a pure method for its side effects.
-        if (location.walOffset() > Long.MAX_VALUE - location.length()) {
-            throw new IllegalStateException("WAL location extends beyond the logical address space");
-        }
+        // WalLocation validates the logical address and encoded payload span.
         return location;
     }
 

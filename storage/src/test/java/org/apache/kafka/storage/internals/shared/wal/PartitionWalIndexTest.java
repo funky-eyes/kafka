@@ -271,6 +271,61 @@ class PartitionWalIndexTest {
         assertTrue(index.mutationRevision(key) > before);
     }
 
+
+    @Test
+    void malformedTruncateReplayDoesNotEvictExistingData() {
+        PartitionWalIndex index = new PartitionWalIndex();
+        WalPartitionKey key = new WalPartitionKey(1L, 2L, 3);
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 0L, 9L, new byte[]{1}),
+            new WalAppendResult(100L, 61));
+        long before = index.mutationRevision(key);
+
+        assertThrows(IllegalArgumentException.class, () ->
+            index.apply(WalRecord.truncate(1L, 2L, 3, 8, 0L),
+                new WalAppendResult(200L, 61)));
+        assertEquals(100L, index.find(key, 0L).orElseThrow().walOffset());
+        assertEquals(before, index.mutationRevision(key));
+    }
+
+    @Test
+    void overflowingTruncateReplayDoesNotAdvanceMutationRevision() {
+        PartitionWalIndex index = new PartitionWalIndex();
+        WalPartitionKey key = new WalPartitionKey(1L, 2L, 3);
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 0L, 9L, new byte[]{1}),
+            new WalAppendResult(100L, 61));
+        long before = index.mutationRevision(key);
+
+        assertThrows(IllegalArgumentException.class, () ->
+            index.apply(WalRecord.truncate(1L, 2L, 3, 8, 0L),
+                new WalAppendResult(Long.MAX_VALUE - 20L, 60)));
+        assertEquals(100L, index.find(key, 0L).orElseThrow().walOffset());
+        assertEquals(before, index.mutationRevision(key));
+    }
+
+    @Test
+    void overflowingDataReplayCannotPublishAnIndex() {
+        PartitionWalIndex index = new PartitionWalIndex();
+        WalPartitionKey key = new WalPartitionKey(1L, 2L, 3);
+        assertThrows(IllegalArgumentException.class, () ->
+            index.apply(WalRecord.data(1L, 2L, 3, 7, 0L, 9L, new byte[]{1}),
+                new WalAppendResult(Long.MAX_VALUE - 20L, 61)));
+        assertEquals(0, index.partitionCount());
+        assertEquals(0L, index.mutationRevision(key));
+    }
+
+    @Test
+    void directWalLocationConstructorRejectsOverflowedSpan() {
+        assertThrows(IllegalArgumentException.class, () ->
+            new WalLocation(Long.MAX_VALUE - 20L, 61, 7, 0L, 9L));
+    }
+
+    @Test
+    void exactEndOfAddressSpaceRemainsValid() {
+        WalLocation location = new WalLocation(Long.MAX_VALUE - 61L, 61, 7, 0L, 9L);
+        assertEquals(Long.MAX_VALUE - 61L, location.walOffset());
+        assertEquals(61, location.length());
+    }
+
     @Test
     void shouldWalkPartitionRangesWithoutMaterializingBacklog() {
         PartitionWalIndex index = new PartitionWalIndex();

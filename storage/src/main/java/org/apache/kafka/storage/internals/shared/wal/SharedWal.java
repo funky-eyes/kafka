@@ -33,7 +33,14 @@ public interface SharedWal extends AutoCloseable {
 
     default CompletableFuture<WalAppendResult> append(WalRecord record) {
         Objects.requireNonNull(record, "record");
-        return appendBatch(List.of(record)).thenApply(results -> results.get(0));
+        return appendBatch(List.of(record)).thenApply(results -> {
+            // A successful future from a broken backend cannot silently
+            // substitute the first result of an invalid append group.
+            if (results == null || results.size() != 1 || results.get(0) == null) {
+                throw new IllegalStateException("Single-record WAL append returned an invalid group result");
+            }
+            return results.get(0);
+        });
     }
 
     WalRecord read(WalLocation location) throws IOException;

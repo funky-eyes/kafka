@@ -36,6 +36,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -288,6 +289,76 @@ class SharedStorageEngineWalDurabilityFenceTest {
             assertEquals(2, engine.localLocations(PARTITION, 0L, 30L).size());
             verify(wal).appendBatch(anyList());
         }
+    }
+
+
+    @Test
+    void nullSingleWalGroupResultCannotPublishIndex() throws Exception {
+        CompletableFuture<List<WalAppendResult>> backend = CompletableFuture.completedFuture(null);
+        try (SharedStorageEngine engine = defaultSingleAppendEngine(backend)) {
+            CompletableFuture<WalLocation> append =
+                engine.appendData(PARTITION, 3, 0L, 9L, ByteBuffer.wrap(new byte[] {1}));
+            assertThrows(CompletionException.class, append::join);
+            assertTrue(engine.localLocations(PARTITION, 0L, 10L).isEmpty());
+        }
+    }
+
+    @Test
+    void emptySingleWalGroupResultCannotPublishIndex() throws Exception {
+        CompletableFuture<List<WalAppendResult>> backend = CompletableFuture.completedFuture(List.of());
+        try (SharedStorageEngine engine = defaultSingleAppendEngine(backend)) {
+            CompletableFuture<WalLocation> append =
+                engine.appendData(PARTITION, 3, 0L, 9L, ByteBuffer.wrap(new byte[] {1}));
+            assertThrows(CompletionException.class, append::join);
+            assertTrue(engine.localLocations(PARTITION, 0L, 10L).isEmpty());
+        }
+    }
+
+    @Test
+    void extraSingleWalGroupResultCannotPublishIndex() throws Exception {
+        CompletableFuture<List<WalAppendResult>> backend = CompletableFuture.completedFuture(
+            List.of(new WalAppendResult(1L, 61), new WalAppendResult(62L, 61))
+        );
+        try (SharedStorageEngine engine = defaultSingleAppendEngine(backend)) {
+            CompletableFuture<WalLocation> append =
+                engine.appendData(PARTITION, 3, 0L, 9L, ByteBuffer.wrap(new byte[] {1}));
+            assertThrows(CompletionException.class, append::join);
+            assertTrue(engine.localLocations(PARTITION, 0L, 10L).isEmpty());
+        }
+    }
+
+    @Test
+    void nullMemberSingleWalGroupResultCannotPublishIndex() throws Exception {
+        CompletableFuture<List<WalAppendResult>> backend = CompletableFuture.completedFuture(
+            Arrays.asList((WalAppendResult) null)
+        );
+        try (SharedStorageEngine engine = defaultSingleAppendEngine(backend)) {
+            CompletableFuture<WalLocation> append =
+                engine.appendData(PARTITION, 3, 0L, 9L, ByteBuffer.wrap(new byte[] {1}));
+            assertThrows(CompletionException.class, append::join);
+            assertTrue(engine.localLocations(PARTITION, 0L, 10L).isEmpty());
+        }
+    }
+
+    @Test
+    void validDefaultSingleWalAppendPublishesExactlyOneBatch() throws Exception {
+        CompletableFuture<List<WalAppendResult>> backend = CompletableFuture.completedFuture(
+            List.of(new WalAppendResult(1L, 61))
+        );
+        try (SharedStorageEngine engine = defaultSingleAppendEngine(backend)) {
+            WalLocation result =
+                engine.appendData(PARTITION, 3, 0L, 9L, ByteBuffer.wrap(new byte[] {1})).join();
+            assertEquals(1L, result.walOffset());
+            assertEquals(1, engine.localLocations(PARTITION, 0L, 10L).size());
+        }
+    }
+
+    private static SharedStorageEngine defaultSingleAppendEngine(
+        CompletableFuture<List<WalAppendResult>> backend
+    ) throws IOException {
+        SharedWal wal = mock(SharedWal.class, CALLS_REAL_METHODS);
+        when(wal.appendBatch(anyList())).thenReturn(backend);
+        return new SharedStorageEngine(wal);
     }
 
     private static SharedStorageEngine.OwnedDataBatch batch(long first, long last) {

@@ -2294,3 +2294,60 @@ semantics. Local mutation generations, local WAL append futures and
 Controller read-only preflights still do NOT form a signed durability
 certificate or an atomic KRaft CAS; all production COMMITTED-object
 physical retirement remains disabled.
+
+
+## Batch 81: centralize logical WAL location address-span validation
+
+Single DATA, grouped DATA and WAL cold replay can all construct WalLocation.
+The overflow check now lives in the canonical WalLocation constructor rather
+than being duplicated in SharedStorageEngine. A location whose encoded
+length extends beyond Long.MAX_VALUE fails closed; an exact end at the
+limit remains representable. Existing asynchronous append overflow tests
+continue to cover the same safety boundary.
+
+## Batch 82: validate replayed TRUNCATE before any index mutation
+
+Unlike the live append future, cold replay flows directly through
+PartitionWalIndex.apply. A malformed header-only TRUNCATE append result
+previously bypassed payload-length and address-span validation and could
+erase live indexed DATA. DATA and TRUNCATE now both construct a validated
+WalLocation before mutating a partition index or its revision. Replay tests
+cover incorrect TRUNCATE length, overflowing TRUNCATE and DATA addresses,
+and unchanged indexed evidence on failure.
+
+## Batch 83: reject malformed single-record WAL append-group results
+
+SharedWal.append delegates to appendBatch for a one-record group.
+The default adapter previously selected the first result without checking
+cardinality, allowing a faulty backend to report a successful empty or
+multi-record group. It now requires exactly one non-null WalAppendResult.
+Deterministic tests cover a null list, empty list, extra result, null
+member, and one valid append. No new assumptions about fsync or group
+durability are introduced.
+
+## Batch 84: preserve lock-order safety and diagnose performance evidence
+
+File and Ring WAL writer callbacks can complete append futures while their
+backend I/O locks are held. SharedStorageEngine WAL reclaim enters backend
+I/O while already holding walMaintenanceLock. Avoid acquiring that
+maintenance lock from append completion callbacks, which would introduce
+a lock-order deadlock. Document this invariant without broadening the
+locking surface or changing the runtime fast path.
+
+The previous Batch 77-80 source-SHA run passed 17/20 workflows but failed
+the WAL crash gate on Maven Central HTTP 429 before actual test execution;
+a separate performance sample reported a 0.5573 median produce ratio
+against the unchanged 0.60 threshold. Prior passing comparable runs had
+median ratios 0.8523 and 0.8140. The failed run's slow samples coincided
+with high WAL durability force latency. Only the two failed jobs were rerun. The WAL crash-window job passed on
+attempt 2, and the performance job passed on attempt 2 with median produce
+ratio 0.7573 and median consume ratio 0.9991. The 0.60 release guard was
+retained without re-running the whole matrix. These two outcomes support
+a transient dependency/host-I/O cause, but do not establish a root-cause
+proof or make the earlier failed GA Seal equivalent to PASS. A new
+normalized Seal still has to succeed on the exact evidence tree.
+
+Batch 81-84 adds **10 named mandatory tests** (314 to 324); the KRaft
+Controller authority writer and physical COMMITTED object GC remain
+disabled. WAL index generations and local append success do not constitute
+cross-broker durability or deletion authorization.

@@ -34,6 +34,11 @@ public record WalLocation(
         if (walOffset < 0 || length < WalRecordCodec.HEADER_BYTES) {
             throw new IllegalArgumentException("invalid logical WAL location");
         }
+        // Apply the bound once for every WAL location, including cold replay
+        // and index readers that do not pass through SharedStorageEngine.
+        if (walOffset > Long.MAX_VALUE - length) {
+            throw new IllegalArgumentException("logical WAL address range overflows");
+        }
         if (payloadLength < 0 || payloadLength != length - WalRecordCodec.HEADER_BYTES) {
             throw new IllegalArgumentException("invalid WAL payload length");
         }
