@@ -164,6 +164,9 @@ REQUIRED_TESTS = {
         "overflowingDataReplayCannotPublishAnIndex",
         "directWalLocationConstructorRejectsOverflowedSpan",
         "exactEndOfAddressSpaceRemainsValid",
+        "staleOverlappingReplayCannotReplaceNewerWalLocation",
+        "duplicatedWalAddressCannotReplaceItsPreviousRange",
+        "staleOverlappingSuccessorCannotPartiallyEvictPredecessor",
     ),
     "org.apache.kafka.storage.internals.shared.SharedStorageEngineWalDurabilityFenceTest": (
         "pendingWalBarrierKeepsEveryGroupBatchInvisible",
@@ -190,6 +193,10 @@ REQUIRED_TESTS = {
         "extraSingleWalGroupResultCannotPublishIndex",
         "nullMemberSingleWalGroupResultCannotPublishIndex",
         "validDefaultSingleWalAppendPublishesExactlyOneBatch",
+        "failedColdReplayClosesWalAndPreservesOriginalIOException",
+        "failedColdReplaySuppressesWalCloseFailure",
+        "replayAndCloseReturningSameFailureCannotSelfSuppress",
+        "normalColdReplayTransfersWalOwnershipToEngine",
     ),
     "org.apache.kafka.controller.PartitionRetirementControllerPrecheckTest": (
         "currentRecoveredLeaderInIsrMatchesButIsNotWriteAuthorization",
@@ -228,6 +235,9 @@ REQUIRED_TESTS = {
         "brokerRegistrationWithReservedIncarnationFailsClosed",
         "authorityChangesAfterPreflightInvalidateTheOriginalGeneration",
         "leaderElectionAfterPreflightInvalidatesTheOldCandidate",
+        "proposedKRaftPositionCannotReuseExpectedPreviousAuthorityOffset",
+        "proposedKRaftPositionCannotMoveBehindExpectedPreviousAuthorityOffset",
+        "zeroTopicIdCannotBeUsedAsRetirementCasIdentity",
     ),
     "org.apache.kafka.controller.PartitionRetirementFeatureGateTest": (
         "productionControllerCannotReplayExperimentalFeatureLevel",

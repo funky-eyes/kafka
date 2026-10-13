@@ -2351,3 +2351,49 @@ Batch 81-84 adds **10 named mandatory tests** (314 to 324); the KRaft
 Controller authority writer and physical COMMITTED object GC remain
 disabled. WAL index generations and local append success do not constitute
 cross-broker durability or deletion authorization.
+
+
+## Batch 85: close WAL when engine initialization fails during replay
+
+SharedStorageEngine acquires its WAL dependency before replaying surviving
+DATA and TRUNCATE records. Previously an exception from replay or local
+checkpoint restore could abort construction without leaving an
+AutoCloseable owner, leaking WAL handles and writer threads. Construction
+now closes its WAL if initialization fails, rethrowing the original
+IOException or RuntimeException. A deterministic test validates cleanup.
+
+## Batch 86: preserve replay failure when WAL close itself fails
+
+If WAL shutdown fails while unwinding initialization, the replay error
+remains primary, and the close failure is suppressed for diagnosis.
+Deterministic tests cover separate failures, the same Throwable reused
+by both replay and close (which must never self-suppress), and successful
+ownership transfer through engine.close().
+This is local lifecycle safety, not a new durable persistence protocol.
+
+## Batch 87: reject stale overlapping WAL address replacements
+
+File, Ring and Rotating WAL backends allocate increasing logical WAL
+addresses. A replayed DATA record whose Kafka offset interval overlaps
+newer local DATA must not evict that latest indexed range if its physical
+logical WAL address is older or equal. PartitionWalIndex checks every
+displaced predecessor/successor WAL address before modifying the index.
+Ordinary tail appends retain their fast path. Three deterministic tests
+exercise stale predecessors, duplicated addresses and newer successors,
+preserving the earlier index and mutation revision on rejection.
+
+## Batch 88: tighten the non-emitting Controller CAS input boundary
+
+The controller-side Candidate constructor now rejects the reserved
+ZERO_UUID Topic ID and a proposed KRaft append position not strictly
+after its expected previous authority version. These reject malformed
+claims before interacting with KRaft timelines and registrations.
+Three deterministic regression tests cover duplicate/reversed offsets
+and reserved topic identity. The Controller still cannot emit authority
+records or grant COMMITTED object deletion: authenticated Kafka source
+LogStart evidence, a Controller event-queue atomic writer and external
+reader/upload quiescence fences remain unimplemented.
+
+The mandatory Java/Scala test manifest increases from **324 to 334
+methods**. Batch 81-84 remains the latest fully validated GA baseline
+until this new source tree completes all release workflows and GA Seal.

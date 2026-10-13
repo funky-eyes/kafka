@@ -175,6 +175,25 @@ class PartitionRetirementCandidatePrecheckTest {
     }
 
     @Test
+    void proposedKRaftPositionCannotReuseExpectedPreviousAuthorityOffset() {
+        assertThrows(IllegalArgumentException.class, () ->
+            request(1, 300L, INCARNATION, 7, 20L, 20L, 50L));
+    }
+
+    @Test
+    void proposedKRaftPositionCannotMoveBehindExpectedPreviousAuthorityOffset() {
+        assertThrows(IllegalArgumentException.class, () ->
+            request(1, 300L, INCARNATION, 7, 30L, 20L, 50L));
+    }
+
+    @Test
+    void zeroTopicIdCannotBeUsedAsRetirementCasIdentity() {
+        assertThrows(IllegalArgumentException.class, () ->
+            new Candidate(new Key(Uuid.ZERO_UUID, 0),
+                1, 300L, INCARNATION, 7, -1L, 20L, 50L));
+    }
+
+    @Test
     void forgedOrPartialBrokerIdentityIsRejectedAtRequestBoundary() {
         assertThrows(IllegalArgumentException.class, () ->
             request(1, -1L, INCARNATION, 7, -1L, 20L, 50L));

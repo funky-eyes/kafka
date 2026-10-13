@@ -21,6 +21,7 @@ import org.apache.kafka.storage.internals.shared.wal.SharedWal;
 import org.apache.kafka.storage.internals.shared.wal.WalAppendResult;
 import org.apache.kafka.storage.internals.shared.wal.WalLocation;
 import org.apache.kafka.storage.internals.shared.wal.WalRecord;
+import org.apache.kafka.storage.internals.shared.wal.WalReplayConsumer;
 
 import org.junit.jupiter.api.Test;
 
@@ -32,11 +33,13 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -351,6 +354,55 @@ class SharedStorageEngineWalDurabilityFenceTest {
             assertEquals(1L, result.walOffset());
             assertEquals(1, engine.localLocations(PARTITION, 0L, 10L).size());
         }
+    }
+
+    @Test
+    void failedColdReplayClosesWalAndPreservesOriginalIOException() throws Exception {
+        SharedWal wal = mock(SharedWal.class);
+        IOException replayFailure = new IOException("replay failed");
+        doThrow(replayFailure).when(wal).replay(any(WalReplayConsumer.class));
+
+        IOException observed = assertThrows(IOException.class, () -> new SharedStorageEngine(wal));
+        assertSame(replayFailure, observed);
+        verify(wal).close();
+    }
+
+    @Test
+    void failedColdReplaySuppressesWalCloseFailure() throws Exception {
+        SharedWal wal = mock(SharedWal.class);
+        IllegalStateException replayFailure = new IllegalStateException("invalid replay entry");
+        IOException closeFailure = new IOException("cannot release WAL");
+        doThrow(replayFailure).when(wal).replay(any(WalReplayConsumer.class));
+        doThrow(closeFailure).when(wal).close();
+
+        IllegalStateException observed = assertThrows(
+            IllegalStateException.class, () -> new SharedStorageEngine(wal));
+        assertSame(replayFailure, observed);
+        assertEquals(1, observed.getSuppressed().length);
+        assertSame(closeFailure, observed.getSuppressed()[0]);
+        verify(wal).close();
+    }
+
+    @Test
+    void replayAndCloseReturningSameFailureCannotSelfSuppress() throws Exception {
+        SharedWal wal = mock(SharedWal.class);
+        IOException replayFailure = new IOException("WAL failed and was already closed");
+        doThrow(replayFailure).when(wal).replay(any(WalReplayConsumer.class));
+        doThrow(replayFailure).when(wal).close();
+
+        IOException observed = assertThrows(IOException.class, () -> new SharedStorageEngine(wal));
+        assertSame(replayFailure, observed);
+        assertEquals(0, observed.getSuppressed().length);
+        verify(wal).close();
+    }
+
+    @Test
+    void normalColdReplayTransfersWalOwnershipToEngine() throws Exception {
+        SharedWal wal = mock(SharedWal.class);
+        SharedStorageEngine engine = new SharedStorageEngine(wal);
+        verify(wal, never()).close();
+        engine.close();
+        verify(wal).close();
     }
 
     private static SharedStorageEngine defaultSingleAppendEngine(

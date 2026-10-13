@@ -52,6 +52,12 @@ final class PartitionRetirementCandidatePrecheck {
         Candidate {
             Objects.requireNonNull(key, "key");
             Objects.requireNonNull(brokerIncarnationId, "brokerIncarnationId");
+            if (Uuid.ZERO_UUID.equals(key.topicId())) {
+                throw new IllegalArgumentException("Retirement CAS requires a real Topic ID");
+            }
+            if (nextAuthorityOffset <= expectedPreviousAuthorityOffset) {
+                throw new IllegalArgumentException("Retirement CAS must advance the authority write position");
+            }
             if (brokerId < 0 || brokerEpoch < 0 || Uuid.ZERO_UUID.equals(brokerIncarnationId)) {
                 throw new IllegalArgumentException("A candidate must bind a registered broker incarnation");
             }

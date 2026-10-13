@@ -69,10 +69,23 @@ public final class SharedStorageEngine implements AutoCloseable {
     public SharedStorageEngine(SharedWal wal, LocalRemoteObjectCheckpoint remoteCheckpoint) throws IOException {
         this.wal = Objects.requireNonNull(wal, "wal");
         this.remoteCheckpoint = remoteCheckpoint;
-        if (remoteCheckpoint != null) {
-            remoteIndex.restore(remoteCheckpoint.references());
+        try {
+            if (remoteCheckpoint != null) {
+                remoteIndex.restore(remoteCheckpoint.references());
+            }
+            wal.replay(walIndex::apply);
+        } catch (IOException | RuntimeException failure) {
+            // Construction has not returned an AutoCloseable owner. Release the
+            // WAL backend on replay/restore failure without hiding the cause.
+            try {
+                wal.close();
+            } catch (IOException | RuntimeException closeFailure) {
+                if (closeFailure != failure) {
+                    failure.addSuppressed(closeFailure);
+                }
+            }
+            throw failure;
         }
-        wal.replay(walIndex::apply);
     }
 
     public synchronized void installRemoteReader(SharedObjectReader reader) {

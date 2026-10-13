@@ -327,6 +327,53 @@ class PartitionWalIndexTest {
     }
 
     @Test
+    void staleOverlappingReplayCannotReplaceNewerWalLocation() {
+        PartitionWalIndex index = new PartitionWalIndex();
+        WalPartitionKey key = new WalPartitionKey(1L, 2L, 3);
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 0L, 9L, new byte[] {1}),
+            new WalAppendResult(200L, 61));
+        long revision = index.mutationRevision(key);
+
+        assertThrows(IllegalStateException.class, () ->
+            index.apply(WalRecord.data(1L, 2L, 3, 8, 0L, 9L, new byte[] {2}),
+                new WalAppendResult(100L, 61)));
+        assertEquals(200L, index.find(key, 0L).orElseThrow().walOffset());
+        assertEquals(revision, index.mutationRevision(key));
+    }
+
+    @Test
+    void duplicatedWalAddressCannotReplaceItsPreviousRange() {
+        PartitionWalIndex index = new PartitionWalIndex();
+        WalPartitionKey key = new WalPartitionKey(1L, 2L, 3);
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 0L, 9L, new byte[] {1}),
+            new WalAppendResult(100L, 61));
+
+        assertThrows(IllegalStateException.class, () ->
+            index.apply(WalRecord.data(1L, 2L, 3, 8, 0L, 9L, new byte[] {2}),
+                new WalAppendResult(100L, 61)));
+        assertEquals(7, index.find(key, 0L).orElseThrow().leaderEpoch());
+        assertEquals(0L, index.mutationRevision(key));
+    }
+
+    @Test
+    void staleOverlappingSuccessorCannotPartiallyEvictPredecessor() {
+        PartitionWalIndex index = new PartitionWalIndex();
+        WalPartitionKey key = new WalPartitionKey(1L, 2L, 3);
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 0L, 9L, new byte[] {1}),
+            new WalAppendResult(100L, 61));
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 10L, 19L, new byte[] {2}),
+            new WalAppendResult(400L, 61));
+
+        assertThrows(IllegalStateException.class, () ->
+            index.apply(WalRecord.data(1L, 2L, 3, 8, 5L, 14L, new byte[] {3}),
+                new WalAppendResult(300L, 61)));
+        assertEquals(100L, index.find(key, 5L).orElseThrow().walOffset());
+        assertEquals(400L, index.find(key, 14L).orElseThrow().walOffset());
+        assertEquals(2, index.ranges(key).size());
+        assertEquals(0L, index.mutationRevision(key));
+    }
+
+    @Test
     void shouldWalkPartitionRangesWithoutMaterializingBacklog() {
         PartitionWalIndex index = new PartitionWalIndex();
         WalPartitionKey key = new WalPartitionKey(1L, 2L, 3);

@@ -66,6 +66,9 @@ public final class PartitionWalIndex {
                 (floor != null && floor.getValue().lastOffset() >= record.firstOffset()) ||
                     ceiling != null;
             if (destructiveMutation) {
+                // Replayed WAL records must be visited in durable logical order.
+                // Refuse a stale overlapping record before evicting current DATA.
+                requireNewerOverlap(partitionLocations, floor, location);
                 gate.destructiveChange(() -> {
                     // RecordBatch ranges are indivisible: an older batch
                     // overlapped by this replacement cannot be left readable.
@@ -80,6 +83,24 @@ public final class PartitionWalIndex {
             } else {
                 // A pure tail append cannot invalidate a prior source LogStart observation.
                 partitionLocations.put(record.firstOffset(), location);
+            }
+        }
+    }
+
+    private static void requireNewerOverlap(
+        ConcurrentNavigableMap<Long, WalLocation> indexed,
+        Map.Entry<Long, WalLocation> predecessor,
+        WalLocation proposed
+    ) {
+        if (predecessor != null && predecessor.getValue().lastOffset() >= proposed.firstOffset()
+            && predecessor.getValue().walOffset() >= proposed.walOffset()) {
+            throw new IllegalStateException("Overlapping WAL replay regressed its logical address");
+        }
+        for (WalLocation previous : indexed.subMap(
+            proposed.firstOffset(), true, proposed.lastOffset(), true
+        ).values()) {
+            if (previous.walOffset() >= proposed.walOffset()) {
+                throw new IllegalStateException("Overlapping WAL replay regressed its logical address");
             }
         }
     }
