@@ -37,6 +37,9 @@ public final class PartitionRetirementAuthorityState {
     public record Key(Uuid topicId, int partitionId) {
         public Key {
             Objects.requireNonNull(topicId, "topicId");
+            if (Uuid.ZERO_UUID.equals(topicId)) {
+                throw new IllegalArgumentException("Partition retirement requires a non-reserved Topic ID");
+            }
             if (partitionId < 0) {
                 throw new IllegalArgumentException("Partition must be nonnegative");
             }

@@ -54,6 +54,19 @@ class PartitionRetirementAuthorityStateTest {
     }
 
     @Test
+    void reservedZeroTopicIdCannotBecomeAnAuthorityKey() {
+        assertThrows(IllegalArgumentException.class, () -> new Key(Uuid.ZERO_UUID, 0));
+    }
+
+    @Test
+    void malformedKRaftRecordWithZeroTopicIdCannotBeDecodedAsAuthorityKey() {
+        PartitionRetirementAuthorityRecord forged = PartitionRetirementAuthorityState.record(
+            PARTITION, active(30L, 7, 1, 5L)
+        ).setTopicId(Uuid.ZERO_UUID);
+        assertThrows(IllegalArgumentException.class, () -> PartitionRetirementAuthorityState.key(forged));
+    }
+
+    @Test
     void malformedPartitionOrUnknownInitialStateFailsClosed() {
         assertThrows(IllegalArgumentException.class, () -> new Key(PARTITION.topicId(), -1));
         assertThrows(IllegalArgumentException.class, () -> new Value(-1L, 0, 1, 0L, false));

@@ -180,6 +180,20 @@ class PartitionRetirementAuthorityImageTest {
     }
 
     @Test
+    void negotiatedKRaftReplayRejectsReservedTopicIdWithoutPoisoningImage() {
+        MetadataDelta delta = negotiatedDelta();
+        delta.replay(record(PARTITION, ELECTED));
+        PartitionRetirementAuthorityRecord forged = record(
+            PARTITION, new Value(11L, 7, 2, 40L, false)
+        ).setTopicId(Uuid.ZERO_UUID);
+
+        assertThrows(IllegalArgumentException.class, () -> delta.replay(forged));
+        MetadataImage image = delta.apply(MetadataProvenance.EMPTY);
+        assertEquals(ELECTED, image.partitionRetirements().get(PARTITION));
+        assertEquals(1, image.partitionRetirements().entries().size());
+    }
+
+    @Test
     void negotiatedImageRejectsDowngradeSnapshotTarget() {
         MetadataDelta delta = negotiatedDelta();
         delta.replay(record(PARTITION, ELECTED));

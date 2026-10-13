@@ -2492,3 +2492,35 @@ fsync contract, KRaft metadata encodings, controller writer or remote
 retirement protocol. The most recent fully validated GA baseline is
 Batch 85-88 until a new source-SHA run passes the complete normalized
 Seal. COMMITTED remote-object physical deletion remains disabled.
+
+## Batches 97–100: separate MinIO GA freeze from non-emitting KRaft identity hardening
+
+**Release split.** The canonical 2026-10-13 MinIO GA evidence checkpoint is
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`, validated by the
+normalized 20/20-workflow SUCCESS evidence
+[run 38354435176](https://github.com/funky-eyes/kafka/actions/runs/38354435176).
+The immutable release-candidate branch is
+`release/shared-storage-minio-ga-20261013`. Actual release dispatch,
+artifact QA, tags and canary remain release-operator actions, not implied
+by source-SHA evidence success.
+
+**Implementation scope.** The follow-up branch
+`feat/committed-lifecycle-authority` does not alter the sealed release
+candidate. `PartitionRetirementAuthorityState.Key` now rejects
+`Uuid.ZERO_UUID` as a reserved immutable Topic ID, aligning its persisted
+KRaft decoder with the earlier non-emitting Controller Candidate guard.
+Direct construction, generated-record decode, Controller timeline replay,
+KRaft log/snapshot replay and negotiated MetadataImage replay all have
+negative regression tests. Rejection must preserve existing authority
+state; malformed input must never create an alternative Topic incarnation.
+
+**Test ownership.** Six new named Java/JUnit methods increase the strict
+Java/Scala source-identity inventory from 348 to 354. All are non-emitting:
+the KRaft record writer, certified broker source LogStart, durable
+COMMITTED reference retirement, reader/upload quiescence and physical
+object DELETE remain OFF. The next P0 code boundary is a fresh,
+controller-verifiable native-source and WAL horizon witness, not another
+caller-supplied advisory preflight receipt.
+
+See [MinIO GA freeze](shared-storage-minio-ga-freeze-2026-10-13.md)
+and [next implementation boundary](committed-lifecycle-gc-next-boundary.md).

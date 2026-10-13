@@ -270,6 +270,9 @@ REQUIRED_TESTS = {
         "KRaftSnapshotMayRetainOlderAcceptedAuthorityOffset",
         "snapshotCannotClaimAuthorityBeyondItsCommittedHorizon",
         "wrongOffsetIsRejectedWithoutReplacingPreviouslyReplayedState",
+        "reservedTopicIdCannotEnterControllerReplayOrOverwriteExistingState",
+        "reservedTopicIdCannotEnterCommittedKRaftRecordReplay",
+        "reservedTopicIdCannotEnterKRaftSnapshotReplay",
     ),
     "org.apache.kafka.metadata.PartitionRetirementAuthorityStateTest": (
         "generatedKRaftRecordIdIsReservedAndVersionZero",
@@ -289,6 +292,8 @@ REQUIRED_TESTS = {
         "equalLeaderEpochCannotReplaceAnAuthenticatedBrokerIncarnation",
         "authenticatedLeaderCannotDowngradeToUnboundRecordAfterRestart",
         "higherSourceLeaderEpochMayCarryNewAuthenticatedBrokerIncarnation",
+        "reservedZeroTopicIdCannotBecomeAnAuthorityKey",
+        "malformedKRaftRecordWithZeroTopicIdCannotBeDecodedAsAuthorityKey",
     ),
     "org.apache.kafka.image.PartitionRetirementAuthorityImageTest": (
         "brokerMetadataDeltaActuallyReplaysTheGeneratedKRaftRecord",
@@ -306,6 +311,7 @@ REQUIRED_TESTS = {
         "brokerIncarnationProofSurvivesNegotiatedKRaftSnapshotAndReplay",
         "malformedBrokerIdentityCannotEnterBrokerMetadataImage",
         "changingIncarnationWithinSameLeaderEpochFailsDuringMetadataReplay",
+        "negotiatedKRaftReplayRejectsReservedTopicIdWithoutPoisoningImage",
     ),
     "org.apache.kafka.server.common.PartitionRetirementAuthorityVersionTest": (
         "productionBuildCannotAdvertiseRecordFeatureLevelOne",
