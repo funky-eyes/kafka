@@ -20,6 +20,7 @@ import org.apache.kafka.common.Endpoint;
 import org.apache.kafka.common.TopicIdPartition;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.replica.PartitionRetirementSourceProbe;
 import org.apache.kafka.common.security.auth.SecurityProtocol;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.storage.internals.log.StorageExtensionBrokerContext;
@@ -469,6 +470,197 @@ class BrokerLocalStartupReplayPrecheckTest {
                 "cluster-a", Uuid.ZERO_UUID, 0, 3, 54L, new Uuid(10L, 11L),
                 8, 2L, 0L, 10L, 10L, 0L, 0L
             ));
+    }
+
+    @Test
+    void currentSourceReportEchoesOnlyTheExactControllerChallenge() throws Exception {
+        try (SharedStorageExtension extension = started("probe-positive", true, true)) {
+            var request = probe();
+            var result = BrokerLocalStartupReplayPrecheck.captureCurrentSourceWalReport(
+                extension, leader(extension), source(0L, 10L, 10L), PARTITION, request
+            ).orElseThrow();
+            assertEquals(request, result.request());
+            assertEquals(0L, result.nativeLogStartOffset());
+            assertEquals(10L, result.nativeHighWatermark());
+            assertEquals(10L, result.nativeLogEndOffset());
+            assertTrue(result.localLeadershipGeneration() > 0L);
+        }
+    }
+
+    @Test
+    void liveDurableWalAndStartupReplayMayJointlyProduceProbeWindow() throws Exception {
+        try (SharedStorageExtension extension = started("probe-mixed", true, true)) {
+            extension.storage().appendData(
+                PARTITION, 8, 10L, 19L, ByteBuffer.wrap(new byte[]{2})
+            ).join();
+            var request = probe();
+            var report = BrokerLocalStartupReplayPrecheck.captureCurrentSourceWalReport(
+                extension, leader(extension), source(0L, 20L, 20L), PARTITION, request
+            ).orElseThrow();
+            assertEquals(20L, report.nativeHighWatermark());
+        }
+    }
+
+    @Test
+    void probeWithAnotherTopicOrPartitionCannotReadLocalSource() throws Exception {
+        try (SharedStorageExtension extension = started("probe-other-topic", true, true)) {
+            var wrongTopic = request(new Uuid(7L, 8L), 0, 3, 54L,
+                new Uuid(10L, 11L), 8, "cluster-a", 0L);
+            var wrongPartition = request(TOPIC_ID, 1, 3, 54L,
+                new Uuid(10L, 11L), 8, "cluster-a", 0L);
+            var roles = leader(extension);
+            var log = source(0L, 10L, 10L);
+            assertTrue(BrokerLocalStartupReplayPrecheck.captureCurrentSourceWalReport(
+                extension, roles, log, PARTITION, wrongTopic).isEmpty());
+            assertTrue(BrokerLocalStartupReplayPrecheck.captureCurrentSourceWalReport(
+                extension, roles, log, PARTITION, wrongPartition).isEmpty());
+        }
+    }
+
+    @Test
+    void staleBrokerEpochOrIncarnationCannotReuseReplayedWalEvidence() throws Exception {
+        try (SharedStorageExtension extension = started("probe-old-broker", true, true)) {
+            var wrongEpoch = request(TOPIC_ID, 0, 3, 53L,
+                new Uuid(10L, 11L), 8, "cluster-a", 0L);
+            var wrongIncarnation = request(TOPIC_ID, 0, 3, 54L,
+                new Uuid(10L, 12L), 8, "cluster-a", 0L);
+            var roles = leader(extension);
+            var log = source(0L, 10L, 10L);
+            assertTrue(BrokerLocalStartupReplayPrecheck.captureCurrentSourceWalReport(
+                extension, roles, log, PARTITION, wrongEpoch).isEmpty());
+            assertTrue(BrokerLocalStartupReplayPrecheck.captureCurrentSourceWalReport(
+                extension, roles, log, PARTITION, wrongIncarnation).isEmpty());
+        }
+    }
+
+    @Test
+    void wrongBrokerIdOrClusterCannotBorrowSourceWalReport() throws Exception {
+        try (SharedStorageExtension extension = started("probe-foreign-broker", true, true)) {
+            var wrongBroker = request(TOPIC_ID, 0, 4, 54L,
+                new Uuid(10L, 11L), 8, "cluster-a", 0L);
+            var wrongCluster = request(TOPIC_ID, 0, 3, 54L,
+                new Uuid(10L, 11L), 8, "cluster-b", 0L);
+            var roles = leader(extension);
+            var log = source(0L, 10L, 10L);
+            assertTrue(BrokerLocalStartupReplayPrecheck.captureCurrentSourceWalReport(
+                extension, roles, log, PARTITION, wrongBroker).isEmpty());
+            assertTrue(BrokerLocalStartupReplayPrecheck.captureCurrentSourceWalReport(
+                extension, roles, log, PARTITION, wrongCluster).isEmpty());
+        }
+    }
+
+    @Test
+    void oldLeaderEpochOrIncorrectLogStartCannotBecomeAProbeReport() throws Exception {
+        try (SharedStorageExtension extension = started("probe-old-source", true, true)) {
+            var wrongLeader = request(TOPIC_ID, 0, 3, 54L,
+                new Uuid(10L, 11L), 7, "cluster-a", 0L);
+            var wrongStart = request(TOPIC_ID, 0, 3, 54L,
+                new Uuid(10L, 11L), 8, "cluster-a", 1L);
+            var roles = leader(extension);
+            var log = source(0L, 10L, 10L);
+            assertTrue(BrokerLocalStartupReplayPrecheck.captureCurrentSourceWalReport(
+                extension, roles, log, PARTITION, wrongLeader).isEmpty());
+            assertTrue(BrokerLocalStartupReplayPrecheck.captureCurrentSourceWalReport(
+                extension, roles, log, PARTITION, wrongStart).isEmpty());
+        }
+    }
+
+    @Test
+    void nativeKafkaSourceDriftDuringReadInvalidatesTheProbeReport() throws Exception {
+        try (SharedStorageExtension extension = started("probe-native-drift", true, true)) {
+            SharedUnifiedLog log = source(0L, 10L, 10L);
+            when(log.captureNativeSourceWindow()).thenReturn(
+                Optional.of(new SharedUnifiedLog.NativeSourceWindow(0L, 10L, 10L)),
+                Optional.of(new SharedUnifiedLog.NativeSourceWindow(0L, 10L, 11L))
+            );
+            assertTrue(BrokerLocalStartupReplayPrecheck.captureCurrentSourceWalReport(
+                extension, leader(extension), log, PARTITION, probe()).isEmpty());
+        }
+    }
+
+    @Test
+    void incompleteWalBatchCoverageCannotBecomeAProbeReport() throws Exception {
+        try (SharedStorageExtension extension = started("probe-wal-gap", true, true)) {
+            extension.storage().appendData(
+                PARTITION, 8, 20L, 29L, ByteBuffer.wrap(new byte[]{2})
+            ).join();
+            assertTrue(BrokerLocalStartupReplayPrecheck.captureCurrentSourceWalReport(
+                extension, leader(extension), source(0L, 30L, 30L), PARTITION, probe()).isEmpty());
+        }
+    }
+
+    @Test
+    void unregisteredBrokerCannotManufactureChallengeBoundWalReport() throws Exception {
+        try (SharedStorageExtension extension = started("probe-no-registration", true, false)) {
+            assertTrue(BrokerLocalStartupReplayPrecheck.captureCurrentSourceWalReport(
+                extension, leader(extension), source(0L, 10L, 10L), PARTITION, probe()).isEmpty());
+        }
+    }
+
+    @Test
+    void concurrentWalAppendDuringNativeCaptureInvalidatesProbeReport() throws Exception {
+        try (SharedStorageExtension extension = started("probe-wal-race", true, true)) {
+            SharedUnifiedLog log = source(0L, 10L, 10L);
+            AtomicInteger samples = new AtomicInteger();
+            when(log.captureNativeSourceWindow()).thenAnswer(invocation -> {
+                if (samples.getAndIncrement() == 0) {
+                    extension.storage().appendData(
+                        PARTITION, 8, 10L, 19L, ByteBuffer.wrap(new byte[]{2})
+                    ).join();
+                }
+                return Optional.of(new SharedUnifiedLog.NativeSourceWindow(0L, 10L, 10L));
+            });
+            assertTrue(BrokerLocalStartupReplayPrecheck.captureCurrentSourceWalReport(
+                extension, leader(extension), log, PARTITION, probe()).isEmpty());
+        }
+    }
+
+    @Test
+    void brokerIncarnationAbaDuringNativeCaptureInvalidatesProbeReport() throws Exception {
+        try (SharedStorageExtension extension = started("probe-incarnation-aba", true, true)) {
+            SharedUnifiedLog log = source(0L, 10L, 10L);
+            AtomicInteger samples = new AtomicInteger();
+            when(log.captureNativeSourceWindow()).thenAnswer(invocation -> {
+                if (samples.getAndIncrement() == 0) {
+                    extension.onBrokerReady(registered(55L, new Uuid(15L, 16L))).join();
+                    extension.onBrokerReady(registered(54L, new Uuid(10L, 11L))).join();
+                }
+                return Optional.of(new SharedUnifiedLog.NativeSourceWindow(0L, 10L, 10L));
+            });
+            assertTrue(BrokerLocalStartupReplayPrecheck.captureCurrentSourceWalReport(
+                extension, leader(extension), log, PARTITION, probe()).isEmpty());
+        }
+    }
+
+    @Test
+    void reconstructedProbeAndReportMustUseValidBoundedCoordinates() {
+        assertThrows(IllegalArgumentException.class, () ->
+            request(Uuid.ZERO_UUID, 0, 3, 54L, new Uuid(10L, 11L), 8, "cluster-a", 0L));
+        assertThrows(IllegalArgumentException.class, () ->
+            new PartitionRetirementSourceProbe.Request(
+                Uuid.ZERO_UUID, "cluster-a", TOPIC_ID, 0, 3, 54L,
+                new Uuid(10L, 11L), 8, -1L, 20L, 0L
+            ));
+        assertThrows(IllegalArgumentException.class, () ->
+            new PartitionRetirementSourceProbe.Report(probe(), 1L, 0L, 0L, 0L, 0L, 0L));
+        assertThrows(IllegalArgumentException.class, () ->
+            new PartitionRetirementSourceProbe.Report(probe(), 1L, 1L, 10L, 10L, 0L, 0L));
+        assertThrows(IllegalArgumentException.class, () ->
+            new PartitionRetirementSourceProbe.Report(probe(), 1L, 0L, 10L, 10L, -1L, 0L));
+    }
+
+    private static PartitionRetirementSourceProbe.Request probe() {
+        return request(TOPIC_ID, 0, 3, 54L, new Uuid(10L, 11L), 8, "cluster-a", 0L);
+    }
+
+    private static PartitionRetirementSourceProbe.Request request(
+        Uuid topicId, int partitionId, int brokerId, long brokerEpoch,
+        Uuid incarnation, int leaderEpoch, String clusterId, long logStart
+    ) {
+        return new PartitionRetirementSourceProbe.Request(
+            new Uuid(21L, 22L), clusterId, topicId, partitionId, brokerId, brokerEpoch,
+            incarnation, leaderEpoch, -1L, 20L, logStart
+        );
     }
 
     private SharedStorageExtension started(String suffix, boolean recoveredData, boolean registered)

@@ -62,6 +62,7 @@ import org.apache.kafka.common.metadata.RegisterControllerRecord;
 import org.apache.kafka.common.metadata.TopicRecord;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.replica.PartitionRetirementSourceProbe;
 import org.apache.kafka.common.requests.AlterPartitionRequest;
 import org.apache.kafka.common.requests.ApiError;
 import org.apache.kafka.common.security.auth.KafkaPrincipal;
@@ -262,6 +263,52 @@ public class QuorumControllerTest {
                 ).get(10, TimeUnit.SECONDS)
             );
             assertEquals(recordCount, clientEnv.allRecords().size());
+        }
+    }
+
+    @Test
+    public void testUnsignedSourceWalReportCannotBecomeControllerAuthority() throws Exception {
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv).build()
+        ) {
+            QuorumController controller = controlEnv.activeController();
+            int recordsBefore = clientEnv.allRecords().size();
+            var candidate = untrustedRetirementCandidate();
+            var request = new PartitionRetirementSourceProbe.Request(
+                new Uuid(21L, 22L), clientEnv.clusterId(), candidate.key().topicId(),
+                candidate.key().partitionId(), candidate.brokerId(), candidate.brokerEpoch(),
+                candidate.brokerIncarnationId(), candidate.sourceLeaderEpoch(),
+                candidate.expectedPreviousAuthorityOffset(), candidate.nextAuthorityOffset(),
+                candidate.claimedLogStartOffset()
+            );
+            var report = new PartitionRetirementSourceProbe.Report(
+                request, 1L, 0L, 10L, 10L, 0L, 0L
+            );
+            assertEquals(
+                PartitionRetirementCandidatePrecheck.Finding.SOURCE_PROBE_NOT_VERIFIED,
+                controller.inspectRetirementSourceReport(ANONYMOUS_CONTEXT, candidate, report)
+                    .get(10, TimeUnit.SECONDS)
+            );
+            assertEquals(recordsBefore, clientEnv.allRecords().size());
+        }
+    }
+
+    @Test
+    public void testMissingSourceWalReportNeverConsumesOrEmitsControllerRecords() throws Exception {
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv).build()
+        ) {
+            QuorumController controller = controlEnv.activeController();
+            var candidate = untrustedRetirementCandidate();
+            int recordsBefore = clientEnv.allRecords().size();
+            assertEquals(
+                PartitionRetirementCandidatePrecheck.Finding.SOURCE_PROBE_NOT_VERIFIED,
+                controller.inspectRetirementSourceReport(ANONYMOUS_CONTEXT, candidate, null)
+                    .get(10, TimeUnit.SECONDS)
+            );
+            assertEquals(recordsBefore, clientEnv.allRecords().size());
         }
     }
 

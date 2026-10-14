@@ -17,6 +17,7 @@
 package org.apache.kafka.storage.internals.shared.kafka;
 
 import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.replica.PartitionRetirementSourceProbe;
 import org.apache.kafka.storage.internals.shared.CurrentLocalWalCoveragePrecheck;
 import org.apache.kafka.storage.internals.shared.LocalWalDurabilityObservation;
 import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
@@ -104,13 +105,19 @@ public final class BrokerLocalStartupReplayPrecheck {
             Objects.requireNonNull(topicId, "topicId");
             Objects.requireNonNull(brokerIncarnationId, "brokerIncarnationId");
             if (clusterId.isBlank() || Uuid.ZERO_UUID.equals(topicId)
-                || Uuid.ZERO_UUID.equals(brokerIncarnationId)
-                || partitionId < 0 || brokerId < 0 || brokerEpoch < 0L
-                || sourceLeaderEpoch < 0 || localLeadershipGeneration <= 0L
-                || observedWalMutationRevision < 0L || observedWalAdmissionRevision < 0L
-                || nativeLogStartOffset < 0L || nativeHighWatermark <= nativeLogStartOffset
+                || Uuid.ZERO_UUID.equals(brokerIncarnationId)) {
+                throw new IllegalArgumentException("Invalid source/WAL identity");
+            }
+            if (partitionId < 0 || brokerId < 0 || brokerEpoch < 0L || sourceLeaderEpoch < 0) {
+                throw new IllegalArgumentException("Invalid broker or source generation");
+            }
+            if (localLeadershipGeneration <= 0L || observedWalMutationRevision < 0L
+                || observedWalAdmissionRevision < 0L) {
+                throw new IllegalArgumentException("Unknown or inflight local WAL generation");
+            }
+            if (nativeLogStartOffset < 0L || nativeHighWatermark <= nativeLogStartOffset
                 || nativeLogEndOffset < nativeHighWatermark) {
-                throw new IllegalArgumentException("Incomplete or impossible broker-local source/WAL claim");
+                throw new IllegalArgumentException("Invalid native Kafka source bounds");
             }
         }
     }
@@ -213,6 +220,58 @@ public final class BrokerLocalStartupReplayPrecheck {
             stable.mutationRevision(),
             stable.admissionRevision()
         ));
+    }
+
+    /**
+     * Produce an unsigned diagnostic report only from a fresh broker-local
+     * native Kafka/WAL capture matching every immutable Controller challenge
+     * coordinate. This is not a network endpoint or proof of origin.
+     *
+     * <p>The nonce and CAS offsets are merely echoed: the broker cannot know
+     * the next KRaft write position. The Controller must independently
+     * validate both the challenge and an authenticated broker transport.</p>
+     */
+    public static Optional<PartitionRetirementSourceProbe.Report> captureCurrentSourceWalReport(
+        SharedStorageExtension extension,
+        SharedPartitionRoleListener roles,
+        SharedUnifiedLog sourceLog,
+        SharedPartitionId partition,
+        PartitionRetirementSourceProbe.Request request
+    ) throws IOException {
+        Objects.requireNonNull(request, "request");
+        Uuid localTopicId = new Uuid(partition.topicIdHigh(), partition.topicIdLow());
+        if (!localTopicId.equals(request.topicId()) || partition.partition() != request.partitionId()) {
+            return Optional.empty();
+        }
+        Optional<CurrentSourceWalClaim> captured = captureCurrentSourceWalClaim(
+            extension, roles, sourceLog, partition
+        );
+        if (captured.isEmpty() || !matchesProbe(captured.get(), request)) {
+            return Optional.empty();
+        }
+        CurrentSourceWalClaim claim = captured.get();
+        return Optional.of(new PartitionRetirementSourceProbe.Report(
+            request, claim.localLeadershipGeneration(), claim.nativeLogStartOffset(),
+            claim.nativeHighWatermark(), claim.nativeLogEndOffset(),
+            claim.observedWalMutationRevision(), claim.observedWalAdmissionRevision()
+        ));
+    }
+
+    private static boolean matchesProbe(
+        CurrentSourceWalClaim source,
+        PartitionRetirementSourceProbe.Request request
+    ) {
+        if (!source.clusterId().equals(request.clusterId())
+            || !source.topicId().equals(request.topicId())
+            || source.partitionId() != request.partitionId()) {
+            return false;
+        }
+        if (source.brokerId() != request.brokerId() || source.brokerEpoch() != request.brokerEpoch()
+            || !source.brokerIncarnationId().equals(request.brokerIncarnationId())) {
+            return false;
+        }
+        return source.sourceLeaderEpoch() == request.sourceLeaderEpoch()
+            && source.nativeLogStartOffset() == request.claimedLogStartOffset();
     }
 
     private static Observation<CurrentLocalWalCoveragePrecheck.Finding> evaluateCurrent(

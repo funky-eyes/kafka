@@ -3003,3 +3003,56 @@ origin proof, nor is a successful local SharedWal Future an object
 retirement certificate. Cross-replica persistency, Controller KRaft CAS
 writer, COMMITTED logical-retirement transition and physical MinIO
 DELETE remain forbidden. The frozen GA release remains unchanged.
+
+## Batches 141–144 — challenge-bound native source read-only adapter
+
+The Batch 137–140 HEAD passed 15/16 GitHub workflows. The only failure
+was a Checkstyle BooleanExpressionComplexity violation (12 > allowed 5)
+in the positive broker-local claim constructor, reached after actual
+storage tests. Guard clauses now separately validate identity, broker
+and source epochs, WAL admission/mutation revisions, and native Kafka
+LogStart/HW/LEO; existing invalid domains still fail closed.
+
+To avoid prematurely allocating a Kafka protocol API key or changing
+production heartbeat semantics, the next handshake is represented by
+a transport-neutral immutable `PartitionRetirementSourceProbe.Request`
+and `Report` in the `clients` dependency shared by `metadata` and
+`storage`. No wire endpoint, parser or sender has been activated.
+Request preserves a one-time nonce, cluster, immutable topic,
+partition, registered broker incarnation, leader epoch and expected
+authority CAS; Report carries native Kafka offset coordinates, local
+role generation, and stable WAL revision observations. Each record is
+freely constructible and **must be considered untrusted**.
+
+The broker-local adapter samples the existing real native
+`SharedUnifiedLog` and current Indexed WAL coverage, double checks the
+same source/role/identity/WAL generations, then compares the observed
+coordinates to the request. It rejects wrong Topic ID, partition,
+cluster, BrokerId, BrokerEpoch, BrokerIncarnationId, LeaderEpoch,
+LogStart, incomplete batches or any transient WAL mutation. This is
+a synchronous local diagnosis, **not** evidence that bytes are
+durable across replicas or remain unchanged after capture.
+
+The Controller nonce registry now round trips the immutable request
+coordinates through the shared model; the report adapter converts
+the caller's self-reported fields into the already non-authoritative
+`PartitionRetirementUntrustedSourceClaim`. It invokes exactly one
+`inspectRetirementSourceProbe` Controller queue event; the nonce is
+burnt and the current KRaft registration, leader, metadata position
+and feature negotiation are rechecked. The production principal
+allowlist remains DENY_ALL; no KRaft record can be emitted and a
+positive payload is always `SOURCE_LOG_START_NOT_VERIFIED`.
+
+**New deterministic regressions:** 12 in the real broker-local source
+capture suite, 3 nonce model round-trip/replay cases, and 2 in the
+QuorumController suite. Required named test inventory is
+**517 methods / 32 suites**. This count is not a CI success assertion
+for the new SHA.
+
+**Next:** design and implement an experimental Kafka-native
+Controller-listener API with explicit version/feature negotiation,
+dedicated per-broker network-authenticated credentials, bounded input
+and no best-effort fallback to CLUSTER_ACTION-only auth. Do not add
+the actual KRaft CAS writer, logical COMMITTED retirement or physical
+DELETE before authenticated origin and cross-broker durability proofs
+can be replayed and tested under crashes and leadership changes.

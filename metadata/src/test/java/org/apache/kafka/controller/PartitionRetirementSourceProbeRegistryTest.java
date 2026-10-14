@@ -193,6 +193,55 @@ class PartitionRetirementSourceProbeRegistryTest {
             () -> new Challenge(Uuid.randomUuid(), "cluster-a", null));
     }
 
+    @Test
+    void challengeMapsToSharedProtocolRequestWithoutLosingCasCoordinates() {
+        Challenge original = issue(registry(), 100L);
+        var request = original.toProtocolRequest();
+        assertEquals(original.nonce(), request.nonce());
+        assertEquals("cluster-a", request.clusterId());
+        assertEquals(CANDIDATE.key().topicId(), request.topicId());
+        assertEquals(CANDIDATE.key().partitionId(), request.partitionId());
+        assertEquals(CANDIDATE.brokerEpoch(), request.brokerEpoch());
+        assertEquals(CANDIDATE.brokerIncarnationId(), request.brokerIncarnationId());
+        assertEquals(CANDIDATE.sourceLeaderEpoch(), request.sourceLeaderEpoch());
+        assertEquals(CANDIDATE.expectedPreviousAuthorityOffset(),
+            request.expectedPreviousAuthorityOffset());
+        assertEquals(CANDIDATE.nextAuthorityOffset(), request.nextAuthorityOffset());
+        assertEquals(original, Challenge.fromProtocolRequest(request));
+    }
+
+    @Test
+    void sourceProbeWithRecreatedTopicIdCannotMatchOriginalChallenge() {
+        var registry = registry();
+        Challenge issued = issue(registry, 100L);
+        var request = issued.toProtocolRequest();
+        var foreign = new org.apache.kafka.common.replica.PartitionRetirementSourceProbe.Request(
+            request.nonce(), request.clusterId(), new Uuid(7L, 8L), request.partitionId(),
+            request.brokerId(), request.brokerEpoch(), request.brokerIncarnationId(),
+            request.sourceLeaderEpoch(), request.expectedPreviousAuthorityOffset(),
+            request.nextAuthorityOffset(), request.claimedLogStartOffset()
+        );
+        assertEquals(Finding.ENVELOPE_MISMATCH, registry.consume(
+            Challenge.fromProtocolRequest(foreign), CANDIDATE, BROKER_THREE, 101L));
+        assertEquals(Finding.UNKNOWN_OR_ALREADY_USED, registry.consume(
+            issued, CANDIDATE, BROKER_THREE, 102L));
+    }
+
+    @Test
+    void claimedAuthorityGenerationCannotBeChangedAcrossWireConversion() {
+        var registry = registry();
+        Challenge issued = issue(registry, 100L);
+        var request = issued.toProtocolRequest();
+        var forged = new org.apache.kafka.common.replica.PartitionRetirementSourceProbe.Request(
+            request.nonce(), request.clusterId(), request.topicId(), request.partitionId(),
+            request.brokerId(), request.brokerEpoch(), request.brokerIncarnationId(),
+            request.sourceLeaderEpoch(), request.expectedPreviousAuthorityOffset(),
+            request.nextAuthorityOffset() + 1L, request.claimedLogStartOffset()
+        );
+        assertEquals(Finding.ENVELOPE_MISMATCH, registry.consume(
+            Challenge.fromProtocolRequest(forged), CANDIDATE, BROKER_THREE, 101L));
+    }
+
     private static PartitionRetirementSourceProbeRegistry registry() {
         return new PartitionRetirementSourceProbeRegistry("cluster-a");
     }

@@ -349,3 +349,60 @@ broker RPC to network-authenticated principal identity with an explicit
 unique broker credential contract, sample source/WAL from the actual
 storage provider after the challenge, and revalidate the result inside
 the serialized Controller event. Production GC remains fail closed.
+
+## Batches 141–144: native-source challenge pairing, not a network certificate
+
+The Batch 137–140 commit `704af53603dd1982efeb78143a7ee8875634ba65`
+has **15/16 workflow SUCCESS**. The single failing job was
+`:storage:checkstyleMain`: `BrokerLocalStartupReplayPrecheck`'s
+`CurrentSourceWalClaim` compact constructor had BooleanExpressionComplexity
+**12 > 5** at line 106. This is a common static-style gate, not a demonstrated
+MinIO/WAL semantic failure. Batch 141 splits identity, generation and
+Kafka offset bounds into small independently readable guards; the
+Checkstyle threshold remains unchanged.
+
+- **141 — compile/checkstyle recovery.** Remove the overly complex Boolean
+  expression without weakening field validation or changing GC enablement.
+- **142 — cross-module request/report DTOs.** Add immutable
+  `PartitionRetirementSourceProbe.Request` and `Report` shapes in
+  `clients`. Exact Topic ID/partition, Cluster ID, BrokerId/Epoch/
+  Incarnation, LeaderEpoch, expected authority offset, nonce, proposed
+  write position, native LogStart and current WAL revisions are preserved
+  across Controller and broker modules. Their public constructors perform
+  only shape validation: they are **not** an authenticating wire codec.
+- **143 — actual broker-local challenge pairing.**
+  `BrokerLocalStartupReplayPrecheck.captureCurrentSourceWalReport` is
+  read-only and generates a `Report` only after an actual double native
+  Kafka Source observation, stable broker-ready identity and exact WAL
+  indexed RecordBatch coverage. The returned local observation must
+  match the Controller's challenge for immutable Topic ID/partition,
+  cluster, BrokerId/Epoch/Incarnation, LeaderEpoch and native LogStart.
+  Invalid/missing coverage, ABA, changed source or WAL admission during
+  the capture yields no report. The echoed nonce is **not** a signature.
+- **144 — consume inside existing Controller event.**
+  `Challenge.toProtocolRequest` / `fromProtocolRequest` preserve the
+  exact CAS coordinates. The package-private Controller
+  `inspectRetirementSourceReport` adapts a transport-neutral report to
+  its **existing** single queued nonce consume + live KRaft recheck; it
+  does not enqueue a nested second event. Invalid and forged reports are
+  never authorization. The event emits zero KRaft records.
+
+**Regression delta:** 12 broker-source tests, 3 Controller nonce-protocol
+mapping tests and 2 real Controller tests were added. Strict named
+Java/Scala evidence is now **517 methods, 32 suites** (was 500/32).
+All cases must run under Java 25 with zero skips before this SHA can be
+considered passing.
+
+**Remaining high-risk prerequisite:** This is a transport-**neutral**
+model and in-process adapter, **NOT** yet a Kafka-native broker RPC.
+No new API key or BrokerHeartbeat extension is advertised. Adding a new
+Kafka API without feature negotiation and explicit sender identity would
+prematurely expose an unusable endpoint. The next implementation needs
+a dedicated version-gated Controller-listener request/response with a
+trusted per-broker authenticated principal mapping, asynchronous
+challenge round trip, actual storage-provider sampling after the
+challenge, replay protection and fresh serialized Controller checks.
+A Controller-matched report is still unauthenticated Source/WAL input.
+A new KRaft authority writer, COMMITTED reference retirement, and
+physical MinIO object DELETE remain forbidden. Frozen MinIO GA remains
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`.

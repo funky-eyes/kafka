@@ -17,8 +17,10 @@
 package org.apache.kafka.controller;
 
 import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.replica.PartitionRetirementSourceProbe;
 import org.apache.kafka.common.security.auth.KafkaPrincipal;
 import org.apache.kafka.controller.PartitionRetirementCandidatePrecheck.Candidate;
+import org.apache.kafka.metadata.PartitionRetirementAuthorityState.Key;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -47,6 +49,26 @@ final class PartitionRetirementSourceProbeRegistry {
             if (Uuid.ZERO_UUID.equals(nonce) || clusterId.isBlank()) {
                 throw new IllegalArgumentException("Invalid source probe challenge identity");
             }
+        }
+
+        PartitionRetirementSourceProbe.Request toProtocolRequest() {
+            return new PartitionRetirementSourceProbe.Request(
+                nonce, clusterId, candidate.key().topicId(), candidate.key().partitionId(),
+                candidate.brokerId(), candidate.brokerEpoch(), candidate.brokerIncarnationId(),
+                candidate.sourceLeaderEpoch(), candidate.expectedPreviousAuthorityOffset(),
+                candidate.nextAuthorityOffset(), candidate.claimedLogStartOffset()
+            );
+        }
+
+        static Challenge fromProtocolRequest(PartitionRetirementSourceProbe.Request request) {
+            Objects.requireNonNull(request, "request");
+            Candidate candidate = new Candidate(
+                new Key(request.topicId(), request.partitionId()),
+                request.brokerId(), request.brokerEpoch(), request.brokerIncarnationId(),
+                request.sourceLeaderEpoch(), request.expectedPreviousAuthorityOffset(),
+                request.nextAuthorityOffset(), request.claimedLogStartOffset()
+            );
+            return new Challenge(request.nonce(), request.clusterId(), candidate);
         }
     }
 

@@ -85,6 +85,7 @@ import org.apache.kafka.common.metadata.UnfenceBrokerRecord;
 import org.apache.kafka.common.metadata.UnregisterBrokerRecord;
 import org.apache.kafka.common.metadata.UserScramCredentialRecord;
 import org.apache.kafka.common.protocol.ApiMessage;
+import org.apache.kafka.common.replica.PartitionRetirementSourceProbe;
 import org.apache.kafka.common.quota.ClientQuotaAlteration;
 import org.apache.kafka.common.quota.ClientQuotaEntity;
 import org.apache.kafka.common.requests.ApiError;
@@ -101,6 +102,7 @@ import org.apache.kafka.metadata.BrokerHeartbeatReply;
 import org.apache.kafka.metadata.BrokerRegistrationReply;
 import org.apache.kafka.metadata.FinalizedControllerFeatures;
 import org.apache.kafka.metadata.KafkaConfigSchema;
+import org.apache.kafka.metadata.PartitionRetirementAuthorityState.Key;
 import org.apache.kafka.metadata.SupportedConfigChecker;
 import org.apache.kafka.metadata.VersionRange;
 import org.apache.kafka.metadata.bootstrap.BootstrapMetadata;
@@ -818,6 +820,37 @@ public final class QuorumController implements Controller {
                 List.of(), PartitionRetirementCandidatePrecheck.Finding.SOURCE_LOG_START_NOT_VERIFIED
             );
         });
+    }
+
+    /**
+     * Convert a transport-neutral broker report to the existing one-time
+     * Controller diagnostic event without introducing a second event or
+     * trusting caller-reported WAL fields. No network API is enabled.
+     *
+     * <p>Both the nonce consume and live KRaft revalidation happen inside
+     * inspectRetirementSourceProbe's same serialized Controller event.</p>
+     */
+    CompletableFuture<PartitionRetirementCandidatePrecheck.Finding> inspectRetirementSourceReport(
+        ControllerRequestContext context,
+        PartitionRetirementCandidatePrecheck.Candidate candidate,
+        PartitionRetirementSourceProbe.Report report
+    ) {
+        Objects.requireNonNull(context, "context");
+        Objects.requireNonNull(candidate, "candidate");
+        if (report == null) {
+            return inspectRetirementSourceProbe(context, candidate, null, null);
+        }
+        PartitionRetirementSourceProbe.Request request = report.request();
+        PartitionRetirementSourceProbeRegistry.Challenge challenge =
+            PartitionRetirementSourceProbeRegistry.Challenge.fromProtocolRequest(request);
+        PartitionRetirementUntrustedSourceClaim claim = new PartitionRetirementUntrustedSourceClaim(
+            new Key(request.topicId(), request.partitionId()),
+            request.brokerId(), request.brokerEpoch(), request.brokerIncarnationId(),
+            request.sourceLeaderEpoch(), report.localLeadershipGeneration(),
+            report.nativeLogStartOffset(), report.nativeHighWatermark(), report.nativeLogEndOffset(),
+            report.observedWalMutationRevision(), report.observedWalAdmissionRevision(), true
+        );
+        return inspectRetirementSourceProbe(context, candidate, challenge, claim);
     }
 
     // Visible for testing
