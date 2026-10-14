@@ -406,3 +406,24 @@ A Controller-matched report is still unauthenticated Source/WAL input.
 A new KRaft authority writer, COMMITTED reference retirement, and
 physical MinIO object DELETE remain forbidden. Frozen MinIO GA remains
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
+
+## Batch 145 — repair the shared Kafka clients Java 11 source boundary
+
+The Batch 141–144 SHA `8de1ebde1924614f8ae73bcf5937940ba387919c`
+finished **16/16 workflow FAILURE**, all blocked before runtime testing
+at `:clients:compileJava`: the newly introduced transport-neutral
+`PartitionRetirementSourceProbe.Request/Report` used Java `record`
+syntax, whereas Kafka's `clients` module compiles with `-source 11`
+even in Java 25 CI. The successful older gates do not apply to this SHA.
+
+Keep Kafka clients' Java 11 bytecode contract. Convert the two diagnostic
+shapes to final immutable classes with final fields, exactly the same
+read accessors, null/domain validation, defensive identity semantics,
+and explicit `equals/hashCode`. Do **not** change the module's Java
+source compatibility or API version advertisement to conceal the
+failure. The existing Controller challenge equality tests exercise
+value round trips. All GC mutation and COMMITTED physical DELETE paths
+remain disabled.
+
+This change is a focused compile-blocker repair checkpoint. The next
+SHA must run the full 16-workflow CI again before a positive GA claim.

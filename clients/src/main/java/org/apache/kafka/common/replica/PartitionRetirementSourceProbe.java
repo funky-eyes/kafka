@@ -21,32 +21,40 @@ import org.apache.kafka.common.Uuid;
 import java.util.Objects;
 
 /**
- * Transport-neutral shapes for a future broker-to-controller Source/WAL
- * diagnostic probe. They are not Kafka protocol APIs or authenticated claims.
- *
- * <p>Neither a caller-supplied nonce nor a complete local indexed WAL window
- * proves broker provenance, replicated durability or COMMITTED GC eligibility.
- * Never use these immutable, freely constructible records as write permits.</p>
+ * Java 11 compatible transport-neutral Source/WAL diagnostic shapes.
+ * No class here authenticates a Broker, signs a claim, authorizes KRaft
+ * writes, or grants permission to retire a COMMITTED object.
  */
 public final class PartitionRetirementSourceProbe {
     private PartitionRetirementSourceProbe() {
     }
 
-    /** Exact Controller-issued probe coordinates that a broker must recheck. */
-    public record Request(
-        Uuid nonce,
-        String clusterId,
-        Uuid topicId,
-        int partitionId,
-        int brokerId,
-        long brokerEpoch,
-        Uuid brokerIncarnationId,
-        int sourceLeaderEpoch,
-        long expectedPreviousAuthorityOffset,
-        long nextAuthorityOffset,
-        long claimedLogStartOffset
-    ) {
-        public Request {
+    public static final class Request {
+        private final Uuid nonce;
+        private final String clusterId;
+        private final Uuid topicId;
+        private final int partitionId;
+        private final int brokerId;
+        private final long brokerEpoch;
+        private final Uuid brokerIncarnationId;
+        private final int sourceLeaderEpoch;
+        private final long expectedPreviousAuthorityOffset;
+        private final long nextAuthorityOffset;
+        private final long claimedLogStartOffset;
+
+        public Request(
+            Uuid nonce,
+            String clusterId,
+            Uuid topicId,
+            int partitionId,
+            int brokerId,
+            long brokerEpoch,
+            Uuid brokerIncarnationId,
+            int sourceLeaderEpoch,
+            long expectedPreviousAuthorityOffset,
+            long nextAuthorityOffset,
+            long claimedLogStartOffset
+        ) {
             Objects.requireNonNull(nonce, "nonce");
             Objects.requireNonNull(clusterId, "clusterId");
             Objects.requireNonNull(topicId, "topicId");
@@ -62,25 +70,140 @@ public final class PartitionRetirementSourceProbe {
                 || nextAuthorityOffset < 0L || claimedLogStartOffset < 0L) {
                 throw new IllegalArgumentException("Probe requires a valid authority CAS and log start");
             }
+            this.nonce = nonce;
+            this.clusterId = clusterId;
+            this.topicId = topicId;
+            this.partitionId = partitionId;
+            this.brokerId = brokerId;
+            this.brokerEpoch = brokerEpoch;
+            this.brokerIncarnationId = brokerIncarnationId;
+            this.sourceLeaderEpoch = sourceLeaderEpoch;
+            this.expectedPreviousAuthorityOffset = expectedPreviousAuthorityOffset;
+            this.nextAuthorityOffset = nextAuthorityOffset;
+            this.claimedLogStartOffset = claimedLogStartOffset;
+        }
+
+        public Uuid nonce() {
+            return nonce;
+        }
+
+        public String clusterId() {
+            return clusterId;
+        }
+
+        public Uuid topicId() {
+            return topicId;
+        }
+
+        public int partitionId() {
+            return partitionId;
+        }
+
+        public int brokerId() {
+            return brokerId;
+        }
+
+        public long brokerEpoch() {
+            return brokerEpoch;
+        }
+
+        public Uuid brokerIncarnationId() {
+            return brokerIncarnationId;
+        }
+
+        public int sourceLeaderEpoch() {
+            return sourceLeaderEpoch;
+        }
+
+        public long expectedPreviousAuthorityOffset() {
+            return expectedPreviousAuthorityOffset;
+        }
+
+        public long nextAuthorityOffset() {
+            return nextAuthorityOffset;
+        }
+
+        public long claimedLogStartOffset() {
+            return claimedLogStartOffset;
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) {
+                if (!(nonce.equals(that.nonce)
+                && clusterId.equals(that.clusterId)
+                && topicId.equals(that.topicId))) {
+                return false;
+            }
+            if (!(partitionId == that.partitionId
+                && brokerId == that.brokerId
+                && brokerEpoch == that.brokerEpoch)) {
+                return false;
+            }
+            if (!(brokerIncarnationId.equals(that.brokerIncarnationId)
+                && sourceLeaderEpoch == that.sourceLeaderEpoch
+                && expectedPreviousAuthorityOffset == that.expectedPreviousAuthorityOffset)) {
+                return false;
+            }
+            if (!(nextAuthorityOffset == that.nextAuthorityOffset
+                && claimedLogStartOffset == that.claimedLogStartOffset)) {
+                return false;
+            }
+            return true;
+            }
+            if (!(other instanceof Request)) {
+                return false;
+            }
+            Request that = (Request) other;
+            return nonce.equals(that.nonce)
+                && clusterId.equals(that.clusterId)
+                && topicId.equals(that.topicId)
+                && partitionId == that.partitionId
+                && brokerId == that.brokerId
+                && brokerEpoch == that.brokerEpoch
+                && brokerIncarnationId.equals(that.brokerIncarnationId)
+                && sourceLeaderEpoch == that.sourceLeaderEpoch
+                && expectedPreviousAuthorityOffset == that.expectedPreviousAuthorityOffset
+                && nextAuthorityOffset == that.nextAuthorityOffset
+                && claimedLogStartOffset == that.claimedLogStartOffset;
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(
+                nonce,
+                clusterId,
+                topicId,
+                partitionId,
+                brokerId,
+                brokerEpoch,
+                brokerIncarnationId,
+                sourceLeaderEpoch,
+                expectedPreviousAuthorityOffset,
+                nextAuthorityOffset,
+                claimedLogStartOffset
+            );
         }
     }
 
-    /**
-     * Unauthenticated reply. A broker may build this ONLY from a fresh native
-     * Kafka source and backend-indexed WAL observation; a Controller must
-     * independently validate an authenticated sender, nonce, current
-     * registration and current KRaft authority before considering any write.
-     */
-    public record Report(
-        Request request,
-        long localLeadershipGeneration,
-        long nativeLogStartOffset,
-        long nativeHighWatermark,
-        long nativeLogEndOffset,
-        long observedWalMutationRevision,
-        long observedWalAdmissionRevision
-    ) {
-        public Report {
+    public static final class Report {
+        private final Request request;
+        private final long localLeadershipGeneration;
+        private final long nativeLogStartOffset;
+        private final long nativeHighWatermark;
+        private final long nativeLogEndOffset;
+        private final long observedWalMutationRevision;
+        private final long observedWalAdmissionRevision;
+
+        public Report(
+            Request request,
+            long localLeadershipGeneration,
+            long nativeLogStartOffset,
+            long nativeHighWatermark,
+            long nativeLogEndOffset,
+            long observedWalMutationRevision,
+            long observedWalAdmissionRevision
+        ) {
             Objects.requireNonNull(request, "request");
             if (localLeadershipGeneration <= 0L || observedWalMutationRevision < 0L
                 || observedWalAdmissionRevision < 0L) {
@@ -91,6 +214,85 @@ public final class PartitionRetirementSourceProbe {
                 || nativeLogEndOffset < nativeHighWatermark) {
                 throw new IllegalArgumentException("A source probe cannot report a different or empty window");
             }
+            this.request = request;
+            this.localLeadershipGeneration = localLeadershipGeneration;
+            this.nativeLogStartOffset = nativeLogStartOffset;
+            this.nativeHighWatermark = nativeHighWatermark;
+            this.nativeLogEndOffset = nativeLogEndOffset;
+            this.observedWalMutationRevision = observedWalMutationRevision;
+            this.observedWalAdmissionRevision = observedWalAdmissionRevision;
+        }
+
+        public Request request() {
+            return request;
+        }
+
+        public long localLeadershipGeneration() {
+            return localLeadershipGeneration;
+        }
+
+        public long nativeLogStartOffset() {
+            return nativeLogStartOffset;
+        }
+
+        public long nativeHighWatermark() {
+            return nativeHighWatermark;
+        }
+
+        public long nativeLogEndOffset() {
+            return nativeLogEndOffset;
+        }
+
+        public long observedWalMutationRevision() {
+            return observedWalMutationRevision;
+        }
+
+        public long observedWalAdmissionRevision() {
+            return observedWalAdmissionRevision;
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) {
+                if (!(request.equals(that.request)
+                && localLeadershipGeneration == that.localLeadershipGeneration
+                && nativeLogStartOffset == that.nativeLogStartOffset)) {
+                return false;
+            }
+            if (!(nativeHighWatermark == that.nativeHighWatermark
+                && nativeLogEndOffset == that.nativeLogEndOffset
+                && observedWalMutationRevision == that.observedWalMutationRevision)) {
+                return false;
+            }
+            if (!(observedWalAdmissionRevision == that.observedWalAdmissionRevision)) {
+                return false;
+            }
+            return true;
+            }
+            if (!(other instanceof Report)) {
+                return false;
+            }
+            Report that = (Report) other;
+            return request.equals(that.request)
+                && localLeadershipGeneration == that.localLeadershipGeneration
+                && nativeLogStartOffset == that.nativeLogStartOffset
+                && nativeHighWatermark == that.nativeHighWatermark
+                && nativeLogEndOffset == that.nativeLogEndOffset
+                && observedWalMutationRevision == that.observedWalMutationRevision
+                && observedWalAdmissionRevision == that.observedWalAdmissionRevision;
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(
+                request,
+                localLeadershipGeneration,
+                nativeLogStartOffset,
+                nativeHighWatermark,
+                nativeLogEndOffset,
+                observedWalMutationRevision,
+                observedWalAdmissionRevision
+            );
         }
     }
 }
