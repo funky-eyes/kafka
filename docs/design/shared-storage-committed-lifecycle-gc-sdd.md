@@ -2698,3 +2698,54 @@ authenticated, durable source-log provenance. There is no guarantee
 the recovered WAL byte inventory covers an entire Kafka LogStart
 window or the other brokers. No Controller KRaft writer, durable
 COMMITTED-reference retirement or physical object DELETE is enabled.
+
+## Batch 117: compare recovered DATA by complete Kafka RecordBatch intervals
+
+A per-partition startup inventory of WAL record *counts* cannot establish
+that any actual Kafka Source LogStart..HW window is covered. The new
+read-only `StartupWalReplayCoveragePrecheck` compares the broker's
+currently indexed `WalLocation` ranges against the immutable per-partition
+startup replay high-water byte position. Its positive result requires
+exactly aligned Kafka batch boundaries and no offset gap/overlap across
+the source window. It does not require physically contiguous WAL addresses
+when another partition was interleaved into the shared WAL.
+
+## Batch 118: prevent post-start and incomplete records from filling recovery gaps
+
+Missing startup replay, reclaimed/trimmed data, partial first batches,
+HW splitting a batch, historical TRUNCATE, missing tail records and
+post-start WAL appends all produce non-success findings. A location that
+extends past the partition's highest *replayed* logical WAL end is never
+credited to startup recovery. Even an extra unexpected index entry past
+HW must be checked instead of accepting an early successful prefix.
+Thirteen deterministic tests cover these invariants and bounds.
+
+## Batch 119: read-only native Source / Broker identity / WAL replay join
+
+`BrokerLocalStartupReplayPrecheck` joins the current extension's
+Broker-ready identity pairing, epoch-aware local leader ticket, two
+actual native Kafka LogStart/HW/LEO observations and the indexed data
+actually recovered at startup. The WAL source's destructive mutation
+revision and live-write admission revision are sampled around the whole
+classification. Incomplete identity, a changed Kafka window/leader,
+or WAL activity suppresses every finding. It returns only local
+diagnostics, not a transferable proof or API grant.
+
+## Batch 120: revoke diagnostics after registration ABA and runtime changes
+
+Real Ring WAL close/reopen regression coverage compares an actual
+recovered Kafka batch with the native source sample and valid broker-ready
+snapshot. Other tests ensure empty recovery, post-start appends, Topic ID
+recreation, native LogEnd/HW drift, local demotion, broker re-registration
+ABA and a WAL append during source capture cannot masquerade as a stable
+observation. Nine integration-style JUnit tests cover this join.
+
+The strict Java/Scala mandatory test manifest grows from
+**391 to 413 methods** across **27 suites**.
+
+**P0 remains unfulfilled:** local startup completeness says nothing about
+other broker replicas, a currently authoritative BrokerRegistration,
+future WAL fsync, Kafka source-log provenance across LeaderEpoch or
+a stable Controller event-queue CAS. These findings must not be sent as
+KRaft retirement authorization. No metadata writer, logical reference
+retirement or physical COMMITTED deletion is enabled.

@@ -166,3 +166,24 @@ Source LogStart window, backend-recovered and new fsynced WAL evidence,
 and current KRaft BrokerRegistration inside the serialized Controller
 event. No authority write until crash, leader-change, registration
 ABA, log-truncation and metadata-replay fault cases all fail closed.
+
+## Batches 117-120: recovered batch coverage against live Kafka source (advisory)
+
+The extension can now ask whether its local startup replayed DATA
+completely covers the exact native Kafka LogStart/HW RecordBatch window.
+The check requires every Kafka batch boundary, detects missing/reclaimed
+or post-start bytes, and compares a broker-ready incarnation pairing
+plus two real native source samples with WAL mutation/admission revisions.
+A registration ABA or any source/role/WAL change discards the result.
+
+Positive local coverage is **not** a Controller-verifiable durability
+certificate. The startup WAL is allowed to have lost reclaimed prefixes,
+only its local persisted records are known, and this check does not
+establish all required Kafka replicas, current broker registration,
+KRaft applied position, authority CAS or any remote reader quiescence.
+
+Next P0 development slice: backend durable/replay *live* horizon beyond
+startup, and an authenticated controller revalidation protocol binding
+real BrokerRegistration with native Kafka LogStart / LeaderEpoch. Reject
+every unverifiable or stale witness; physical COMMITTED object deletion
+remains disabled.
