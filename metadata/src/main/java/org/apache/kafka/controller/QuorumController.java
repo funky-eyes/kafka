@@ -723,6 +723,35 @@ public final class QuorumController implements Controller {
     }
 
 
+    /**
+     * Evaluate a broker-reported source/WAL claim on the same serialized
+     * Controller event queue as BrokerRegistration, leader elections and
+     * retirement authority replay. Do not authenticate the sender here:
+     * an arbitrary caller can supply a matching self-reported claim.
+     *
+     * <p>The response is a diagnostic rejection, NEVER an authority grant.
+     * No Controller interface or network endpoint exposes this method and
+     * the event emits no KRaft records. The request's deadline is honored so
+     * a timed-out queue observation cannot be reused as fresh evidence.</p>
+     */
+    CompletableFuture<PartitionRetirementCandidatePrecheck.Finding> preflightUntrustedPartitionRetirement(
+        ControllerRequestContext context,
+        PartitionRetirementCandidatePrecheck.Candidate candidate,
+        PartitionRetirementUntrustedSourceClaim claim
+    ) {
+        Objects.requireNonNull(context, "context");
+        Objects.requireNonNull(candidate, "candidate");
+        return appendWriteEvent("partitionRetirementUntrustedSourcePreflight", context.deadlineNs(), () ->
+            ControllerResult.of(
+                List.of(),
+                PartitionRetirementCandidatePrecheck.assessUntrustedSourceClaim(
+                    featureControl, clusterControl, replicationControl, partitionRetirementControl,
+                    candidate, offsetControl.nextWriteOffset(), claim
+                )
+            )
+        );
+    }
+
     // Visible for testing
     ConfigurationControlManager configurationControl() {
         return configurationControl;

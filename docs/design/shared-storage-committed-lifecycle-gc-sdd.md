@@ -2915,3 +2915,42 @@ identity and validate a fresh actual source/WAL continuity proof
 *inside* the serialized Controller KRaft event. Controller authority
 writers, durable COMMITTED reference retirement and physical object
 DELETE all remain OFF; the frozen MinIO GA branch is unchanged.
+
+## Batches 133–136 — broker-local snapshot capture and Controller event-queue diagnostic
+
+A broker-local `CurrentSourceWalClaim` is now populated from the same
+immutable broker-ready WAL replay identity, exact native Kafka Source window
+and currently indexed backend WAL batch coverage used by the read-only
+`CURRENT_WINDOW_CLASSIFIED` classifier. The positive capture requires a
+non-empty Kafka RecordBatch-complete window, unchanged source before/after
+classification, stable WAL admission/mutation generations and an identical
+live completion snapshot. It deliberately does not accept an injected
+positive-coverage boolean. The payload includes ClusterId, TopicId,
+PartitionId, BrokerId/Epoch/IncarnationId, LeaderEpoch, local role generation,
+native LogStart/HW/LEO and WAL revision coordinates.
+
+A new `QuorumController.preflightUntrustedPartitionRetirement` method
+executes the matching Controller claim agreement gate in the serialized
+Controller write-event queue, using the event's **current** next KRaft write
+position, current BrokerRegistration/partition leader/feature gate and
+replayed retirement authority. It always emits **zero records**, and a
+matching claim still returns `SOURCE_LOG_START_NOT_VERIFIED`. Its
+ControllerRequestContext deadline is honored; it is not exposed as a
+public `Controller` API or RPC endpoint.
+
+Nine deterministic broker-origin capture tests cover real WAL replay,
+mixed replay/live durability, missing broker-ready identity, offset gaps,
+empty windows, native source drift, BrokerIncarnation ABA, concurrent
+backend WAL completion, and invalid reconstructed payloads. Two real
+QuorumController tests verify default feature rejection, no KRaft emissions
+and event ordering. Mandatory evidence inventory: **473 / 30 suites**.
+
+**No authenticated broker transport exists at this checkpoint.** Both the
+new local claim and Controller method are independently invocable; they
+have not been connected by an authenticated Kafka-native RPC. They cannot
+prevent forgery or replay of wire bytes, and current KRaft registration
+does not prove the RPC's unique broker-process identity. Broker-to-Controller
+authenticated ingress, freshness/non-replayability inside the serialized
+commit event, quorum durability/cross-broker proof, an atomic KRaft authority
+writer, COMMITTED retirement and physical MinIO deletion remain blocked.
+The frozen MinIO GA branch is unchanged.

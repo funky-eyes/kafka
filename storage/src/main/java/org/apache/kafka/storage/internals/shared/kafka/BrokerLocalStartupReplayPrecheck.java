@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.storage.internals.shared.kafka;
 
+import org.apache.kafka.common.Uuid;
 import org.apache.kafka.storage.internals.shared.CurrentLocalWalCoveragePrecheck;
 import org.apache.kafka.storage.internals.shared.LocalWalDurabilityObservation;
 import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
@@ -76,7 +77,57 @@ public final class BrokerLocalStartupReplayPrecheck {
         }
     }
 
-    private record Observation<T>(Status status, Optional<T> finding) {
+    /**
+     * Actual local source/WAL coordinates sampled while the broker-ready
+     * incarnation, native source, WAL admission/mutation and completed writes
+     * remained unchanged. This is an UNSIGNED, freely copyable diagnostic
+     * envelope. It is not authenticated RPC evidence, a durable replica
+     * certificate, or permission for Controller authority writes or GC.
+     */
+    public record CurrentSourceWalClaim(
+        String clusterId,
+        Uuid topicId,
+        int partitionId,
+        int brokerId,
+        long brokerEpoch,
+        Uuid brokerIncarnationId,
+        int sourceLeaderEpoch,
+        long localLeadershipGeneration,
+        long nativeLogStartOffset,
+        long nativeHighWatermark,
+        long nativeLogEndOffset,
+        long observedWalMutationRevision,
+        long observedWalAdmissionRevision
+    ) {
+        public CurrentSourceWalClaim {
+            Objects.requireNonNull(clusterId, "clusterId");
+            Objects.requireNonNull(topicId, "topicId");
+            Objects.requireNonNull(brokerIncarnationId, "brokerIncarnationId");
+            if (clusterId.isBlank() || Uuid.ZERO_UUID.equals(topicId)
+                || Uuid.ZERO_UUID.equals(brokerIncarnationId)
+                || partitionId < 0 || brokerId < 0 || brokerEpoch < 0L
+                || sourceLeaderEpoch < 0 || localLeadershipGeneration <= 0L
+                || observedWalMutationRevision < 0L || observedWalAdmissionRevision < 0L
+                || nativeLogStartOffset < 0L || nativeHighWatermark <= nativeLogStartOffset
+                || nativeLogEndOffset < nativeHighWatermark) {
+                throw new IllegalArgumentException("Incomplete or impossible broker-local source/WAL claim");
+            }
+        }
+    }
+
+    private record StableInputs(
+        BrokerStartupReplayObservation identity,
+        SourceLogStartObservation.LocalObservation source,
+        long mutationRevision,
+        long admissionRevision
+    ) {
+    }
+
+    private record Observation<T>(
+        Status status,
+        Optional<T> finding,
+        Optional<StableInputs> stableInputs
+    ) {
     }
 
     @FunctionalInterface
@@ -116,13 +167,66 @@ public final class BrokerLocalStartupReplayPrecheck {
         SharedUnifiedLog sourceLog,
         SharedPartitionId partition
     ) throws IOException {
-        Observation<CurrentLocalWalCoveragePrecheck.Finding> result = evaluate(
+        Observation<CurrentLocalWalCoveragePrecheck.Finding> result = evaluateCurrent(
+            extension, roles, sourceLog, partition
+        );
+        return new CurrentAssessment(result.status(), result.finding());
+    }
+
+    /**
+     * Captures broker-local coordinates from the real native Kafka source and
+     * current indexed WAL only when every batch in the nonempty Kafka source
+     * window is present and all existing local fences remain stable.
+     *
+     * <p>Any caller can later copy or forge these primitives. No receiving
+     * Controller may treat this snapshot as authenticated source provenance.</p>
+     */
+    public static Optional<CurrentSourceWalClaim> captureCurrentSourceWalClaim(
+        SharedStorageExtension extension,
+        SharedPartitionRoleListener roles,
+        SharedUnifiedLog sourceLog,
+        SharedPartitionId partition
+    ) throws IOException {
+        Observation<CurrentLocalWalCoveragePrecheck.Finding> result = evaluateCurrent(
+            extension, roles, sourceLog, partition
+        );
+        if (result.status() != Status.CURRENT_WINDOW_CLASSIFIED
+            || result.finding().orElseThrow() != CurrentLocalWalCoveragePrecheck.Finding.INDEXED_BATCH_WINDOW) {
+            return Optional.empty();
+        }
+        StableInputs stable = result.stableInputs().orElseThrow();
+        BrokerStartupReplayObservation identity = stable.identity();
+        SourceLogStartObservation.LocalObservation source = stable.source();
+        var offsets = source.offsets();
+        return Optional.of(new CurrentSourceWalClaim(
+            identity.clusterId(),
+            new Uuid(partition.topicIdHigh(), partition.topicIdLow()),
+            partition.partition(),
+            identity.brokerId(),
+            identity.brokerEpoch(),
+            identity.brokerIncarnationId(),
+            source.sourceLeaderEpoch(),
+            source.localGeneration(),
+            offsets.logStartOffset(),
+            offsets.highWatermark(),
+            offsets.logEndOffset(),
+            stable.mutationRevision(),
+            stable.admissionRevision()
+        ));
+    }
+
+    private static Observation<CurrentLocalWalCoveragePrecheck.Finding> evaluateCurrent(
+        SharedStorageExtension extension,
+        SharedPartitionRoleListener roles,
+        SharedUnifiedLog sourceLog,
+        SharedPartitionId partition
+    ) throws IOException {
+        return evaluate(
             extension, roles, sourceLog, partition, Status.CURRENT_WINDOW_CLASSIFIED,
             (identity, storage, key, window) -> storage.localDurableWindowCoverage(
                 key, window.logStartOffset(), window.highWatermark()
             )
         );
-        return new CurrentAssessment(result.status(), result.finding());
     }
 
     private static <T> Observation<T> evaluate(
@@ -177,7 +281,10 @@ public final class BrokerLocalStartupReplayPrecheck {
         if (extension.brokerStartupReplayObservation().orElse(null) != identity) {
             return rejected(Status.BROKER_IDENTITY_REVOKED);
         }
-        return new Observation<>(successStatus, Optional.of(Objects.requireNonNull(covered, "window finding")));
+        return new Observation<>(
+            successStatus, Optional.of(Objects.requireNonNull(covered, "window finding")),
+            Optional.of(new StableInputs(identity, source, mutationBefore, admissionBefore))
+        );
     }
 
     private static boolean sameSourceObservation(
@@ -207,6 +314,6 @@ public final class BrokerLocalStartupReplayPrecheck {
     }
 
     private static <T> Observation<T> rejected(Status status) {
-        return new Observation<>(status, Optional.empty());
+        return new Observation<>(status, Optional.empty(), Optional.empty());
     }
 }

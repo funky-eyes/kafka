@@ -260,3 +260,44 @@ backend WAL provenance tied to the current BrokerRegistration, and
 revalidate it in the serialized Controller event before atomic
 metadata publication. A local complete interval or completed Future
 is insufficient. Do not enable physical COMMITTED deletion.
+
+## Batches 133–136: real broker-local claim capture and serialized Controller preflight
+
+- **133 — broker-origin local window fields.** The shared storage extension
+  now exposes a read-only `CurrentSourceWalClaim` from the same actual
+  Kafka-native Source, immutable broker-ready pairing and backend WAL indexed
+  batch coverage used by the existing diagnostic. The claim contains the
+  Cluster ID, Topic ID/partition, BrokerId/Epoch/IncarnationId,
+  LeaderEpoch/local generation, LogStart/HW/LEO and observed per-partition
+  WAL mutation/admission revisions. No caller-supplied coverage flag can
+  turn an empty or incomplete window into a positive capture.
+- **134 — fail-closed stable snapshot.** Capture only returns an envelope for
+  `INDEXED_BATCH_WINDOW` after identical double source observations, the
+  same startup pairing object and unchanged WAL generations/completion
+  snapshot. Missing broker readiness, Kafka offset gaps, empty windows,
+  source drift, incarnation ABA or WAL activity all return no claim.
+- **135 — Controller event-queue recheck.** A *package-private*, non-network
+  `QuorumController.preflightUntrustedPartitionRetirement` runs the existing
+  current KRaft feature/registration/leader/authority CAS and untrusted-claim
+  checks within `appendWriteEvent`, respects request deadlines and emits an
+  empty KRaft record list. It is serialized against Controller state changes.
+- **136 — deterministic regressions.** Nine broker-origin capture tests and
+  two real Controller event-queue tests are mandatory; the strict named
+  Java/Scala test inventory becomes **473 methods across 30 suites**.
+
+**Security limitation:** `CurrentSourceWalClaim` is an UNSIGNED primitive
+envelope. It can be copied, forged, delayed or replayed after leaving the
+broker process. KRaft `BrokerRegistration` and Kafka `CLUSTER_ACTION` ACL
+alone do not cryptographically bind an RPC sender to one BrokerId and
+IncarnationId (deployments may share an inter-broker principal). This
+checkpoint DOES NOT add a Broker-to-Controller RPC, authenticated transport,
+freshness challenge, replicated/fsynced cross-broker certificate, authority
+writer, COMMITTED reference retirement, or physical MinIO DELETE. Do not
+mistake a positive local claim or queued Controller diagnostic for a GC grant.
+
+**Next implementation:** add a feature-gated Kafka-native transport for the
+broker-produced read-only data, establish per-broker authenticated channel
+identity (not a shared principal or caller-declared BrokerId), and provide
+single-use anti-replay/source-validation semantics *inside* the Controller
+event before any KRaft write is allowed. Keep the frozen MinIO GA branch
+at `9a28c11b6d97ecacafe1b8566cde5cc34d604889`.

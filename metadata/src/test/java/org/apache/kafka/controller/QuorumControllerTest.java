@@ -173,6 +173,78 @@ public class QuorumControllerTest {
     static final BootstrapMetadata SIMPLE_BOOTSTRAP = BootstrapMetadata.
             fromVersion(MetadataVersion.IBP_3_7_IV0, "test-provided bootstrap");
 
+    @Test
+    public void testUntrustedRetirementClaimIsRejectedByProductionFeatureWithoutKRaftRecords() throws Exception {
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv).build()
+        ) {
+            QuorumController controller = controlEnv.activeController();
+            int recordCount = clientEnv.allRecords().size();
+            var candidate = untrustedRetirementCandidate();
+            var claim = untrustedRetirementSourceClaim(candidate);
+            assertEquals(
+                PartitionRetirementCandidatePrecheck.Finding.FEATURE_NOT_NEGOTIATED,
+                controller.preflightUntrustedPartitionRetirement(ANONYMOUS_CONTEXT, candidate, claim)
+                    .get(10, TimeUnit.SECONDS)
+            );
+            assertEquals(recordCount, clientEnv.allRecords().size());
+        }
+    }
+
+    @Test
+    public void testUntrustedRetirementClaimCannotBypassTheSerializedControllerEventQueue() throws Exception {
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv).build()
+        ) {
+            QuorumController controller = controlEnv.activeController();
+            CountDownLatch entered = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            controller.appendControlEvent("holdRetirementSourcePreflight", () -> {
+                entered.countDown();
+                try {
+                    if (!release.await(10, TimeUnit.SECONDS)) {
+                        throw new AssertionError("Controller gate was not released");
+                    }
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException(interrupted);
+                }
+            });
+            try {
+                assertTrue(entered.await(10, TimeUnit.SECONDS));
+                var candidate = untrustedRetirementCandidate();
+                var assessment = controller.preflightUntrustedPartitionRetirement(
+                    ANONYMOUS_CONTEXT, candidate, untrustedRetirementSourceClaim(candidate)
+                );
+                assertFalse(assessment.isDone());
+                release.countDown();
+                assertEquals(PartitionRetirementCandidatePrecheck.Finding.FEATURE_NOT_NEGOTIATED,
+                    assessment.get(10, TimeUnit.SECONDS));
+            } finally {
+                release.countDown();
+            }
+        }
+    }
+
+    private static PartitionRetirementCandidatePrecheck.Candidate untrustedRetirementCandidate() {
+        return new PartitionRetirementCandidatePrecheck.Candidate(
+            new org.apache.kafka.metadata.PartitionRetirementAuthorityState.Key(Uuid.randomUuid(), 0),
+            3, 54L, new Uuid(10L, 11L), 8, -1L, 100L, 0L
+        );
+    }
+
+    private static PartitionRetirementUntrustedSourceClaim untrustedRetirementSourceClaim(
+        PartitionRetirementCandidatePrecheck.Candidate candidate
+    ) {
+        return new PartitionRetirementUntrustedSourceClaim(
+            candidate.key(), candidate.brokerId(), candidate.brokerEpoch(),
+            candidate.brokerIncarnationId(), candidate.sourceLeaderEpoch(),
+            1L, 0L, 10L, 10L, 0L, 0L, true
+        );
+    }
+
     /**
      * Test setting some configuration values and reading them back.
      */

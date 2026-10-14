@@ -43,6 +43,7 @@ import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -332,6 +333,142 @@ class BrokerLocalStartupReplayPrecheckTest {
             assertEquals(BrokerLocalStartupReplayPrecheck.Status.BROKER_IDENTITY_UNAVAILABLE, current.status());
             assertTrue(current.finding().isEmpty());
         }
+    }
+
+    @Test
+    void stableReplayedWalAndNativeSourceYieldOnlyAProcessLocalClaim() throws Exception {
+        try (SharedStorageExtension extension = started("claim-replay", true, true)) {
+            var claim = BrokerLocalStartupReplayPrecheck.captureCurrentSourceWalClaim(
+                extension, leader(extension), source(0L, 10L, 10L), PARTITION
+            ).orElseThrow();
+            assertEquals("cluster-a", claim.clusterId());
+            assertEquals(TOPIC_ID, claim.topicId());
+            assertEquals(0, claim.partitionId());
+            assertEquals(3, claim.brokerId());
+            assertEquals(54L, claim.brokerEpoch());
+            assertEquals(new Uuid(10L, 11L), claim.brokerIncarnationId());
+            assertEquals(8, claim.sourceLeaderEpoch());
+            assertTrue(claim.localLeadershipGeneration() > 0L);
+            assertEquals(0L, claim.nativeLogStartOffset());
+            assertEquals(10L, claim.nativeHighWatermark());
+            assertEquals(10L, claim.nativeLogEndOffset());
+            assertEquals(extension.storage().walMutationRevision(PARTITION), claim.observedWalMutationRevision());
+            assertEquals(extension.storage().walAdmissionRevision(PARTITION), claim.observedWalAdmissionRevision());
+        }
+    }
+
+    @Test
+    void mixedReplayAndDurableLiveWritesCanProduceCurrentLocalClaim() throws Exception {
+        try (SharedStorageExtension extension = started("claim-mixed", true, true)) {
+            extension.storage().appendData(
+                PARTITION, 8, 10L, 19L, ByteBuffer.wrap(new byte[]{2})
+            ).join();
+            var claim = BrokerLocalStartupReplayPrecheck.captureCurrentSourceWalClaim(
+                extension, leader(extension), source(0L, 20L, 20L), PARTITION
+            ).orElseThrow();
+            assertEquals(0L, claim.nativeLogStartOffset());
+            assertEquals(20L, claim.nativeHighWatermark());
+        }
+    }
+
+    @Test
+    void unregisteredBrokerCannotCreateAClaimFromRecoveredWal() throws Exception {
+        try (SharedStorageExtension extension = started("claim-unbound", true, false)) {
+            assertTrue(BrokerLocalStartupReplayPrecheck.captureCurrentSourceWalClaim(
+                extension, leader(extension), source(0L, 10L, 10L), PARTITION
+            ).isEmpty());
+        }
+    }
+
+    @Test
+    void missingKafkaRecordBatchCannotCreatePositiveClaim() throws Exception {
+        try (SharedStorageExtension extension = started("claim-gap", true, true)) {
+            extension.storage().appendData(
+                PARTITION, 8, 20L, 29L, ByteBuffer.wrap(new byte[]{2})
+            ).join();
+            assertTrue(BrokerLocalStartupReplayPrecheck.captureCurrentSourceWalClaim(
+                extension, leader(extension), source(0L, 30L, 30L), PARTITION
+            ).isEmpty());
+        }
+    }
+
+    @Test
+    void emptySourceWindowCannotMasqueradeAsDurableDataClaim() throws Exception {
+        try (SharedStorageExtension extension = started("claim-empty", false, true)) {
+            assertTrue(BrokerLocalStartupReplayPrecheck.captureCurrentSourceWalClaim(
+                extension, leader(extension), source(0L, 0L, 0L), PARTITION
+            ).isEmpty());
+        }
+    }
+
+    @Test
+    void sourceLogEndChangeDuringCaptureRevokesTheClaim() throws Exception {
+        try (SharedStorageExtension extension = started("claim-source-drift", true, true)) {
+            SharedUnifiedLog log = source(0L, 10L, 10L);
+            when(log.captureNativeSourceWindow()).thenReturn(
+                Optional.of(new SharedUnifiedLog.NativeSourceWindow(0L, 10L, 10L)),
+                Optional.of(new SharedUnifiedLog.NativeSourceWindow(0L, 10L, 11L))
+            );
+            assertTrue(BrokerLocalStartupReplayPrecheck.captureCurrentSourceWalClaim(
+                extension, leader(extension), log, PARTITION
+            ).isEmpty());
+        }
+    }
+
+    @Test
+    void brokerIncarnationAbaDuringNativeCaptureRevokesTheClaim() throws Exception {
+        try (SharedStorageExtension extension = started("claim-aba", true, true)) {
+            SharedUnifiedLog log = source(0L, 10L, 10L);
+            AtomicInteger samples = new AtomicInteger();
+            when(log.captureNativeSourceWindow()).thenAnswer(invocation -> {
+                if (samples.getAndIncrement() == 0) {
+                    extension.onBrokerReady(registered(55L, new Uuid(14L, 15L))).join();
+                    extension.onBrokerReady(registered(54L, new Uuid(10L, 11L))).join();
+                }
+                return Optional.of(new SharedUnifiedLog.NativeSourceWindow(0L, 10L, 10L));
+            });
+            assertTrue(BrokerLocalStartupReplayPrecheck.captureCurrentSourceWalClaim(
+                extension, leader(extension), log, PARTITION
+            ).isEmpty());
+        }
+    }
+
+    @Test
+    void completedWalAppendDuringNativeCaptureRevokesTheClaim() throws Exception {
+        try (SharedStorageExtension extension = started("claim-wal-change", true, true)) {
+            SharedUnifiedLog log = source(0L, 10L, 10L);
+            AtomicInteger samples = new AtomicInteger();
+            when(log.captureNativeSourceWindow()).thenAnswer(invocation -> {
+                if (samples.getAndIncrement() == 0) {
+                    extension.storage().appendData(
+                        PARTITION, 8, 10L, 19L, ByteBuffer.wrap(new byte[]{2})
+                    ).join();
+                }
+                return Optional.of(new SharedUnifiedLog.NativeSourceWindow(0L, 10L, 10L));
+            });
+            assertTrue(BrokerLocalStartupReplayPrecheck.captureCurrentSourceWalClaim(
+                extension, leader(extension), log, PARTITION
+            ).isEmpty());
+        }
+    }
+
+    @Test
+    void callerConstructedMalformedClaimIsRejectedWithoutTrustingItsFields() {
+        assertThrows(IllegalArgumentException.class, () ->
+            new BrokerLocalStartupReplayPrecheck.CurrentSourceWalClaim(
+                "", TOPIC_ID, 0, 3, 54L, new Uuid(10L, 11L),
+                8, 2L, 0L, 10L, 10L, 0L, 0L
+            ));
+        assertThrows(IllegalArgumentException.class, () ->
+            new BrokerLocalStartupReplayPrecheck.CurrentSourceWalClaim(
+                "cluster-a", TOPIC_ID, 0, 3, 54L, new Uuid(10L, 11L),
+                8, 2L, 0L, 0L, 0L, 0L, 0L
+            ));
+        assertThrows(IllegalArgumentException.class, () ->
+            new BrokerLocalStartupReplayPrecheck.CurrentSourceWalClaim(
+                "cluster-a", Uuid.ZERO_UUID, 0, 3, 54L, new Uuid(10L, 11L),
+                8, 2L, 0L, 10L, 10L, 0L, 0L
+            ));
     }
 
     private SharedStorageExtension started(String suffix, boolean recoveredData, boolean registered)

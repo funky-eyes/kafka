@@ -249,6 +249,15 @@ REQUIRED_TESTS = {
         "incarnationAbaCannotAuthorizeCurrentLocalWalCoverage",
         "completedWalAppendDuringNativeCaptureInvalidatesCurrentFinding",
         "currentCoverageRequiresBrokerReadyIdentityEvenWhenWalIndexIsComplete",
+        "stableReplayedWalAndNativeSourceYieldOnlyAProcessLocalClaim",
+        "mixedReplayAndDurableLiveWritesCanProduceCurrentLocalClaim",
+        "unregisteredBrokerCannotCreateAClaimFromRecoveredWal",
+        "missingKafkaRecordBatchCannotCreatePositiveClaim",
+        "emptySourceWindowCannotMasqueradeAsDurableDataClaim",
+        "sourceLogEndChangeDuringCaptureRevokesTheClaim",
+        "brokerIncarnationAbaDuringNativeCaptureRevokesTheClaim",
+        "completedWalAppendDuringNativeCaptureRevokesTheClaim",
+        "callerConstructedMalformedClaimIsRejectedWithoutTrustingItsFields",
     ),
     "org.apache.kafka.storage.internals.shared.kafka.SharedStorageExtensionWalRuntimeTest": (
         "defaultRuntimeActuallyStartsRingWal",
@@ -304,6 +313,10 @@ REQUIRED_TESTS = {
         "synchronousWalBackendFailureDoesNotStrandAdmission",
         "pendingWriteDoesNotFenceUnrelatedPartitionAdmission",
         "invalidDurableWalResultAlsoCompletesAdmissionWithoutPublishingIndex",
+    ),
+    "org.apache.kafka.controller.QuorumControllerTest": (
+        "testUntrustedRetirementClaimIsRejectedByProductionFeatureWithoutKRaftRecords",
+        "testUntrustedRetirementClaimCannotBypassTheSerializedControllerEventQueue",
     ),
     "org.apache.kafka.controller.PartitionRetirementControllerPrecheckTest": (
         "currentRecoveredLeaderInIsrMatchesButIsNotWriteAuthorization",
