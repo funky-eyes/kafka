@@ -130,41 +130,34 @@ public final class PartitionRetirementSourceProbe {
         @Override
         public boolean equals(Object other) {
             if (this == other) {
-                if (!(nonce.equals(that.nonce)
-                && clusterId.equals(that.clusterId)
-                && topicId.equals(that.topicId))) {
-                return false;
-            }
-            if (!(partitionId == that.partitionId
-                && brokerId == that.brokerId
-                && brokerEpoch == that.brokerEpoch)) {
-                return false;
-            }
-            if (!(brokerIncarnationId.equals(that.brokerIncarnationId)
-                && sourceLeaderEpoch == that.sourceLeaderEpoch
-                && expectedPreviousAuthorityOffset == that.expectedPreviousAuthorityOffset)) {
-                return false;
-            }
-            if (!(nextAuthorityOffset == that.nextAuthorityOffset
-                && claimedLogStartOffset == that.claimedLogStartOffset)) {
-                return false;
-            }
-            return true;
+                return true;
             }
             if (!(other instanceof Request)) {
                 return false;
             }
             Request that = (Request) other;
-            return nonce.equals(that.nonce)
-                && clusterId.equals(that.clusterId)
-                && topicId.equals(that.topicId)
-                && partitionId == that.partitionId
-                && brokerId == that.brokerId
-                && brokerEpoch == that.brokerEpoch
-                && brokerIncarnationId.equals(that.brokerIncarnationId)
+            return sameIdentity(that) && sameBroker(that)
+                && sameAuthority(that) && samePositions(that);
+        }
+
+        private boolean sameIdentity(Request that) {
+            return nonce.equals(that.nonce) && clusterId.equals(that.clusterId)
+                && topicId.equals(that.topicId);
+        }
+
+        private boolean sameBroker(Request that) {
+            return partitionId == that.partitionId && brokerId == that.brokerId
+                && brokerEpoch == that.brokerEpoch;
+        }
+
+        private boolean sameAuthority(Request that) {
+            return brokerIncarnationId.equals(that.brokerIncarnationId)
                 && sourceLeaderEpoch == that.sourceLeaderEpoch
-                && expectedPreviousAuthorityOffset == that.expectedPreviousAuthorityOffset
-                && nextAuthorityOffset == that.nextAuthorityOffset
+                && expectedPreviousAuthorityOffset == that.expectedPreviousAuthorityOffset;
+        }
+
+        private boolean samePositions(Request that) {
+            return nextAuthorityOffset == that.nextAuthorityOffset
                 && claimedLogStartOffset == that.claimedLogStartOffset;
         }
 
@@ -254,30 +247,24 @@ public final class PartitionRetirementSourceProbe {
         @Override
         public boolean equals(Object other) {
             if (this == other) {
-                if (!(request.equals(that.request)
-                && localLeadershipGeneration == that.localLeadershipGeneration
-                && nativeLogStartOffset == that.nativeLogStartOffset)) {
-                return false;
-            }
-            if (!(nativeHighWatermark == that.nativeHighWatermark
-                && nativeLogEndOffset == that.nativeLogEndOffset
-                && observedWalMutationRevision == that.observedWalMutationRevision)) {
-                return false;
-            }
-            if (!(observedWalAdmissionRevision == that.observedWalAdmissionRevision)) {
-                return false;
-            }
-            return true;
+                return true;
             }
             if (!(other instanceof Report)) {
                 return false;
             }
             Report that = (Report) other;
+            return sameSource(that) && sameWal(that);
+        }
+
+        private boolean sameSource(Report that) {
             return request.equals(that.request)
                 && localLeadershipGeneration == that.localLeadershipGeneration
                 && nativeLogStartOffset == that.nativeLogStartOffset
-                && nativeHighWatermark == that.nativeHighWatermark
-                && nativeLogEndOffset == that.nativeLogEndOffset
+                && nativeHighWatermark == that.nativeHighWatermark;
+        }
+
+        private boolean sameWal(Report that) {
+            return nativeLogEndOffset == that.nativeLogEndOffset
                 && observedWalMutationRevision == that.observedWalMutationRevision
                 && observedWalAdmissionRevision == that.observedWalAdmissionRevision;
         }

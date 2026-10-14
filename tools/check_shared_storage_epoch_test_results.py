@@ -345,6 +345,16 @@ REQUIRED_TESTS = {
         "trustedMappingIsDefensivelyCopiedBeforeUse",
         "missingPolicyMapIsRejected",
     ),
+    "org.apache.kafka.controller.PartitionRetirementSourceProbeValueTest": (
+        "requestValuesRemainEqualAcrossReconstructedJava11Instances",
+        "changedNonceOrTopicCannotShareRequestEquality",
+        "changedBrokerEpochIncarnationAndLeaderNeverShareRequestEquality",
+        "changedKRaftWritePositionOrKafkaLogStartIsNotEqual",
+        "reportEqualityTracksSourceAndWalRevisionCoordinates",
+        "requestRejectsZeroIdentitiesBlankClusterAndInvalidCasBounds",
+        "requestRejectsNegativeBrokerOrUnknownSourceLeader",
+        "reportRejectsEmptySourceMissingWalAndInconsistentLogEnd",
+    ),
     "org.apache.kafka.controller.PartitionRetirementSourceProbeRegistryTest": (
         "correctBrokerGetsUniqueNoncesButNoSourceAuthority",
         "replayedNonceCannotBeConsumedTwice",

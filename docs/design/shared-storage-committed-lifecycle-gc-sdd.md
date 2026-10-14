@@ -3056,3 +3056,36 @@ and no best-effort fallback to CLUSTER_ACTION-only auth. Do not add
 the actual KRaft CAS writer, logical COMMITTED retirement or physical
 DELETE before authenticated origin and cross-broker durability proofs
 can be replayed and tested under crashes and leadership changes.
+
+## Batches 146–148 — Java 11 DTO compile and mandatory Controller evidence
+
+Batch 145's Java-11 class conversion was syntactically incorrect:
+the generated equals methods referenced the cast variable `that` before
+declaring it. Consequently all 16 workflows failed at a shared
+`:clients:compileJava` gate. The correction makes each immutable
+Request/Report `equals` method strictly Java 11: identity fast-path,
+type check, explicit cast and short bounded comparisons. The same
+source compiled under `javac --release 11 -Xlint:all -Werror` with
+a stub matching the Kafka Uuid API used by the DTO. Its equality and
+invalid-window smoke harness passed. The full repository Gradle compile
+and JUnit verification remain separate CI requirements.
+
+Eight deterministic `PartitionRetirementSourceProbeValueTest` tests
+now verify equality/hash contracts under reconstructed source
+requests/reports and negative identity, CAS, epoch, WAL and source
+offset cases. Required tests grow **517 -> 525 methods, 32 -> 33 suites**.
+
+Critically, the Shared Storage workflow's explicit metadata
+`--tests` filter had not included the existing mandatory
+`QuorumControllerTest`, principal policy, or source probe registry
+suites. The filter now schedules all mandatory Controller test
+methods, including the new value-contract suite, so the fail-closed
+report verifier can inspect actually executed JUnit XML rather
+than only test method names in source. `:clients:compileJava` runs
+before the resource-intensive E2E steps. Workflow path filters
+include relevant new clients and metadata Probe files.
+
+**Scope:** No network RPC, producer or Consumer API, Java version
+upgrade, principal trust shortcut, KRaft writer, reference retirement
+or physical COMMITTED deletion. The next transport step must remain
+separate until the corrected SHA establishes 16/16 CI success.

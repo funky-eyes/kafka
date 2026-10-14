@@ -427,3 +427,49 @@ remain disabled.
 
 This change is a focused compile-blocker repair checkpoint. The next
 SHA must run the full 16-workflow CI again before a positive GA claim.
+
+## Batches 146–148: restore Java 11 compilation and enforce actual Controller regression execution
+
+Prior checkpoint `e8526444f20c0c2cf762f282dd94aaf038b90c36`
+finished **16/16 Workflow FAILURE**, blocked in `:clients:compileJava`.
+The new immutable `PartitionRetirementSourceProbe` did preserve the Java 11
+language level, but its generated `equals()` compared `that.*` inside
+`if (this == other)` *before declaring `that`*. Both nested value types
+caused 18 identical undefined-variable compiler errors. No subsequent
+MinIO/WAL execution on that SHA is evidence of correctness.
+
+- **146 — verified Java 11 correction.** Reconstruct both `equals()`
+  implementations in correct order: identity fast-path, Java 11
+  `instanceof`, cast to the same immutable value type, then bounded
+  field-equality guards. Keep matching `hashCode()` and all constructor
+  validations; do not raise Kafka `clients` source/bytecode levels.
+  Exact corrected source was compiled locally via
+  `javac --release 11 -Xlint:all -Werror` against a minimal Kafka Uuid
+  API stub, and an executable value/invalid-window harness passed.
+  This is a focused local compile test, NOT a full Kafka Gradle build.
+- **147 — deterministic value contracts.** Add eight Java/Scala-gate
+  regression tests in `PartitionRetirementSourceProbeValueTest` for
+  reflexive/symmetric equality, equivalent reconstructed instances,
+  hash consistency, nonce, Topic ID, broker epoch/incarnation,
+  leader epoch, KRaft position, Kafka LogStart, WAL mutation and
+  admission revision changes, invalid requests and empty source windows.
+- **148 — close CI evidence ownership.** The existing Shared Storage
+  workflow selected a small, explicit metadata-test allowlist while
+  `REQUIRED_TESTS` also demanded `QuorumControllerTest`,
+  `PartitionRetirementBrokerPrincipalPolicyTest` and
+  `PartitionRetirementSourceProbeRegistryTest`. This would have failed
+  the final evidence checker even after compilation recovered.
+  Add every required Controller test to the actual Gradle
+  `--tests` command, explicitly select the six mandatory
+  QuorumController methods, and add a fast `:clients:compileJava`
+  gate before storage/MinIO tests. Trigger the workflow on shared
+  Probe DTO and Controller Probe code/test changes. The strict
+  inventory becomes **525 mandatory methods across 33 suites**.
+
+No new wire API, privileged Controller builder setting, or authenticated
+Broker→Controller sender has been introduced. Do not interpret the
+transport-neutral request/response values as signed attestations or a GC
+grant. Production Broker principal allowlist remains DENY_ALL; KRaft
+authority writing, COMMITTED logical reference retirement and
+physical MinIO deletion remain disabled. Frozen MinIO GA stays on
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
