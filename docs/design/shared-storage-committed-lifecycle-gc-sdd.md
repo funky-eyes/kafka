@@ -2954,3 +2954,52 @@ authenticated ingress, freshness/non-replayability inside the serialized
 commit event, quorum durability/cross-broker proof, an atomic KRaft authority
 writer, COMMITTED retirement and physical MinIO deletion remain blocked.
 The frozen MinIO GA branch is unchanged.
+
+## Batches 137–140 — compile recovery and Controller-only probe security prerequisites
+
+**CI root cause from prior checkpoint:** Batch 133–136 source-SHA CI ended
+16/16 failed in common Java compilation because a new
+`Objects.requireNonNull` invocation in `QuorumController` lacked its
+`java.util.Objects` import. Batch 137 repairs that defect without
+weakening compiler checks or changing the frozen MinIO GA branch.
+
+A new immutable broker principal allowlist rejects missing, anonymous,
+wildcard and shared principals. It performs an exact match on the trusted
+`ControllerRequestContext.principal()` rather than on a self-reported
+BrokerId. Crucially, the default runtime allowlist is EMPTY/DENY_ALL,
+because Kafka's normal CLUSTER_ACTION privileges and a nonunique
+interbroker principal are insufficient to prove individual broker
+incarnation ownership.
+
+A controller-volatile one-shot Source/WAL probe registry issues an opaque
+Uuid nonce bound to the proposed TopicId/partition and exact Controller
+candidate. Creation requires a uniquely bound principal. Its 5-second
+TTL uses signed-origin-safe monotonic `nanoTime` subtraction; issuance
+has a strict 128-entry outstanding cap and expires old pending sessions.
+Consumption removes the nonce *before* any check so wrong-principal,
+forged-envelope, expired, moved-epoch or changed-KRaft-position requests
+cannot retry it later. A new Controller instance has no session; the
+current one clears outstanding sessions on claim, re-epoch and renounce.
+
+Two Controller-internal methods issue and consume probes in the
+`appendWriteEvent` serialized queue, respect the request deadline,
+and emit an EMPTY record list. Once consumed, the existing
+`PartitionRetirementCandidatePrecheck.assessUntrustedSourceClaim` is
+rerun against fresh feature negotiation, registration, partition
+leadership, KRaft write position and retirement authority timeline.
+A positive nonce remains **MATCHED_UNTRUSTED**, and even a matching
+claim never becomes an authority writer or physical GC grant.
+
+Mandatory regression inventory increases by 27 methods (9 principal
+mapping, 16 nonce/lease and 2 Controller diagnostics) to
+**500 named Java/Scala tests over 32 suites**. This is a test
+inventory, not a CI success claim; this development SHA must pass its
+own full Java 25/MinIO/WAL/Controller gates.
+
+**Security and scope:** The application does not yet transport probes
+over the network, inject trusted principal mappings or authenticate
+actual Broker→Controller evidence. Possession of a nonce is not data
+origin proof, nor is a successful local SharedWal Future an object
+retirement certificate. Cross-replica persistency, Controller KRaft CAS
+writer, COMMITTED logical-retirement transition and physical MinIO
+DELETE remain forbidden. The frozen GA release remains unchanged.

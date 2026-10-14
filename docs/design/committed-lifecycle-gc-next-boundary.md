@@ -301,3 +301,51 @@ identity (not a shared principal or caller-declared BrokerId), and provide
 single-use anti-replay/source-validation semantics *inside* the Controller
 event before any KRaft write is allowed. Keep the frozen MinIO GA branch
 at `9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
+
+## Batches 137–140: CI compile fix and one-shot Controller probe boundary
+
+The immediately preceding Batch 133–136 source-SHA validation ended
+**16/16 FAILURE** due to a single shared `:metadata:compileJava` failure:
+`QuorumController` referenced `Objects.requireNonNull` without importing
+`java.util.Objects`. The new Batch 137 code explicitly fixes that import.
+Those failures were build-stage failures, **not** proof that the 11 new
+deterministic regressions or three-broker MinIO scenarios passed or failed.
+
+- **137:** restore strict Java 25 compilation without loosening warnings.
+- **138:** add a fail-closed immutable `PartitionRetirementBrokerPrincipalPolicy`
+  requiring an exact, nonanonymous, nonwildcard, **unique** principal per
+  BrokerId. Shared inter-broker credentials cannot impersonate a unique
+  broker process. The production Controller's policy is `DENY_ALL`; there
+  is **no runtime configuration or authenticated transport** at this stage.
+- **139:** add a small, nonpersistent `PartitionRetirementSourceProbeRegistry`
+  issuing unpredictable UUID correlation nonces only after the policy
+  matches. Nonces are bound to ClusterId, the exact candidate's
+  TopicId/partition, BrokerId/Epoch/Incarnation, Source LeaderEpoch and
+  authority-generation coordinates. They are valid for **less than 5 s**,
+  may be consumed **once**, have a **128-probe** outstanding cap, are burnt
+  on malformed or cross-principal responses, and are lost on restart,
+  controller epoch changes and leadership renouncement.
+- **140:** make probe issuance/consumption two **package-private,
+  non-network** `QuorumController` diagnostic events, serialized with
+  registration/leader/authority events. A consumed nonce triggers a fresh
+  Controller KRaft feature/leader/registration/CAS check. A match still
+  resolves to `SOURCE_LOG_START_NOT_VERIFIED`, never a write grant;
+  every event emits `List.of()` as its record list. Two Controller
+  regressions and 25 policy/probe unit regressions are enrolled in the
+  mandatory inventory: **473 → 500 methods across 32 suites**.
+
+**Still blocked:** This is preparation for, **not** a functioning authenticated
+Broker→Controller RPC. KafkaPrincipal equality by itself cannot prove the
+authentication mechanism or physical broker origin. The deployment must
+separately establish dedicated broker credentials and trusted principal
+mapping; the current application intentionally offers no way to enable the
+policy. A nonce also does not prove backend fsync, WAL replay continuity,
+replica recoverability or native Source LogStart. No new metadata schema,
+KRaft writer, COMMITTED reference retirement or MinIO physical DELETE is
+enabled. Retain frozen MinIO GA `9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
+
+The next actual transport milestone must wire a version-gated Kafka-native
+broker RPC to network-authenticated principal identity with an explicit
+unique broker credential contract, sample source/WAL from the actual
+storage provider after the challenge, and revalidate the result inside
+the serialized Controller event. Production GC remains fail closed.

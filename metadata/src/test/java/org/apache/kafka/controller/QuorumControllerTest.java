@@ -228,6 +228,43 @@ public class QuorumControllerTest {
         }
     }
 
+    @Test
+    public void testProbeIssuanceIsDisabledUntilFeatureAndBrokerAuthAreNegotiated() throws Exception {
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv).build()
+        ) {
+            QuorumController controller = controlEnv.activeController();
+            int recordCount = clientEnv.allRecords().size();
+            var candidate = untrustedRetirementCandidate();
+            assertTrue(controller.beginRetirementSourceProbe(ANONYMOUS_CONTEXT, candidate)
+                .get(10, TimeUnit.SECONDS).isEmpty());
+            assertEquals(recordCount, clientEnv.allRecords().size());
+        }
+    }
+
+    @Test
+    public void testForgedSourceProbeCannotPublishControllerAuthorityRecord() throws Exception {
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv).build()
+        ) {
+            QuorumController controller = controlEnv.activeController();
+            int recordCount = clientEnv.allRecords().size();
+            var candidate = untrustedRetirementCandidate();
+            var forged = new PartitionRetirementSourceProbeRegistry.Challenge(
+                Uuid.randomUuid(), clientEnv.clusterId(), candidate
+            );
+            assertEquals(
+                PartitionRetirementCandidatePrecheck.Finding.SOURCE_PROBE_NOT_VERIFIED,
+                controller.inspectRetirementSourceProbe(
+                    ANONYMOUS_CONTEXT, candidate, forged, untrustedRetirementSourceClaim(candidate)
+                ).get(10, TimeUnit.SECONDS)
+            );
+            assertEquals(recordCount, clientEnv.allRecords().size());
+        }
+    }
+
     private static PartitionRetirementCandidatePrecheck.Candidate untrustedRetirementCandidate() {
         return new PartitionRetirementCandidatePrecheck.Candidate(
             new org.apache.kafka.metadata.PartitionRetirementAuthorityState.Key(Uuid.randomUuid(), 0),

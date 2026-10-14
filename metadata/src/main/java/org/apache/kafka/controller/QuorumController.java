@@ -136,6 +136,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
@@ -752,6 +753,73 @@ public final class QuorumController implements Controller {
         );
     }
 
+    /**
+     * Prepare a single-use diagnostic nonce on the serialized Controller event
+     * thread. The default empty broker principal policy deliberately refuses
+     * every candidate. This is not a remotely callable method or a GC grant.
+     */
+    CompletableFuture<Optional<PartitionRetirementSourceProbeRegistry.Challenge>> beginRetirementSourceProbe(
+        ControllerRequestContext context,
+        PartitionRetirementCandidatePrecheck.Candidate candidate
+    ) {
+        Objects.requireNonNull(context, "context");
+        Objects.requireNonNull(candidate, "candidate");
+        return appendWriteEvent("beginRetirementSourceProbe", context.deadlineNs(), () -> {
+            Optional<PartitionRetirementSourceProbeRegistry.Challenge> nonce = Optional.empty();
+            if (PartitionRetirementCandidatePrecheck.assess(
+                    featureControl, clusterControl, replicationControl, partitionRetirementControl,
+                    candidate, offsetControl.nextWriteOffset()
+                ) == PartitionRetirementCandidatePrecheck.Finding.SOURCE_LOG_START_NOT_VERIFIED) {
+                nonce = retirementSourceProbeRegistry.issue(
+                    candidate, context.principal(), retirementBrokerPrincipalPolicy, time.nanoseconds()
+                );
+            }
+            return ControllerResult.of(List.of(), nonce);
+        });
+    }
+
+    /**
+     * Consume an ephemeral nonce at most once and recheck live Controller CAS.
+     * A matching nonce plus self-reported WAL bytes still cannot establish
+     * transport authentication or source provenance. This always rejects
+     * retirement authorization and appends no KRaft records.
+     */
+    CompletableFuture<PartitionRetirementCandidatePrecheck.Finding> inspectRetirementSourceProbe(
+        ControllerRequestContext context,
+        PartitionRetirementCandidatePrecheck.Candidate candidate,
+        PartitionRetirementSourceProbeRegistry.Challenge challenge,
+        PartitionRetirementUntrustedSourceClaim claim
+    ) {
+        Objects.requireNonNull(context, "context");
+        Objects.requireNonNull(candidate, "candidate");
+        return appendWriteEvent("inspectRetirementSourceProbe", context.deadlineNs(), () -> {
+            PartitionRetirementSourceProbeRegistry.Finding status = retirementSourceProbeRegistry.consume(
+                challenge, candidate, context.principal(), time.nanoseconds()
+            );
+            if (status != PartitionRetirementSourceProbeRegistry.Finding.MATCHED_UNTRUSTED) {
+                return ControllerResult.of(
+                    List.of(), PartitionRetirementCandidatePrecheck.Finding.SOURCE_PROBE_NOT_VERIFIED
+                );
+            }
+            PartitionRetirementCandidatePrecheck.Finding controller =
+                PartitionRetirementCandidatePrecheck.assessUntrustedSourceClaim(
+                    featureControl, clusterControl, replicationControl, partitionRetirementControl,
+                    candidate, offsetControl.nextWriteOffset(), claim
+                );
+            if (controller != PartitionRetirementCandidatePrecheck.Finding.SOURCE_LOG_START_NOT_VERIFIED) {
+                return ControllerResult.of(List.of(), controller);
+            }
+            if (!retirementBrokerPrincipalPolicy.matches(context.principal(), candidate.brokerId())) {
+                return ControllerResult.of(
+                    List.of(), PartitionRetirementCandidatePrecheck.Finding.SOURCE_PRINCIPAL_UNBOUND
+                );
+            }
+            return ControllerResult.of(
+                List.of(), PartitionRetirementCandidatePrecheck.Finding.SOURCE_LOG_START_NOT_VERIFIED
+            );
+        });
+    }
+
     // Visible for testing
     ConfigurationControlManager configurationControl() {
         return configurationControl;
@@ -1140,6 +1208,7 @@ public final class QuorumController implements Controller {
                     if (newLeader.isLeader(nodeId)) {
                         log.warn("We were the leader in epoch {}, and are still the leader " +
                                 "in the new epoch {}.", curClaimEpoch, newLeader.epoch());
+                        retirementSourceProbeRegistry.invalidateAll();
                         curClaimEpoch = newLeader.epoch();
                     } else {
                         log.warn("Renouncing the leadership due to a metadata log event. " +
@@ -1191,6 +1260,7 @@ public final class QuorumController implements Controller {
                 throw new RuntimeException("Cannot claim leadership because we are already the " +
                         "active controller.");
             }
+            retirementSourceProbeRegistry.invalidateAll();
             curClaimEpoch = epoch;
             offsetControl.activate(newNextWriteOffset);
             clusterControl.activate();
@@ -1241,6 +1311,7 @@ public final class QuorumController implements Controller {
                 throw new RuntimeException("Cannot renounce leadership because we are not the " +
                         "current leader.");
             }
+            retirementSourceProbeRegistry.invalidateAll();
             raftClient.resign(curClaimEpoch);
             curClaimEpoch = -1;
             deferredEventQueue.failAll(ControllerExceptions.
@@ -1491,6 +1562,16 @@ public final class QuorumController implements Controller {
     private final PartitionRetirementControlManager partitionRetirementControl;
 
     /**
+     * No principal mapping is enabled in production until each broker has an
+     * independently authenticated principal and a Kafka-native RPC exists.
+     */
+    private final PartitionRetirementBrokerPrincipalPolicy retirementBrokerPrincipalPolicy =
+        PartitionRetirementBrokerPrincipalPolicy.DENY_ALL;
+
+    /** One-time diagnostic probes; access exclusively in the Controller event queue. */
+    private final PartitionRetirementSourceProbeRegistry retirementSourceProbeRegistry;
+
+    /**
      * Manages SCRAM credentials, if there are any.
      */
     private final ScramControlManager scramControlManager;
@@ -1591,6 +1672,7 @@ public final class QuorumController implements Controller {
         this.controllerMetrics = controllerMetrics;
         this.snapshotRegistry = new SnapshotRegistry(logContext);
         this.partitionRetirementControl = new PartitionRetirementControlManager(snapshotRegistry);
+        this.retirementSourceProbeRegistry = new PartitionRetirementSourceProbeRegistry(clusterId);
         this.deferredEventQueue = new DeferredEventQueue(logContext);
         this.resourceExists = new ConfigResourceExistenceChecker();
         this.clientQuotaControlManager = new ClientQuotaControlManager.Builder().

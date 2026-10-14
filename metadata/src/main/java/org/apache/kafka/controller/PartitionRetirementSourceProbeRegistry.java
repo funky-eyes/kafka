@@ -1,0 +1,142 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.kafka.controller;
+
+import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.security.auth.KafkaPrincipal;
+import org.apache.kafka.controller.PartitionRetirementCandidatePrecheck.Candidate;
+
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * One-time, bounded, controller-volatile Source/WAL probe correlation.
+ *
+ * <p>Must be accessed on the controller event thread; no thread-safe promise
+ * or persisted lease is made. A matched probe is NOT a valid source or WAL
+ * certificate: the payload remains caller-reported and not remotely verified.
+ * Controller leadership change loses this map and intentionally rejects old
+ * responses. There is no KRaft emitter or remote GC capability.</p>
+ */
+final class PartitionRetirementSourceProbeRegistry {
+    static final long MAX_AGE_NS = TimeUnit.SECONDS.toNanos(5);
+    static final int MAX_PENDING = 128;
+
+    record Challenge(Uuid nonce, String clusterId, Candidate candidate) {
+        Challenge {
+            Objects.requireNonNull(nonce, "nonce");
+            Objects.requireNonNull(clusterId, "clusterId");
+            Objects.requireNonNull(candidate, "candidate");
+            if (Uuid.ZERO_UUID.equals(nonce) || clusterId.isBlank()) {
+                throw new IllegalArgumentException("Invalid source probe challenge identity");
+            }
+        }
+    }
+
+    enum Finding {
+        UNKNOWN_OR_ALREADY_USED,
+        EXPIRED,
+        ENVELOPE_MISMATCH,
+        PRINCIPAL_MISMATCH,
+        CANDIDATE_CHANGED,
+        MATCHED_UNTRUSTED
+    }
+
+    private record Pending(Challenge challenge, KafkaPrincipal principal, long issuedAtNs) {
+    }
+
+    private final String clusterId;
+    private final Map<Uuid, Pending> outstanding = new HashMap<>();
+
+    PartitionRetirementSourceProbeRegistry(String clusterId) {
+        this.clusterId = Objects.requireNonNull(clusterId, "clusterId");
+        if (clusterId.isBlank()) {
+            throw new IllegalArgumentException("A source probe must bind to a real cluster");
+        }
+    }
+
+    Optional<Challenge> issue(
+        Candidate candidate,
+        KafkaPrincipal authenticatedPrincipal,
+        PartitionRetirementBrokerPrincipalPolicy principalPolicy,
+        long nowNs
+    ) {
+        Objects.requireNonNull(candidate, "candidate");
+        Objects.requireNonNull(principalPolicy, "principalPolicy");
+        // Both an unbound broker and a reused shared broker principal fail closed.
+        if (!principalPolicy.matches(authenticatedPrincipal, candidate.brokerId())) {
+            return Optional.empty();
+        }
+        outstanding.entrySet().removeIf(entry -> !fresh(entry.getValue().issuedAtNs(), nowNs));
+        if (outstanding.size() >= MAX_PENDING) {
+            return Optional.empty();
+        }
+        Uuid nonce;
+        do {
+            nonce = Uuid.randomUuid();
+        } while (Uuid.ZERO_UUID.equals(nonce) || outstanding.containsKey(nonce));
+        Challenge challenge = new Challenge(nonce, clusterId, candidate);
+        outstanding.put(nonce, new Pending(challenge, authenticatedPrincipal, nowNs));
+        return Optional.of(challenge);
+    }
+
+    Finding consume(
+        Challenge reported,
+        Candidate currentCandidate,
+        KafkaPrincipal authenticatedPrincipal,
+        long nowNs
+    ) {
+        Objects.requireNonNull(currentCandidate, "currentCandidate");
+        if (reported == null) {
+            return Finding.UNKNOWN_OR_ALREADY_USED;
+        }
+        // Remove before any comparison: even a forged or expired response burns
+        // the nonce and can never be retried as a usable certificate.
+        Pending pending = outstanding.remove(reported.nonce());
+        if (pending == null) {
+            return Finding.UNKNOWN_OR_ALREADY_USED;
+        }
+        if (!fresh(pending.issuedAtNs(), nowNs)) {
+            return Finding.EXPIRED;
+        }
+        if (!pending.challenge().equals(reported)) {
+            return Finding.ENVELOPE_MISMATCH;
+        }
+        if (!pending.principal().equals(authenticatedPrincipal)) {
+            return Finding.PRINCIPAL_MISMATCH;
+        }
+        if (!pending.challenge().candidate().equals(currentCandidate)) {
+            return Finding.CANDIDATE_CHANGED;
+        }
+        return Finding.MATCHED_UNTRUSTED;
+    }
+
+    /** Revoke every volatile probe when the controller leadership epoch changes. */
+    void invalidateAll() {
+        outstanding.clear();
+    }
+
+    private static boolean fresh(long issuedAtNs, long nowNs) {
+        // nanoTime has an arbitrary signed origin; subtraction, rather than
+        // now >= issuedAt, is the correct comparison for bounded durations.
+        long elapsedNs = nowNs - issuedAtNs;
+        return elapsedNs >= 0L && elapsedNs < MAX_AGE_NS;
+    }
+}
