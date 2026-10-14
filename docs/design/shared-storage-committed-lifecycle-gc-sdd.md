@@ -3225,3 +3225,24 @@ principal configuration, authenticated transport, broker-native
 source and WAL asynchronous sampling, KRaft authority CAS writing,
 COMMITTED retirement and physical GC deletion are still blocked.
 The frozen MinIO GA release is unchanged.
+
+## Corrective evidence on Batch 157–160
+
+The exact SpotBugs HTML, now retained by Shared Storage CI,
+identified one failure only:
+`DCN_NULLPOINTER_EXCEPTION` in the metadata heartbeat report gate.
+Explicitly reject null nonce, ClusterId, TopicId or BrokerIncarnationId
+instead of catching `NullPointerException`; continue to reject
+illegal offsets via `IllegalArgumentException` only. A new
+controller-side negative regression enforces the null-field contract,
+taking mandatory Java/Scala evidence from 540 to **541 methods
+across 34 suites**.
+
+GA Workflow Consistency simultaneously identified a newly triggered
+production source missing from the established release fingerprint.
+The non-authorizing Broker v3 challenge parser is therefore nested
+inside the already fingerprinted `BrokerLifecycleManager` source;
+its independent 10-method JUnit suite remains and is still mandatory
+in main CI. No fingerprint exception or generic code exclusion
+was added. Frozen MinIO GA remains unchanged. The new corrective
+HEAD still requires its own end-to-end CI pass.

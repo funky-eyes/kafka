@@ -654,3 +654,34 @@ one Controller serialized event** before even considering an authority
 writer. Prove Controller rotation and multi-broker durable recovery
 using real MinIO. Frozen MinIO GA remains
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
+
+## Batch 157–160 corrective CI checkpoint: verified SpotBugs and GA fingerprint
+
+The first `a7a1df08` run exposed **two real build blockers**
+while the other workflows were still executing:
+
+1. `Shared Storage GA Workflow Consistency` rejected the new
+   `server/src/main/java/.../BrokerHeartbeatSourceProbeChallengeGate.java`
+   as outside the frozen production-fingerprint paths.
+   Instead of weakening the manifest or adding a broad new Java prefix,
+   keep the challenge validator as a **package-visible static nested
+   class inside the already fingerprinted `BrokerLifecycleManager.java`**.
+   Remove the new standalone Java production file and its explicit
+   workflow trigger. The full Gate JUnit suite remains a distinct
+   `:server:test` source and still runs under strict JUnit XML evidence.
+2. The newly retained `metadata/build/reports/spotbugs/main.html`
+   contained exactly **one medium-priority warning**, rule
+   `DCN_NULLPOINTER_EXCEPTION` at
+   `PartitionRetirementHeartbeatReportGate.inspect` line 67.
+   Do not catch NullPointerException from untrusted wire fields.
+   Explicitly validate nonce, cluster, TopicId and BrokerIncarnationId
+   against `null` before constructing the immutable report and catch
+   only `IllegalArgumentException` for impossible value ranges.
+   One more negative Controller JUnit case covers all four missing
+   required reference fields. Mandatory Java/Scala evidence is now
+   **541 methods, 34 suites**, plus 10 separately gated Broker tests.
+
+This patch fixes the **actual** static-analysis rule and the **actual**
+release-manifest failure without broadening trust or changing the
+frozen MinIO GA branch. It does not authorize reports, source/WAL
+attestation, metadata retirement or COMMITTED physical object GC.

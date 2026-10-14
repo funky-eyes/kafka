@@ -20,7 +20,8 @@ import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.message.BrokerHeartbeatResponseData;
 import org.apache.kafka.common.message.BrokerHeartbeatResponseData.SourceWalProbeChallenge;
 import org.apache.kafka.metadata.BrokerState;
-import org.apache.kafka.server.BrokerHeartbeatSourceProbeChallengeGate.Finding;
+import org.apache.kafka.server.BrokerLifecycleManager.BrokerHeartbeatSourceProbeChallengeGate;
+import org.apache.kafka.server.BrokerLifecycleManager.BrokerHeartbeatSourceProbeChallengeGate.Finding;
 
 import org.junit.jupiter.api.Test;
 

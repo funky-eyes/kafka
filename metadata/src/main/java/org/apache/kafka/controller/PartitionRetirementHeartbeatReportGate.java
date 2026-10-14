@@ -64,7 +64,7 @@ final class PartitionRetirementHeartbeatReportGate {
         }
         try {
             fromWire(heartbeat);
-        } catch (IllegalArgumentException | NullPointerException invalid) {
+        } catch (IllegalArgumentException invalid) {
             return Finding.MALFORMED;
         }
         // A syntactically valid self-report is still untrusted. Deliberately
@@ -79,6 +79,12 @@ final class PartitionRetirementHeartbeatReportGate {
         SourceWalProbeReport wire = heartbeat.sourceWalProbeReport();
         if (wire == null) {
             return Optional.empty();
+        }
+        // Explicit validation, not catching NullPointerException. This is an
+        // untrusted network payload; malformed identities must fail closed.
+        if (wire.nonce() == null || wire.clusterId() == null
+            || wire.topicId() == null || wire.brokerIncarnationId() == null) {
+            throw new IllegalArgumentException("Missing required Source/WAL report identity");
         }
         PartitionRetirementSourceProbe.Request request =
             new PartitionRetirementSourceProbe.Request(

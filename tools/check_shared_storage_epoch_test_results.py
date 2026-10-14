@@ -347,6 +347,7 @@ REQUIRED_TESTS = {
         "decodingPreservesBrokerEpochNonceAndExactSourceWindow",
         "oldHeartbeatProducesNoReportObject",
         "missingNonceAndWrongIncarnationAreMalformed",
+        "nullWireIdentityIsRejectedWithoutCatchingNullPointerException",
         "missingOrEmptyNativeSourceWindowIsMalformed",
         "negativeLocalWalGenerationAndRevisionAreMalformed",
         "changedOuterBrokerEpochCannotBeAcceptedAsOriginalProof",

@@ -117,6 +117,22 @@ class PartitionRetirementHeartbeatReportGateTest {
     }
 
     @Test
+    void nullWireIdentityIsRejectedWithoutCatchingNullPointerException() {
+        var topicMissing = heartbeat();
+        topicMissing.sourceWalProbeReport().setTopicId(null);
+        assertEquals(Finding.MALFORMED, inspectBound(topicMissing));
+        var clusterMissing = heartbeat();
+        clusterMissing.sourceWalProbeReport().setClusterId(null);
+        assertEquals(Finding.MALFORMED, inspectBound(clusterMissing));
+        var incarnationMissing = heartbeat();
+        incarnationMissing.sourceWalProbeReport().setBrokerIncarnationId(null);
+        assertEquals(Finding.MALFORMED, inspectBound(incarnationMissing));
+        var nonceMissing = heartbeat();
+        nonceMissing.sourceWalProbeReport().setNonce(null);
+        assertEquals(Finding.MALFORMED, inspectBound(nonceMissing));
+    }
+
+    @Test
     void missingOrEmptyNativeSourceWindowIsMalformed() {
         var missing = heartbeat();
         missing.sourceWalProbeReport().setNativeHighWatermark(0L);
