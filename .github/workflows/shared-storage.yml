@@ -87,7 +87,7 @@ on:
       - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
       - 'core/src/test/**/kafka/log/**'
       - 'core/src/test/**/kafka/server/**'
-      - 'checkstyle/import-control.xml'
+      - 'checkstyle/import-control-metadata.xml'
       - 'checkstyle/import-control-shared-storage-s3.xml'
       - 'settings.gradle'
       - '.github/actions/setup-gradle/**'
@@ -159,7 +159,7 @@ on:
       - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
       - 'core/src/test/**/kafka/log/**'
       - 'core/src/test/**/kafka/server/**'
-      - 'checkstyle/import-control.xml'
+      - 'checkstyle/import-control-metadata.xml'
       - 'checkstyle/import-control-shared-storage-s3.xml'
       - 'settings.gradle'
       - 'tools/check_shared_storage_minio_test_results.py'
@@ -271,6 +271,9 @@ jobs:
             --tests 'org.apache.kafka.controller.QuorumControllerTest.testForgedSourceProbeCannotPublishControllerAuthorityRecord' \
             --tests 'org.apache.kafka.controller.QuorumControllerTest.testUnsignedSourceWalReportCannotBecomeControllerAuthority' \
             --tests 'org.apache.kafka.controller.QuorumControllerTest.testMissingSourceWalReportNeverConsumesOrEmitsControllerRecords' \
+            --tests 'org.apache.kafka.controller.QuorumControllerTest.testUntrustedHeartbeatProbeRejectsBeforeAnyKRaftWrite' \
+            --tests 'org.apache.kafka.controller.QuorumControllerTest.testHeartbeatProbeCannotBypassStableProtocolVersion' \
+            --tests 'org.apache.kafka.controller.PartitionRetirementHeartbeatReportGateTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementBrokerPrincipalPolicyTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementSourceProbeRegistryTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementSourceProbeValueTest' \

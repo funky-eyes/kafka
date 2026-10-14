@@ -25,6 +25,7 @@ import org.apache.kafka.common.acl.AclBindingFilter;
 import org.apache.kafka.common.config.ConfigResource;
 import org.apache.kafka.common.errors.ApiException;
 import org.apache.kafka.common.errors.BrokerIdNotRegisteredException;
+import org.apache.kafka.common.errors.ClusterAuthorizationException;
 import org.apache.kafka.common.errors.InvalidRequestException;
 import org.apache.kafka.common.errors.StaleBrokerEpochException;
 import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
@@ -85,9 +86,9 @@ import org.apache.kafka.common.metadata.UnfenceBrokerRecord;
 import org.apache.kafka.common.metadata.UnregisterBrokerRecord;
 import org.apache.kafka.common.metadata.UserScramCredentialRecord;
 import org.apache.kafka.common.protocol.ApiMessage;
-import org.apache.kafka.common.replica.PartitionRetirementSourceProbe;
 import org.apache.kafka.common.quota.ClientQuotaAlteration;
 import org.apache.kafka.common.quota.ClientQuotaEntity;
+import org.apache.kafka.common.replica.PartitionRetirementSourceProbe;
 import org.apache.kafka.common.requests.ApiError;
 import org.apache.kafka.common.security.token.delegation.internals.DelegationTokenCache;
 import org.apache.kafka.common.utils.LogContext;
@@ -2139,6 +2140,22 @@ public final class QuorumController implements Controller {
         ControllerRequestContext context,
         BrokerHeartbeatRequestData request
     ) {
+        PartitionRetirementHeartbeatReportGate.Finding probe =
+            PartitionRetirementHeartbeatReportGate.inspect(
+                context, request, retirementBrokerPrincipalPolicy
+            );
+        if (probe == PartitionRetirementHeartbeatReportGate.Finding.PRINCIPAL_UNBOUND) {
+            return CompletableFuture.failedFuture(
+                new ClusterAuthorizationException("Broker identity cannot authorize a Source/WAL probe")
+            );
+        }
+        if (probe != PartitionRetirementHeartbeatReportGate.Finding.ABSENT) {
+            return CompletableFuture.failedFuture(
+                new InvalidRequestException("Source/WAL probe is not authorized: " + probe)
+            );
+        }
+        // Reject a non-null v3 report before updating heartbeat contact time
+        // or executing any serialized Controller metadata operations.
         controllerMetrics.updateBrokerContactTime(request.brokerId());
         // We start by updating the broker heartbeat in a lockless data structure.
         // We do this first so that if the main controller thread is backlogged, the

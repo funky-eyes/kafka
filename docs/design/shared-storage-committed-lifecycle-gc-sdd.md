@@ -3131,3 +3131,59 @@ registration-incarnation binding, real replayable durable proofs,
 CAS writer, reference retirement and physical COMMITTED GC are all
 still pending. Production remains DENY_ALL; frozen MinIO GA remains
 unchanged.
+
+## Batches 153–156 — correct metadata ImportControl and reject untrusted v3 wire reports
+
+The preceding experimental BrokerHeartbeat v3 checkpoint passed
+**16 of 17 workflows**. Its single main Shared Storage failure was
+`:metadata:checkstyleMain` rejecting two Source/WAL diagnostic imports
+after an earlier patch updated the wrong ImportControl file. Metadata
+compiles with the dedicated
+`checkstyle/import-control-metadata.xml`; the new classes now have
+explicit allow rules only under its `controller` subpackage.
+The unnecessary change to the shared `import-control.xml` is
+reverted. Workflow triggers track the correct rules file.
+
+`PartitionRetirementHeartbeatReportGate` is a pure validation and
+decoding boundary around the optional unstable v3
+`BrokerHeartbeatRequestData.SourceWalProbeReport`.
+An absent report takes the unchanged heartbeat path. Present reports
+require protocol v3, a uniquely mapped authenticated Principal and
+valid immutable Source/WAL coordinates; invalid/unknown fields are
+rejected. A report with valid syntax and a matching Principal is
+**still unverified** because the Controller has not correlated it to a
+live nonce, current KRaft BrokerRegistration, native Kafka Source or
+replica-durable WAL proof. It NEVER grants GC.
+
+`QuorumController.processBrokerHeartbeat` invokes the gate **before**
+its broker contact metric and lockless heartbeat tracking. Wrong
+principal produces a cluster authorization failure; any other
+non-absent finding produces an invalid request. These failures are
+represented by failed futures so ControllerApis retains the existing
+asynchronous heartbeat error handling. A rejected report cannot
+trigger a KRaft event. The network sender has not been enabled,
+and even an explicit experimental v3 API negotiation does not
+change the production allowlist `DENY_ALL`.
+
+Eleven gate/codec tests verify version/identity bounds, malformed
+Source/WAL windows and revision fields, absence on v2, and that a
+matching but caller-supplied report stays UNVERIFIED. Two real
+QuorumController tests assert the wire report is refused before
+KRaft records can be emitted. Mandatory named evidence now comprises
+**540 methods in 34 suites**, but the new source SHA must independently
+pass its CI gates; this count is not a success declaration.
+
+Remaining blockers: real Broker-source sample sender, Controller
+nonce challenge issued through the network, unique authenticated
+principal-to-current-BrokerRegistration binding, anti-replay evidence
+inside one serialized Controller event, cross-broker durable proof,
+then explicit KRaft authority writer and COMMITTED retirement/physical
+MinIO deletion. All write/delete paths remain OFF on the independent
+feature branch; frozen MinIO GA remains unchanged.
+ 
+A read-only broker-side `captureCurrentSourceWalHeartbeatReport`
+adapter now serializes a fresh native Source/WAL observation into the
+generated v3 tagged field without launching a heartbeat. Two additional
+storage regressions cover native capture -> v3 bytes -> parsed report
+and broker-incarnation mismatch rejection. Mandatory named evidence
+is therefore **540 methods in 34 suites** rather than 538.

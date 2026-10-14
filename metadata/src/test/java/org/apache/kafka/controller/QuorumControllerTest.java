@@ -21,6 +21,8 @@ import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.config.ConfigResource;
 import org.apache.kafka.common.config.TopicConfig;
 import org.apache.kafka.common.errors.BrokerIdNotRegisteredException;
+import org.apache.kafka.common.errors.ClusterAuthorizationException;
+import org.apache.kafka.common.errors.InvalidRequestException;
 import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
 import org.apache.kafka.common.errors.UnsupportedVersionException;
@@ -308,6 +310,57 @@ public class QuorumControllerTest {
                 controller.inspectRetirementSourceReport(ANONYMOUS_CONTEXT, candidate, null)
                     .get(10, TimeUnit.SECONDS)
             );
+            assertEquals(recordsBefore, clientEnv.allRecords().size());
+        }
+    }
+
+    @Test
+    public void testUntrustedHeartbeatProbeRejectsBeforeAnyKRaftWrite() throws Exception {
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv).build()
+        ) {
+            QuorumController controller = controlEnv.activeController();
+            int recordsBefore = clientEnv.allRecords().size();
+            ControllerRequestContext context = new ControllerRequestContext(
+                new RequestHeaderData().setRequestApiKey((short) 63).setRequestApiVersion((short) 3),
+                KafkaPrincipal.ANONYMOUS, OptionalLong.empty()
+            );
+            BrokerHeartbeatRequestData heartbeat = new BrokerHeartbeatRequestData()
+                .setBrokerId(3)
+                .setBrokerEpoch(54L)
+                .setSourceWalProbeReport(new BrokerHeartbeatRequestData.SourceWalProbeReport()
+                    .setNonce(new Uuid(1L, 2L))
+                    .setClusterId(clientEnv.clusterId())
+                    .setTopicId(new Uuid(3L, 4L))
+                    .setPartitionId(0));
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                () -> controller.processBrokerHeartbeat(context, heartbeat).get(10, TimeUnit.SECONDS));
+            assertTrue(failure.getCause() instanceof ClusterAuthorizationException);
+            assertEquals(recordsBefore, clientEnv.allRecords().size());
+        }
+    }
+
+    @Test
+    public void testHeartbeatProbeCannotBypassStableProtocolVersion() throws Exception {
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv).build()
+        ) {
+            QuorumController controller = controlEnv.activeController();
+            int recordsBefore = clientEnv.allRecords().size();
+            ControllerRequestContext context = new ControllerRequestContext(
+                new RequestHeaderData().setRequestApiKey((short) 63).setRequestApiVersion((short) 2),
+                KafkaPrincipal.ANONYMOUS, OptionalLong.empty()
+            );
+            BrokerHeartbeatRequestData heartbeat = new BrokerHeartbeatRequestData()
+                .setBrokerId(3)
+                .setBrokerEpoch(54L)
+                .setSourceWalProbeReport(new BrokerHeartbeatRequestData.SourceWalProbeReport()
+                    .setNonce(new Uuid(1L, 2L)));
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                () -> controller.processBrokerHeartbeat(context, heartbeat).get(10, TimeUnit.SECONDS));
+            assertTrue(failure.getCause() instanceof InvalidRequestException);
             assertEquals(recordsBefore, clientEnv.allRecords().size());
         }
     }

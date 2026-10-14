@@ -17,6 +17,7 @@
 package org.apache.kafka.storage.internals.shared.kafka;
 
 import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.message.BrokerHeartbeatRequestData.SourceWalProbeReport;
 import org.apache.kafka.common.replica.PartitionRetirementSourceProbe;
 import org.apache.kafka.storage.internals.shared.CurrentLocalWalCoveragePrecheck;
 import org.apache.kafka.storage.internals.shared.LocalWalDurabilityObservation;
@@ -255,6 +256,45 @@ public final class BrokerLocalStartupReplayPrecheck {
             claim.nativeHighWatermark(), claim.nativeLogEndOffset(),
             claim.observedWalMutationRevision(), claim.observedWalAdmissionRevision()
         ));
+    }
+
+    /**
+     * Encode a real, challenge-matched native Source/WAL capture in the
+     * optional unstable BrokerHeartbeat v3 tagged-field representation.
+     *
+     * <p>This is an in-process, read-only adapter. It neither sends a
+     * heartbeat nor authenticates the resulting self-reported wire bytes.</p>
+     */
+    public static Optional<SourceWalProbeReport> captureCurrentSourceWalHeartbeatReport(
+        SharedStorageExtension extension,
+        SharedPartitionRoleListener roles,
+        SharedUnifiedLog sourceLog,
+        SharedPartitionId partition,
+        PartitionRetirementSourceProbe.Request challenge
+    ) throws IOException {
+        return captureCurrentSourceWalReport(
+            extension, roles, sourceLog, partition, challenge
+        ).map(BrokerLocalStartupReplayPrecheck::toHeartbeatReport);
+    }
+
+    public static SourceWalProbeReport toHeartbeatReport(PartitionRetirementSourceProbe.Report report) {
+        Objects.requireNonNull(report, "report");
+        PartitionRetirementSourceProbe.Request request = report.request();
+        return new SourceWalProbeReport()
+            .setNonce(request.nonce())
+            .setClusterId(request.clusterId())
+            .setTopicId(request.topicId())
+            .setPartitionId(request.partitionId())
+            .setBrokerIncarnationId(request.brokerIncarnationId())
+            .setSourceLeaderEpoch(request.sourceLeaderEpoch())
+            .setExpectedPreviousAuthorityOffset(request.expectedPreviousAuthorityOffset())
+            .setNextAuthorityOffset(request.nextAuthorityOffset())
+            .setLocalLeadershipGeneration(report.localLeadershipGeneration())
+            .setNativeLogStartOffset(report.nativeLogStartOffset())
+            .setNativeHighWatermark(report.nativeHighWatermark())
+            .setNativeLogEndOffset(report.nativeLogEndOffset())
+            .setWalMutationRevision(report.observedWalMutationRevision())
+            .setWalAdmissionRevision(report.observedWalAdmissionRevision());
     }
 
     private static boolean matchesProbe(

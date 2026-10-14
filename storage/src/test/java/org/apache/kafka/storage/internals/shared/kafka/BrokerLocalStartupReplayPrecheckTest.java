@@ -20,6 +20,8 @@ import org.apache.kafka.common.Endpoint;
 import org.apache.kafka.common.TopicIdPartition;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.message.BrokerHeartbeatRequestData;
+import org.apache.kafka.common.protocol.MessageUtil;
 import org.apache.kafka.common.replica.PartitionRetirementSourceProbe;
 import org.apache.kafka.common.security.auth.SecurityProtocol;
 import org.apache.kafka.common.utils.Time;
@@ -484,6 +486,41 @@ class BrokerLocalStartupReplayPrecheckTest {
             assertEquals(10L, result.nativeHighWatermark());
             assertEquals(10L, result.nativeLogEndOffset());
             assertTrue(result.localLeadershipGeneration() > 0L);
+        }
+    }
+
+    @Test
+    void challengeBoundNativeWalCaptureSerializesAsHeartbeatVThreeReport() throws Exception {
+        try (SharedStorageExtension extension = started("probe-wire-positive", true, true)) {
+            var wire = BrokerLocalStartupReplayPrecheck.captureCurrentSourceWalHeartbeatReport(
+                extension, leader(extension), source(0L, 10L, 10L), PARTITION, probe()
+            ).orElseThrow();
+            assertEquals(probe().nonce(), wire.nonce());
+            assertEquals(TOPIC_ID, wire.topicId());
+            assertEquals(0, wire.partitionId());
+            assertEquals(8, wire.sourceLeaderEpoch());
+            assertEquals(10L, wire.nativeHighWatermark());
+            assertEquals(10L, wire.nativeLogEndOffset());
+            BrokerHeartbeatRequestData heartbeat = new BrokerHeartbeatRequestData()
+                .setBrokerId(3)
+                .setBrokerEpoch(54L)
+                .setCurrentMetadataOffset(100L)
+                .setSourceWalProbeReport(wire);
+            var parsed = new BrokerHeartbeatRequestData(
+                MessageUtil.toByteBufferAccessor(heartbeat, (short) 3), (short) 3
+            );
+            assertEquals(wire, parsed.sourceWalProbeReport());
+        }
+    }
+
+    @Test
+    void staleBrokerIncarnationCannotEncodeHeartbeatSourceEvidence() throws Exception {
+        try (SharedStorageExtension extension = started("probe-wire-stale", true, true)) {
+            var stale = request(TOPIC_ID, 0, 3, 54L,
+                new Uuid(9L, 11L), 8, "cluster-a", 0L);
+            assertTrue(BrokerLocalStartupReplayPrecheck.captureCurrentSourceWalHeartbeatReport(
+                extension, leader(extension), source(0L, 10L, 10L), PARTITION, stale
+            ).isEmpty());
         }
     }
 

@@ -528,3 +528,68 @@ explicit feature negotiation, and burn the one-time nonce inside the
 serialized Controller event before any KRaft mutation is even considered.
 Then prove old-broker v2 fallback, controller failover and 3-broker
 durability under real MinIO.
+
+## Batches 153–156 — correct metadata import boundary and deny-only v3 ingress
+
+The **previous** `70cd5293c11fac3b73b3d3b7d48f3e598d3ffabb`
+completed **16/17 GitHub Actions SUCCESS**, with the sole Shared Storage
+job blocked in early `:metadata:checkstyleMain`. The two remaining
+`PartitionRetirementSourceProbe` imports were still rejected because
+the preceding patch had edited `checkstyle/import-control.xml`,
+whereas the metadata module actually uses
+`checkstyle/import-control-metadata.xml`. This is a rules-location
+mistake; the completed WAL, real MinIO and Controller HA checks were
+otherwise successful.
+
+- **153 — correct import ownership.** Restore generic
+  `import-control.xml` to its earlier value and allow only the three
+  Source/WAL diagnostic value classes inside the `controller` subpackage
+  of `import-control-metadata.xml`. Update Shared Storage workflow
+  path filters to include the *actual* metadata rules file. Do not
+  allow all `common.replica`.
+- **154 — parse the real v3 heartbeat transport.** Add a fail-closed
+  `PartitionRetirementHeartbeatReportGate` that reconstructs the existing
+  typed `PartitionRetirementSourceProbe.Request/Report` from an optional
+  generated `BrokerHeartbeatRequestData.SourceWalProbeReport`.
+  BrokerId/BrokerEpoch come from the outer heartbeat, while nonce,
+  immutable TopicId/partition, incarnation, source epoch, CAS,
+  LogStart/HW/LEO and WAL revisions are checked by the established
+  immutable contract. Invalid data is rejected, not trusted.
+- **155 — enforce the default-deny network ingress.** At the start of
+  `QuorumController.processBrokerHeartbeat`, before contact-time
+  metrics, lockless broker heartbeat tracking or a serialized metadata
+  event, reject non-null v3 reports unless the protocol is v3 and its
+  authenticated Principal matches the dedicated per-broker policy.
+  Even a structurally valid report from a matching Principal yields
+  **UNVERIFIED** and is refused: no probe or authority writer is
+  invoked. An absent report retains the legacy heartbeat flow.
+  The production allowlist remains `DENY_ALL`.
+- **156 — deterministic security regressions.** Add eleven unit tests
+  for absent v2 reports, dedicated-principal matching, version
+  fencing, anonymous/foreign principals, malformed nonce, epoch,
+  source window and WAL revisions, plus two actual QuorumController
+  negative tests proving the rejected report cannot change KRaft
+  records. Strict named mandatory inventory becomes **540 methods
+  across 34 suites** (previously 525/33), with all new tests selected
+  in the main `:metadata:test` CI command.
+
+
+  Additionally, the broker-local adapter can now turn an exact
+  challenge-matched `SharedUnifiedLog`/WAL capture into the generated
+  v3 tagged `SourceWalProbeReport` structure. Two real storage
+  regressions prove native capture survives a v3 encode/decode round
+  trip and an old broker incarnation cannot emit a report. This
+  adapter does not itself send network packets. The total mandatory
+  inventory is **540 methods across 34 suites**.
+
+**This is only a negative ingress, not a working end-to-end protocol.**
+The broker has no integrated actual-WAL report sender, Controller does
+not yet produce a challenge on real network heartbeats, and there is
+still no configured per-broker authenticated transport. All positive
+Source/WAL reports continue to be denied. To advance, implement a
+controller-initiated, short-lived challenge bound to BrokerRegistration
+and a dedicated authenticated principal, then request actual native
+Kafka/WAL sampling through the Broker lifecycle without breaking
+v2 fallback. KRaft authority CAS writing, COMMITTED reference retirement
+and physical MinIO DELETE remain strictly disabled. The frozen MinIO
+GA ref `9a28c11b6d97ecacafe1b8566cde5cc34d604889` is unchanged.
