@@ -593,3 +593,64 @@ Kafka/WAL sampling through the Broker lifecycle without breaking
 v2 fallback. KRaft authority CAS writing, COMMITTED reference retirement
 and physical MinIO DELETE remain strictly disabled. The frozen MinIO
 GA ref `9a28c11b6d97ecacafe1b8566cde5cc34d604889` is unchanged.
+
+## Batches 157–160: SpotBugs evidence and real broker heartbeat challenge ingress
+
+Prior checkpoint `e86a1d5cfcbc928632f8f7ef282fe0cd70336ea5`
+finished **16/17 CI SUCCESS**. All Java 11/protocol, Checkstyle, storage,
+MinIO, Ring WAL and Controller HA gates completed, but the main Shared
+Storage job failed at `:metadata:spotbugsMain` after the storage suite
+passed. Its GitHub artifact contained storage SpotBugs/metadata
+Checkstyle but **not metadata SpotBugs**, so the precise rule cannot
+yet be determined from that run. Do NOT disable SpotBugs or invent an
+issue-specific fix without its report.
+
+- **157 — early fail-closed static evidence.** Run
+  `:metadata:spotbugsMain` together with the existing Java 11 clients
+  compile and metadata Checkstyle preflight, before heavy core/storage/
+  MinIO tests. Preserve `metadata/build/reports/spotbugs` in the
+  `shared-storage-static-analysis` artifact even on failure. The next
+  SHA must expose the actual SpotBugs finding and fix it, with the
+  rule itself still enabled.
+- **158 — broker-side challenge validation.** Add a read-only
+  `BrokerHeartbeatSourceProbeChallengeGate`. An optional unstable
+  v3 `SourceWalProbeChallenge` is rejected unless the response
+  belongs to the **exact negotiated request version 3**, a broker that
+  is **registered and RUNNING**, the current ClusterId,
+  BrokerId/Epoch/IncarnationId, nonzero nonce/TopicId and valid
+  Source LeaderEpoch/authority CAS/LogStart bounds. The immutable
+  Java 11 Request reconstruction is available for diagnostics only,
+  and positive shape agreement still yields `MATCHED_UNTRUSTED`.
+- **159 — real lifecycle receive hook.** The standard
+  `BrokerLifecycleManager.BrokerHeartbeatResponseEvent` inspects
+  present v3 challenge tags on successful heartbeat responses on its
+  serialized event thread. Invalid/legacy challenges are ignored.
+  Even matching ones are **discarded**, not stored, sampled or sent
+  to Controller. Normal v0-v2 readiness, offline-directory acknowledgement,
+  shutdown and heartbeat cadence are unaffected. There is deliberately
+  no privileged producer, feature bypass or controller response writer.
+- **160 — regression/CI boundary.** Add ten deterministic JUnit tests
+  under `:server:test` for v2/v3 compatibility, registration/fencing,
+  BrokerId/Epoch/Incarnation ABA, wrong ClusterId, invalid UUIDs,
+  malformed CAS/LogStart and the non-authorizing matched outcome.
+  Require all ten named JUnit XML results with zero skips/failures
+  in the main Java 25 CI and upload the server test reports. Keep the
+  **540 methods / 34 suites** existing storage/metadata evidence
+  unchanged; the ten server tests run as a separately hard-gated suite.
+
+This is **not** an authenticated end-to-end Broker→Controller
+Source/WAL exchange. The producer still lacks an installed asynchronous
+source/WAL sampler, and Controller does not issue real v3 challenges.
+A Controller's permission to use `CLUSTER_ACTION` does not bind it to
+an independently authenticated Broker incarnation. Production
+principal policy remains `DENY_ALL`; no KRaft authority writer,
+COMMITTED reference retirement, or physical MinIO DELETE is enabled.
+
+**Next:** use the new metadata SpotBugs artifact to repair the exact
+failure; then introduce an explicitly configured per-broker mTLS/SASL
+identity policy and asynchronous challenge→native Source/WAL capture→
+response correlation. Revalidate and consume one-time nonce **inside
+one Controller serialized event** before even considering an authority
+writer. Prove Controller rotation and multi-broker durable recovery
+using real MinIO. Frozen MinIO GA remains
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`.

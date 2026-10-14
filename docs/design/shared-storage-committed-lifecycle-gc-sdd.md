@@ -3187,3 +3187,41 @@ generated v3 tagged field without launching a heartbeat. Two additional
 storage regressions cover native capture -> v3 bytes -> parsed report
 and broker-incarnation mismatch rejection. Mandatory named evidence
 is therefore **540 methods in 34 suites** rather than 538.
+
+## Batches 157–160: observable BrokerHeartbeat v3 challenge with no response authority
+
+The previous `e86a1d5c` HEAD passed 16 of 17 GitHub Actions, with
+only the Shared Storage `:metadata:spotbugsMain` static analyzer
+failing. The existing static-analysis artifact did not include
+metadata's SpotBugs HTML or XML, preventing attribution to an actual
+warning type. The primary workflow now uploads
+`metadata/build/reports/spotbugs` and runs this uncompromised
+SpotBugs gate **early** alongside Java 11 client compile and
+metadata Checkstyle, so future failures are independently reviewable.
+
+The broker's *real* heartbeat response event path now explicitly
+examines an optional unstable v3 Controller Source/WAL challenge. The
+read-only gate requires version 3, matching current
+BrokerId/Epoch/IncarnationId/ClusterId, registered RUNNING broker
+state, valid nonzero nonce, immutable TopicId, partition,
+SourceLeaderEpoch, LogStart and authority CAS fields. An exact,
+constructible challenge is classified `MATCHED_UNTRUSTED`, never
+"authenticated", "authorized", or "durable". There is no sampling
+callback or pending queue yet. The lifecycle handler intentionally
+ignores the challenge and continues ordinary broker registration,
+heartbeats, fencing/unfencing and controlled shutdown unchanged.
+
+Ten new deterministic server-side tests cover the challenge's
+wire-shape and identity checks plus the default non-authorizing
+diagnostic. `:server:test` selects the exact suite, and a separate
+fail-closed JUnit XML verifier checks all ten method names and
+zero skips/failures. Existing mandatory storage/metadata Java/Scala
+inventory remains **540 methods / 34 suites**, plus these ten
+separately required server tests. No network Report is emitted.
+
+Production Controller principal policy remains `DENY_ALL`.
+Actual v3 Controller challenge signing/issuance, unique broker
+principal configuration, authenticated transport, broker-native
+source and WAL asynchronous sampling, KRaft authority CAS writing,
+COMMITTED retirement and physical GC deletion are still blocked.
+The frozen MinIO GA release is unchanged.

@@ -650,6 +650,7 @@ public class BrokerLifecycleManager {
                 Errors errorCode = Errors.forCode(message.data().errorCode());
                 if (errorCode == Errors.NONE) {
                     BrokerHeartbeatResponseData responseData = message.data();
+                    inspectSourceWalChallenge(response, responseData);
                     currentOfflineDirs.forEach(cur -> offlineDirs.put(cur, true));
                     switch (state) {
                         case STARTING -> {
@@ -715,6 +716,29 @@ public class BrokerLifecycleManager {
                 }
             }
         }
+    }
+
+    /**
+     * Observe a challenge on the real Controller heartbeat response path.
+     * A matched v3 challenge is intentionally discarded: neither the
+     * provider of actual native Source/WAL evidence nor per-broker network
+     * authentication is wired into this lifecycle manager yet.
+     *
+     * <p>Never allow a speculative v3 field to affect broker readiness,
+     * registration, ordinary heartbeat scheduling or GC authority.</p>
+     */
+    private void inspectSourceWalChallenge(ClientResponse response, BrokerHeartbeatResponseData data) {
+        if (data.sourceWalProbeChallenge() == null) {
+            return;
+        }
+        short requestVersion = response.requestHeader() == null
+            ? (short) -1 : response.requestHeader().apiVersion();
+        BrokerHeartbeatSourceProbeChallengeGate.Finding finding =
+            BrokerHeartbeatSourceProbeChallengeGate.inspect(
+                data, requestVersion, clusterId, nodeId, brokerEpoch, incarnationId, state, registered
+            );
+        logger.debug("Ignoring experimental Controller Source/WAL challenge ({}) until "
+            + "an authenticated broker reporter is enabled.", finding);
     }
 
     private void scheduleNextCommunicationImmediately() {

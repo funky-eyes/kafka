@@ -41,6 +41,9 @@ on:
       - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementControlManager.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/QuorumController.java'
       - 'clients/src/main/java/org/apache/kafka/common/replica/PartitionRetirementSourceProbe.java'
+      - 'server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java'
+      - 'server/src/main/java/org/apache/kafka/server/BrokerHeartbeatSourceProbeChallengeGate.java'
+      - 'server/src/test/java/org/apache/kafka/server/BrokerHeartbeatSourceProbeChallengeGateTest.java'
       - 'clients/src/main/resources/common/message/BrokerHeartbeatRequest.json'
       - 'clients/src/main/resources/common/message/BrokerHeartbeatResponse.json'
       - 'clients/src/test/java/org/apache/kafka/common/requests/BrokerHeartbeatSourceWalProbeProtocolTest.java'
@@ -113,6 +116,9 @@ on:
       - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementControlManager.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/QuorumController.java'
       - 'clients/src/main/java/org/apache/kafka/common/replica/PartitionRetirementSourceProbe.java'
+      - 'server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java'
+      - 'server/src/main/java/org/apache/kafka/server/BrokerHeartbeatSourceProbeChallengeGate.java'
+      - 'server/src/test/java/org/apache/kafka/server/BrokerHeartbeatSourceProbeChallengeGateTest.java'
       - 'clients/src/main/resources/common/message/BrokerHeartbeatRequest.json'
       - 'clients/src/main/resources/common/message/BrokerHeartbeatResponse.json'
       - 'clients/src/test/java/org/apache/kafka/common/requests/BrokerHeartbeatSourceWalProbeProtocolTest.java'
@@ -206,7 +212,7 @@ jobs:
         run: |
           set -o pipefail
           ./gradlew :clients:compileJava :metadata:checkstyleMain :metadata:checkstyleTest \
-            --no-scan 2>&1 | tee shared-storage-clients-java11.log
+            :metadata:spotbugsMain --no-scan 2>&1 | tee shared-storage-clients-java11.log
 
       - name: Verify experimental broker heartbeat protocol compatibility
         shell: bash
@@ -234,6 +240,38 @@ jobs:
           actual = {case.get('name', '').removesuffix('()') for case in root.findall('testcase')}
           assert expected <= actual, sorted(expected - actual)
           print(f'PASS: {len(expected)} broker heartbeat protocol regression methods, zero skips')
+          PY
+
+      - name: Verify broker lifecycle source probe challenge rejection
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew :server:test --no-scan \
+            --tests 'org.apache.kafka.server.BrokerHeartbeatSourceProbeChallengeGateTest' \
+            2>&1 | tee shared-storage-broker-probe-test.log
+          python3 - <<'PY'
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+          suite = 'org.apache.kafka.server.BrokerHeartbeatSourceProbeChallengeGateTest'
+          xml = Path('server/build/test-results/test/TEST-' + suite + '.xml')
+          root = ET.parse(xml).getroot()
+          required = {
+              'missingChallengeCannotChangeNormalBrokerHeartbeat',
+              'controllerMustNegotiateExplicitUnstableVersionThree',
+              'unregisteredOrFencedBrokerCannotAcceptChallenge',
+              'wrongClusterOrBrokerIdCannotBorrowAnotherBrokerChallenge',
+              'brokerEpochOrIncarnationAbaCannotResurrectOldChallenge',
+              'invalidNonceOrRecreatedTopicFailsBeforeDiagnosticDecode',
+              'invalidAuthorityCasOrSourceLogStartIsMalformed',
+              'missingClusterAndRequiredUuidAreMalformedOrMismatched',
+              'validChallengeIsStillUntrustedAndNeverSelfAuthorizesGc',
+              'rejectedChallengeNeverYieldsLocalSamplingRequest',
+          }
+          assert root.tag == 'testsuite' and root.get('name') == suite
+          assert all(root.get(key) == '0' for key in ('skipped', 'failures', 'errors'))
+          executed = {node.get('name', '').removesuffix('()') for node in root.findall('testcase')}
+          assert required <= executed, sorted(required - executed)
+          print(f'PASS: {len(required)} broker challenge regression cases and zero skips')
           PY
 
       - name: Run shared storage LogManager startup regression
@@ -324,6 +362,7 @@ jobs:
             shared-storage-logmanager-regression.log
             shared-storage-test.log
             shared-storage-source-probe-wire-test.log
+            shared-storage-broker-probe-test.log
             shared-storage-controller-retirement-test.log
             shared-storage-retirement-feature-test.log
             shared-storage-s3-test.log
@@ -339,6 +378,7 @@ jobs:
             storage/build/reports/spotbugs
             storage/build/reports/checkstyle
             metadata/build/reports/checkstyle
+            metadata/build/reports/spotbugs
             storage/shared-storage-s3/build/reports/spotbugs
             storage/shared-storage-s3/build/reports/checkstyle
           if-no-files-found: ignore
@@ -352,6 +392,8 @@ jobs:
           path: |
             clients/build/reports/tests/test
             clients/build/test-results/test
+            server/build/reports/tests/test
+            server/build/test-results/test
             storage/build/reports/tests/test
             storage/build/test-results/test
             metadata/build/reports/tests/test
