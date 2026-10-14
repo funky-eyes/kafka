@@ -88,6 +88,10 @@ final class PartitionRetirementCandidatePrecheck {
         BROKER_EPOCH_MISMATCH,
         BROKER_INCARNATION_MISMATCH,
         REJECTED_AUTHORITY_TRANSITION,
+        SOURCE_CLAIM_MISSING,
+        SOURCE_CLAIM_IDENTITY_MISMATCH,
+        SOURCE_CLAIM_LOG_START_MISMATCH,
+        SOURCE_CLAIM_LOCAL_COVERAGE_INCOMPLETE,
         SOURCE_LOG_START_NOT_VERIFIED
     }
 
@@ -130,6 +134,46 @@ final class PartitionRetirementCandidatePrecheck {
         }
         // No trusted source-log-start adapter exists yet. This is never an
         // authorization result even when every current controller claim matches.
+        return Finding.SOURCE_LOG_START_NOT_VERIFIED;
+    }
+
+    /**
+     * Non-emitting agreement gate for a future authenticated source protocol.
+     *
+     * <p>First rechecks all current KRaft state against the Controller's
+     * registration, leader and append position. A caller-provided local WAL
+     * claim is then checked for internal consistency, but even a perfectly
+     * matching claim is UNTRUSTED and cannot authorize a retirement record.
+     * A future writer must independently authenticate the source from the
+     * current broker and revalidate it in the serialized commit event.</p>
+     */
+    static Finding assessUntrustedSourceClaim(
+        FeatureControlManager features,
+        ClusterControlManager cluster,
+        ReplicationControlManager replicas,
+        PartitionRetirementControlManager authority,
+        Candidate candidate,
+        long nextWriteOffset,
+        PartitionRetirementUntrustedSourceClaim claim
+    ) {
+        Finding controller = assess(features, cluster, replicas, authority, candidate, nextWriteOffset);
+        if (controller != Finding.SOURCE_LOG_START_NOT_VERIFIED) {
+            return controller;
+        }
+        if (claim == null) {
+            return Finding.SOURCE_CLAIM_MISSING;
+        }
+        if (!claim.matchesRetirementCandidate(candidate)) {
+            return Finding.SOURCE_CLAIM_IDENTITY_MISMATCH;
+        }
+        if (claim.nativeLogStartOffset() != candidate.claimedLogStartOffset()) {
+            return Finding.SOURCE_CLAIM_LOG_START_MISMATCH;
+        }
+        if (!claim.reportsCompleteLocalWalWindow()) {
+            return Finding.SOURCE_CLAIM_LOCAL_COVERAGE_INCOMPLETE;
+        }
+        // Matching self-reported bytes / offsets cannot establish provenance,
+        // authenticated BrokerRegistration ownership or replicated durability.
         return Finding.SOURCE_LOG_START_NOT_VERIFIED;
     }
 

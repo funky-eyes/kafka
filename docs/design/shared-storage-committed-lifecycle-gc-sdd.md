@@ -2855,3 +2855,63 @@ replicated/fsynced recoverability after broker loss, or a serialized
 KRaft authority CAS. Never use a local complete interval to authorize
 COMMITTED physical-object GC. No Controller record emitter or physical
 delete path was enabled; the frozen MinIO GA candidate remains separate.
+
+## Batch 129: introduce an explicitly untrusted Controller source/WAL claim
+
+A Controller-local `PartitionRetirementUntrustedSourceClaim` now
+describes the proposed Topic ID, partition, BrokerId, BrokerEpoch,
+BrokerIncarnationId, native Source LeaderEpoch, local role generation,
+LogStart/HW/LEO and observed WAL mutation/admission generations.
+Construction rejects impossible native Kafka offset ordering, missing
+leader and broker identities, negative/unknown WAL generations and
+a purported COMPLETE DATA window that is actually empty.
+
+This is a **caller-reported claim**, not an attestation, signed
+certificate or proof of KRaft BrokerRegistration ownership.
+It cannot be used to authorize remote-object retirement.
+
+## Batch 130: make untrusted source claims agree with live Controller CAS
+
+`PartitionRetirementCandidatePrecheck.assessUntrustedSourceClaim`
+first runs the existing NON-EMITTING current KRaft feature, write-position,
+authority-timeline CAS, partition leadership and BrokerRegistration checks.
+Only after those checks are valid does it compare the source claim
+against the exact Candidate's topic identity, broker identity,
+LeaderEpoch, claimed Source LogStart and local batch coverage flag.
+Mismatches have explicit fail-closed findings.
+
+**Even matching positive claims return SOURCE_LOG_START_NOT_VERIFIED.**
+No caller-originated bytes, WAL Future count or boolean can switch that
+finding to an authorization; this code never appends authority records.
+
+## Batch 131: stale registrations and KRaft movement invalidate old claims
+
+After a matching read-only preflight, a new Controller BrokerEpoch or
+IncarnationId, different partition leader, non-current next KRaft
+write offset, feature disablement or retirement authority timeline
+advance is evaluated against the *current* manager state again.
+Old claims cannot survive registration ABA, leadership movement,
+KRaft commit or feature reconfiguration by being replayed unchanged.
+A new authenticated Broker-to-Controller source verification transport
+and serialized CAS event remain missing.
+
+## Batch 132: deterministic untrusted source boundary verification
+
+Eighteen named JUnit tests exercise positive-but-unverified claims,
+missing and incomplete local coverage, immutable Topic/partition and
+broker identity disagreement, leader epoch/LogStart mismatch,
+impossible native HW/LEO and empty windows, in-flight WAL generations,
+malformed local leadership, feature disablement, BrokerEpoch rotation,
+KRaft leader change and authority CAS/replay changes. They also
+assert that no KRaft authority record is emitted.
+
+Strict named Java/Scala test inventory grows from **444 to 462**
+methods across **29 suites**.
+
+**GA limit:** This does not authenticate any source identity or durable
+Kafka/WAL range and has no Broker-to-Controller RPC. A future
+transport must establish the sender's current registered process
+identity and validate a fresh actual source/WAL continuity proof
+*inside* the serialized Controller KRaft event. Controller authority
+writers, durable COMMITTED reference retirement and physical object
+DELETE all remain OFF; the frozen MinIO GA branch is unchanged.

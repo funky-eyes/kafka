@@ -236,3 +236,27 @@ must cross the current Controller BrokerRegistration, source-log-start
 provenance and committed KRaft event boundary, with well-defined
 attestation expiry and fail-closed restart/ABA semantics. All
 retirement authority writes and physical COMMITTED deletes stay off.
+
+## Batches 129–132: explicit untrusted Controller source claim contract
+
+The metadata-side non-emitting Controller precheck now has an
+untrusted source/WAL claim shape and deterministic consistency checks
+for Topic ID, BrokerEpoch/IncarnationId, native Source LeaderEpoch,
+Kafka LogStart/HW/LEO and stable local WAL generations.
+The current KRaft BrokerRegistration, partition leader, feature gate,
+authority state and next write offset are always checked first.
+Re-registration, ABA, leader changes and stale authority versions
+invalidate previously matching claims.
+
+A forged affirmative coverage flag is still only an **untrusted
+statement**. Even perfect field agreement always returns
+`SOURCE_LOG_START_NOT_VERIFIED` and emits no authority record.
+No durable and authenticated Broker-to-Controller transport has been
+created by this checkpoint.
+
+Next actual P0 implementation must select a Kafka-native broker
+authentication/transport path, deliver non-replayable source and
+backend WAL provenance tied to the current BrokerRegistration, and
+revalidate it in the serialized Controller event before atomic
+metadata publication. A local complete interval or completed Future
+is insufficient. Do not enable physical COMMITTED deletion.
