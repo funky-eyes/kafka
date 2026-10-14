@@ -102,7 +102,13 @@ class PartitionRetirementSourceProbeValueTest {
             new Request(NONCE, "", TOPIC_ID, 0, 3, 54L,
                 INCARNATION, 8, -1L, 20L, 0L));
         assertThrows(IllegalArgumentException.class, () ->
-            request(NONCE, TOPIC_ID, 3, 54L, INCARNATION, 8, 0L, 1L));
+            new Request(NONCE, "cluster-a", TOPIC_ID, 0, 3, 54L,
+                INCARNATION, 8, 20L, 20L, 1L));
+        // KRaft authority positions and Kafka data offsets belong to
+        // separate logs. A Kafka LogStart > next KRaft CAS offset is not
+        // an invalid relationship between these unrelated coordinates.
+        assertEquals(1L, request(NONCE, TOPIC_ID, 3, 54L, INCARNATION, 8, 0L, 1L)
+            .claimedLogStartOffset());
     }
 
     @Test

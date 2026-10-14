@@ -17,6 +17,9 @@
 package org.apache.kafka.controller;
 
 import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.errors.UnsupportedVersionException;
+import org.apache.kafka.common.message.BrokerHeartbeatResponseData;
+import org.apache.kafka.common.protocol.MessageUtil;
 import org.apache.kafka.common.security.auth.KafkaPrincipal;
 import org.apache.kafka.controller.PartitionRetirementCandidatePrecheck.Candidate;
 import org.apache.kafka.controller.PartitionRetirementSourceProbeRegistry.Challenge;
@@ -208,6 +211,57 @@ class PartitionRetirementSourceProbeRegistryTest {
             request.expectedPreviousAuthorityOffset());
         assertEquals(CANDIDATE.nextAuthorityOffset(), request.nextAuthorityOffset());
         assertEquals(original, Challenge.fromProtocolRequest(request));
+    }
+
+    @Test
+    void issuedChallengeRoundTripsThroughHeartbeatVersionThreeButNeverAuthorizesGc() {
+        var registry = registry();
+        Challenge issued = issue(registry, 100L);
+        var response = new BrokerHeartbeatResponseData()
+            .setSourceWalProbeChallenge(issued.toHeartbeatChallenge());
+        var parsed = new BrokerHeartbeatResponseData(
+            MessageUtil.toByteBufferAccessor(response, (short) 3), (short) 3
+        );
+        Challenge reconstructed = Challenge.fromHeartbeatChallenge(parsed.sourceWalProbeChallenge());
+        assertEquals(issued, reconstructed);
+        assertEquals(Finding.MATCHED_UNTRUSTED,
+            registry.consume(reconstructed, CANDIDATE, BROKER_THREE, 101L));
+        assertEquals(Finding.UNKNOWN_OR_ALREADY_USED,
+            registry.consume(reconstructed, CANDIDATE, BROKER_THREE, 102L));
+    }
+
+    @Test
+    void malformedHeartbeatChallengeCannotBecomeTypedSourceProbe() {
+        Challenge issued = issue(registry(), 100L);
+        var noNonce = issued.toHeartbeatChallenge().setNonce(null);
+        assertThrows(IllegalArgumentException.class, () -> Challenge.fromHeartbeatChallenge(noNonce));
+        var noTopic = issued.toHeartbeatChallenge().setTopicId(null);
+        assertThrows(IllegalArgumentException.class, () -> Challenge.fromHeartbeatChallenge(noTopic));
+        var badEpoch = issued.toHeartbeatChallenge().setBrokerEpoch(-1L);
+        assertThrows(IllegalArgumentException.class, () -> Challenge.fromHeartbeatChallenge(badEpoch));
+        var badCas = issued.toHeartbeatChallenge().setNextAuthorityOffset(-1L);
+        assertThrows(IllegalArgumentException.class, () -> Challenge.fromHeartbeatChallenge(badCas));
+    }
+
+    @Test
+    void forgedWireFieldBurnsNonceAndPreventsLaterValidConsumption() {
+        var registry = registry();
+        Challenge issued = issue(registry, 100L);
+        var forged = issued.toHeartbeatChallenge().setBrokerIncarnationId(new Uuid(99L, 100L));
+        Challenge reconstructed = Challenge.fromHeartbeatChallenge(forged);
+        assertEquals(Finding.ENVELOPE_MISMATCH,
+            registry.consume(reconstructed, CANDIDATE, BROKER_THREE, 101L));
+        assertEquals(Finding.UNKNOWN_OR_ALREADY_USED,
+            registry.consume(issued, CANDIDATE, BROKER_THREE, 102L));
+    }
+
+    @Test
+    void unstableChallengeNeverDowngradesIntoStableHeartbeatReply() {
+        Challenge issued = issue(registry(), 100L);
+        var response = new BrokerHeartbeatResponseData()
+            .setSourceWalProbeChallenge(issued.toHeartbeatChallenge());
+        assertThrows(UnsupportedVersionException.class,
+            () -> MessageUtil.toByteBufferAccessor(response, (short) 2));
     }
 
     @Test

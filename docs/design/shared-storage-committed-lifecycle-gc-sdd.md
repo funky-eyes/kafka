@@ -3246,3 +3246,39 @@ its independent 10-method JUnit suite remains and is still mandatory
 in main CI. No fingerprint exception or generic code exclusion
 was added. Frozen MinIO GA remains unchanged. The new corrective
 HEAD still requires its own end-to-end CI pass.
+
+## Batches 161–164 — independent offset namespaces and versioned diagnostic challenge transport
+
+The Shared Storage `:metadata:test` on `4d5a6d46` failed two
+tests while native source/WAL and other completed CI gates succeeded.
+
+The constructor must compare **KRaft retirement authority** CAS
+positions with each other, not with Kafka native Source LogStart
+offsets. The regression now asserts true CAS non-advancement is
+invalid, while Kafka LogStart greater than a numerically smaller
+KRaft authority offset is valid. No runtime tightening based
+on unrelated log coordinate systems has been added.
+
+A separate test incorrectly counted KRaft controller bootstrap
+feature/registration records as retirement mutations because it
+captured `allRecords()` before startup had finished asynchronously.
+All early retirement preflight tests now count only
+`PartitionRetirementAuthorityRecord` for "no GC record" assertions.
+The production writer remains OFF and tests still fail if one
+retirement authority record is emitted.
+
+`PartitionRetirementSourceProbeRegistry.Challenge` can now be
+encoded to the existing unstable `BrokerHeartbeatResponseData`
+v3 `SourceWalProbeChallenge` and reconstructed after decoding
+without dropping nonce, BrokerId/Epoch/Incarnation, TopicId,
+LeaderEpoch, source LogStart or CAS coordinates. Four tests prove
+successful v3 round-trip, strict single-use untrusted nonce,
+malformed/forged identity rejection and v2 downgrade rejection.
+Named mandatory evidence is **545 tests in 34 Java/Scala suites**,
+with separately verified clients/broker protocol suites unchanged.
+
+**Not yet live:** This conversion alone does not issue a Controller
+challenge, send it on BrokerHeartbeat, set a trusted Principal, or
+enable retirement. The production feature gate remains disabled,
+per-broker authentication remains DENY_ALL and physical GC remains
+disabled. MinIO GA release stays frozen.

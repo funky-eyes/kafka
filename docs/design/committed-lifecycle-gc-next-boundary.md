@@ -685,3 +685,56 @@ This patch fixes the **actual** static-analysis rule and the **actual**
 release-manifest failure without broadening trust or changing the
 frozen MinIO GA branch. It does not authorize reports, source/WAL
 attestation, metadata retirement or COMMITTED physical object GC.
+
+## Batches 161–164 — fix real metadata JUnit failures and bridge volatile challenge to heartbeat v3
+
+On HEAD `4d5a6d4635d8b81482c17468dfcc0a08a347d22c`,
+GA Workflow Consistency, Java 11, metadata Checkstyle/SpotBugs, clients wire
+tests, dedicated broker challenge tests and storage JUnit passed. The
+Shared Storage main job subsequently hit two **actual metadata JUnit
+assertion failures**, unrelated to native MinIO/WAL:
+
+- **161 — separate offset domains.** `PartitionRetirementSourceProbeValueTest`
+  incorrectly expected `KRaft nextAuthorityOffset=0` and
+  `Kafka nativeLogStartOffset=1` to be mutually invalid.
+  They are positions in unrelated logs. Replace that assertion
+  with an actually invalid CAS (`expectedPreviousAuthorityOffset=20`,
+  `nextAuthorityOffset=20`) and explicitly assert the orthogonal
+  native offset case is valid. Do not introduce a fabricated
+  cross-log numeric inequality in production.
+- **162 — isolate Controller records from bootstrap.** A
+  `QuorumControllerTest` compared `clientEnv.allRecords().size()`
+  immediately after `activeController()` against the count after
+  its read-only preflight. Normal asynchronous KRaft bootstrap
+  records caused expected `0`, actual `5`. All early Source/WAL
+  no-write tests now compare **only**
+  `PartitionRetirementAuthorityRecord` instances, so startup
+  FeatureLevel/ControllerRegistration metadata cannot mimic
+  a retirement write. Still assert zero retirement record emission.
+- **163 — non-authorizing transport bridge.** Extend the existing,
+  serialized Controller-only `PartitionRetirementSourceProbeRegistry.Challenge`
+  with a `toHeartbeatChallenge` v3 tagged-field mapper and the
+  reverse `fromHeartbeatChallenge` conversion. Preserve nonce,
+  cluster, TopicId, partition, BrokerId/Epoch/Incarnation, source
+  LeaderEpoch, expected/next KRaft CAS and Kafka LogStart without
+  coercing unrelated offsets. Explicitly reject null identity
+  fields before constructing the immutable typed request.
+  **Encoding is not issuance.** The Controller keeps DENY_ALL and
+  still has no production heartbeat reply challenge issuer.
+- **164 — wire/anti-replay evidence.** Four deterministic registry
+  JUnit tests exercise a genuine v3 encode/decode round trip that
+  still results only in `MATCHED_UNTRUSTED`, the one-time nonce
+  consumption, malformed wire identities, Broker incarnation
+  alteration burning its nonce, and refusal to silently encode a
+  populated v3 challenge under stable v2. Mandatory Java/Scala
+  methods increase **541 → 545 across 34 suites**; separately
+  hard-gated broker and clients wire regressions remain unchanged.
+
+This feature branch deliberately leaves actual Controller challenge
+issuance, Broker-side native WAL sampling **network send**, per-broker
+mutually authenticated principal configuration, Controller nonce
+recheck under the active KRaft epoch, and source/WAL durability
+attestation for future checkpoints. There is no authority writer,
+COMMITTED logical reference retirement, or physical MinIO DELETE.
+The frozen MinIO GA ref remains
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`.

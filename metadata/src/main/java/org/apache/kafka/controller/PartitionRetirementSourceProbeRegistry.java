@@ -17,6 +17,7 @@
 package org.apache.kafka.controller;
 
 import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.message.BrokerHeartbeatResponseData.SourceWalProbeChallenge;
 import org.apache.kafka.common.replica.PartitionRetirementSourceProbe;
 import org.apache.kafka.common.security.auth.KafkaPrincipal;
 import org.apache.kafka.controller.PartitionRetirementCandidatePrecheck.Candidate;
@@ -70,6 +71,45 @@ final class PartitionRetirementSourceProbeRegistry {
             );
             return new Challenge(request.nonce(), request.clusterId(), candidate);
         }
+
+        /**
+         * Encode this diagnostic Challenge using the unstable heartbeat v3
+         * response field. Encoding is not issuance or broker authentication.
+         */
+        SourceWalProbeChallenge toHeartbeatChallenge() {
+            return new SourceWalProbeChallenge()
+                .setNonce(nonce)
+                .setClusterId(clusterId)
+                .setTopicId(candidate.key().topicId())
+                .setPartitionId(candidate.key().partitionId())
+                .setBrokerId(candidate.brokerId())
+                .setBrokerEpoch(candidate.brokerEpoch())
+                .setBrokerIncarnationId(candidate.brokerIncarnationId())
+                .setSourceLeaderEpoch(candidate.sourceLeaderEpoch())
+                .setExpectedPreviousAuthorityOffset(candidate.expectedPreviousAuthorityOffset())
+                .setNextAuthorityOffset(candidate.nextAuthorityOffset())
+                .setClaimedLogStartOffset(candidate.claimedLogStartOffset());
+        }
+
+        /**
+         * Decode an untrusted heartbeat field. The returned Challenge still
+         * requires a one-time nonce consume on the Controller event thread.
+         */
+        static Challenge fromHeartbeatChallenge(SourceWalProbeChallenge wire) {
+            Objects.requireNonNull(wire, "wire");
+            if (wire.nonce() == null || wire.clusterId() == null || wire.topicId() == null
+                || wire.brokerIncarnationId() == null) {
+                throw new IllegalArgumentException("Missing Source/WAL challenge identity");
+            }
+            PartitionRetirementSourceProbe.Request request = new PartitionRetirementSourceProbe.Request(
+                wire.nonce(), wire.clusterId(), wire.topicId(), wire.partitionId(),
+                wire.brokerId(), wire.brokerEpoch(), wire.brokerIncarnationId(),
+                wire.sourceLeaderEpoch(), wire.expectedPreviousAuthorityOffset(),
+                wire.nextAuthorityOffset(), wire.claimedLogStartOffset()
+            );
+            return fromProtocolRequest(request);
+        }
+
     }
 
     enum Finding {

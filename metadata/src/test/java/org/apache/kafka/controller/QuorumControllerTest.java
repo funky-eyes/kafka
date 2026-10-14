@@ -55,6 +55,7 @@ import org.apache.kafka.common.metadata.BrokerRegistrationChangeRecord;
 import org.apache.kafka.common.metadata.ConfigRecord;
 import org.apache.kafka.common.metadata.EndTransactionRecord;
 import org.apache.kafka.common.metadata.FeatureLevelRecord;
+import org.apache.kafka.common.metadata.PartitionRetirementAuthorityRecord;
 import org.apache.kafka.common.metadata.PartitionRecord;
 import org.apache.kafka.common.metadata.ProducerIdsRecord;
 import org.apache.kafka.common.metadata.RegisterBrokerRecord;
@@ -183,7 +184,7 @@ public class QuorumControllerTest {
             QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv).build()
         ) {
             QuorumController controller = controlEnv.activeController();
-            int recordCount = clientEnv.allRecords().size();
+            long recordCount = retirementAuthorityRecordCount(clientEnv);
             var candidate = untrustedRetirementCandidate();
             var claim = untrustedRetirementSourceClaim(candidate);
             assertEquals(
@@ -191,7 +192,7 @@ public class QuorumControllerTest {
                 controller.preflightUntrustedPartitionRetirement(ANONYMOUS_CONTEXT, candidate, claim)
                     .get(10, TimeUnit.SECONDS)
             );
-            assertEquals(recordCount, clientEnv.allRecords().size());
+            assertEquals(recordCount, retirementAuthorityRecordCount(clientEnv));
         }
     }
 
@@ -238,11 +239,11 @@ public class QuorumControllerTest {
             QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv).build()
         ) {
             QuorumController controller = controlEnv.activeController();
-            int recordCount = clientEnv.allRecords().size();
+            long recordCount = retirementAuthorityRecordCount(clientEnv);
             var candidate = untrustedRetirementCandidate();
             assertTrue(controller.beginRetirementSourceProbe(ANONYMOUS_CONTEXT, candidate)
                 .get(10, TimeUnit.SECONDS).isEmpty());
-            assertEquals(recordCount, clientEnv.allRecords().size());
+            assertEquals(recordCount, retirementAuthorityRecordCount(clientEnv));
         }
     }
 
@@ -253,7 +254,7 @@ public class QuorumControllerTest {
             QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv).build()
         ) {
             QuorumController controller = controlEnv.activeController();
-            int recordCount = clientEnv.allRecords().size();
+            long recordCount = retirementAuthorityRecordCount(clientEnv);
             var candidate = untrustedRetirementCandidate();
             var forged = new PartitionRetirementSourceProbeRegistry.Challenge(
                 Uuid.randomUuid(), clientEnv.clusterId(), candidate
@@ -264,7 +265,7 @@ public class QuorumControllerTest {
                     ANONYMOUS_CONTEXT, candidate, forged, untrustedRetirementSourceClaim(candidate)
                 ).get(10, TimeUnit.SECONDS)
             );
-            assertEquals(recordCount, clientEnv.allRecords().size());
+            assertEquals(recordCount, retirementAuthorityRecordCount(clientEnv));
         }
     }
 
@@ -275,7 +276,7 @@ public class QuorumControllerTest {
             QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv).build()
         ) {
             QuorumController controller = controlEnv.activeController();
-            int recordsBefore = clientEnv.allRecords().size();
+            long recordsBefore = retirementAuthorityRecordCount(clientEnv);
             var candidate = untrustedRetirementCandidate();
             var request = new PartitionRetirementSourceProbe.Request(
                 new Uuid(21L, 22L), clientEnv.clusterId(), candidate.key().topicId(),
@@ -292,7 +293,7 @@ public class QuorumControllerTest {
                 controller.inspectRetirementSourceReport(ANONYMOUS_CONTEXT, candidate, report)
                     .get(10, TimeUnit.SECONDS)
             );
-            assertEquals(recordsBefore, clientEnv.allRecords().size());
+            assertEquals(recordsBefore, retirementAuthorityRecordCount(clientEnv));
         }
     }
 
@@ -304,13 +305,13 @@ public class QuorumControllerTest {
         ) {
             QuorumController controller = controlEnv.activeController();
             var candidate = untrustedRetirementCandidate();
-            int recordsBefore = clientEnv.allRecords().size();
+            long recordsBefore = retirementAuthorityRecordCount(clientEnv);
             assertEquals(
                 PartitionRetirementCandidatePrecheck.Finding.SOURCE_PROBE_NOT_VERIFIED,
                 controller.inspectRetirementSourceReport(ANONYMOUS_CONTEXT, candidate, null)
                     .get(10, TimeUnit.SECONDS)
             );
-            assertEquals(recordsBefore, clientEnv.allRecords().size());
+            assertEquals(recordsBefore, retirementAuthorityRecordCount(clientEnv));
         }
     }
 
@@ -321,7 +322,7 @@ public class QuorumControllerTest {
             QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv).build()
         ) {
             QuorumController controller = controlEnv.activeController();
-            int recordsBefore = clientEnv.allRecords().size();
+            long recordsBefore = retirementAuthorityRecordCount(clientEnv);
             ControllerRequestContext context = new ControllerRequestContext(
                 new RequestHeaderData().setRequestApiKey((short) 63).setRequestApiVersion((short) 3),
                 KafkaPrincipal.ANONYMOUS, OptionalLong.empty()
@@ -337,7 +338,7 @@ public class QuorumControllerTest {
             ExecutionException failure = assertThrows(ExecutionException.class,
                 () -> controller.processBrokerHeartbeat(context, heartbeat).get(10, TimeUnit.SECONDS));
             assertTrue(failure.getCause() instanceof ClusterAuthorizationException);
-            assertEquals(recordsBefore, clientEnv.allRecords().size());
+            assertEquals(recordsBefore, retirementAuthorityRecordCount(clientEnv));
         }
     }
 
@@ -348,7 +349,7 @@ public class QuorumControllerTest {
             QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv).build()
         ) {
             QuorumController controller = controlEnv.activeController();
-            int recordsBefore = clientEnv.allRecords().size();
+            long recordsBefore = retirementAuthorityRecordCount(clientEnv);
             ControllerRequestContext context = new ControllerRequestContext(
                 new RequestHeaderData().setRequestApiKey((short) 63).setRequestApiVersion((short) 2),
                 KafkaPrincipal.ANONYMOUS, OptionalLong.empty()
@@ -361,8 +362,19 @@ public class QuorumControllerTest {
             ExecutionException failure = assertThrows(ExecutionException.class,
                 () -> controller.processBrokerHeartbeat(context, heartbeat).get(10, TimeUnit.SECONDS));
             assertTrue(failure.getCause() instanceof InvalidRequestException);
-            assertEquals(recordsBefore, clientEnv.allRecords().size());
+            assertEquals(recordsBefore, retirementAuthorityRecordCount(clientEnv));
         }
+    }
+
+    /**
+     * Controller bootstrap may append unrelated feature/registration records
+     * after activeController() returns. Retirement preflight must be proven
+     * non-emitting without racing those independent startup writes.
+     */
+    private static long retirementAuthorityRecordCount(MockRaftClientTestEnv clientEnv) {
+        return clientEnv.allRecords().stream()
+            .filter(record -> record.message() instanceof PartitionRetirementAuthorityRecord)
+            .count();
     }
 
     private static PartitionRetirementCandidatePrecheck.Candidate untrustedRetirementCandidate() {
