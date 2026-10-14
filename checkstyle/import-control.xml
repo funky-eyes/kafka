@@ -41,6 +41,11 @@
 
   <!-- anyone can use public classes -->
   <allow pkg="org.apache.kafka.common" exact-match="true" />
+  <!-- The retirement probe is a version-neutral clients-layer value contract.
+       Do not broaden this to all common.replica imports. -->
+  <allow class="org.apache.kafka.common.replica.PartitionRetirementSourceProbe" exact-match="true" />
+  <allow class="org.apache.kafka.common.replica.PartitionRetirementSourceProbe.Request" exact-match="true" />
+  <allow class="org.apache.kafka.common.replica.PartitionRetirementSourceProbe.Report" exact-match="true" />
   <allow pkg="org.apache.kafka.common.security" />
   <allow pkg="org.apache.kafka.common.serialization" />
   <allow pkg="org.apache.kafka.common.utils" />

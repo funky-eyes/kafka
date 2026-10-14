@@ -3089,3 +3089,45 @@ include relevant new clients and metadata Probe files.
 upgrade, principal trust shortcut, KRaft writer, reference retirement
 or physical COMMITTED deletion. The next transport step must remain
 separate until the corrected SHA establishes 16/16 CI success.
+
+## Batches 149–152 — metadata layer boundary and experimental native heartbeat schema
+
+The primary Shared Storage CI on `f229b4d5` encountered five
+`ImportControl` errors because the new clients-layer
+`PartitionRetirementSourceProbe` values were consumed by
+`QuorumController`, `PartitionRetirementSourceProbeRegistry`
+and their tests without an import-control declaration. The
+dependency exception is now restricted to exactly those three
+classes; global package access remains forbidden. Metadata
+Checkstyle is executed in the early Java 11 compilation preflight
+instead of after large storage and WAL test batches.
+
+A new *unstable version 3* adds optional Kafka protocol tagged
+`SourceWalProbeReport` to `BrokerHeartbeatRequest` and optional
+`SourceWalProbeChallenge` to `BrokerHeartbeatResponse`.
+The report carries immutable TopicId/partition, nonce, cluster,
+broker incarnation, source LeaderEpoch/LogStart/HW/LEO, local
+leadership and WAL mutation/admission revision, and authority
+CAS coordinates. The challenge carries the current registered
+BrokerId/Epoch/Incarnation, Source LeaderEpoch, TopicId/partition,
+nonce and Controller authority coordinates. Legacy v0–v2 fields
+retain their exact schema and tags. Only the request JSON declares
+`latestVersionUnstable`, because the Kafka protocol generator
+rejects that property on responses. Default production
+`ApiVersions` must still cap heartbeat at v2.
+
+Six clients-JUnit serialization tests are added as a mandatory early
+gate: stable/unstable advertised versions; v0–v2 null defaults;
+v3 Source/WAL report and Controller challenge round trips; and
+deterministic rejection of non-null v3 tagged fields serialized
+under v2. The existing Controller/Storage mandatory evidence count
+remains **525 Java/Scala methods / 33 suites**; the six clients wire
+tests are executed and XML-verified separately.
+
+No Broker or Controller handler yet generates or consumes the new
+wire tags. In particular, a self-reported Source/WAL report is not
+an authenticated replica certificate. Unique per-broker credentials,
+registration-incarnation binding, real replayable durable proofs,
+CAS writer, reference retirement and physical COMMITTED GC are all
+still pending. Production remains DENY_ALL; frozen MinIO GA remains
+unchanged.

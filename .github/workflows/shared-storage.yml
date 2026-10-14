@@ -41,6 +41,9 @@ on:
       - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementControlManager.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/QuorumController.java'
       - 'clients/src/main/java/org/apache/kafka/common/replica/PartitionRetirementSourceProbe.java'
+      - 'clients/src/main/resources/common/message/BrokerHeartbeatRequest.json'
+      - 'clients/src/main/resources/common/message/BrokerHeartbeatResponse.json'
+      - 'clients/src/test/java/org/apache/kafka/common/requests/BrokerHeartbeatSourceWalProbeProtocolTest.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirement*.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/PartitionRetirement*.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/QuorumControllerTest.java'
@@ -84,6 +87,7 @@ on:
       - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
       - 'core/src/test/**/kafka/log/**'
       - 'core/src/test/**/kafka/server/**'
+      - 'checkstyle/import-control.xml'
       - 'checkstyle/import-control-shared-storage-s3.xml'
       - 'settings.gradle'
       - '.github/actions/setup-gradle/**'
@@ -109,6 +113,9 @@ on:
       - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementControlManager.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/QuorumController.java'
       - 'clients/src/main/java/org/apache/kafka/common/replica/PartitionRetirementSourceProbe.java'
+      - 'clients/src/main/resources/common/message/BrokerHeartbeatRequest.json'
+      - 'clients/src/main/resources/common/message/BrokerHeartbeatResponse.json'
+      - 'clients/src/test/java/org/apache/kafka/common/requests/BrokerHeartbeatSourceWalProbeProtocolTest.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirement*.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/PartitionRetirement*.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/QuorumControllerTest.java'
@@ -152,6 +159,7 @@ on:
       - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
       - 'core/src/test/**/kafka/log/**'
       - 'core/src/test/**/kafka/server/**'
+      - 'checkstyle/import-control.xml'
       - 'checkstyle/import-control-shared-storage-s3.xml'
       - 'settings.gradle'
       - 'tools/check_shared_storage_minio_test_results.py'
@@ -193,11 +201,40 @@ jobs:
           java-version: 25
           gradle-cache-read-only: true
 
-      - name: Enforce clients Java 11 source compatibility
+      - name: Enforce clients Java 11 and metadata import boundaries
         shell: bash
         run: |
           set -o pipefail
-          ./gradlew :clients:compileJava --no-scan 2>&1 | tee shared-storage-clients-java11.log
+          ./gradlew :clients:compileJava :metadata:checkstyleMain :metadata:checkstyleTest \
+            --no-scan 2>&1 | tee shared-storage-clients-java11.log
+
+      - name: Verify experimental broker heartbeat protocol compatibility
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew :clients:test --no-scan \
+            --tests 'org.apache.kafka.common.requests.BrokerHeartbeatSourceWalProbeProtocolTest' \
+            2>&1 | tee shared-storage-source-probe-wire-test.log
+          python3 - <<'PY'
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+          suite = 'org.apache.kafka.common.requests.BrokerHeartbeatSourceWalProbeProtocolTest'
+          path = Path('clients/build/test-results/test/TEST-' + suite + '.xml')
+          root = ET.parse(path).getroot()
+          expected = {
+              'productionControllerHeartbeatRemainsAtVersionTwo',
+              'legacyRequestVersionsNeverCarrySourceWalReport',
+              'unstableReportRoundTripsWithExactBrokerSourceCoordinates',
+              'unstableControllerChallengeRoundTripsAndLegacyReplyStaysEmpty',
+              'legacyRequestCannotSilentlyDowngradeNonemptyReport',
+              'legacyResponseCannotSilentlyDowngradeNonemptyChallenge'
+          }
+          assert root.get('name') == suite
+          assert all(root.get(field) == '0' for field in ('skipped', 'failures', 'errors'))
+          actual = {case.get('name', '').removesuffix('()') for case in root.findall('testcase')}
+          assert expected <= actual, sorted(expected - actual)
+          print(f'PASS: {len(expected)} broker heartbeat protocol regression methods, zero skips')
+          PY
 
       - name: Run shared storage LogManager startup regression
         shell: bash
@@ -227,7 +264,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          ./gradlew :metadata:checkstyleMain :metadata:checkstyleTest :metadata:test --no-scan \
+          ./gradlew :metadata:test --no-scan \
             --tests 'org.apache.kafka.controller.QuorumControllerTest.testUntrustedRetirementClaimIsRejectedByProductionFeatureWithoutKRaftRecords' \
             --tests 'org.apache.kafka.controller.QuorumControllerTest.testUntrustedRetirementClaimCannotBypassTheSerializedControllerEventQueue' \
             --tests 'org.apache.kafka.controller.QuorumControllerTest.testProbeIssuanceIsDisabledUntilFeatureAndBrokerAuthAreNegotiated' \
@@ -283,6 +320,7 @@ jobs:
           path: |
             shared-storage-logmanager-regression.log
             shared-storage-test.log
+            shared-storage-source-probe-wire-test.log
             shared-storage-controller-retirement-test.log
             shared-storage-retirement-feature-test.log
             shared-storage-s3-test.log
@@ -309,6 +347,8 @@ jobs:
         with:
           name: shared-storage-test-reports
           path: |
+            clients/build/reports/tests/test
+            clients/build/test-results/test
             storage/build/reports/tests/test
             storage/build/test-results/test
             metadata/build/reports/tests/test

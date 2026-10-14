@@ -473,3 +473,58 @@ grant. Production Broker principal allowlist remains DENY_ALL; KRaft
 authority writing, COMMITTED logical reference retirement and
 physical MinIO deletion remain disabled. Frozen MinIO GA stays on
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
+
+## Batches 149–152 — exact ImportControl repair and unstable heartbeat wire reservation
+
+The prior `f229b4d53a4f8a4615923ebe2e85110c3f537bc8` run reached
+real Java 25 storage and MinIO tests, but the main Shared Storage job
+failed during `:metadata:checkstyleMain` and `:metadata:checkstyleTest`:
+five `ImportControl` violations for
+`org.apache.kafka.common.replica.PartitionRetirementSourceProbe` and its
+two nested values. This was a missing dependency-layer allowlist,
+**not** evidence that MinIO, WAL or Controller safety assertions failed.
+
+- **149 — exact ImportControl approval.** Allow only the outer
+  `PartitionRetirementSourceProbe` plus its `Request` and `Report`
+  nested value types from `common.replica` to metadata. Do not
+  broadly enable that package or weaken Checkstyle rules.
+- **150 — fail-fast CI ownership.** Move metadata main/test Checkstyle
+  into the early `:clients:compileJava` preflight, before expensive
+  `core:test`, `storage:test` and MinIO. Remove redundant Checkstyle
+  invocation from the later metadata test command, keep its mandatory
+  JUnit `--tests` selection, and add `import-control.xml` to path triggers.
+- **151 — version-negotiated Kafka-native framing.** Reserve a single,
+  **unstable** v3 `BrokerHeartbeat` tagged field in each direction:
+  `SourceWalProbeReport` (request tag 2, old tags 0/1 unchanged) and
+  `SourceWalProbeChallenge` (response tag 0). Both are optional/nullable.
+  Version v3 is declared **unstable only on the Request specification**
+  per Kafka `MessageSpec` generator contract. Ordinary controller
+  ApiVersions continue to advertise v0–v2; an explicit unstable-features
+  environment can opt into v3. The existing Kafka ApiKey 63 and
+  Controller listener are reused, so there is no speculative new public
+  ApiKey allocation. Legacy field order and semantics are unchanged.
+- **152 — downgrade/roundtrip regression.** Add six focused
+  `clients` tests covering production v2 max, unstable v3 opt-in,
+  optional fields absent from v0–v2, exact v3 report/challenge
+  serialization and explicit rejection of attempts to serialize
+  non-null v3 evidence into a v2 message. Execute the suite as
+  a fail-closed, early Java 25 workflow stage before MinIO.
+
+**Critical limitation:** The v3 schema is a *transport reservation*,
+not a functioning report processor or Controller challenge issuer.
+No Broker sender, KafkaListener handler for the new fields, unique
+network-authenticated per-broker identity or signed durable evidence
+is implemented by this checkpoint. Existing heartbeat code ignores
+these fields even when unstable API versions are enabled.
+`CLUSTER_ACTION` alone is never sufficient provenance.
+`PartitionRetirementBrokerPrincipalPolicy.DENY_ALL` remains active.
+No KRaft authority writer, COMMITTED reference retirement, or physical
+MinIO object deletion is enabled. The frozen MinIO GA release remains
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
+
+**Next:** authenticate the network sender to a unique registered BrokerId
+and incarnation, connect v3 challenge issuance and broker sampling behind
+explicit feature negotiation, and burn the one-time nonce inside the
+serialized Controller event before any KRaft mutation is even considered.
+Then prove old-broker v2 fallback, controller failover and 3-broker
+durability under real MinIO.
