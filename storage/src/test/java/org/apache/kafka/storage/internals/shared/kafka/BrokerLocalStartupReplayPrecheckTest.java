@@ -24,6 +24,8 @@ import org.apache.kafka.common.security.auth.SecurityProtocol;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.storage.internals.log.StorageExtensionBrokerContext;
 import org.apache.kafka.storage.internals.log.StorageExtensionContext;
+import org.apache.kafka.storage.internals.shared.LocalWalDurabilityObservation;
+import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
 import org.apache.kafka.storage.internals.shared.StartupWalReplayCoveragePrecheck;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 
@@ -169,6 +171,30 @@ class BrokerLocalStartupReplayPrecheckTest {
             });
             var result = BrokerLocalStartupReplayPrecheck.assess(
                 extension, leader(extension), log, PARTITION
+            );
+            assertEquals(BrokerLocalStartupReplayPrecheck.Status.LOCAL_WAL_CHANGED, result.status());
+            assertTrue(result.finding().isEmpty());
+        }
+    }
+
+    @Test
+    void changedBackendCompletionSnapshotRejectsOtherwiseStableWalGenerations() throws Exception {
+        try (SharedStorageExtension runtime = started("live-snapshot-drift", false, true)) {
+            SharedStorageExtension extension = mock(SharedStorageExtension.class);
+            SharedStorageEngine storage = mock(SharedStorageEngine.class);
+            var identity = runtime.brokerStartupReplayObservation().orElseThrow();
+            when(extension.brokerStartupReplayObservation()).thenReturn(Optional.of(identity));
+            when(extension.storage()).thenReturn(storage);
+            when(storage.startupWalReplayEvidence()).thenReturn(identity.replay());
+            when(storage.walMutationRevision(PARTITION)).thenReturn(0L);
+            when(storage.walAdmissionRevision(PARTITION)).thenReturn(6L);
+            var changed = mock(LocalWalDurabilityObservation.Snapshot.class);
+            when(storage.liveWalDurabilityObservation(PARTITION)).thenReturn(
+                LocalWalDurabilityObservation.Snapshot.EMPTY, changed
+            );
+
+            var result = BrokerLocalStartupReplayPrecheck.assess(
+                extension, leader(runtime), source(0L, 0L, 0L), PARTITION
             );
             assertEquals(BrokerLocalStartupReplayPrecheck.Status.LOCAL_WAL_CHANGED, result.status());
             assertTrue(result.finding().isEmpty());

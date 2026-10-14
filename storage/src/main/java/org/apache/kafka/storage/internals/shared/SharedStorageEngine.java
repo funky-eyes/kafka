@@ -53,6 +53,7 @@ public final class SharedStorageEngine implements AutoCloseable {
     private final SharedWal wal;
     private final PartitionWalIndex walIndex = new PartitionWalIndex();
     private final StartupWalReplayEvidence startupWalReplayEvidence;
+    private final LocalWalDurabilityObservation liveWalDurability = new LocalWalDurabilityObservation();
     private final RemoteObjectIndex remoteIndex = new RemoteObjectIndex();
     private final LocalRemoteObjectCheckpoint remoteCheckpoint;
     private final ConcurrentLinkedQueue<SharedObjectMetadata> pendingRemoteCheckpoints = new ConcurrentLinkedQueue<>();
@@ -159,8 +160,11 @@ public final class SharedStorageEngine implements AutoCloseable {
         // The backend cannot change the members while the future is pending.
         List<WalRecord> immutableRecords = List.copyOf(records);
         return walIndex.trackDurableWrite(walKey(partition), () ->
-            wal.appendBatch(immutableRecords).thenApply(results ->
-                walIndex.applyDataGroup(immutableRecords, List.copyOf(results))));
+            wal.appendBatch(immutableRecords).thenApply(results -> {
+                List<WalLocation> published = walIndex.applyDataGroup(immutableRecords, List.copyOf(results));
+                liveWalDurability.dataGroupCompleted(partition, published);
+                return published;
+            }));
     }
 
     private static WalLocation validatedLocation(WalRecord record, WalAppendResult result) {
@@ -196,6 +200,7 @@ public final class SharedStorageEngine implements AutoCloseable {
             wal.append(record).thenApply(result -> {
                 WalLocation location = validatedLocation(record, result);
                 walIndex.apply(record, result);
+                liveWalDurability.dataCompleted(partition, location);
                 return location;
             }));
     }
@@ -215,8 +220,9 @@ public final class SharedStorageEngine implements AutoCloseable {
         );
         return walIndex.trackDurableWrite(walKey(partition), () ->
             wal.append(record).thenAccept(result -> {
-                validatedLocation(record, result);
+                WalLocation location = validatedLocation(record, result);
                 walIndex.apply(record, result);
+                liveWalDurability.truncateCompleted(partition, location);
             }));
     }
 
@@ -502,6 +508,15 @@ public final class SharedStorageEngine implements AutoCloseable {
      */
     public StartupWalReplayEvidence startupWalReplayEvidence() {
         return startupWalReplayEvidence;
+    }
+
+    /**
+     * Post-start successful backend WAL durability and index-publication
+     * completions. This is diagnostic only, NOT a replay/fsync certificate
+     * across broker restart or Controller retirement authority.
+     */
+    public LocalWalDurabilityObservation.Snapshot liveWalDurabilityObservation(SharedPartitionId partition) {
+        return liveWalDurability.snapshot(partition);
     }
 
     /**

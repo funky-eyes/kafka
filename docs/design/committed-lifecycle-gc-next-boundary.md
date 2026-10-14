@@ -187,3 +187,29 @@ startup, and an authenticated controller revalidation protocol binding
 real BrokerRegistration with native Kafka LogStart / LeaderEpoch. Reject
 every unverifiable or stale witness; physical COMMITTED object deletion
 remains disabled.
+
+## Batches 121–124: local post-start durable-completion diagnostics
+
+A per-partition, atomically published snapshot now distinguishes WAL
+operations successfully acknowledged by the backend Future and applied
+to the local index from operations still pending or rejected. Copied
+DATA, owned DATA, full DATA groups and TRUNCATE are all counted. A
+failed/partial Future is never positive. The highest logical byte end
+is monotonic across asynchronous completion order, but it is not a
+contiguous Kafka offset horizon.
+
+The startup replay inventory and this post-start completion snapshot
+are deliberately separate: real File/Ring WAL restarts reconstruct
+replay evidence while the new process's live snapshot starts empty.
+The read-only native Source/WAL precheck now also validates the
+identity of the immutable CAS completion snapshot across the capture.
+This strengthens local fail-closed behavior without changing any
+native Kafka source offsets, KRaft state or object storage.
+
+**Next actual P0 gate:** bind a backend-originated persistent/replay
+range to native Kafka LeaderEpoch/LogStart and the *current* KRaft
+BrokerRegistration in a Controller-serialized event, including crash,
+leader-change and incarnation ABA tests. Until that contract exists,
+a local completed Future is NOT a distributed certification or a
+COMMITTED object-delete permission. Keep the frozen MinIO GA release
+branch untouched and physical deletion disabled.

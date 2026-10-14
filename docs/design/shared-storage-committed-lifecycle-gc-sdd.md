@@ -2749,3 +2749,51 @@ future WAL fsync, Kafka source-log provenance across LeaderEpoch or
 a stable Controller event-queue CAS. These findings must not be sent as
 KRaft retirement authorization. No metadata writer, logical reference
 retirement or physical COMMITTED deletion is enabled.
+
+## Batch 121: observe successful live WAL durability futures after index publication
+
+The existing local WAL admission generation intentionally tracks *pending*
+work rather than reporting successful completions or logical addresses.
+`LocalWalDurabilityObservation` now separately records only successful,
+backend-returned WAL logical locations after both the `SharedWal`
+durability Future and its index-publication continuation have completed.
+A per-partition immutable CAS snapshot reports DATA batch count, DATA
+group count, TRUNCATE count and the highest observed successful WAL end.
+
+## Batch 122: fail closed on failed groups and non-durable operations
+
+The copied and owned DATA append path, owned batch-group path and
+TRUNCATE path record observations only after valid WAL result length and
+successful local index application. A pending Future, failed force,
+invalid backend result or incomplete/partial group produces no positive
+completion observation. Synchronous backend errors also never fabricate
+one. Observations are per-partition and completion-ordered by a
+monotonic logical maximum, not by a last-writer assignment.
+
+## Batch 123: prove reboot resets live observations on real File/Ring WAL
+
+Real File and Ring WAL append/close/reopen tests distinguish a successful
+post-start durability Future from the next process's startup replay.
+The new process starts with an empty *live* completion snapshot and may
+only rebuild its immutable startup replay evidence from backend recovery.
+No live observation is persisted, transferable or reusable after an
+incarnation restart. Immutable earlier snapshots are not mutated.
+
+## Batch 124: recheck live completion snapshots across native source capture
+
+The existing read-only local Broker/source/replay classification now
+compares the identity of its CAS-published live completion snapshot
+before/after source and index observation. It invalidates the finding
+if that snapshot was replaced, even when separately mocked WAL
+admission/mutation generations remain constant. A regression case
+simulates precisely this torn-view gap. Eleven deterministic tests
+increase the strict named Java/Scala inventory from **413 to 424**
+methods across **28 suites**.
+
+**Trust limit:** a SharedWal successful Future is a backend's local
+durability contract for this process, not proof that any range survives
+another broker's failure or remains recoverable after local WAL
+reclamation. Highest successful WAL end is NOT contiguous Kafka DATA
+coverage, replicated HW, a stable native Source LogStart, KRaft
+Controller registration, or a signed authority receipt. No KRaft
+retirement authority writer or COMMITTED physical GC has been enabled.

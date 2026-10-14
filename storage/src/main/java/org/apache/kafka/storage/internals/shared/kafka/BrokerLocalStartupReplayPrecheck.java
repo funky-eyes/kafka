@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.storage.internals.shared.kafka;
 
+import org.apache.kafka.storage.internals.shared.LocalWalDurabilityObservation;
 import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
 import org.apache.kafka.storage.internals.shared.StartupWalReplayCoveragePrecheck;
 import org.apache.kafka.storage.internals.shared.StartupWalReplayCoveragePrecheck.Finding;
@@ -90,6 +91,7 @@ public final class BrokerLocalStartupReplayPrecheck {
     ) throws IOException {
         long mutationBefore = storage.walMutationRevision(partition);
         long admissionBefore = storage.walAdmissionRevision(partition);
+        LocalWalDurabilityObservation.Snapshot completedBefore = storage.liveWalDurabilityObservation(partition);
         if (mutationBefore < 0L || admissionBefore < 0L) {
             return rejected(Status.LOCAL_WAL_IN_FLIGHT);
         }
@@ -113,7 +115,7 @@ public final class BrokerLocalStartupReplayPrecheck {
         if (!sameSourceObservation(source, second)) {
             return rejected(Status.NATIVE_SOURCE_CHANGED);
         }
-        if (!sameWalGeneration(storage, partition, admissionBefore, mutationBefore)) {
+        if (!sameWalGeneration(storage, partition, admissionBefore, mutationBefore, completedBefore)) {
             return rejected(Status.LOCAL_WAL_CHANGED);
         }
         // Compare exact process-local identity: a revoke/ABA callback
@@ -138,12 +140,16 @@ public final class BrokerLocalStartupReplayPrecheck {
         SharedStorageEngine storage,
         SharedPartitionId partition,
         long admissionBefore,
-        long mutationBefore
+        long mutationBefore,
+        LocalWalDurabilityObservation.Snapshot completedBefore
     ) {
         long admissionAfter = storage.walAdmissionRevision(partition);
         long mutationAfter = storage.walMutationRevision(partition);
+        // The immutable CAS-published completion observation must not be
+        // replaced while Kafka source identity and offsets are sampled.
         return admissionAfter >= 0L && mutationAfter >= 0L
-            && admissionAfter == admissionBefore && mutationAfter == mutationBefore;
+            && admissionAfter == admissionBefore && mutationAfter == mutationBefore
+            && storage.liveWalDurabilityObservation(partition) == completedBefore;
     }
 
     private static Assessment rejected(Status status) {

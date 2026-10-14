@@ -180,6 +180,18 @@ REQUIRED_TESTS = {
         "overlappingWalAdmissionsRequireEveryFutureToFinish",
         "synchronousNullWalFutureFailsClosedAndReleasesAdmission",
     ),
+    "org.apache.kafka.storage.internals.shared.LocalWalDurabilityObservationTest": (
+        "pendingDataFutureDoesNotPublishAFalseDurabilityCompletion",
+        "failedDurabilityFutureNeverCreatesALiveSuccessReceipt",
+        "malformedDurableWalResultCannotCreateAReceiptOrIndex",
+        "ownedDataGroupCountsOnlyAfterTheWholeDurableGroupPublishes",
+        "rejectedPartialGroupResultsCannotClaimDurableDataCoverage",
+        "truncateSuccessIsCountedOnlyAfterTruncateIndexPublication",
+        "outOfOrderDurabilityCompletionsNeverMoveLogicalMaximumBackwards",
+        "anotherPartitionCannotInheritDurableCompletionCounts",
+        "restartTurnsPreviouslyCompletedWritesIntoReplayNotLiveCompletions",
+        "ringBackendDurableFuturePublishesLiveReceiptButNotStartupReplay",
+    ),
     "org.apache.kafka.storage.internals.shared.StartupWalReplayCoveragePrecheckTest": (
         "exactRecoveredRecordBatchWindowIsLocallyCovered",
         "gappedKafkaBatchOffsetsCannotBeCalledCompleteRecovery",
@@ -214,6 +226,7 @@ REQUIRED_TESTS = {
         "localLeaderDemotionDuringCaptureDiscardsTheRecoveredWindow",
         "walAdmissionDuringNativeSourceReadInvalidatesRecoveryObservation",
         "kafkaTopicIncarnationMismatchCannotClaimReplayedPartition",
+        "changedBackendCompletionSnapshotRejectsOtherwiseStableWalGenerations",
     ),
     "org.apache.kafka.storage.internals.shared.kafka.SharedStorageExtensionWalRuntimeTest": (
         "defaultRuntimeActuallyStartsRingWal",
