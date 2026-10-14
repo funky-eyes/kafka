@@ -213,3 +213,26 @@ leader-change and incarnation ABA tests. Until that contract exists,
 a local completed Future is NOT a distributed certification or a
 COMMITTED object-delete permission. Keep the frozen MinIO GA release
 branch untouched and physical deletion disabled.
+
+## Batches 125–128: current WAL DATA coverage without inventing a certificate
+
+The broker may now inspect **current** index-resident DATA batches,
+including genuine startup-replayed bytes and live writes that crossed
+the backend's durable Future and index-publication continuation. The
+window checker requires contiguous Kafka offset coverage with intact
+RecordBatch boundaries; it does not confuse monotonic WAL addresses
+with contiguous Kafka offsets. File/Ring, TRUNCATE, error, gap and
+cross-partition regression cases are mandatory.
+
+The broker-local native-source/identity precheck exposes separate
+read-only STARTUP and CURRENT findings. Both require the same stable
+broker-ready incarnation object, two native Kafka source snapshots,
+unchanged local leadership, WAL mutation/admission generations and
+the immutable live-durability snapshot.
+
+A successful CURRENT finding is **not** an authenticated
+distributed durability certificate. The next implementation milestone
+must cross the current Controller BrokerRegistration, source-log-start
+provenance and committed KRaft event boundary, with well-defined
+attestation expiry and fail-closed restart/ABA semantics. All
+retirement authority writes and physical COMMITTED deletes stay off.

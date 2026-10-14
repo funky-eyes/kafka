@@ -359,6 +359,22 @@ public final class SharedStorageEngine implements AutoCloseable {
         }
     }
 
+    /**
+     * Current local-WAL Kafka batch coverage, including both startup replayed
+     * records and live successful WAL Future/index publications. Diagnostic
+     * only: no replicated WAL, source ownership or Controller CAS proof.
+     */
+    public CurrentLocalWalCoveragePrecheck.Finding localDurableWindowCoverage(
+        SharedPartitionId partition,
+        long sourceLogStart,
+        long sourceHighWatermark
+    ) {
+        return CurrentLocalWalCoveragePrecheck.assess(
+            localLocations(partition, sourceLogStart, sourceHighWatermark),
+            sourceLogStart, sourceHighWatermark
+        );
+    }
+
     public List<WalRecord> readLocalLocations(List<WalLocation> locations) throws IOException {
         Objects.requireNonNull(locations, "locations");
         synchronized (walMaintenanceLock) {

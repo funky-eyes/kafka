@@ -24,6 +24,7 @@ import org.apache.kafka.common.security.auth.SecurityProtocol;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.storage.internals.log.StorageExtensionBrokerContext;
 import org.apache.kafka.storage.internals.log.StorageExtensionContext;
+import org.apache.kafka.storage.internals.shared.CurrentLocalWalCoveragePrecheck;
 import org.apache.kafka.storage.internals.shared.LocalWalDurabilityObservation;
 import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
 import org.apache.kafka.storage.internals.shared.StartupWalReplayCoveragePrecheck;
@@ -211,6 +212,125 @@ class BrokerLocalStartupReplayPrecheckTest {
             );
             assertEquals(BrokerLocalStartupReplayPrecheck.Status.NATIVE_SOURCE_UNAVAILABLE, result.status());
             assertTrue(result.finding().isEmpty());
+        }
+    }
+
+    @Test
+    void startupOnlyAndCurrentDurableClassificationsStayDistinctForMixedWal() throws Exception {
+        try (SharedStorageExtension extension = started("mixed-live-current", true, true)) {
+            extension.storage().appendData(
+                PARTITION, 8, 10L, 19L, ByteBuffer.wrap(new byte[]{2})
+            ).join();
+            SharedPartitionRoleListener roles = leader(extension);
+            SharedUnifiedLog log = source(0L, 20L, 20L);
+            var startup = BrokerLocalStartupReplayPrecheck.assess(extension, roles, log, PARTITION);
+            assertEquals(BrokerLocalStartupReplayPrecheck.Status.REPLAY_WINDOW_CLASSIFIED, startup.status());
+            assertEquals(StartupWalReplayCoveragePrecheck.Finding.POST_START_WAL_BATCH,
+                startup.finding().orElseThrow());
+
+            var current = BrokerLocalStartupReplayPrecheck.assessCurrent(extension, roles, log, PARTITION);
+            assertEquals(BrokerLocalStartupReplayPrecheck.Status.CURRENT_WINDOW_CLASSIFIED, current.status());
+            assertEquals(CurrentLocalWalCoveragePrecheck.Finding.INDEXED_BATCH_WINDOW,
+                current.finding().orElseThrow());
+        }
+    }
+
+    @Test
+    void currentDurableCoverageCanContainOnlySuccessfulPostStartWrites() throws Exception {
+        try (SharedStorageExtension extension = started("only-live-current", false, true)) {
+            extension.storage().appendOwnedData(
+                PARTITION, 8, 0L, 9L, ByteBuffer.wrap(new byte[]{2})
+            ).join();
+            var current = BrokerLocalStartupReplayPrecheck.assessCurrent(
+                extension, leader(extension), source(0L, 10L, 10L), PARTITION
+            );
+            assertEquals(BrokerLocalStartupReplayPrecheck.Status.CURRENT_WINDOW_CLASSIFIED, current.status());
+            assertEquals(CurrentLocalWalCoveragePrecheck.Finding.INDEXED_BATCH_WINDOW,
+                current.finding().orElseThrow());
+            assertEquals(0L, extension.storage().startupWalReplayEvidence().replayedRecords());
+        }
+    }
+
+    @Test
+    void currentDurableFindingCannotBorrowUnwrittenKafkaOffsetGaps() throws Exception {
+        try (SharedStorageExtension extension = started("gap-live-current", true, true)) {
+            extension.storage().appendData(
+                PARTITION, 8, 20L, 29L, ByteBuffer.wrap(new byte[]{2})
+            ).join();
+            var current = BrokerLocalStartupReplayPrecheck.assessCurrent(
+                extension, leader(extension), source(0L, 30L, 30L), PARTITION
+            );
+            assertEquals(BrokerLocalStartupReplayPrecheck.Status.CURRENT_WINDOW_CLASSIFIED, current.status());
+            assertEquals(CurrentLocalWalCoveragePrecheck.Finding.KAFKA_BATCH_GAP_OR_OVERLAP,
+                current.finding().orElseThrow());
+        }
+    }
+
+    @Test
+    void nativeSourceChangeRevokesCurrentDurableWindowBeforeReturning() throws Exception {
+        try (SharedStorageExtension extension = started("current-native-change", true, true)) {
+            SharedUnifiedLog log = source(0L, 10L, 10L);
+            when(log.captureNativeSourceWindow()).thenReturn(
+                Optional.of(new SharedUnifiedLog.NativeSourceWindow(0L, 10L, 10L)),
+                Optional.of(new SharedUnifiedLog.NativeSourceWindow(0L, 10L, 11L))
+            );
+            var current = BrokerLocalStartupReplayPrecheck.assessCurrent(
+                extension, leader(extension), log, PARTITION
+            );
+            assertEquals(BrokerLocalStartupReplayPrecheck.Status.NATIVE_SOURCE_CHANGED, current.status());
+            assertTrue(current.finding().isEmpty());
+        }
+    }
+
+    @Test
+    void incarnationAbaCannotAuthorizeCurrentLocalWalCoverage() throws Exception {
+        try (SharedStorageExtension extension = started("current-aba", true, true)) {
+            SharedUnifiedLog log = source(0L, 10L, 10L);
+            AtomicInteger captures = new AtomicInteger();
+            when(log.captureNativeSourceWindow()).thenAnswer(invocation -> {
+                if (captures.getAndIncrement() == 0) {
+                    extension.onBrokerReady(registered(55L, new Uuid(15L, 16L))).join();
+                    extension.onBrokerReady(registered(54L, new Uuid(10L, 11L))).join();
+                }
+                return Optional.of(new SharedUnifiedLog.NativeSourceWindow(0L, 10L, 10L));
+            });
+            var current = BrokerLocalStartupReplayPrecheck.assessCurrent(
+                extension, leader(extension), log, PARTITION
+            );
+            assertEquals(BrokerLocalStartupReplayPrecheck.Status.BROKER_IDENTITY_REVOKED, current.status());
+            assertTrue(current.finding().isEmpty());
+        }
+    }
+
+    @Test
+    void completedWalAppendDuringNativeCaptureInvalidatesCurrentFinding() throws Exception {
+        try (SharedStorageExtension extension = started("current-wal-drift", true, true)) {
+            SharedUnifiedLog log = source(0L, 10L, 10L);
+            AtomicInteger captures = new AtomicInteger();
+            when(log.captureNativeSourceWindow()).thenAnswer(invocation -> {
+                if (captures.getAndIncrement() == 0) {
+                    extension.storage().appendData(
+                        PARTITION, 8, 10L, 19L, ByteBuffer.wrap(new byte[]{2})
+                    ).join();
+                }
+                return Optional.of(new SharedUnifiedLog.NativeSourceWindow(0L, 10L, 10L));
+            });
+            var current = BrokerLocalStartupReplayPrecheck.assessCurrent(
+                extension, leader(extension), log, PARTITION
+            );
+            assertEquals(BrokerLocalStartupReplayPrecheck.Status.LOCAL_WAL_CHANGED, current.status());
+            assertTrue(current.finding().isEmpty());
+        }
+    }
+
+    @Test
+    void currentCoverageRequiresBrokerReadyIdentityEvenWhenWalIndexIsComplete() throws Exception {
+        try (SharedStorageExtension extension = started("current-unbound", true, false)) {
+            var current = BrokerLocalStartupReplayPrecheck.assessCurrent(
+                extension, leader(extension), source(0L, 10L, 10L), PARTITION
+            );
+            assertEquals(BrokerLocalStartupReplayPrecheck.Status.BROKER_IDENTITY_UNAVAILABLE, current.status());
+            assertTrue(current.finding().isEmpty());
         }
     }
 

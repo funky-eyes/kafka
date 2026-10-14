@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.storage.internals.shared.kafka;
 
+import org.apache.kafka.storage.internals.shared.CurrentLocalWalCoveragePrecheck;
 import org.apache.kafka.storage.internals.shared.LocalWalDurabilityObservation;
 import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
 import org.apache.kafka.storage.internals.shared.StartupWalReplayCoveragePrecheck;
@@ -28,8 +29,9 @@ import java.util.Optional;
 
 /**
  * Read-only local join of (1) the real broker-ready incarnation pairing,
- * (2) two native Kafka source samples and (3) actual startup WAL DATA
- * ranges still visible in the local index.
+ * (2) two native Kafka source samples and (3) local WAL DATA batches.
+ * Startup-replay-only and current durable-index observations share the same
+ * broker incarnation, source and WAL mutation/admission fences.
  *
  * <p>No result is an authenticated cross-broker durability certificate.
  * Controller registration, metadata quorum, replica persistence, reader
@@ -46,7 +48,8 @@ public final class BrokerLocalStartupReplayPrecheck {
         LOCAL_WAL_IN_FLIGHT,
         LOCAL_WAL_CHANGED,
         BROKER_IDENTITY_REVOKED,
-        REPLAY_WINDOW_CLASSIFIED
+        REPLAY_WINDOW_CLASSIFIED,
+        CURRENT_WINDOW_CLASSIFIED
     }
 
     public record Assessment(Status status, Optional<Finding> finding) {
@@ -59,36 +62,91 @@ public final class BrokerLocalStartupReplayPrecheck {
         }
     }
 
+    /** Current indexed coverage is distinct from a successful startup replay. */
+    public record CurrentAssessment(
+        Status status,
+        Optional<CurrentLocalWalCoveragePrecheck.Finding> finding
+    ) {
+        public CurrentAssessment {
+            Objects.requireNonNull(status, "status");
+            Objects.requireNonNull(finding, "finding");
+            if ((status == Status.CURRENT_WINDOW_CLASSIFIED) != finding.isPresent()) {
+                throw new IllegalArgumentException("Current WAL coverage requires stable local inputs");
+            }
+        }
+    }
+
+    private record Observation<T>(Status status, Optional<T> finding) {
+    }
+
+    @FunctionalInterface
+    private interface WindowClassifier<T> {
+        T classify(
+            BrokerStartupReplayObservation identity,
+            SharedStorageEngine storage,
+            SharedPartitionId partition,
+            SharedUnifiedLog.NativeSourceWindow sourceWindow
+        );
+    }
+
     static Assessment assess(
         SharedStorageExtension extension,
         SharedPartitionRoleListener roles,
         SharedUnifiedLog sourceLog,
         SharedPartitionId partition
     ) throws IOException {
-        Objects.requireNonNull(extension, "extension");
-        Objects.requireNonNull(roles, "roles");
-        Objects.requireNonNull(sourceLog, "sourceLog");
-        Objects.requireNonNull(partition, "partition");
-        var identity = extension.brokerStartupReplayObservation();
-        if (identity.isEmpty()) {
-            return rejected(Status.BROKER_IDENTITY_UNAVAILABLE);
-        }
-
-        SharedStorageEngine storage = extension.storage();
-        if (identity.get().replay() != storage.startupWalReplayEvidence()) {
-            return rejected(Status.BROKER_IDENTITY_REVOKED);
-        }
-        return assessLocal(extension, identity.get(), storage, roles, sourceLog, partition);
+        Observation<Finding> result = evaluate(
+            extension, roles, sourceLog, partition, Status.REPLAY_WINDOW_CLASSIFIED,
+            (identity, storage, key, window) -> StartupWalReplayCoveragePrecheck.assess(
+                identity.replay(), key,
+                storage.localLocations(key, window.logStartOffset(), window.highWatermark()),
+                window.logStartOffset(), window.highWatermark()
+            )
+        );
+        return new Assessment(result.status(), result.finding());
     }
 
-    private static Assessment assessLocal(
+    /**
+     * Read-only current durable-index coverage includes recovered and newly
+     * successful WAL appends. It is NOT authenticated Controller evidence.
+     */
+    static CurrentAssessment assessCurrent(
         SharedStorageExtension extension,
-        BrokerStartupReplayObservation identity,
-        SharedStorageEngine storage,
         SharedPartitionRoleListener roles,
         SharedUnifiedLog sourceLog,
         SharedPartitionId partition
     ) throws IOException {
+        Observation<CurrentLocalWalCoveragePrecheck.Finding> result = evaluate(
+            extension, roles, sourceLog, partition, Status.CURRENT_WINDOW_CLASSIFIED,
+            (identity, storage, key, window) -> storage.localDurableWindowCoverage(
+                key, window.logStartOffset(), window.highWatermark()
+            )
+        );
+        return new CurrentAssessment(result.status(), result.finding());
+    }
+
+    private static <T> Observation<T> evaluate(
+        SharedStorageExtension extension,
+        SharedPartitionRoleListener roles,
+        SharedUnifiedLog sourceLog,
+        SharedPartitionId partition,
+        Status successStatus,
+        WindowClassifier<T> classifier
+    ) throws IOException {
+        Objects.requireNonNull(extension, "extension");
+        Objects.requireNonNull(roles, "roles");
+        Objects.requireNonNull(sourceLog, "sourceLog");
+        Objects.requireNonNull(partition, "partition");
+        Objects.requireNonNull(classifier, "classifier");
+        var paired = extension.brokerStartupReplayObservation();
+        if (paired.isEmpty()) {
+            return rejected(Status.BROKER_IDENTITY_UNAVAILABLE);
+        }
+        SharedStorageEngine storage = extension.storage();
+        BrokerStartupReplayObservation identity = paired.get();
+        if (identity.replay() != storage.startupWalReplayEvidence()) {
+            return rejected(Status.BROKER_IDENTITY_REVOKED);
+        }
         long mutationBefore = storage.walMutationRevision(partition);
         long admissionBefore = storage.walAdmissionRevision(partition);
         LocalWalDurabilityObservation.Snapshot completedBefore = storage.liveWalDurabilityObservation(partition);
@@ -102,11 +160,7 @@ public final class BrokerLocalStartupReplayPrecheck {
         }
         var source = first.get();
         var windows = source.offsets();
-        Finding recovered = StartupWalReplayCoveragePrecheck.assess(
-            identity.replay(), partition,
-            storage.localLocations(partition, windows.logStartOffset(), windows.highWatermark()),
-            windows.logStartOffset(), windows.highWatermark()
-        );
+        T covered = classifier.classify(identity, storage, partition, windows);
 
         // A second observation must represent exactly the same Kafka source
         // window. An advancing HW/LEO is safe for other read paths but not
@@ -123,7 +177,7 @@ public final class BrokerLocalStartupReplayPrecheck {
         if (extension.brokerStartupReplayObservation().orElse(null) != identity) {
             return rejected(Status.BROKER_IDENTITY_REVOKED);
         }
-        return new Assessment(Status.REPLAY_WINDOW_CLASSIFIED, Optional.of(recovered));
+        return new Observation<>(successStatus, Optional.of(Objects.requireNonNull(covered, "window finding")));
     }
 
     private static boolean sameSourceObservation(
@@ -152,7 +206,7 @@ public final class BrokerLocalStartupReplayPrecheck {
             && storage.liveWalDurabilityObservation(partition) == completedBefore;
     }
 
-    private static Assessment rejected(Status status) {
-        return new Assessment(status, Optional.empty());
+    private static <T> Observation<T> rejected(Status status) {
+        return new Observation<>(status, Optional.empty());
     }
 }

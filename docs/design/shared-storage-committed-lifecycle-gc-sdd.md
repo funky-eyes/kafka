@@ -2797,3 +2797,61 @@ reclamation. Highest successful WAL end is NOT contiguous Kafka DATA
 coverage, replicated HW, a stable native Source LogStart, KRaft
 Controller registration, or a signed authority receipt. No KRaft
 retirement authority writer or COMMITTED physical GC has been enabled.
+
+## Batch 125: current locally durable Kafka RecordBatch coverage
+
+The initial `StartupWalReplayCoveragePrecheck` deliberately rejected
+records written after this process's startup, even if their WAL Future
+successfully completed. A separate
+`CurrentLocalWalCoveragePrecheck` now classifies exactly aligned,
+gap-free Kafka RecordBatch ranges in the current `PartitionWalIndex`.
+The `SharedStorageEngine.localDurableWindowCoverage` entrypoint obtains
+its input from the actual WAL index rather than a caller-provided list.
+Every indexed entry was admitted via successful WAL replay or a completed
+backend durability Future followed by successful index publication.
+
+A positive local result requires full batch-aligned coverage of
+LogStart..HW, never just a maximum WAL logical address, a count of
+acknowledgments, or an implicit assumption that gaps are covered.
+A distinct EMPTY_SOURCE_WINDOW is not a positive DATA proof.
+
+## Batch 126: mix startup replay and post-start durable WAL without duplicating indexes
+
+Thirteen direct and real-backend regressions cover Kafka gaps,
+overlaps, partial first/last batches, missing tails, unfinished/failed
+durability Futures, cross-partition physical-WAL interleaving, true
+File WAL close/restart plus newly durably appended data, Ring WAL
+per-partition separation and durable TRUNCATE eviction.
+The current index is reused: there is no second unbounded per-batch
+provenance table.
+
+## Batch 127: apply exactly the existing Broker/native Source/WAL fences
+
+`BrokerLocalStartupReplayPrecheck` gains a separate
+`assessCurrent` result type. Both startup-only and current-local
+coverage share one generic read-only double-capture sequence over
+Kafka's native LogStart/HW/LEO, role generation and LeaderEpoch.
+It also rechecks the initial broker-ready incarnation pairing, WAL
+destructive generation, in-flight admission generation and immutable
+live-durability completion snapshot.
+
+A current-local finding is not a startup-replay finding; neither is
+a Controller-issued attestation or a usable retirement permit.
+
+## Batch 128: isolate local ABA / stale Source / pending WAL cases
+
+Seven integration-style tests cover recovery+live windows, exclusively
+live durable windows, offset gaps, changed native Source samples,
+re-registration/Incarnation ABA, append completion during capture
+and missing broker-ready registration. A fence violation discards the
+finding even when the WAL index would otherwise cover the window.
+Strict required Java/JUnit inventory grows from **424 to 444 methods**
+across **29 suites**.
+
+**P0/GC still blocked:** all observations are process-local. This does
+not prove which replicas must retain Kafka's committed bytes, freshness
+of Controller BrokerRegistration, metadata quorum applied position,
+replicated/fsynced recoverability after broker loss, or a serialized
+KRaft authority CAS. Never use a local complete interval to authorize
+COMMITTED physical-object GC. No Controller record emitter or physical
+delete path was enabled; the frozen MinIO GA candidate remains separate.
