@@ -736,16 +736,19 @@ class BrokerLocalStartupReplayPrecheckTest {
             leader(extension);
             var tasks = new ArrayDeque<Runnable>();
             AtomicInteger lookups = new AtomicInteger();
+            SharedUnifiedLog log = source(0L, 10L, 10L);
             var sampler = extension.readOnlySourceWalSampler(challenge -> {
                 lookups.incrementAndGet();
-                return Optional.of(sourceUnchecked(0L, 10L, 10L));
+                return Optional.of(log);
             }, tasks::add);
             var future = sampler.apply(probe());
             assertFalse(future.isDone());
             assertEquals(0, lookups.get());
             assertEquals(1, tasks.size());
-            tasks.removeFirst().run();
-            assertEquals(1, lookups.get());
+            Thread worker = new Thread(tasks.removeFirst(), "source-wal-test-worker");
+            worker.start();
+            worker.join();
+            assertEquals(2, lookups.get());
             assertEquals(probe(), future.join().orElseThrow().request());
         }
     }
@@ -754,12 +757,13 @@ class BrokerLocalStartupReplayPrecheckTest {
     void asyncSamplerNeverTurnsMissingLogOrClosedExtensionIntoEvidence() throws Exception {
         try (SharedStorageExtension extension = started("adapter-missing", true, true)) {
             leader(extension);
+            Executor worker = command -> new Thread(command, "source-wal-empty-test").start();
             var sampler = extension.readOnlySourceWalSampler(
-                challenge -> Optional.empty(), Runnable::run
+                challenge -> Optional.empty(), worker
             );
             assertTrue(sampler.apply(probe()).join().isEmpty());
             var closedSampler = extension.readOnlySourceWalSampler(
-                challenge -> Optional.of(sourceUnchecked(0L, 10L, 10L)), Runnable::run
+                challenge -> Optional.of(sourceUnchecked(0L, 10L, 10L)), worker
             );
             extension.close();
             assertTrue(closedSampler.apply(probe()).join().isEmpty());
@@ -793,9 +797,103 @@ class BrokerLocalStartupReplayPrecheckTest {
                 Optional.of(new SharedUnifiedLog.NativeSourceWindow(0L, 11L, 11L))
             );
             var sampler = extension.readOnlySourceWalSampler(
-                challenge -> Optional.of(log), Runnable::run
+                challenge -> Optional.of(log),
+                command -> new Thread(command, "source-wal-drift-test").start()
             );
             assertTrue(sampler.apply(probe()).join().isEmpty());
+        }
+    }
+
+    @Test
+    void inlineExecutorCannotSampleNativeWalOnHeartbeatCallerThread() throws Exception {
+        try (SharedStorageExtension extension = started("adapter-inline", true, true)) {
+            leader(extension);
+            AtomicInteger lookups = new AtomicInteger();
+            var sampler = extension.readOnlySourceWalSampler(challenge -> {
+                lookups.incrementAndGet();
+                return Optional.of(sourceUnchecked(0L, 10L, 10L));
+            }, Runnable::run);
+            var rejected = assertThrows(CompletionException.class, () -> sampler.apply(probe()).join());
+            assertTrue(rejected.getCause() instanceof IllegalStateException);
+            assertEquals(0, lookups.get());
+        }
+    }
+
+    @Test
+    void nativeLogReplacementBetweenReadAndReturnRevokesCapturedEvidence() throws Exception {
+        try (SharedStorageExtension extension = started("adapter-replaced", true, true)) {
+            leader(extension);
+            SharedUnifiedLog first = source(0L, 10L, 10L);
+            SharedUnifiedLog replacement = source(0L, 10L, 10L);
+            AtomicInteger lookups = new AtomicInteger();
+            var sampler = extension.readOnlySourceWalSampler(challenge ->
+                Optional.of(lookups.getAndIncrement() == 0 ? first : replacement),
+                command -> new Thread(command, "source-wal-replace-test").start()
+            );
+            assertTrue(sampler.apply(probe()).join().isEmpty());
+            assertEquals(2, lookups.get());
+        }
+    }
+
+    @Test
+    void localReplicaRemovedAfterNativeReadCannotYieldCurrentEvidence() throws Exception {
+        try (SharedStorageExtension extension = started("adapter-removed", true, true)) {
+            leader(extension);
+            SharedUnifiedLog log = source(0L, 10L, 10L);
+            AtomicInteger lookups = new AtomicInteger();
+            var sampler = extension.readOnlySourceWalSampler(challenge ->
+                lookups.getAndIncrement() == 0 ? Optional.of(log) : Optional.empty(),
+                command -> new Thread(command, "source-wal-removal-test").start()
+            );
+            assertTrue(sampler.apply(probe()).join().isEmpty());
+            assertEquals(2, lookups.get());
+        }
+    }
+
+    @Test
+    void stableCurrentLogIdentitySurvivesDoubleLookupWithoutForgingProof() throws Exception {
+        try (SharedStorageExtension extension = started("adapter-stable", true, true)) {
+            leader(extension);
+            SharedUnifiedLog log = source(0L, 10L, 10L);
+            AtomicInteger lookups = new AtomicInteger();
+            var sampler = extension.readOnlySourceWalSampler(challenge -> {
+                lookups.incrementAndGet();
+                return Optional.of(log);
+            }, command -> new Thread(command, "source-wal-stable-test").start());
+            var observed = sampler.apply(probe()).join().orElseThrow();
+            assertEquals(probe(), observed.request());
+            assertEquals(2, lookups.get());
+        }
+    }
+
+    @Test
+    void brokerReadyIdentityRevokedDuringSecondLookupInvalidatesEvidence() throws Exception {
+        try (SharedStorageExtension extension = started("adapter-post-identity-revoke", true, true)) {
+            leader(extension);
+            SharedUnifiedLog log = source(0L, 10L, 10L);
+            AtomicInteger lookups = new AtomicInteger();
+            var sampler = extension.readOnlySourceWalSampler(challenge -> {
+                if (lookups.incrementAndGet() == 2) {
+                    extension.onBrokerReady(registered(55L, new Uuid(15L, 16L))).join();
+                }
+                return Optional.of(log);
+            }, command -> new Thread(command, "source-wal-revoked-test").start());
+            assertTrue(sampler.apply(probe()).join().isEmpty());
+            assertEquals(2, lookups.get());
+            assertTrue(extension.brokerStartupReplayObservation().isEmpty());
+        }
+    }
+
+    @Test
+    void nullCurrentLogLookupCannotBecomePositiveReport() throws Exception {
+        try (SharedStorageExtension extension = started("adapter-null-lookup", true, true)) {
+            leader(extension);
+            var sampler = extension.readOnlySourceWalSampler(
+                challenge -> null,
+                command -> new Thread(command, "source-wal-null-test").start()
+            );
+            var failure = assertThrows(CompletionException.class, () -> sampler.apply(probe()).join());
+            assertTrue(failure.getCause() instanceof NullPointerException);
         }
     }
 

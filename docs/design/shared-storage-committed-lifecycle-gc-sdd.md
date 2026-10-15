@@ -3458,3 +3458,54 @@ evidence now totals **557 methods across 34 suites**,
 plus four independently XML-enforced BrokerServer
 resolution tests. Frozen MinIO GA and all COMMITTED
 logical/physical deletion gates remain unchanged.
+
+## Batches 181–184 — exact SpotBugs finding and double-fenced native capture
+
+At `00ed9ee1` the development workflows finished
+**16 SUCCESS / 1 FAILURE**. The main Storage Java 25 job
+passed Java 11, metadata Checkstyle/SpotBugs, clients
+protocol, broker challenge/capture JUnit, and the core
+BrokerServer tests. It failed only at
+`:storage:spotbugsMain` due to
+**BC_VACUOUS_INSTANCEOF**, at
+`SharedStorageExtension.java:196` in a redundant
+`SharedPartitionRoleListener` type guard.
+The field is now the concrete extension-owned listener
+with an explicit non-null check; the external
+`StoragePartitionRoleListener` contract is unchanged.
+The static rule remains enabled.
+
+An asynchronous sampler must not trust a native Source/WAL
+claim when its `SharedUnifiedLog` has been replaced or
+removed after the existing native/WAL source precheck.
+The sampler now re-resolves the current log and checks
+the **same Java object reference** before accepting a
+diagnostic report; a missing or different source refuses
+the result even if offset ranges match. It also captures
+and rechecks the exact Broker-ready identity observation
+around the sample and final log lookup, so BrokerEpoch
+or incarnation revocation cannot leak a report across
+that post-capture window. The pre-existing KRaft
+Controller precheck remains separately mandatory.
+
+The supplied executor must truly schedule work off the
+heartbeat event queue. `CompletableFuture.supplyAsync`
+alone permits a synchronous `Runnable::run` executor;
+the implementation now rejects an inline worker **before
+metadata or native WAL access**. This is a fail-closed
+guard, not a general guarantee that no externally supplied
+executor can block the submitter.
+
+Six additional storage JUnit tests cover these races and
+worker properties. Two additional core Scala tests
+verify inline execution and null metadata do not
+fall through to LogManager; previous positive async
+tests use distinct worker threads. Main CI requires all
+**six** named Scala cases and the strict storage/metadata
+inventory rises to **563 methods / 34 suites**.
+
+No report transmission or Controller permission has been
+added. The sampler is not installed on production startup,
+Controller per-Broker policy remains `DENY_ALL`, KRaft
+authority mutation and COMMITTED object deletion are
+OFF, and the MinIO GA release remains frozen.

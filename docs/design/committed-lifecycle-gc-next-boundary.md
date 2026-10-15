@@ -1012,3 +1012,70 @@ Source/WAL provenance, real multi-Broker MinIO tests and
 finally an independently gated authority writer. Logical
 COMMITTED retirement and physical S3 DELETE remain **OFF**.
 The feature PR stays Draft; new exact-HEAD CI must pass.
+
+## Batches 181–184 — verified SpotBugs repair and post-capture log/identity fences
+
+The previous `00ed9ee143588b4bdf3908a574557e2e5e08db40`
+finished **16/17 GitHub Actions SUCCESS**. The only failing
+job was main Shared Storage at `:storage:spotbugsMain`.
+The uploaded, actual SpotBugs report
+`storage/build/reports/spotbugs/main.html` identified exactly
+one warning: **BC_VACUOUS_INSTANCEOF**,
+`SharedStorageExtension.java:196`, a redundant
+`partitionRoleListener instanceof SharedPartitionRoleListener`
+where that exact concrete type is assigned by the extension.
+No SpotBugs/Checkstyle suppression or rule change was made.
+
+- **181 — type-safe, SpotBugs-compliant role reader.**
+  Store the extension-owned listener as the concrete
+  `SharedPartitionRoleListener` (the existing public SPI
+  still returns `StoragePartitionRoleListener`), check it
+  explicitly against null, and reuse the verified local
+  native Source/WAL precheck. This removes the vacuous
+  runtime type test without broadening accepted log sources.
+- **182 — current-log double lookup.** The async sampler
+  captures the current `UnifiedLog`, samples its native
+  offsets and durable WAL revisions, then asks the current
+  TopicId→TopicPartition resolver for the active log **again**.
+  Report emission to its local diagnostic slot is denied if
+  the source disappears or the second lookup returns a
+  different log **object identity**, even when offsets,
+  topic name and epoch still look the same. This closes
+  a stale-source TOCTOU window during log unload/recreation.
+- **183 — post-lookup broker identity + inline-executor
+  fencing.** Capture the exact Broker-ready identity
+  observation before WAL sampling and require the **same**
+  immutable observation after the second log lookup.
+  Revocation/re-registration during resolution causes a
+  negative result, never an old report. Refuse inline
+  executors: a supplied executor that invokes the
+  `CompletableFuture` worker on the submitting heartbeat
+  thread fails **before metadata lookup or WAL I/O**.
+  A real bounded off-thread executor is still a caller
+  responsibility; this check does not certify all possible
+  executor implementations or credentials.
+- **184 — exact regression and release evidence.**
+  Add six deterministic storage JUnit tests for inline
+  rejection, log replacement, replica removal, unchanged
+  log acceptance, null lookup and Broker-ready identity
+  revocation during the second lookup. Two new Scala
+  `BrokerSourceWalProbeAdapterTest` methods prove
+  inline-executor and null metadata rejection. Adjust the
+  previous deferred-execution tests to run workers on
+  actual separate test threads. The main CI now
+  XML-verifies all **six** Scala adapter tests; mandatory
+  metadata/storage Java/Scala inventory grows
+  **557→563 methods across 34 suites**.
+
+**No production authorization change:** the sampler factory
+is still not installed by BrokerServer startup. Even a valid
+local WAL sample remains a diagnostic; there is no
+authenticated Broker→Controller report, no Controller
+nonce acceptance with durable multi-replica proof, no
+KRaft retirement authority writer, and no COMMITTED
+reference retirement or MinIO physical DELETE.
+`PartitionRetirementBrokerPrincipalPolicy.DENY_ALL`
+remains the production default. The independently frozen
+MinIO GA branch stays at
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
+The corrective HEAD requires its own 17/17 CI PASS.

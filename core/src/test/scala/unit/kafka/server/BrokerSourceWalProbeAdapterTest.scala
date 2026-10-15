@@ -26,7 +26,7 @@ import org.junit.jupiter.api.Test
 import org.mockito.Mockito.mock
 
 import java.util.{ArrayDeque, Optional}
-import java.util.concurrent.{Executor, RejectedExecutionException}
+import java.util.concurrent.{CompletionException, Executor, RejectedExecutionException}
 
 /**
  * Broker metadata-to-native-source diagnostic lookup. No test enables
@@ -57,7 +57,9 @@ class BrokerSourceWalProbeAdapterTest {
     assertNull(visitedId)
     assertNull(visitedPartition)
     assertEquals(1, work.size())
-    work.removeFirst().run()
+    val task = new Thread(work.removeFirst(), "broker-source-probe-test")
+    task.start()
+    task.join()
     assertEquals(topicId, visitedId)
     assertEquals(new TopicPartition("native-topic", 0), visitedPartition)
     // A classic Kafka UnifiedLog cannot become shared-storage evidence.
@@ -73,7 +75,7 @@ class BrokerSourceWalProbeAdapterTest {
         Optional.empty[String]()
       },
       _ => throw new AssertionError("Missing TopicId must not query the log"),
-      (task: Runnable) => task.run()
+      (task: Runnable) => new Thread(task, "broker-source-missing-test").start()
     )
     assertTrue(adapter.capture(challenge()).toCompletableFuture.join().isEmpty)
   }
@@ -110,6 +112,41 @@ class BrokerSourceWalProbeAdapterTest {
       ()
     })
     assertFalse(resolverInvoked)
+  }
+
+  @Test
+  def testInlineWorkerCannotReadMetadataOrNativeSource(): Unit = {
+    var called = false
+    val adapter = BrokerServer.readOnlySourceWalProbeSampler(
+      new SharedStorageExtension(),
+      _ => {
+        called = true
+        Optional.of("native-topic")
+      },
+      _ => None,
+      (task: Runnable) => task.run()
+    )
+    val failure = assertThrows(classOf[CompletionException], () => {
+      adapter.capture(challenge()).toCompletableFuture.join()
+      ()
+    })
+    assertTrue(failure.getCause.isInstanceOf[IllegalStateException])
+    assertFalse(called)
+  }
+
+  @Test
+  def testNullTopicMetadataResponseNeverFallsBackToLocalLog(): Unit = {
+    val adapter = BrokerServer.readOnlySourceWalProbeSampler(
+      new SharedStorageExtension(),
+      _ => null,
+      _ => throw new AssertionError("Unknown metadata must not reach LogManager"),
+      (task: Runnable) => new Thread(task, "broker-null-topic-test").start()
+    )
+    val failure = assertThrows(classOf[CompletionException], () => {
+      adapter.capture(challenge()).toCompletableFuture.join()
+      ()
+    })
+    assertTrue(failure.getCause.isInstanceOf[NullPointerException])
   }
 
   private def challenge(): PartitionRetirementSourceProbe.Request = {

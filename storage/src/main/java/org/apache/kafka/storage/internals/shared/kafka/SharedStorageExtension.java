@@ -45,7 +45,7 @@ public final class SharedStorageExtension implements KafkaStorageExtension {
     private SharedStorageEngine storage;
     private SharedCommitProgress commitProgress;
     private UnifiedLogFactory unifiedLogFactory;
-    private StoragePartitionRoleListener partitionRoleListener;
+    private SharedPartitionRoleListener partitionRoleListener;
     private int startedBrokerId = -1;
     private boolean brokerReadyObserved;
     private BrokerStartupReplayObservation brokerStartupReplayObservation;
@@ -193,12 +193,12 @@ public final class SharedStorageExtension implements KafkaStorageExtension {
         }
         SharedPartitionRoleListener roles;
         synchronized (this) {
-            if (storage == null || !(partitionRoleListener instanceof SharedPartitionRoleListener listener)
+            if (storage == null || partitionRoleListener == null
                 || brokerStartupReplayObservation == null
                 || challenge.brokerId() != startedBrokerId) {
                 return Optional.empty();
             }
-            roles = listener;
+            roles = partitionRoleListener;
         }
         SharedPartitionId partition = new SharedPartitionId(
             challenge.topicId().getMostSignificantBits(),
@@ -225,16 +225,55 @@ public final class SharedStorageExtension implements KafkaStorageExtension {
     ) {
         Objects.requireNonNull(logLookup, "logLookup");
         Objects.requireNonNull(executor, "executor");
-        return challenge -> CompletableFuture.supplyAsync(() -> {
-            try {
-                Optional<UnifiedLog> log = Objects.requireNonNull(
-                    logLookup.apply(challenge), "logLookup result"
-                );
-                return captureSourceWalProbe(challenge, log.orElse(null));
-            } catch (IOException failure) {
-                throw new CompletionException(failure);
-            }
-        }, executor);
+        return challenge -> {
+            Objects.requireNonNull(challenge, "challenge");
+            Thread submittingThread = Thread.currentThread();
+            return CompletableFuture.supplyAsync(() -> {
+                // supplyAsync does not guarantee a separate thread when the
+                // caller injects an inline executor. Never run native WAL
+                // inspection on the Broker heartbeat event thread.
+                if (Thread.currentThread() == submittingThread) {
+                    throw new IllegalStateException("Source/WAL sampler executor ran inline");
+                }
+                try {
+                    Optional<UnifiedLog> first = Objects.requireNonNull(
+                        logLookup.apply(challenge), "logLookup result"
+                    );
+                    if (first.isEmpty()) {
+                        return Optional.empty();
+                    }
+                    // Preserve the exact Broker-ready pairing across both
+                    // current-log lookups. Registration revocation during the
+                    // second lookup must not resurrect a completed WAL scan.
+                    BrokerStartupReplayObservation identity =
+                        brokerStartupReplayObservation().orElse(null);
+                    if (identity == null) {
+                        return Optional.empty();
+                    }
+                    Optional<PartitionRetirementSourceProbe.Report> captured =
+                        captureSourceWalProbe(challenge, first.get());
+                    if (captured.isEmpty()) {
+                        return Optional.empty();
+                    }
+                    // A native log can be unloaded, replaced, or re-created
+                    // while Source/WAL revisions are sampled. Re-resolve the
+                    // current TopicId and log after the local precheck, and
+                    // require the exact same log object (not equals()).
+                    Optional<UnifiedLog> second = Objects.requireNonNull(
+                        logLookup.apply(challenge), "logLookup result"
+                    );
+                    if (second.isEmpty() || second.get() != first.get()) {
+                        return Optional.empty();
+                    }
+                    if (brokerStartupReplayObservation().orElse(null) != identity) {
+                        return Optional.empty();
+                    }
+                    return captured;
+                } catch (IOException failure) {
+                    throw new CompletionException(failure);
+                }
+            }, executor);
+        };
     }
 
     @Override

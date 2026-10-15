@@ -279,6 +279,12 @@ REQUIRED_TESTS = {
         "asyncSamplerNeverTurnsMissingLogOrClosedExtensionIntoEvidence",
         "asyncExecutorRejectionCannotFallBackToHeartbeatThread",
         "asynchronousSamplerStillRejectsNativeKafkaSourceDrift",
+        "inlineExecutorCannotSampleNativeWalOnHeartbeatCallerThread",
+        "nativeLogReplacementBetweenReadAndReturnRevokesCapturedEvidence",
+        "localReplicaRemovedAfterNativeReadCannotYieldCurrentEvidence",
+        "stableCurrentLogIdentitySurvivesDoubleLookupWithoutForgingProof",
+        "brokerReadyIdentityRevokedDuringSecondLookupInvalidatesEvidence",
+        "nullCurrentLogLookupCannotBecomePositiveReport",
     ),
     "org.apache.kafka.storage.internals.shared.kafka.SharedStorageExtensionWalRuntimeTest": (
         "defaultRuntimeActuallyStartsRingWal",

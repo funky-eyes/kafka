@@ -347,6 +347,8 @@ jobs:
               'testMissingTopicIdNeverTouchesLogManager',
               'testRemovedLocalReplicaCannotSupplySourceWalEvidence',
               'testRejectedWorkerDoesNotRunNativeSamplingOnHeartbeatThread',
+              'testInlineWorkerCannotReadMetadataOrNativeSource',
+              'testNullTopicMetadataResponseNeverFallsBackToLocalLog',
           }
           assert broker_root.get('name') == broker_suite
           assert all(broker_root.get(k) == '0' for k in ('skipped', 'failures', 'errors'))
