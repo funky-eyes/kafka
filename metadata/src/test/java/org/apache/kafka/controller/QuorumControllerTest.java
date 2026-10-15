@@ -411,6 +411,110 @@ public class QuorumControllerTest {
         }
     }
 
+    @Test
+    public void testUniquelyBoundHeartbeatReportIsSerializedAndStillDeniedWithoutNonce() throws Exception {
+        KafkaPrincipal uniqueBroker = new KafkaPrincipal(KafkaPrincipal.USER_TYPE, "broker-id-three");
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv)
+                .setControllerBuilderInitializer(builder ->
+                    builder.setPartitionRetirementBrokerPrincipalPolicy(
+                        new PartitionRetirementBrokerPrincipalPolicy(Map.of(3, uniqueBroker))
+                    )
+                ).build()
+        ) {
+            QuorumController controller = controlEnv.activeController(true);
+            long recordsBefore = retirementAuthorityRecordCount(clientEnv);
+            CountDownLatch entered = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            controller.appendControlEvent("holdSourceWalDiagnostic", () -> {
+                entered.countDown();
+                try {
+                    if (!release.await(10, TimeUnit.SECONDS)) {
+                        throw new AssertionError("Diagnostic gate was not released");
+                    }
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException(interrupted);
+                }
+            });
+            try {
+                assertTrue(entered.await(10, TimeUnit.SECONDS));
+                CompletableFuture<BrokerHeartbeatReply> attempted = controller.processBrokerHeartbeat(
+                    retirementReportContext((short) 3, uniqueBroker), untrustedHeartbeatReport()
+                );
+                // Even a correctly mapped Principal cannot bypass the
+                // serialized Controller event or treat unverified bytes as authority.
+                assertFalse(attempted.isDone());
+                release.countDown();
+                ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> attempted.get(10, TimeUnit.SECONDS));
+                assertTrue(failure.getCause() instanceof InvalidRequestException);
+                assertTrue(failure.getCause().getMessage().contains("SOURCE_PROBE_NOT_VERIFIED"));
+                assertEquals(recordsBefore, retirementAuthorityRecordCount(clientEnv));
+            } finally {
+                release.countDown();
+            }
+        }
+    }
+
+    @Test
+    public void testBoundBrokerCannotBorrowForeignIdentityOrFutureHeartbeatVersion() throws Exception {
+        KafkaPrincipal uniqueBroker = new KafkaPrincipal(KafkaPrincipal.USER_TYPE, "broker-id-three");
+        KafkaPrincipal foreignBroker = new KafkaPrincipal(KafkaPrincipal.USER_TYPE, "broker-id-four");
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv)
+                .setControllerBuilderInitializer(builder ->
+                    builder.setPartitionRetirementBrokerPrincipalPolicy(
+                        new PartitionRetirementBrokerPrincipalPolicy(Map.of(3, uniqueBroker))
+                    )
+                ).build()
+        ) {
+            QuorumController controller = controlEnv.activeController(true);
+            long recordsBefore = retirementAuthorityRecordCount(clientEnv);
+            ExecutionException wrongIdentity = assertThrows(ExecutionException.class, () ->
+                controller.processBrokerHeartbeat(
+                    retirementReportContext((short) 3, foreignBroker), untrustedHeartbeatReport()
+                ).get(10, TimeUnit.SECONDS));
+            assertTrue(wrongIdentity.getCause() instanceof ClusterAuthorizationException);
+            ExecutionException futureVersion = assertThrows(ExecutionException.class, () ->
+                controller.processBrokerHeartbeat(
+                    retirementReportContext((short) 4, uniqueBroker), untrustedHeartbeatReport()
+                ).get(10, TimeUnit.SECONDS));
+            assertTrue(futureVersion.getCause() instanceof InvalidRequestException);
+            assertEquals(recordsBefore, retirementAuthorityRecordCount(clientEnv));
+        }
+    }
+
+    private static ControllerRequestContext retirementReportContext(short version, KafkaPrincipal principal) {
+        return new ControllerRequestContext(
+            new RequestHeaderData().setRequestApiKey((short) 63).setRequestApiVersion(version),
+            principal, OptionalLong.empty()
+        );
+    }
+
+    private static BrokerHeartbeatRequestData untrustedHeartbeatReport() {
+        return new BrokerHeartbeatRequestData()
+            .setBrokerId(3)
+            .setBrokerEpoch(54L)
+            .setSourceWalProbeReport(new BrokerHeartbeatRequestData.SourceWalProbeReport()
+                .setNonce(new Uuid(1L, 2L))
+                .setClusterId("test-cluster")
+                .setTopicId(new Uuid(3L, 4L))
+                .setPartitionId(0)
+                .setBrokerIncarnationId(new Uuid(5L, 6L))
+                .setSourceLeaderEpoch(8)
+                .setExpectedPreviousAuthorityOffset(-1L)
+                .setNextAuthorityOffset(100L)
+                .setLocalLeadershipGeneration(2L)
+                .setNativeLogStartOffset(0L)
+                .setNativeHighWatermark(10L)
+                .setNativeLogEndOffset(10L)
+                .setWalMutationRevision(12L)
+                .setWalAdmissionRevision(13L));
+    }
+
     private static long retirementAuthorityRecordCount(MockRaftClientTestEnv clientEnv) {
         return clientEnv.allRecords().stream()
             .filter(record -> record.message() instanceof PartitionRetirementAuthorityRecord)

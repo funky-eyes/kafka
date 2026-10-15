@@ -1079,3 +1079,75 @@ remains the production default. The independently frozen
 MinIO GA branch stays at
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
 The corrective HEAD requires its own 17/17 CI PASS.
+
+## Batches 185–188 — verified core test recovery and serialized authenticated report rejection
+
+The preceding `20b793192c2d297dd95509e31bd583b9bedfd277`
+finished **16/17 workflows SUCCESS**. The sole failing
+`Shared Storage` job passed Java 11, metadata/server/core
+Checkstyle and SpotBugs, the 563-method Java/Scala source inventory
+already executed in earlier stages, and real MinIO 3-broker E2E.
+It failed on **two exact core Scala JUnit assertions**:
+`BrokerSourceWalProbeAdapterTest.testRemovedLocalReplicaCannotSupplySourceWalEvidence`
+still supplied `Runnable::run`, which correctly tripped the new
+inline-executor guard; and
+`testNullTopicMetadataResponseNeverFallsBackToLocalLog`
+expected an exception instead of the existing, correct
+**empty result** for a missing TopicId. These two tests,
+not the production adapter, were corrected.
+
+- **185 — match actual Broker adapter contract.** Run the
+  missing-local-replica test on a real separate worker thread;
+  the null metadata test now demands `Optional.empty` and
+  verifies LogManager is never queried. Keep the inline-executor
+  denial test intact; never weaken the native WAL scheduling
+  or missing TopicId security gates.
+- **186 — strictly internal Broker-specific principal map.**
+  Allow `QuorumController.Builder` to receive an immutable,
+  explicitly validated `PartitionRetirementBrokerPrincipalPolicy`
+  **only from the Controller Java package**, to test unique
+  broker principal ownership. Ordinary production builders
+  retain `DENY_ALL`. This is **not** a new Kafka broker
+  configuration, public authentication API, or authorization
+  to use a shared inter-broker Principal.
+- **187 — Controller event-bound report correlation, still rejected.**
+  A BrokerHeartbeat v3 request reporting Source/WAL evidence is
+  rejected before normal Broker contact-time and heartbeat
+  bookkeeping unless its Principal matches the explicit
+  per-Broker policy and its wire structure is valid.
+  For that internal-only mapped case, reuse
+  `inspectRetirementSourceReport`, whose **single serialized
+  Controller event** consumes a one-use nonce, then checks
+  current KRaft broker registration, source leader, TopicId
+  and authority CAS. Even after a matching diagnostic
+  report, the external RPC **always fails** with
+  `InvalidRequestException`; no retirement authority
+  KRaft records or MinIO operations are emitted. The
+  source report remains unauthenticated as durable
+  cross-replica bytes; Principal binding is not sufficient
+  to authorize deletion.
+- **188 — regression evidence and future-version denial.**
+  Reject all report-bearing request API versions **other
+  than explicitly negotiated v3**, including unknown v4.
+  Add two real Controller JUnit tests: an explicitly mapped
+  principal still cannot bypass the serialized event or
+  invent an issued nonce, and another Broker's principal
+  or future protocol version cannot piggyback on the mapping.
+  Add one protocol gate test rejecting implicit v4 trust.
+  The main Workflow explicitly selects the two new Controller
+  tests; the mandatory evidence grows **563→566 methods
+  across 34 suites**. Existing clients/standalone Broker
+  protocol suites remain separately enforced.
+
+**Release blockers remain:** No BrokerSourceWalProbeReport
+is automatically transmitted by `BrokerLifecycleManager`,
+no trusted Broker Principal policy is configured by
+production startup, no cross-replica WAL/S3 durability
+certificate exists, and no KRaft retirement authority
+writer, COMMITTED reference retirement or physical MinIO
+DELETE is reachable. The release-grade MinIO GA branch
+remains frozen at
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
+Feature PR #2 remains Draft. The new HEAD must independently
+pass all 17 workflows before being declared a stable
+development checkpoint.

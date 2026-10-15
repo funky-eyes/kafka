@@ -56,7 +56,9 @@ final class PartitionRetirementHeartbeatReportGate {
         if (heartbeat.sourceWalProbeReport() == null) {
             return Finding.ABSENT;
         }
-        if (context.requestHeader() == null || context.requestHeader().requestApiVersion() < 3) {
+        // Future protocol versions are not implicitly trusted. Review any
+        // new tagged-field semantics before accepting a different version.
+        if (context.requestHeader() == null || context.requestHeader().requestApiVersion() != 3) {
             return Finding.VERSION_NOT_NEGOTIATED;
         }
         if (!principalPolicy.matches(context.principal(), heartbeat.brokerId())) {

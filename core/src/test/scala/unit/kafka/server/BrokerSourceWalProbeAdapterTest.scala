@@ -89,7 +89,7 @@ class BrokerSourceWalProbeAdapterTest {
         assertEquals(new TopicPartition("native-topic", 0), tp)
         None
       },
-      (task: Runnable) => task.run()
+      (task: Runnable) => new Thread(task, "broker-replica-removed-test").start()
     )
     assertTrue(adapter.capture(challenge()).toCompletableFuture.join().isEmpty)
   }
@@ -142,11 +142,9 @@ class BrokerSourceWalProbeAdapterTest {
       _ => throw new AssertionError("Unknown metadata must not reach LogManager"),
       (task: Runnable) => new Thread(task, "broker-null-topic-test").start()
     )
-    val failure = assertThrows(classOf[CompletionException], () => {
-      adapter.capture(challenge()).toCompletableFuture.join()
-      ()
-    })
-    assertTrue(failure.getCause.isInstanceOf[NullPointerException])
+    // A null TopicId lookup is unknown, not a reason to access LogManager
+    // or to fabricate a source/WAL report. Fail closed with an empty result.
+    assertTrue(adapter.capture(challenge()).toCompletableFuture.join().isEmpty)
   }
 
   private def challenge(): PartitionRetirementSourceProbe.Request = {

@@ -227,6 +227,9 @@ public final class QuorumController implements Controller {
         private long delegationTokenExpiryTimeMs;
         private long delegationTokenExpiryCheckIntervalMs = TimeUnit.MINUTES.toMillis(5);
         private long uncleanLeaderElectionCheckIntervalMs = TimeUnit.MINUTES.toMillis(5);
+        // Internal-only experiment seam. Production startup never sets this.
+        private PartitionRetirementBrokerPrincipalPolicy retirementBrokerPrincipalPolicy =
+            PartitionRetirementBrokerPrincipalPolicy.DENY_ALL;
 
         public Builder(int nodeId, String clusterId) {
             this.nodeId = nodeId;
@@ -392,6 +395,18 @@ public final class QuorumController implements Controller {
             return this;
         }
 
+        /**
+         * Visible only within the Controller package for authenticated
+         * diagnostic regressions. Do not expose this as a user configuration
+         * or bind a cluster-wide shared inter-broker Principal.
+         */
+        Builder setPartitionRetirementBrokerPrincipalPolicy(
+            PartitionRetirementBrokerPrincipalPolicy policy
+        ) {
+            this.retirementBrokerPrincipalPolicy = Objects.requireNonNull(policy, "policy");
+            return this;
+        }
+
 
         public QuorumController build() throws Exception {
             if (raftClient == null) {
@@ -459,7 +474,8 @@ public final class QuorumController implements Controller {
                     delegationTokenExpiryCheckIntervalMs,
                     uncleanLeaderElectionCheckIntervalMs,
                     controllerPerformanceSamplePeriodMs,
-                    controllerPerformanceAlwaysLogThresholdMs
+                    controllerPerformanceAlwaysLogThresholdMs,
+                    retirementBrokerPrincipalPolicy
                 );
             } catch (Exception e) {
                 Utils.closeQuietly(queue, "event queue");
@@ -1596,11 +1612,11 @@ public final class QuorumController implements Controller {
     private final PartitionRetirementControlManager partitionRetirementControl;
 
     /**
-     * No principal mapping is enabled in production until each broker has an
-     * independently authenticated principal and a Kafka-native RPC exists.
+     * Deny-all in production. A package-private Builder seam permits tests
+     * to exercise uniquely authenticated broker identities; ordinary
+     * Controller startup must never install a shared inter-broker principal.
      */
-    private final PartitionRetirementBrokerPrincipalPolicy retirementBrokerPrincipalPolicy =
-        PartitionRetirementBrokerPrincipalPolicy.DENY_ALL;
+    private final PartitionRetirementBrokerPrincipalPolicy retirementBrokerPrincipalPolicy;
 
     /** One-time diagnostic probes; access exclusively in the Controller event queue. */
     private final PartitionRetirementSourceProbeRegistry retirementSourceProbeRegistry;
@@ -1694,7 +1710,8 @@ public final class QuorumController implements Controller {
         long delegationTokenExpiryCheckIntervalMs,
         long uncleanLeaderElectionCheckIntervalMs,
         long controllerPerformanceSamplePeriodMs,
-        long controllerPerformanceAlwaysLogThresholdMs
+        long controllerPerformanceAlwaysLogThresholdMs,
+        PartitionRetirementBrokerPrincipalPolicy retirementBrokerPrincipalPolicy
     ) {
         this.nonFatalFaultHandler = nonFatalFaultHandler;
         this.fatalFaultHandler = fatalFaultHandler;
@@ -1707,6 +1724,9 @@ public final class QuorumController implements Controller {
         this.snapshotRegistry = new SnapshotRegistry(logContext);
         this.partitionRetirementControl = new PartitionRetirementControlManager(snapshotRegistry);
         this.retirementSourceProbeRegistry = new PartitionRetirementSourceProbeRegistry(clusterId);
+        this.retirementBrokerPrincipalPolicy = Objects.requireNonNull(
+            retirementBrokerPrincipalPolicy, "retirementBrokerPrincipalPolicy"
+        );
         this.deferredEventQueue = new DeferredEventQueue(logContext);
         this.resourceExists = new ConfigResourceExistenceChecker();
         this.clientQuotaControlManager = new ClientQuotaControlManager.Builder().
@@ -2149,13 +2169,29 @@ public final class QuorumController implements Controller {
                 new ClusterAuthorizationException("Broker identity cannot authorize a Source/WAL probe")
             );
         }
+        if (probe == PartitionRetirementHeartbeatReportGate.Finding.UNVERIFIED) {
+            // A caller with an *explicitly* mapped, unique authenticated
+            // Broker Principal may correlate the nonce on the serialized
+            // Controller event queue. Even then its self-reported native
+            // bytes can never authorize retirement or refresh heartbeat
+            // contact, and the network request still receives an error.
+            PartitionRetirementSourceProbe.Report report =
+                PartitionRetirementHeartbeatReportGate.fromWire(request).orElseThrow();
+            PartitionRetirementCandidatePrecheck.Candidate candidate =
+                PartitionRetirementSourceProbeRegistry.Challenge
+                    .fromProtocolRequest(report.request()).candidate();
+            return inspectRetirementSourceReport(context, candidate, report)
+                .thenCompose(finding -> CompletableFuture.failedFuture(
+                    new InvalidRequestException("Source/WAL report is non-authoritative: " + finding)
+                ));
+        }
         if (probe != PartitionRetirementHeartbeatReportGate.Finding.ABSENT) {
             return CompletableFuture.failedFuture(
                 new InvalidRequestException("Source/WAL probe is not authorized: " + probe)
             );
         }
-        // Reject a non-null v3 report before updating heartbeat contact time
-        // or executing any serialized Controller metadata operations.
+        // Non-null reports never refresh Broker heartbeat contact time or
+        // mutate normal Broker heartbeat state.
         controllerMetrics.updateBrokerContactTime(request.brokerId());
         // We start by updating the broker heartbeat in a lockless data structure.
         // We do this first so that if the main controller thread is backlogged, the

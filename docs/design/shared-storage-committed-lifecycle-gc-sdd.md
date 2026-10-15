@@ -3509,3 +3509,47 @@ added. The sampler is not installed on production startup,
 Controller per-Broker policy remains `DENY_ALL`, KRaft
 authority mutation and COMMITTED object deletion are
 OFF, and the MinIO GA release remains frozen.
+
+## Batches 185–188 — one-use Controller report correlation with default-deny identity
+
+Baseline `20b79319` finished **16/17 Actions SUCCESS**.
+The sole failure was two Scala core tests: an obsolete
+inline Executor in the removed-replica test, and a
+null-metadata test expecting an exception rather than
+the correct `Optional.empty`. Both test contracts
+were fixed; the fail-closed production lookup and
+off-heartbeat scheduling stayed unchanged.
+
+`QuorumController.Builder` now offers a **package-private**
+internal test seam for an already validated, unique
+BrokerId→KafkaPrincipal map. The production builder's
+default remains `PartitionRetirementBrokerPrincipalPolicy.DENY_ALL`;
+no controller server startup code passes another value.
+Shared principals, anonymous principals and wildcards
+are still disallowed by the pre-existing policy.
+
+Previously every inbound v3 Source/WAL Report was rejected
+before Controller contact-time updates. That remains
+true in production. When the internal test-only policy
+maps the authenticated Broker Principal and the v3
+wire passes strict shape checks, the report is now
+**correlated inside the existing serialized Controller
+event**. The event consumes a Controller-issued nonce
+exactly once (including on a forged reply), checks
+BrokerRegistration, TopicId/partition leadership,
+incarnation, source epoch and current KRaft CAS.
+**Regardless of these checks, the public heartbeat
+request still returns a non-authorizing error.**
+No KRaft authority mutation, retention or object
+DELETE is attached to this path. A unique network
+Principal establishes only the claimed channel's
+identity; it does not independently attest WAL
+persistence on other replicas.
+
+Two Controller integration regressions assert
+event queue ordering, error/no-authority outcome
+and foreign Principal denial. A separate strict
+gate regression forbids implicit trust of unknown
+future report-bearing protocol versions. Mandatory
+Java/Scala method inventory: **566 across 34 suites**.
+No feature is enabled at ordinary Kafka startup.

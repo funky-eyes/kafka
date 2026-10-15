@@ -75,6 +75,13 @@ class PartitionRetirementHeartbeatReportGateTest {
     }
 
     @Test
+    void unknownFutureProtocolCannotImplicitlyAuthorizeVThreeDiagnostic() {
+        assertEquals(Finding.VERSION_NOT_NEGOTIATED, PartitionRetirementHeartbeatReportGate.inspect(
+            context((short) 4, BROKER_THREE), heartbeat(), BOUND
+        ));
+    }
+
+    @Test
     void matchingPrincipalStillCannotAuthorizeAnyGcAction() {
         assertEquals(Finding.UNVERIFIED, PartitionRetirementHeartbeatReportGate.inspect(
             context((short) 3, BROKER_THREE), heartbeat(), BOUND
