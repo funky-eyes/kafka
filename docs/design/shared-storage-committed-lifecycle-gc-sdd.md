@@ -3553,3 +3553,52 @@ gate regression forbids implicit trust of unknown
 future report-bearing protocol versions. Mandatory
 Java/Scala method inventory: **566 across 34 suites**.
 No feature is enabled at ordinary Kafka startup.
+
+## Batches 189–192 — disabled-by-default Broker v3 Report mapper and stable Controller nonce offers
+
+The last independently verified development checkpoint
+`10da64ff84b1bcaa059063b532e8c63357e6c85c`
+passed **17/17 Workflow gates**. This checkpoint adds
+the missing *local* Broker Report-to-v3-wire conversion
+without changing production request transmission, auth
+or object deletion.
+
+`BrokerLifecycleManager.SourceWalProbeCaptureState`
+now serializes a consumed immutable diagnostic
+`PartitionRetirementSourceProbe.Report` to
+`BrokerHeartbeatRequestData.SourceWalProbeReport`
+through `takeWireOnce`. The same single-use staged
+mailbox backs both typed and wire reads, preserving
+BrokerId/Epoch/Incarnation, original nonce,
+TopicId/partition, source LeaderEpoch and KRaft CAS.
+No report is transmitted; `sendBrokerHeartbeat()`
+still constructs the ordinary untagged request.
+The native Source/WAL report can never become a
+credential or authorize KRaft state mutation.
+
+The Controller's outstanding nonce map is now
+insertion ordered, so an authenticated Broker
+receives the **oldest pending, still-live Challenge**
+across heartbeat retries. The Controller still
+issues secure random nonces, enforces exact per-Broker
+principal binding, five-second TTL, max 128 pending
+probes and immediate invalidation on leadership
+change. Consuming any nonce removes it and
+never turns a self-reported WAL sample into
+a COMMITTED-retirement grant.
+
+Six Broker JUnit cases hard-gate exact wire mapping,
+version 3 roundtrip, v2 refusal, single-use consumption
+and stale Broker/TTL denial. Three extra Controller
+JUnit cases hard-gate deterministic retry ordering,
+expiration and cross-Broker isolation. Required
+evidence is **569 named metadata/storage methods /
+34 suites**, plus **24 separately XML-checked
+Broker capture-state tests** and the existing
+challenge/clients regressions.
+
+Production remains `DENY_ALL`; no native
+report sender is activated, no physical MinIO
+object deletion or authority writer is introduced.
+MinIO GA `9a28c11b6d97ecacafe1b8566cde5cc34d604889`
+remains frozen, and PR #2 stays Draft.

@@ -19,6 +19,7 @@ package org.apache.kafka.server;
 import org.apache.kafka.clients.ClientResponse;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.message.BrokerHeartbeatRequestData;
+import org.apache.kafka.common.message.BrokerHeartbeatRequestData.SourceWalProbeReport;
 import org.apache.kafka.common.message.BrokerHeartbeatResponseData;
 import org.apache.kafka.common.message.BrokerHeartbeatResponseData.SourceWalProbeChallenge;
 import org.apache.kafka.common.message.BrokerRegistrationRequestData;
@@ -1016,6 +1017,46 @@ public class BrokerLifecycleManager {
                 return Optional.empty();
             }
             return Optional.ofNullable(stagedReport);
+        }
+
+        /**
+         * Convert one already verified *local diagnostic* to the optional
+         * unstable v3 heartbeat wire value. The caller must still have its
+         * own authenticated return-channel policy and version negotiation.
+         *
+         * <p>This method is never invoked by sendBrokerHeartbeat: reporting
+         * self-asserted WAL bytes is disabled in production.</p>
+         */
+        Optional<SourceWalProbeReport> takeWireOnce(
+            long nowNs,
+            int brokerId,
+            long brokerEpoch,
+            Uuid incarnationId,
+            BrokerState state,
+            boolean registered
+        ) {
+            return takeOnce(
+                nowNs, brokerId, brokerEpoch, incarnationId, state, registered
+            ).map(SourceWalProbeCaptureState::toWire);
+        }
+
+        private static SourceWalProbeReport toWire(PartitionRetirementSourceProbe.Report report) {
+            PartitionRetirementSourceProbe.Request request = report.request();
+            return new SourceWalProbeReport()
+                .setNonce(request.nonce())
+                .setClusterId(request.clusterId())
+                .setTopicId(request.topicId())
+                .setPartitionId(request.partitionId())
+                .setBrokerIncarnationId(request.brokerIncarnationId())
+                .setSourceLeaderEpoch(request.sourceLeaderEpoch())
+                .setExpectedPreviousAuthorityOffset(request.expectedPreviousAuthorityOffset())
+                .setNextAuthorityOffset(request.nextAuthorityOffset())
+                .setLocalLeadershipGeneration(report.localLeadershipGeneration())
+                .setNativeLogStartOffset(report.nativeLogStartOffset())
+                .setNativeHighWatermark(report.nativeHighWatermark())
+                .setNativeLogEndOffset(report.nativeLogEndOffset())
+                .setWalMutationRevision(report.observedWalMutationRevision())
+                .setWalAdmissionRevision(report.observedWalAdmissionRevision());
         }
 
         void abandon(Capture capture) {

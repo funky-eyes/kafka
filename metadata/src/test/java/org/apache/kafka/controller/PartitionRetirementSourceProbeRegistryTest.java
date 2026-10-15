@@ -70,6 +70,54 @@ class PartitionRetirementSourceProbeRegistryTest {
     }
 
     @Test
+    void heartbeatRetriesOfferOldestOutstandingNonceUntilItIsConsumed() {
+        var registry = registry();
+        Challenge first = issue(registry, 100L);
+        Challenge second = issue(registry, 101L);
+        Challenge third = issue(registry, 102L);
+        for (long nowNs = 103L; nowNs < 106L; nowNs++) {
+            assertEquals(first,
+                registry.pendingForHeartbeat(3, 54L, BROKER_THREE, nowNs).orElseThrow());
+        }
+        assertEquals(Finding.MATCHED_UNTRUSTED,
+            registry.consume(first, CANDIDATE, BROKER_THREE, 106L));
+        assertEquals(second, registry.pendingForHeartbeat(3, 54L, BROKER_THREE, 107L).orElseThrow());
+        assertEquals(Finding.MATCHED_UNTRUSTED,
+            registry.consume(second, CANDIDATE, BROKER_THREE, 108L));
+        assertEquals(third, registry.pendingForHeartbeat(3, 54L, BROKER_THREE, 109L).orElseThrow());
+    }
+
+    @Test
+    void expiredOldestNonceIsSkippedWithoutChangingNewerPendingOrder() {
+        var registry = registry();
+        issue(registry, 100L);
+        Challenge second = issue(registry, 101L);
+        long firstExpired = 100L + PartitionRetirementSourceProbeRegistry.MAX_AGE_NS;
+        assertEquals(second,
+            registry.pendingForHeartbeat(3, 54L, BROKER_THREE, firstExpired).orElseThrow());
+        assertTrue(registry.pendingForHeartbeat(3, 54L, BROKER_THREE, firstExpired + 1L).isEmpty());
+    }
+
+    @Test
+    void pendingChallengeOrderingIsIsolatedByBrokerIdentity() {
+        var registry = registry();
+        Challenge first = issue(registry, 100L);
+        Candidate other = candidate(4, 54L, new Uuid(20L, 21L), 8, 20L);
+        Challenge foreign = registry.issue(other, BROKER_FOUR, POLICY, 101L).orElseThrow();
+        Challenge next = issue(registry, 102L);
+        assertEquals(foreign,
+            registry.pendingForHeartbeat(4, 54L, BROKER_FOUR, 103L).orElseThrow());
+        assertEquals(first,
+            registry.pendingForHeartbeat(3, 54L, BROKER_THREE, 103L).orElseThrow());
+        assertEquals(Finding.MATCHED_UNTRUSTED,
+            registry.consume(first, CANDIDATE, BROKER_THREE, 104L));
+        assertEquals(next,
+            registry.pendingForHeartbeat(3, 54L, BROKER_THREE, 105L).orElseThrow());
+        assertEquals(foreign,
+            registry.pendingForHeartbeat(4, 54L, BROKER_FOUR, 105L).orElseThrow());
+    }
+
+    @Test
     void heartbeatOfferMustRejectOldBrokerEpochAndExpiredNonce() {
         var registry = registry();
         Challenge issued = issue(registry, 100L);

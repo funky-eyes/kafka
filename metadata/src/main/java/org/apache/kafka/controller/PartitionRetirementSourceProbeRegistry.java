@@ -23,7 +23,7 @@ import org.apache.kafka.common.security.auth.KafkaPrincipal;
 import org.apache.kafka.controller.PartitionRetirementCandidatePrecheck.Candidate;
 import org.apache.kafka.metadata.PartitionRetirementAuthorityState.Key;
 
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -125,7 +125,10 @@ final class PartitionRetirementSourceProbeRegistry {
     }
 
     private final String clusterId;
-    private final Map<Uuid, Pending> outstanding = new HashMap<>();
+    // Insertion order makes v3 heartbeat offers deterministic when several
+    // one-shot probes are pending for the same Broker. Never expose a
+    // non-deterministically selected nonce from the Controller map.
+    private final Map<Uuid, Pending> outstanding = new LinkedHashMap<>();
 
     PartitionRetirementSourceProbeRegistry(String clusterId) {
         this.clusterId = Objects.requireNonNull(clusterId, "clusterId");
@@ -177,6 +180,8 @@ final class PartitionRetirementSourceProbeRegistry {
         if (brokerId < 0 || brokerEpoch < 0L || authenticatedPrincipal == null) {
             return Optional.empty();
         }
+        // LinkedHashMap preserves the earliest-issued, still-live nonce
+        // until it is consumed. Heartbeat retries re-offer the same challenge.
         return outstanding.values().stream()
             .filter(pending -> pending.principal().equals(authenticatedPrincipal))
             .filter(pending -> fresh(pending.issuedAtNs(), nowNs))

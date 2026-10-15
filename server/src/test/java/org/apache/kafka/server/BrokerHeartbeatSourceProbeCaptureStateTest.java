@@ -17,6 +17,9 @@
 package org.apache.kafka.server;
 
 import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.errors.UnsupportedVersionException;
+import org.apache.kafka.common.message.BrokerHeartbeatRequestData;
+import org.apache.kafka.common.protocol.MessageUtil;
 import org.apache.kafka.common.replica.PartitionRetirementSourceProbe;
 import org.apache.kafka.common.replica.PartitionRetirementSourceProbe.Report;
 import org.apache.kafka.common.replica.PartitionRetirementSourceProbe.Request;
@@ -33,6 +36,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * Strictly local asynchronous Source/WAL diagnostic staging. No test enables
@@ -263,6 +267,111 @@ class BrokerHeartbeatSourceProbeCaptureStateTest {
         Request request = challenge(1L);
         Capture capture = state.begin(request, 100L);
         assertFalse(complete(state, capture, Optional.of(report(request)), null, 99L));
+    }
+
+    @Test
+    void stagedReportMapsToExactUnstableHeartbeatWireFields() {
+        var state = new SourceWalProbeCaptureState();
+        Request request = challenge(1L);
+        Capture capture = state.begin(request, 100L);
+        assertTrue(complete(state, capture, Optional.of(report(request)), null, 101L));
+        var wire = takeWire(state, 102L).orElseThrow();
+        assertEquals(request.nonce(), wire.nonce());
+        assertEquals(request.clusterId(), wire.clusterId());
+        assertEquals(request.topicId(), wire.topicId());
+        assertEquals(request.partitionId(), wire.partitionId());
+        assertEquals(request.brokerIncarnationId(), wire.brokerIncarnationId());
+        assertEquals(request.sourceLeaderEpoch(), wire.sourceLeaderEpoch());
+        assertEquals(request.expectedPreviousAuthorityOffset(), wire.expectedPreviousAuthorityOffset());
+        assertEquals(request.nextAuthorityOffset(), wire.nextAuthorityOffset());
+        assertEquals(2L, wire.localLeadershipGeneration());
+        assertEquals(0L, wire.nativeLogStartOffset());
+        assertEquals(10L, wire.nativeHighWatermark());
+        assertEquals(10L, wire.nativeLogEndOffset());
+        assertEquals(12L, wire.walMutationRevision());
+        assertEquals(13L, wire.walAdmissionRevision());
+    }
+
+    @Test
+    void diagnosticWireReportSurvivesVThreeEncodeDecodeWithoutAuthorizingGc() {
+        var state = new SourceWalProbeCaptureState();
+        Request request = challenge(1L);
+        Capture capture = state.begin(request, 100L);
+        assertTrue(complete(state, capture, Optional.of(report(request)), null, 101L));
+        var heartbeat = new BrokerHeartbeatRequestData()
+            .setBrokerId(request.brokerId())
+            .setBrokerEpoch(request.brokerEpoch())
+            .setSourceWalProbeReport(takeWire(state, 102L).orElseThrow());
+        var parsed = new BrokerHeartbeatRequestData(
+            MessageUtil.toByteBufferAccessor(heartbeat, (short) 3), (short) 3
+        );
+        assertEquals(heartbeat, parsed);
+        assertEquals(request.nonce(), parsed.sourceWalProbeReport().nonce());
+        assertEquals(request.brokerId(), parsed.brokerId());
+        assertEquals(request.brokerEpoch(), parsed.brokerEpoch());
+        assertTrue(takeWire(state, 103L).isEmpty());
+    }
+
+    @Test
+    void localWireReportNeverSilentlyDowngradesToStableVTwo() {
+        var state = new SourceWalProbeCaptureState();
+        Request request = challenge(1L);
+        Capture capture = state.begin(request, 100L);
+        assertTrue(complete(state, capture, Optional.of(report(request)), null, 101L));
+        var heartbeat = new BrokerHeartbeatRequestData()
+            .setBrokerId(request.brokerId())
+            .setBrokerEpoch(request.brokerEpoch())
+            .setSourceWalProbeReport(takeWire(state, 102L).orElseThrow());
+        assertThrows(UnsupportedVersionException.class,
+            () -> MessageUtil.toByteBufferAccessor(heartbeat, (short) 2));
+    }
+
+    @Test
+    void wireAndTypedViewsShareTheSameOneShotResult() {
+        var state = new SourceWalProbeCaptureState();
+        Request first = challenge(1L);
+        Capture capture = state.begin(first, 100L);
+        assertTrue(complete(state, capture, Optional.of(report(first)), null, 101L));
+        assertTrue(takeWire(state, 102L).isPresent());
+        assertTrue(take(state, 103L).isEmpty());
+
+        Request second = challenge(2L);
+        Capture next = state.begin(second, 104L);
+        assertTrue(complete(state, next, Optional.of(report(second)), null, 105L));
+        assertTrue(take(state, 106L).isPresent());
+        assertTrue(takeWire(state, 107L).isEmpty());
+    }
+
+    @Test
+    void wireReportIsSuppressedAfterEpochChangeOrExpiry() {
+        var changedEpoch = new SourceWalProbeCaptureState();
+        Request request = challenge(1L);
+        Capture first = changedEpoch.begin(request, 100L);
+        assertTrue(complete(changedEpoch, first, Optional.of(report(request)), null, 101L));
+        assertTrue(changedEpoch.takeWireOnce(
+            102L, 3, 55L, INCARNATION, BrokerState.RUNNING, true
+        ).isEmpty());
+        var expired = new SourceWalProbeCaptureState();
+        Capture next = expired.begin(request, 100L);
+        assertTrue(complete(expired, next, Optional.of(report(request)), null, 101L));
+        assertTrue(takeWire(expired, 100L + SourceWalProbeCaptureState.MAX_AGE_NS).isEmpty());
+    }
+
+    @Test
+    void revokingBrokerRegistrationDiscardsWireReportBeforeEncoding() {
+        var state = new SourceWalProbeCaptureState();
+        Request request = challenge(1L);
+        Capture capture = state.begin(request, 100L);
+        assertTrue(complete(state, capture, Optional.of(report(request)), null, 101L));
+        state.clear();
+        assertTrue(takeWire(state, 102L).isEmpty());
+        assertNull(state.begin(request, 103L));
+    }
+
+    private static Optional<BrokerHeartbeatRequestData.SourceWalProbeReport> takeWire(
+        SourceWalProbeCaptureState state, long nowNs
+    ) {
+        return state.takeWireOnce(nowNs, 3, 54L, INCARNATION, BrokerState.RUNNING, true);
     }
 
     private static boolean complete(

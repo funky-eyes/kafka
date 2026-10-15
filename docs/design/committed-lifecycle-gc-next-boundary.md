@@ -1151,3 +1151,72 @@ remains frozen at
 Feature PR #2 remains Draft. The new HEAD must independently
 pass all 17 workflows before being declared a stable
 development checkpoint.
+
+## Batches 189–192 — one-shot local v3 Report serialization and deterministic Controller offers
+
+**Verified baseline:** `10da64ff84b1bcaa059063b532e8c63357e6c85c`
+finished **17/17 GitHub Actions SUCCESS**, including the main
+Shared Storage Java 25/JUnit/SpotBugs, real MinIO, WAL Crash,
+Ring WAL and Controller HA gates. The independently frozen
+MinIO GA release `9a28c11b6d97ecacafe1b8566cde5cc34d604889`
+remains untouched.
+
+- **189 — complete Broker-side wire representation.** The existing
+  `BrokerLifecycleManager.SourceWalProbeCaptureState` now has a
+  **diagnostic-only** `takeWireOnce`, converting an already collected
+  native Kafka Source/WAL `PartitionRetirementSourceProbe.Report`
+  into the generated optional
+  `BrokerHeartbeatRequestData.SourceWalProbeReport`. It preserves
+  nonce, cluster, TopicId, partition, broker incarnation, source
+  LeaderEpoch, expected/next KRaft CAS and native
+  LogStart/HW/LEO, leadership generation and WAL revisions.
+  BrokerId/Epoch remain in the **outer** heartbeat request.
+  No new API key or wire version is introduced.
+- **190 — shared one-shot fence across both representations.**
+  `takeWireOnce` uses the same capture mailbox as
+  `takeOnce`: the first accessor clears the staged bytes
+  and a second typed/wire view cannot consume them again.
+  The existing five-second TTL, exact BrokerId/Epoch/incarnation,
+  registered RUNNING state, nonce replay history and
+  single in-flight native I/O fence remain mandatory.
+  Revocation, timeout, broker replacement and old epochs
+  yield no wire diagnostic. Most importantly, **the normal
+  `sendBrokerHeartbeat` does not invoke `takeWireOnce`**:
+  default production traffic cannot accidentally send
+  an unauthenticated report.
+- **191 — deterministic Controller pending Challenge order.**
+  Replace the Controller's volatile pending nonce map with
+  insertion-ordered `LinkedHashMap`. Multiple valid
+  Challenge offers for one authenticated Broker select the
+  **oldest still-live** nonce for repeated heartbeats until
+  it is consumed or expired; they cannot randomly alternate
+  on changes to the hash table. Broker Principal/BrokerEpoch
+  identity filters, the existing 128-entry global cap, five-second
+  TTL, leadership invalidation, one-time consume and
+  always-`MATCHED_UNTRUSTED` result remain unchanged.
+- **192 — strict serialization, downgrade and replay evidence.**
+  Six new deterministic Broker JUnit tests cover exact wire
+  fields, a v3 encode/decode round-trip, forbidden v2
+  downgrade, exclusive typed/wire consumption, changed
+  BrokerEpoch/expiry and revoked registration. Three new
+  Controller registry tests verify oldest-first offers,
+  skipping expired entries and strict cross-Broker Principal
+  isolation. Main Java 25 CI now XML-verifies **24 Broker
+  capture methods**, plus the existing ten Broker challenge
+  tests. The mandatory metadata/storage Java/Scala inventory
+  increases from **566 to 569 methods in 34 suites**.
+  These are tests of safety and framing, **not evidence of
+  end-to-end authenticated GC execution**.
+
+**Still intentionally disabled:** The production native sampler
+is not installed, the normal BrokerHeartbeat sender does not
+attach a `SourceWalProbeReport`, and the Controller's default
+per-Broker Principal policy is `DENY_ALL`. Even a uniquely
+authenticated Controller-side nonce correlation yields only
+non-authoritative diagnostic findings, not trusted native
+WAL attestation or a cross-replica durability certificate.
+No KRaft retirement authority mutation, logical COMMITTED
+reference retirement or physical MinIO DELETE is enabled.
+PR #2 stays Draft pending actual per-Broker authenticated
+round-trip and multi-node durability evidence. A new exact
+SHA must pass its own 17 CI workflows before validation.

@@ -299,6 +299,12 @@ jobs:
               'expiryAtExactMaxAgeInvalidatesCompletionAndStagedResult',
               'monotonicTimerCanCrossSignedLongBoundary',
               'backwardClockObservationCannotMakeOldCaptureFresh',
+              'stagedReportMapsToExactUnstableHeartbeatWireFields',
+              'diagnosticWireReportSurvivesVThreeEncodeDecodeWithoutAuthorizingGc',
+              'localWireReportNeverSilentlyDowngradesToStableVTwo',
+              'wireAndTypedViewsShareTheSameOneShotResult',
+              'wireReportIsSuppressedAfterEpochChangeOrExpiry',
+              'revokingBrokerRegistrationDiscardsWireReportBeforeEncoding',
           }
           assert capture_root.tag == 'testsuite'
           assert capture_root.get('name') == capture_suite
