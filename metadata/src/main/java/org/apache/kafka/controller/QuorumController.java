@@ -2188,7 +2188,14 @@ public final class QuorumController implements Controller {
                     ControllerResult<BrokerHeartbeatReply> result = replicationControl.
                         processBrokerHeartbeat(request, offsetForRegisterBrokerRecord.getAsLong());
                     inControlledShutdown = result.response().inControlledShutdown();
-                    return result;
+                    BrokerHeartbeatReply reply = attachValidatedSourceProbe(context, request, result);
+                    if (reply == result.response()) {
+                        return result;
+                    }
+                    // Preserve the native heartbeat's atomicity and KRaft records.
+                    return result.isAtomic()
+                        ? ControllerResult.atomicOf(result.records(), reply)
+                        : ControllerResult.of(result.records(), reply);
                 }
 
                 @Override
@@ -2205,6 +2212,53 @@ public final class QuorumController implements Controller {
                     controllerMetrics.incrementTimedOutHeartbeats();
                 }
             });
+    }
+
+    /**
+     * Only the serialized Controller heartbeat event may select a previously
+     * issued probe. A v3 field is never fabricated from caller-supplied bytes
+     * and never grants Source/WAL authority or COMMITTED object retirement.
+     */
+    private BrokerHeartbeatReply attachValidatedSourceProbe(
+        ControllerRequestContext context,
+        BrokerHeartbeatRequestData request,
+        ControllerResult<BrokerHeartbeatReply> result
+    ) {
+        BrokerHeartbeatReply reply = result.response();
+        if (context.requestHeader() == null || context.requestHeader().requestApiVersion() != 3) {
+            return reply;
+        }
+        if (!result.records().isEmpty() || !reply.isCaughtUp() || reply.isFenced()
+            || reply.shouldShutDown() || reply.inControlledShutdown()) {
+            return reply;
+        }
+        if (request.wantFence() || request.wantShutDown()) {
+            return reply;
+        }
+        if (!retirementBrokerPrincipalPolicy.matches(context.principal(), request.brokerId())) {
+            return reply;
+        }
+        Optional<PartitionRetirementSourceProbeRegistry.Challenge> pending =
+            retirementSourceProbeRegistry.pendingForHeartbeat(
+                request.brokerId(), request.brokerEpoch(), context.principal(), time.nanoseconds()
+            );
+        if (pending.isEmpty()) {
+            return reply;
+        }
+        PartitionRetirementCandidatePrecheck.Candidate candidate = pending.get().candidate();
+        if (PartitionRetirementCandidatePrecheck.assess(
+                featureControl, clusterControl, replicationControl, partitionRetirementControl,
+                candidate, offsetControl.nextWriteOffset()
+            ) != PartitionRetirementCandidatePrecheck.Finding.SOURCE_LOG_START_NOT_VERIFIED) {
+            return reply;
+        }
+        // The immutable value is diagnostic only, held within this one
+        // Controller response. The nonce remains pending until consumed or
+        // expired; leader failover invalidates it.
+        return new BrokerHeartbeatReply(
+            reply.isCaughtUp(), reply.isFenced(), reply.inControlledShutdown(),
+            reply.shouldShutDown(), pending.get().toProtocolRequest()
+        );
     }
 
     @Override

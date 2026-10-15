@@ -159,6 +159,33 @@ final class PartitionRetirementSourceProbeRegistry {
         return Optional.of(challenge);
     }
 
+    /**
+     * Read-only view of an already issued, unexpired challenge for one
+     * authenticated Broker heartbeat. Called only on the Controller event
+     * thread. It never mints a nonce, extends its expiry, or consumes it.
+     *
+     * <p>Callers must also revalidate the candidate against the *current*
+     * KRaft broker registration, partition leader and CAS positions before
+     * carrying this diagnostic on a heartbeat response.</p>
+     */
+    Optional<Challenge> pendingForHeartbeat(
+        int brokerId,
+        long brokerEpoch,
+        KafkaPrincipal authenticatedPrincipal,
+        long nowNs
+    ) {
+        if (brokerId < 0 || brokerEpoch < 0L || authenticatedPrincipal == null) {
+            return Optional.empty();
+        }
+        return outstanding.values().stream()
+            .filter(pending -> pending.principal().equals(authenticatedPrincipal))
+            .filter(pending -> fresh(pending.issuedAtNs(), nowNs))
+            .map(Pending::challenge)
+            .filter(challenge -> challenge.candidate().brokerId() == brokerId)
+            .filter(challenge -> challenge.candidate().brokerEpoch() == brokerEpoch)
+            .findFirst();
+    }
+
     Finding consume(
         Challenge reported,
         Candidate currentCandidate,

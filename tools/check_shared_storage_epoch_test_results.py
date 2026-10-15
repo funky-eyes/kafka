@@ -337,6 +337,7 @@ REQUIRED_TESTS = {
         "testMissingSourceWalReportNeverConsumesOrEmitsControllerRecords",
         "testUntrustedHeartbeatProbeRejectsBeforeAnyKRaftWrite",
         "testHeartbeatProbeCannotBypassStableProtocolVersion",
+        "testProductionV3HeartbeatNeverIssuesUnauthenticatedSourceChallenge",
     ),
     "org.apache.kafka.controller.PartitionRetirementHeartbeatReportGateTest": (
         "absentReportPreservesLegacyHeartbeatWithoutBrokerPrincipal",
@@ -391,6 +392,10 @@ REQUIRED_TESTS = {
         "backwardsNanotimeCannotMakeAnExpiredProbeFresh",
         "malformedChallengeIdentifiersAndMissingCandidatesFailConstruction",
         "challengeMapsToSharedProtocolRequestWithoutLosingCasCoordinates",
+        "pendingChallengeIsReadOnlyAndRequiresExactBrokerPrincipal",
+        "heartbeatOfferMustRejectOldBrokerEpochAndExpiredNonce",
+        "consumedProbeCannotBeReofferedOnLaterHeartbeat",
+        "controllerLeadershipChangeRevokesHeartbeatOffers",
         "issuedChallengeRoundTripsThroughHeartbeatVersionThreeButNeverAuthorizesGc",
         "malformedHeartbeatChallengeCannotBecomeTypedSourceProbe",
         "forgedWireFieldBurnsNonceAndPreventsLaterValidConsumption",

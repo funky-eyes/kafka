@@ -627,7 +627,8 @@ class ControllerApis(
             setErrorCode(NONE.code).
             setIsCaughtUp(reply.isCaughtUp).
             setIsFenced(reply.isFenced).
-            setShouldShutDown(reply.shouldShutDown))
+            setShouldShutDown(reply.shouldShutDown).
+            setSourceWalProbeChallenge(ControllerApis.sourceWalProbeChallenge(reply, request.context.apiVersion)))
         }
       }
       requestHelper.sendResponseMaybeThrottle(request,
@@ -1103,5 +1104,36 @@ class ControllerApis(
   def handleUpdateRaftVoter(request: RequestChannel.Request): CompletableFuture[Unit] = {
     authHelper.authorizeClusterOperation(request, CLUSTER_ACTION)
     handleRaftRequest(request, response => new UpdateRaftVoterResponse(response.asInstanceOf[UpdateRaftVoterResponseData]))
+  }
+}
+
+/**
+ * Stable brokers always receive the unchanged v0-v2 heartbeat response.
+ * The v3 tagged field can only carry an immutable Challenge selected in
+ * the active Controller event. It is diagnostic and never GC authority.
+ */
+object ControllerApis {
+  private[server] def sourceWalProbeChallenge(
+    reply: BrokerHeartbeatReply,
+    apiVersion: Int
+  ): BrokerHeartbeatResponseData.SourceWalProbeChallenge = {
+    val request = reply.sourceWalProbeChallenge()
+    if (apiVersion != 3 || request == null || reply.isFenced ||
+        reply.inControlledShutdown || reply.shouldShutDown) {
+      null
+    } else {
+      new BrokerHeartbeatResponseData.SourceWalProbeChallenge()
+        .setNonce(request.nonce())
+        .setClusterId(request.clusterId())
+        .setTopicId(request.topicId())
+        .setPartitionId(request.partitionId())
+        .setBrokerId(request.brokerId())
+        .setBrokerEpoch(request.brokerEpoch())
+        .setBrokerIncarnationId(request.brokerIncarnationId())
+        .setSourceLeaderEpoch(request.sourceLeaderEpoch())
+        .setExpectedPreviousAuthorityOffset(request.expectedPreviousAuthorityOffset())
+        .setNextAuthorityOffset(request.nextAuthorityOffset())
+        .setClaimedLogStartOffset(request.claimedLogStartOffset())
+    }
   }
 }

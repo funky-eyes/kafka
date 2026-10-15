@@ -56,6 +56,50 @@ class PartitionRetirementSourceProbeRegistryTest {
     }
 
     @Test
+    void pendingChallengeIsReadOnlyAndRequiresExactBrokerPrincipal() {
+        var registry = registry();
+        Challenge issued = issue(registry, 100L);
+        assertEquals(issued,
+            registry.pendingForHeartbeat(3, 54L, BROKER_THREE, 101L).orElseThrow());
+        assertTrue(registry.pendingForHeartbeat(4, 54L, BROKER_THREE, 101L).isEmpty());
+        assertTrue(registry.pendingForHeartbeat(3, 54L, BROKER_FOUR, 101L).isEmpty());
+        assertTrue(registry.pendingForHeartbeat(3, 54L, KafkaPrincipal.ANONYMOUS, 101L).isEmpty());
+        assertTrue(registry.pendingForHeartbeat(3, 54L, null, 101L).isEmpty());
+        assertEquals(Finding.MATCHED_UNTRUSTED,
+            registry.consume(issued, CANDIDATE, BROKER_THREE, 102L));
+    }
+
+    @Test
+    void heartbeatOfferMustRejectOldBrokerEpochAndExpiredNonce() {
+        var registry = registry();
+        Challenge issued = issue(registry, 100L);
+        assertTrue(registry.pendingForHeartbeat(3, 55L, BROKER_THREE, 101L).isEmpty());
+        assertTrue(registry.pendingForHeartbeat(3, -1L, BROKER_THREE, 101L).isEmpty());
+        assertTrue(registry.pendingForHeartbeat(-1, 54L, BROKER_THREE, 101L).isEmpty());
+        long expiry = 100L + PartitionRetirementSourceProbeRegistry.MAX_AGE_NS;
+        assertTrue(registry.pendingForHeartbeat(3, 54L, BROKER_THREE, expiry).isEmpty());
+        assertEquals(Finding.EXPIRED, registry.consume(issued, CANDIDATE, BROKER_THREE, expiry));
+    }
+
+    @Test
+    void consumedProbeCannotBeReofferedOnLaterHeartbeat() {
+        var registry = registry();
+        Challenge issued = issue(registry, 100L);
+        assertEquals(Finding.MATCHED_UNTRUSTED,
+            registry.consume(issued, CANDIDATE, BROKER_THREE, 101L));
+        assertTrue(registry.pendingForHeartbeat(3, 54L, BROKER_THREE, 102L).isEmpty());
+    }
+
+    @Test
+    void controllerLeadershipChangeRevokesHeartbeatOffers() {
+        var registry = registry();
+        issue(registry, 100L);
+        assertTrue(registry.pendingForHeartbeat(3, 54L, BROKER_THREE, 101L).isPresent());
+        registry.invalidateAll();
+        assertTrue(registry.pendingForHeartbeat(3, 54L, BROKER_THREE, 102L).isEmpty());
+    }
+
+    @Test
     void replayedNonceCannotBeConsumedTwice() {
         var registry = registry();
         Challenge issued = issue(registry, 100L);

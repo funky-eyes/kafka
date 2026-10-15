@@ -738,3 +738,73 @@ attestation for future checkpoints. There is no authority writer,
 COMMITTED logical reference retirement, or physical MinIO DELETE.
 The frozen MinIO GA ref remains
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
+
+## Batches 165–168 — Controller-to-Broker v3 Challenge response plumbing (still default-deny)
+
+**Baseline:** `0f223df37b7660c736284b4b5ec4819550826216`
+completed **17/17 GitHub Actions SUCCESS**, including the Java 25,
+metadata Checkstyle/SpotBugs/JUnit, real MinIO, 3-broker E2E, Ring WAL,
+WAL crash and Controller HA gates. The independent MinIO GA release
+branch remains frozen at `9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
+
+- **165 — Controller-volatile pending source:** Add
+  `PartitionRetirementSourceProbeRegistry.pendingForHeartbeat`.
+  Only a nonce **already issued in the serialized Controller event**
+  can be selected; no new nonce is minted or expiry extended.
+  BrokerId/Epoch, unique authenticated principal and strictly
+  positive remaining TTL must match. A lookup does not consume the
+  one-use nonce. Controller leadership invalidation clears it.
+- **166 — serial authority revalidation:** Inside
+  `QuorumController.processBrokerHeartbeat`'s existing Controller
+  serialized event, consider carrying a pending Challenge **only**
+  when an exact unstable v3 heartbeat is negotiated, the broker
+  is caught up and not fenced/shutting down, the request does not
+  seek fencing or shutdown, and the normal heartbeat produces no
+  KRaft records. The dedicated per-Broker principal mapping must
+  match. The pending candidate must again pass the *current*
+  finalized feature gate, BrokerRegistration, TopicId/partition
+  leadership, broker incarnation and KRaft authority CAS checks.
+  Otherwise the original heartbeat result is returned unchanged.
+  A successful diagnostic reuses the existing KRaft result
+  (preserving the original record list and atomicity) and adds
+  only an **immutable** Source Probe Request to the reply.
+- **167 — actual Controller response encoder:** Extend
+  `BrokerHeartbeatReply` with a nullable immutable Challenge,
+  preserving the original four-argument constructor. The
+  `ControllerApis` response builder maps this to the optional
+  `BrokerHeartbeatResponseData.SourceWalProbeChallenge` **only
+  for version 3**, never for stable v0–v2 or broker fencing,
+  controlled shutdown or shutdown. No API Key allocation,
+  metadata writing or object deletion is involved.
+- **168 — deterministic gates:** Four registry tests cover
+  matched/wrong Principal, wrong BrokerId/Epoch, expiration,
+  one-use consumption and Controller leadership revocation.
+  Three ControllerApis tests cover stable version silence,
+  refused fenced/shutdown replies and exact v3 serialization
+  round-trip. Main CI now runs and XML-verifies the three Scala
+  tests, and the strict Controller Java/Scala inventory increases
+  **545 -> 550 named methods, 34 suites**. Trigger
+  `BrokerHeartbeatReply.java` changes through the existing
+  Shared Storage main workflow. Exact imports in the metadata
+  module retain the restricted ImportControl boundary.
+
+**Important security and GA boundaries:**
+No production code configures a dedicated per-Broker Principal
+(`DENY_ALL` remains the default), and the Kafka retirement feature
+is not finalized in production. Thus this plumbing cannot create
+live Challenge offers in default deployments. The broker receives
+the optional field but its lifecycle handler still validates and
+**discards** it: there is no asynchronous native Source/WAL sampler
+bound to a broker-specific authenticated return channel. Even an
+otherwise correct report is still rejected before normal Controller
+heartbeat state or KRaft event handling, and no COMMITTED physical
+GC can happen. Future work must finish authenticated Broker identity,
+native WAL evidence, nonce consume under a single Controller event,
+multi-replica durability and KRaft authority writer before enabling
+reference retirement or MinIO DELETE.
+
+  Additionally, one exact `QuorumControllerTest` runtime regression
+  registers a Broker and sends a negotiated v3 heartbeat under
+  the production `DENY_ALL` policy. It proves that no Source/WAL
+  challenge is issued and no retirement authority record is emitted.
+  The new test is explicitly selected by the main CI gate.

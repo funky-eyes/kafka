@@ -166,6 +166,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -371,6 +372,45 @@ public class QuorumControllerTest {
      * after activeController() returns. Retirement preflight must be proven
      * non-emitting without racing those independent startup writes.
      */
+    @Test
+    public void testProductionV3HeartbeatNeverIssuesUnauthenticatedSourceChallenge() throws Exception {
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv).build()
+        ) {
+            QuorumController active = controlEnv.activeController(true);
+            ListenerCollection listeners = new ListenerCollection();
+            listeners.add(new Listener().setName("PLAINTEXT")
+                .setHost("localhost").setPort(9092));
+            long epoch = active.registerBroker(
+                ANONYMOUS_CONTEXT,
+                new BrokerRegistrationRequestData()
+                    .setBrokerId(0)
+                    .setClusterId(clientEnv.clusterId())
+                    .setIncarnationId(new Uuid(55L, 66L))
+                    .setFeatures(brokerFeaturesPlusFeatureVersions(
+                        MetadataVersion.MINIMUM_VERSION, MetadataVersion.latestTesting(),
+                        Map.of(EligibleLeaderReplicasVersion.FEATURE_NAME,
+                            EligibleLeaderReplicasVersion.ELRV_1.featureLevel())))
+                    .setLogDirs(List.of(new Uuid(77L, 88L)))
+                    .setListeners(listeners)
+            ).get(10, TimeUnit.SECONDS).epoch();
+            ControllerRequestContext versionThree = new ControllerRequestContext(
+                new RequestHeaderData().setRequestApiKey((short) 63).setRequestApiVersion((short) 3),
+                KafkaPrincipal.ANONYMOUS, OptionalLong.empty()
+            );
+            var reply = active.processBrokerHeartbeat(
+                versionThree, new BrokerHeartbeatRequestData()
+                    .setBrokerId(0).setBrokerEpoch(epoch)
+                    .setCurrentMetadataOffset(100000L).setWantFence(false)
+            ).get(10, TimeUnit.SECONDS);
+            assertTrue(reply.isCaughtUp());
+            assertFalse(reply.isFenced());
+            assertNull(reply.sourceWalProbeChallenge());
+            assertEquals(0L, retirementAuthorityRecordCount(clientEnv));
+        }
+    }
+
     private static long retirementAuthorityRecordCount(MockRaftClientTestEnv clientEnv) {
         return clientEnv.allRecords().stream()
             .filter(record -> record.message() instanceof PartitionRetirementAuthorityRecord)

@@ -40,7 +40,8 @@ import org.apache.kafka.common.message.IncrementalAlterConfigsResponseData.Alter
 import org.apache.kafka.common.message._
 import org.apache.kafka.common.network.{ClientInformation, ListenerName}
 import org.apache.kafka.common.protocol.Errors._
-import org.apache.kafka.common.protocol.{ApiKeys, ApiMessage, Errors}
+import org.apache.kafka.common.protocol.{ApiKeys, ApiMessage, Errors, MessageUtil}
+import org.apache.kafka.common.replica.PartitionRetirementSourceProbe
 import org.apache.kafka.common.requests._
 import org.apache.kafka.common.resource.{PatternType, Resource, ResourcePattern, ResourceType}
 import org.apache.kafka.common.security.auth.{KafkaPrincipal, SecurityProtocol}
@@ -51,7 +52,7 @@ import org.apache.kafka.common.requests.RequestHeader
 import org.apache.kafka.controller.ControllerRequestContextUtil.ANONYMOUS_CONTEXT
 import org.apache.kafka.controller.{Controller, ControllerRequestContext, ResultOrError}
 import org.apache.kafka.image.publisher.ControllerRegistrationsPublisher
-import org.apache.kafka.metadata.KRaftMetadataCache
+import org.apache.kafka.metadata.{BrokerHeartbeatReply, KRaftMetadataCache}
 import org.apache.kafka.network.{Session, SocketServerConfigs}
 import org.apache.kafka.network.metrics.RequestChannelMetrics
 import org.apache.kafka.raft.{KRaftConfigs, QuorumConfig, RaftManager}
@@ -82,6 +83,53 @@ import scala.reflect.ClassTag
 
 class ControllerApisTest {
   val logger = LoggerFactory.getLogger(classOf[ControllerApisTest])
+
+  private def diagnosticReply(): BrokerHeartbeatReply = {
+    val challenge = new PartitionRetirementSourceProbe.Request(
+      new Uuid(1L, 2L), "cluster-a", new Uuid(3L, 4L), 0,
+      3, 54L, new Uuid(5L, 6L), 8, -1L, 100L, 0L
+    )
+    new BrokerHeartbeatReply(true, false, false, false, challenge)
+  }
+
+  @Test
+  def testStableHeartbeatNeverIncludesSourceWalChallenge(): Unit = {
+    val reply = diagnosticReply()
+    for (version <- 0 to 2) {
+      assertNull(ControllerApis.sourceWalProbeChallenge(reply, version))
+    }
+    assertNull(ControllerApis.sourceWalProbeChallenge(
+      new BrokerHeartbeatReply(true, false, false, false), 3))
+  }
+
+  @Test
+  def testFencedOrShuttingDownBrokerCannotReceiveDiagnostic(): Unit = {
+    val reply = diagnosticReply()
+    assertNull(ControllerApis.sourceWalProbeChallenge(
+      new BrokerHeartbeatReply(true, true, false, false, reply.sourceWalProbeChallenge()), 3))
+    assertNull(ControllerApis.sourceWalProbeChallenge(
+      new BrokerHeartbeatReply(true, false, true, false, reply.sourceWalProbeChallenge()), 3))
+    assertNull(ControllerApis.sourceWalProbeChallenge(
+      new BrokerHeartbeatReply(true, false, false, true, reply.sourceWalProbeChallenge()), 3))
+  }
+
+  @Test
+  def testControllerDiagnosticRoundTripsOnHeartbeatVersionThree(): Unit = {
+    val wire = ControllerApis.sourceWalProbeChallenge(diagnosticReply(), 3)
+    assertNotNull(wire)
+    val response = new BrokerHeartbeatResponseData().setSourceWalProbeChallenge(wire)
+    val parsed = new BrokerHeartbeatResponseData(
+      MessageUtil.toByteBufferAccessor(response, 3.toShort), 3.toShort
+    )
+    assertEquals(new Uuid(1L, 2L), parsed.sourceWalProbeChallenge().nonce())
+    assertEquals(new Uuid(3L, 4L), parsed.sourceWalProbeChallenge().topicId())
+    assertEquals(new Uuid(5L, 6L), parsed.sourceWalProbeChallenge().brokerIncarnationId())
+    assertEquals(3, parsed.sourceWalProbeChallenge().brokerId())
+    assertEquals(54L, parsed.sourceWalProbeChallenge().brokerEpoch())
+    assertEquals(8, parsed.sourceWalProbeChallenge().sourceLeaderEpoch())
+    assertEquals(100L, parsed.sourceWalProbeChallenge().nextAuthorityOffset())
+  }
+
 
   object MockControllerMutationQuota {
     val errorMessage = "quota exceeded in test"

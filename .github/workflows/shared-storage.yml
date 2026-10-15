@@ -40,6 +40,7 @@ on:
       - 'metadata/src/main/java/org/apache/kafka/image/PartitionRetirementAuthority*.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementControlManager.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/QuorumController.java'
+      - 'metadata/src/main/java/org/apache/kafka/metadata/BrokerHeartbeatReply.java'
       - 'clients/src/main/java/org/apache/kafka/common/replica/PartitionRetirementSourceProbe.java'
       - 'server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java'
       - 'server/src/test/java/org/apache/kafka/server/BrokerHeartbeatSourceProbeChallengeGateTest.java'
@@ -114,6 +115,7 @@ on:
       - 'metadata/src/main/java/org/apache/kafka/image/PartitionRetirementAuthority*.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementControlManager.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/QuorumController.java'
+      - 'metadata/src/main/java/org/apache/kafka/metadata/BrokerHeartbeatReply.java'
       - 'clients/src/main/java/org/apache/kafka/common/replica/PartitionRetirementSourceProbe.java'
       - 'server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java'
       - 'server/src/test/java/org/apache/kafka/server/BrokerHeartbeatSourceProbeChallengeGateTest.java'
@@ -280,7 +282,26 @@ jobs:
             --tests 'kafka.log.LogManagerTest.testLoadLogsSkipsIncompleteInitializationWithoutOffliningParentDir' \
             --tests 'kafka.server.BrokerLifecycleManagerTest.testIncarnationChangesAcrossBrokerProcessRestart' \
             --tests 'kafka.server.BrokerLifecycleManagerTest.testKraftJBODMetadataVersionUpdateEvent' \
+            --tests 'kafka.server.ControllerApisTest.testStableHeartbeatNeverIncludesSourceWalChallenge' \
+            --tests 'kafka.server.ControllerApisTest.testFencedOrShuttingDownBrokerCannotReceiveDiagnostic' \
+            --tests 'kafka.server.ControllerApisTest.testControllerDiagnosticRoundTripsOnHeartbeatVersionThree' \
             --no-scan 2>&1 | tee shared-storage-logmanager-regression.log
+          python3 - <<'PY'
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+          suite = 'kafka.server.ControllerApisTest'
+          root = ET.parse(Path('core/build/test-results/test/TEST-' + suite + '.xml')).getroot()
+          expected = {
+              'testStableHeartbeatNeverIncludesSourceWalChallenge',
+              'testFencedOrShuttingDownBrokerCannotReceiveDiagnostic',
+              'testControllerDiagnosticRoundTripsOnHeartbeatVersionThree',
+          }
+          assert root.get('name') == suite
+          assert all(root.get(field) == '0' for field in ('skipped', 'failures', 'errors'))
+          actual = {case.get('name', '').removesuffix('()') for case in root.findall('testcase')}
+          assert expected <= actual, sorted(expected - actual)
+          print(f'PASS: {len(expected)} ControllerApis v3 response contract tests')
+          PY
 
       - name: Run shared storage tests
         shell: bash
@@ -309,6 +330,7 @@ jobs:
             --tests 'org.apache.kafka.controller.QuorumControllerTest.testMissingSourceWalReportNeverConsumesOrEmitsControllerRecords' \
             --tests 'org.apache.kafka.controller.QuorumControllerTest.testUntrustedHeartbeatProbeRejectsBeforeAnyKRaftWrite' \
             --tests 'org.apache.kafka.controller.QuorumControllerTest.testHeartbeatProbeCannotBypassStableProtocolVersion' \
+            --tests 'org.apache.kafka.controller.QuorumControllerTest.testProductionV3HeartbeatNeverIssuesUnauthenticatedSourceChallenge' \
             --tests 'org.apache.kafka.controller.PartitionRetirementHeartbeatReportGateTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementBrokerPrincipalPolicyTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementSourceProbeRegistryTest' \

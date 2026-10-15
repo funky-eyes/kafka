@@ -3282,3 +3282,51 @@ challenge, send it on BrokerHeartbeat, set a trusted Principal, or
 enable retirement. The production feature gate remains disabled,
 per-broker authentication remains DENY_ALL and physical GC remains
 disabled. MinIO GA release stays frozen.
+
+## Batches 165–168 — negotiated Controller diagnostic challenge delivery
+
+The development branch's preceding `0f223df3` SHA passed all
+**17/17 CI workflows**, including real MinIO and Controller HA.
+This section extends the transport boundary but deliberately does
+not change the frozen MinIO GA release or enable physical GC.
+
+A `PartitionRetirementSourceProbeRegistry` challenge is a
+Controller-volatile nonce, at most five seconds old. The new
+read-only `pendingForHeartbeat` lookup checks BrokerId/Epoch and
+the unique mapped authenticated Principal without minting,
+refreshing, or consuming a nonce; Controller promotion/deactivation
+still clears the registry. In the existing serialized Controller
+heartbeat event, `QuorumController` may return a previously issued
+pending Challenge only after **fresh, authoritative KRaft**
+registration/leadership/feature/CAS revalidation. It sends nothing
+if the heartbeat is non-v3, writes KRaft metadata, is behind
+metadata, seeks fencing/shutdown or describes a fenced/shutting-down
+broker. The original heartbeat records and atomicity remain intact.
+
+`BrokerHeartbeatReply` now optionally carries an immutable typed
+SourceProbe Request, while preserving its original four-argument
+constructor. `ControllerApis` serializes it as an optional
+`BrokerHeartbeatResponseData.SourceWalProbeChallenge` only when
+the actual negotiated request version equals 3. The generated
+stable v0–v2 wire envelope remains unchanged. The existing broker
+handler rejects or ignores this diagnostic and does not schedule
+source reads or send reports.
+
+Four registry-JUnit tests validate read-only principal fencing,
+BrokerEpoch ABA, TTL, one-use consume and leader turnover.
+Three Scala ControllerApis tests validate non-v3 silence,
+fenced/shutdown suppression and an exact v3 encode/decode.
+The Shared Storage CI explicitly runs and XML-verifies these
+three core tests and the existing strict Java/Scala contract
+inventory is now **550 methods / 34 suites**.
+
+No stable public API, new Kafka API key, production Principal
+configuration, signed native Source/WAL proof, KRaft authority
+writer or COMMITTED object DELETE is enabled. The full new
+SHA must independently pass its 17 Workflow release tests
+before this becomes a verified development checkpoint.
+ 
+An additional Controller runtime test registers a Broker and
+sends a v3 heartbeat under `DENY_ALL`, asserting neither a
+Source/WAL challenge nor a retirement authority record is emitted.
+The mandatory named inventory is 550 methods in 34 suites.

@@ -142,6 +142,9 @@
     </subpackage>
 
     <subpackage name="metadata">
+        <!-- The heartbeat reply carries only an immutable diagnostic value. -->
+        <allow class="org.apache.kafka.common.replica.PartitionRetirementSourceProbe" exact-match="true" />
+        <allow class="org.apache.kafka.common.replica.PartitionRetirementSourceProbe.Request" exact-match="true" />
         <allow pkg="org.apache.kafka.admin" />
         <allow pkg="org.apache.kafka.clients" />
         <allow pkg="org.apache.kafka.common.acl" />
