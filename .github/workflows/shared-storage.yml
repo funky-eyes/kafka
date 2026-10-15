@@ -44,6 +44,7 @@ on:
       - 'clients/src/main/java/org/apache/kafka/common/replica/PartitionRetirementSourceProbe.java'
       - 'server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java'
       - 'server/src/test/java/org/apache/kafka/server/BrokerHeartbeatSourceProbeChallengeGateTest.java'
+      - 'server/src/test/java/org/apache/kafka/server/BrokerHeartbeatSourceProbeCaptureStateTest.java'
       - 'clients/src/main/resources/common/message/BrokerHeartbeatRequest.json'
       - 'clients/src/main/resources/common/message/BrokerHeartbeatResponse.json'
       - 'clients/src/test/java/org/apache/kafka/common/requests/BrokerHeartbeatSourceWalProbeProtocolTest.java'
@@ -119,6 +120,7 @@ on:
       - 'clients/src/main/java/org/apache/kafka/common/replica/PartitionRetirementSourceProbe.java'
       - 'server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java'
       - 'server/src/test/java/org/apache/kafka/server/BrokerHeartbeatSourceProbeChallengeGateTest.java'
+      - 'server/src/test/java/org/apache/kafka/server/BrokerHeartbeatSourceProbeCaptureStateTest.java'
       - 'clients/src/main/resources/common/message/BrokerHeartbeatRequest.json'
       - 'clients/src/main/resources/common/message/BrokerHeartbeatResponse.json'
       - 'clients/src/test/java/org/apache/kafka/common/requests/BrokerHeartbeatSourceWalProbeProtocolTest.java'
@@ -248,6 +250,7 @@ jobs:
           set -o pipefail
           ./gradlew :server:test --no-scan \
             --tests 'org.apache.kafka.server.BrokerHeartbeatSourceProbeChallengeGateTest' \
+            --tests 'org.apache.kafka.server.BrokerHeartbeatSourceProbeCaptureStateTest' \
             2>&1 | tee shared-storage-broker-probe-test.log
           python3 - <<'PY'
           from pathlib import Path
@@ -272,6 +275,33 @@ jobs:
           executed = {node.get('name', '').removesuffix('()') for node in root.findall('testcase')}
           assert required <= executed, sorted(required - executed)
           print(f'PASS: {len(required)} broker challenge regression cases and zero skips')
+          capture_suite = 'org.apache.kafka.server.BrokerHeartbeatSourceProbeCaptureStateTest'
+          capture_xml = Path('server/build/test-results/test/TEST-' + capture_suite + '.xml')
+          capture_root = ET.parse(capture_xml).getroot()
+          required_capture = {
+              'successfulCaptureIsAvailableExactlyOnce',
+              'duplicateNonceCannotResampleOrOverwritePriorEvidence',
+              'laterNonceFencesOutOfOrderCompletionFromOlderCapture',
+              'singleFlightPreventsAnUnboundedQueueOfNativeCaptureTasks',
+              'providerReconfigurationRevokesPendingAndStagedCaptures',
+              'synchronousProviderFailureReleasesIOLockButNotNonceReplayFence',
+              'captureForWrongBrokerOrChangedEpochCannotBeStaged',
+              'brokerIncarnationChangeInvalidatesAsyncCompletion',
+              'fencingOrUnregistrationInvalidatesAsyncCompletion',
+              'emptyNullOrFailedProviderDoesNotProduceReport',
+              'reportForOtherNonceOrSourceCannotBeSubstituted',
+              'expiryAtExactMaxAgeInvalidatesCompletionAndStagedResult',
+              'monotonicTimerCanCrossSignedLongBoundary',
+              'backwardClockObservationCannotMakeOldCaptureFresh',
+          }
+          assert capture_root.tag == 'testsuite'
+          assert capture_root.get('name') == capture_suite
+          assert all(capture_root.get(field) == '0' for field in ('skipped', 'failures', 'errors'))
+          capture_names = {
+              case.get('name', '').removesuffix('()') for case in capture_root.findall('testcase')
+          }
+          assert required_capture <= capture_names, sorted(required_capture - capture_names)
+          print(f'PASS: {len(required_capture)} asynchronous broker capture fences and zero skips')
           PY
 
       - name: Run shared storage LogManager startup regression

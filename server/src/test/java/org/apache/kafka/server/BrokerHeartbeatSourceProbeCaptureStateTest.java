@@ -1,0 +1,245 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.kafka.server;
+
+import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.replica.PartitionRetirementSourceProbe;
+import org.apache.kafka.common.replica.PartitionRetirementSourceProbe.Report;
+import org.apache.kafka.common.replica.PartitionRetirementSourceProbe.Request;
+import org.apache.kafka.metadata.BrokerState;
+import org.apache.kafka.server.BrokerLifecycleManager.SourceWalProbeCaptureState;
+import org.apache.kafka.server.BrokerLifecycleManager.SourceWalProbeCaptureState.Capture;
+
+import org.junit.jupiter.api.Test;
+
+import java.util.Optional;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/**
+ * Strictly local asynchronous Source/WAL diagnostic staging. No test enables
+ * sending a SourceWalProbeReport or writing any KRaft retirement authority.
+ */
+class BrokerHeartbeatSourceProbeCaptureStateTest {
+    private static final Uuid INCARNATION = new Uuid(5L, 6L);
+
+    @Test
+    void successfulCaptureIsAvailableExactlyOnce() {
+        var state = new SourceWalProbeCaptureState();
+        Request request = challenge(1L);
+        Capture capture = state.begin(request, 100L);
+        assertNotNull(capture);
+        Report observed = report(request);
+        assertTrue(complete(state, capture, Optional.of(observed), null, 101L));
+        assertEquals(Optional.of(observed), take(state, 102L));
+        assertTrue(take(state, 103L).isEmpty());
+    }
+
+    @Test
+    void duplicateNonceCannotResampleOrOverwritePriorEvidence() {
+        var state = new SourceWalProbeCaptureState();
+        Request request = challenge(1L);
+        Capture started = state.begin(request, 100L);
+        assertNotNull(started);
+        assertNull(state.begin(request, 101L));
+        assertNull(state.begin(new Request(
+            request.nonce(), "cluster-b", request.topicId(), request.partitionId(),
+            request.brokerId(), request.brokerEpoch(), request.brokerIncarnationId(),
+            request.sourceLeaderEpoch(), request.expectedPreviousAuthorityOffset(),
+            request.nextAuthorityOffset(), request.claimedLogStartOffset()
+        ), 102L));
+        assertTrue(complete(state, started, Optional.of(report(request)), null, 103L));
+        assertTrue(take(state, 104L).isPresent());
+    }
+
+    @Test
+    void laterNonceFencesOutOfOrderCompletionFromOlderCapture() {
+        var state = new SourceWalProbeCaptureState();
+        Request first = challenge(1L);
+        Request second = challenge(2L);
+        Capture old = state.begin(first, 100L);
+        // A generation fence cancels the old pending slot without waiting for
+        // a delayed provider, which may still complete after a new capture.
+        state.clear();
+        assertNull(state.begin(second, 101L));
+        assertFalse(complete(state, old, Optional.of(report(first)), null, 102L));
+        Capture replacement = state.begin(second, 103L);
+        assertNotNull(replacement);
+        assertTrue(take(state, 103L).isEmpty());
+        assertTrue(complete(state, replacement, Optional.of(report(second)), null, 104L));
+        assertEquals(second, take(state, 105L).orElseThrow().request());
+    }
+
+    @Test
+    void singleFlightPreventsAnUnboundedQueueOfNativeCaptureTasks() {
+        var state = new SourceWalProbeCaptureState();
+        Request first = challenge(1L);
+        Capture capture = state.begin(first, 100L);
+        assertNotNull(capture);
+        // Expiration alone cannot authorize a second concurrent capture:
+        // the old producer Future may still be executing.
+        assertNull(state.begin(challenge(2L), 101L));
+        assertNull(state.begin(challenge(3L), SourceWalProbeCaptureState.MAX_AGE_NS + 100L));
+        assertFalse(complete(state, capture, Optional.empty(), null, 102L));
+        assertNotNull(state.begin(challenge(2L), 103L));
+    }
+
+    @Test
+    void providerReconfigurationRevokesPendingAndStagedCaptures() {
+        var state = new SourceWalProbeCaptureState();
+        Request oldRequest = challenge(1L);
+        Capture old = state.begin(oldRequest, 100L);
+        state.clear();
+        assertNull(state.begin(challenge(2L), 101L));
+        assertFalse(complete(state, old, Optional.of(report(oldRequest)), null, 101L));
+        assertNull(state.begin(oldRequest, 102L));
+        Request fresh = challenge(2L);
+        Capture capture = state.begin(fresh, 103L);
+        assertTrue(complete(state, capture, Optional.of(report(fresh)), null, 104L));
+        state.clear();
+        assertTrue(take(state, 105L).isEmpty());
+    }
+
+    @Test
+    void synchronousProviderFailureReleasesIOLockButNotNonceReplayFence() {
+        var state = new SourceWalProbeCaptureState();
+        Capture abandoned = state.begin(challenge(1L), 100L);
+        state.abandon(abandoned);
+        assertNull(state.begin(challenge(1L), 101L));
+        Capture fresh = state.begin(challenge(2L), 102L);
+        assertNotNull(fresh);
+        assertFalse(complete(state, abandoned, Optional.of(report(challenge(1L))), null, 103L));
+        assertTrue(complete(state, fresh, Optional.of(report(challenge(2L))), null, 104L));
+    }
+
+    @Test
+    void captureForWrongBrokerOrChangedEpochCannotBeStaged() {
+        var wrongBroker = new SourceWalProbeCaptureState();
+        Capture capture = wrongBroker.begin(challenge(1L), 100L);
+        assertFalse(wrongBroker.complete(capture, Optional.of(report(challenge(1L))),
+            null, 101L, 4, 54L, INCARNATION, BrokerState.RUNNING, true));
+        var newEpoch = new SourceWalProbeCaptureState();
+        Capture next = newEpoch.begin(challenge(2L), 100L);
+        assertFalse(newEpoch.complete(next, Optional.of(report(challenge(2L))),
+            null, 101L, 3, 55L, INCARNATION, BrokerState.RUNNING, true));
+    }
+
+    @Test
+    void brokerIncarnationChangeInvalidatesAsyncCompletion() {
+        var state = new SourceWalProbeCaptureState();
+        Request request = challenge(1L);
+        Capture capture = state.begin(request, 100L);
+        assertFalse(state.complete(capture, Optional.of(report(request)), null,
+            101L, 3, 54L, new Uuid(5L, 7L), BrokerState.RUNNING, true));
+        assertTrue(take(state, 102L).isEmpty());
+    }
+
+    @Test
+    void fencingOrUnregistrationInvalidatesAsyncCompletion() {
+        var fenced = new SourceWalProbeCaptureState();
+        Request request = challenge(1L);
+        Capture first = fenced.begin(request, 100L);
+        assertFalse(fenced.complete(first, Optional.of(report(request)), null,
+            101L, 3, 54L, INCARNATION, BrokerState.RECOVERY, true));
+        var unregistered = new SourceWalProbeCaptureState();
+        Capture second = unregistered.begin(challenge(2L), 100L);
+        assertFalse(unregistered.complete(second, Optional.of(report(challenge(2L))), null,
+            101L, 3, 54L, INCARNATION, BrokerState.RUNNING, false));
+    }
+
+    @Test
+    void emptyNullOrFailedProviderDoesNotProduceReport() {
+        var empty = new SourceWalProbeCaptureState();
+        assertFalse(complete(empty, empty.begin(challenge(1L), 100L), Optional.empty(), null, 101L));
+        var missing = new SourceWalProbeCaptureState();
+        assertFalse(complete(missing, missing.begin(challenge(2L), 100L), null, null, 101L));
+        var failed = new SourceWalProbeCaptureState();
+        assertFalse(complete(failed, failed.begin(challenge(3L), 100L),
+            Optional.of(report(challenge(3L))), new IllegalStateException("unavailable"), 101L));
+        assertTrue(take(failed, 102L).isEmpty());
+    }
+
+    @Test
+    void reportForOtherNonceOrSourceCannotBeSubstituted() {
+        var state = new SourceWalProbeCaptureState();
+        Capture capture = state.begin(challenge(1L), 100L);
+        assertFalse(complete(state, capture, Optional.of(report(challenge(2L))), null, 101L));
+        assertTrue(take(state, 102L).isEmpty());
+    }
+
+    @Test
+    void expiryAtExactMaxAgeInvalidatesCompletionAndStagedResult() {
+        long expiry = 100L + SourceWalProbeCaptureState.MAX_AGE_NS;
+        var expired = new SourceWalProbeCaptureState();
+        Capture first = expired.begin(challenge(1L), 100L);
+        assertFalse(complete(expired, first, Optional.of(report(challenge(1L))), null, expiry));
+        var alreadyReady = new SourceWalProbeCaptureState();
+        Capture second = alreadyReady.begin(challenge(2L), 100L);
+        assertTrue(complete(alreadyReady, second, Optional.of(report(challenge(2L))), null, 101L));
+        assertTrue(take(alreadyReady, expiry).isEmpty());
+    }
+
+    @Test
+    void monotonicTimerCanCrossSignedLongBoundary() {
+        var state = new SourceWalProbeCaptureState();
+        long start = Long.MAX_VALUE - 1L;
+        Request request = challenge(1L);
+        Capture capture = state.begin(request, start);
+        assertTrue(complete(state, capture, Optional.of(report(request)), null, Long.MIN_VALUE + 3L));
+        assertTrue(take(state, Long.MIN_VALUE + 4L).isPresent());
+    }
+
+    @Test
+    void backwardClockObservationCannotMakeOldCaptureFresh() {
+        var state = new SourceWalProbeCaptureState();
+        Request request = challenge(1L);
+        Capture capture = state.begin(request, 100L);
+        assertFalse(complete(state, capture, Optional.of(report(request)), null, 99L));
+    }
+
+    private static boolean complete(
+        SourceWalProbeCaptureState state,
+        Capture capture,
+        Optional<Report> report,
+        Throwable error,
+        long nowNs
+    ) {
+        return state.complete(capture, report, error, nowNs,
+            3, 54L, INCARNATION, BrokerState.RUNNING, true);
+    }
+
+    private static Optional<Report> take(SourceWalProbeCaptureState state, long nowNs) {
+        return state.takeOnce(nowNs, 3, 54L, INCARNATION, BrokerState.RUNNING, true);
+    }
+
+    private static Request challenge(long nonceLo) {
+        return new PartitionRetirementSourceProbe.Request(
+            new Uuid(1L, nonceLo), "cluster-a", new Uuid(3L, 4L), 0,
+            3, 54L, INCARNATION, 8, -1L, 100L, 0L
+        );
+    }
+
+    private static Report report(Request request) {
+        return new PartitionRetirementSourceProbe.Report(
+            request, 2L, 0L, 10L, 10L, 12L, 13L
+        );
+    }
+}

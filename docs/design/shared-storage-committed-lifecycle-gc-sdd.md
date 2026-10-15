@@ -3330,3 +3330,42 @@ An additional Controller runtime test registers a Broker and
 sends a v3 heartbeat under `DENY_ALL`, asserting neither a
 Source/WAL challenge nor a retirement authority record is emitted.
 The mandatory named inventory is 550 methods in 34 suites.
+
+## Batches 169–172 — one in-flight asynchronous Source/WAL sampler, fail closed
+
+Baseline `794f6d61` passed 17/17 Workflow gates. The new
+Broker-side `SourceWalProbeSampler` is only an explicit,
+default-null, transport-neutral asynchronous callback.
+BrokerLifecycleManager samples only after successful receipt
+of a Controller heartbeat v3 challenge with a registered RUNNING
+Broker, exact ClusterId/BrokerId/BrokerEpoch/incarnation and valid
+immutable Source/WAL CAS coordinates. A response indicating fencing,
+shutdown or incomplete metadata catch-up cannot start sampling.
+
+One pending capture, one staged result and one most-recent nonce
+are held exclusively on the existing Broker lifecycle event queue.
+Sampler Futures complete back into that queue, never directly
+mutating Broker state on arbitrary executor threads. Identity
+fencing prevents late callback ABA; null/error/empty results,
+wrong nonce/source, stale BrokerEpoch or changed incarnation
+fail closed. A hung provider cannot launch unlimited native I/O:
+its active I/O fence survives provider replacement until the prior
+callback finishes or synchronous scheduling fails. A valid result can only be
+consumed once through a diagnostic-only mailbox and expires
+at five seconds, with monotonic timer wrap handled by subtraction.
+Registration, controlled shutdown, shutdown and sampler change
+revoke pending or staged values without making the previous
+nonce eligible again.
+
+**No production adapter is installed and no Report is sent.**
+This intentionally avoids source reads, transport credentials,
+shared-storage mutations or KRaft writes in default deployments
+until unique Broker authentication and durable source evidence are
+implemented. All Controller denial, COMMITTED retirement and
+physical object deletion controls remain unchanged and OFF.
+
+Fourteen new `server:test` Java methods provide deterministic
+coverage of these fences; the main Java 25 workflow verifies the
+exact JUnit XML set with zero skipped/failing cases. The existing
+550-method/34-suite metadata-storage inventory is unchanged.
+The MinIO GA release branch remains frozen.

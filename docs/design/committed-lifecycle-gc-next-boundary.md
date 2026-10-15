@@ -808,3 +808,70 @@ reference retirement or MinIO DELETE.
   the production `DENY_ALL` policy. It proves that no Source/WAL
   challenge is issued and no retirement authority record is emitted.
   The new test is explicitly selected by the main CI gate.
+
+## Batches 169–172 — bounded asynchronous Broker-local Source/WAL capture (no wire Report)
+
+The prior `794f6d61edbddde2778dd9d0a3aa78b32d250bf6` development
+checkpoint finished **17/17 GitHub Actions SUCCESS**. The frozen
+MinIO GA release `9a28c11b6d97ecacafe1b8566cde5cc34d604889`
+remains untouched.
+
+- **169 — explicit disabled-by-default sampler seam.**
+  `BrokerLifecycleManager` now declares a transport-neutral
+  `SourceWalProbeSampler`, which must promptly return a
+  `CompletionStage<Optional<PartitionRetirementSourceProbe.Report>>`.
+  Production constructors do not install one. An explicit
+  `setSourceWalProbeSampler` event replaces the provider on the
+  existing Broker lifecycle event queue and fences all prior
+  captures. The existing `storage` native Source/WAL reader is
+  **not yet bound** to this seam.
+- **170 — nonce/async completion fence.** On an actual v3
+  Controller heartbeat challenge, the Broker first validates the
+  request version, registered RUNNING status, ClusterId,
+  BrokerId/Epoch/Incarnation, nonce and source CAS. Only then, and
+  **only with an installed sampler**, can it initiate a local
+  asynchronous diagnostic capture. At most **one provider Future**
+  may be outstanding, even across provider replacement until the old
+  callback completes; duplicate nonce offers do not start a
+  second capture. Its result is returned to the serialized
+  lifecycle queue and matches the original immutable challenge.
+  A late completion from a replaced provider/nonce is discarded
+  by **capture object identity**, not solely by nonce/epoch value.
+- **171 — bounded result lifetime and lifecycle fence.**
+  A captured Report is only staged in one in-process diagnostic
+  slot; it is never put onto a heartbeat request. The single-use
+  diagnostic mailbox validates registered RUNNING status, the
+  precise BrokerId/Epoch/Incarnation and the original 5-second
+  monotonic time window, with safe signed nanoTime wrap handling.
+  Registration changes, controlled shutdown, broker shutdown and
+  provider replacement revoke staged/in-flight diagnostic
+  state. A repeated nonce remains blocked even after revocation.
+  Fenced, shutdown or uncaught-up heartbeat responses trigger
+  no sampling.
+- **172 — deterministic asynchronous lifecycle tests.**
+  Add **14** server-side JUnit regression cases for one-shot
+  completed evidence, duplicate/replayed nonce, single-flight
+  backpressure, late callback after revocation, wrong BrokerId,
+  stale epoch/incarnation, fencing/unregistration, null/failed
+  Future result, mismatched Request, exact TTL expiration,
+  monotonic clock wrap and backwards clock. The primary
+  `Shared Storage` CI executes and XML-verifies these
+  14 named methods without skips, along with the prior 10
+  Broker challenge tests. Existing metadata/storage evidence
+  remains **550 named methods across 34 suites**; this is a
+  separate 14-method Broker suite rather than an artificial
+  increase in the metadata inventory.
+
+**Not yet enabled or authorized:** A real
+`SharedStorageExtension` + native Kafka Source adapter has
+not been installed as a Broker sampler, and captured reports are
+**not attached to `BrokerHeartbeatRequest`**. Production still
+uses `PartitionRetirementBrokerPrincipalPolicy.DENY_ALL`.
+Controller still refuses every inbound Source/WAL Report, no
+nonce can authorize KRaft metadata, and no COMMITTED logical
+reference retirement or physical MinIO DELETE is reachable.
+Authenticating each Broker to its current BrokerRegistration,
+connecting the actual native sampler and safely returning one
+nonce-bound report remain follow-up work. Do not call this
+an authenticated end-to-end GC implementation until the real
+multi-Broker MinIO/Controller HA run proves those properties.
