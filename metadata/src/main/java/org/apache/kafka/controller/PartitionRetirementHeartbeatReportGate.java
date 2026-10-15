@@ -38,6 +38,7 @@ final class PartitionRetirementHeartbeatReportGate {
         VERSION_NOT_NEGOTIATED,
         PRINCIPAL_UNBOUND,
         MALFORMED,
+        BROKER_NOT_ELIGIBLE,
         UNVERIFIED
     }
 
@@ -63,6 +64,12 @@ final class PartitionRetirementHeartbeatReportGate {
         }
         if (!principalPolicy.matches(context.principal(), heartbeat.brokerId())) {
             return Finding.PRINCIPAL_UNBOUND;
+        }
+        // Failed directories, broker fencing, and controlled shutdown
+        // invalidate any claim of an available native Source/WAL window.
+        if (heartbeat.wantFence() || heartbeat.wantShutDown()
+            || !heartbeat.offlineLogDirs().isEmpty()) {
+            return Finding.BROKER_NOT_ELIGIBLE;
         }
         try {
             fromWire(heartbeat);

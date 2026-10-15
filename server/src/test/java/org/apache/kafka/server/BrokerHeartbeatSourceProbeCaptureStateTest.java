@@ -16,7 +16,10 @@
  */
 package org.apache.kafka.server;
 
+import org.apache.kafka.clients.NodeApiVersions;
 import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.protocol.ApiKeys;
+import org.apache.kafka.common.requests.BrokerHeartbeatRequest;
 import org.apache.kafka.common.errors.UnsupportedVersionException;
 import org.apache.kafka.common.message.BrokerHeartbeatRequestData;
 import org.apache.kafka.common.protocol.MessageUtil;
@@ -366,6 +369,120 @@ class BrokerHeartbeatSourceProbeCaptureStateTest {
         state.clear();
         assertTrue(takeWire(state, 102L).isEmpty());
         assertNull(state.begin(request, 103L));
+    }
+
+    @Test
+    void reportDispatchRequiresIndependentlyVerifiedBrokerChannelIdentity() {
+        var state = readyDispatchReport();
+        assertTrue(dispatch(state, regularHeartbeat(), false, (short) 3, 102L,
+            BrokerState.RUNNING, true).isEmpty());
+        assertTrue(dispatch(state, regularHeartbeat(), true, (short) 3, 102L,
+            BrokerState.RUNNING, true).isPresent());
+        assertTrue(takeWire(state, 103L).isEmpty());
+    }
+
+    @Test
+    void versionTwoControllerCannotDrainStagedWalReport() {
+        var state = readyDispatchReport();
+        assertTrue(dispatch(state, regularHeartbeat(), true, (short) 2, 102L,
+            BrokerState.RUNNING, true).isEmpty());
+        assertTrue(dispatch(state, regularHeartbeat(), true, (short) 3, 103L,
+            BrokerState.RUNNING, true).isPresent());
+    }
+
+    @Test
+    void missingControllerApiNegotiationCannotDrainStagedReport() {
+        var state = readyDispatchReport();
+        assertTrue(BrokerHeartbeatSourceWalReportDispatch.prepareOnce(
+            state, regularHeartbeat(), Optional.empty(), true,
+            102L, INCARNATION, BrokerState.RUNNING, true
+        ).isEmpty());
+        assertTrue(takeWire(state, 103L).isPresent());
+    }
+
+    @Test
+    void explicitVThreeDispatchPreservesOrdinaryHeartbeatAndIsSingleUse() {
+        var state = readyDispatchReport();
+        var base = regularHeartbeat().setCurrentMetadataOffset(42L);
+        var builder = dispatch(state, base, true, (short) 3, 102L,
+            BrokerState.RUNNING, true).orElseThrow();
+        assertEquals(3, builder.oldestAllowedVersion());
+        assertEquals(3, builder.latestAllowedVersion());
+        assertEquals(3, builder.build().version());
+        var diagnostic = builder.build().data();
+        assertEquals(42L, diagnostic.currentMetadataOffset());
+        assertEquals(challenge(1L).nonce(), diagnostic.sourceWalProbeReport().nonce());
+        assertEquals(54L, diagnostic.brokerEpoch());
+        assertNull(base.sourceWalProbeReport());
+        assertTrue(dispatch(state, base, true, (short) 3, 103L,
+            BrokerState.RUNNING, true).isEmpty());
+    }
+
+    @Test
+    void fencingShutdownOrOfflineLogDirCannotReportWalDurability() {
+        var state = readyDispatchReport();
+        assertTrue(dispatch(state, regularHeartbeat().setWantFence(true),
+            true, (short) 3, 102L, BrokerState.RUNNING, true).isEmpty());
+        assertTrue(dispatch(state, regularHeartbeat().setWantShutDown(true),
+            true, (short) 3, 102L, BrokerState.RUNNING, true).isEmpty());
+        assertTrue(dispatch(state, regularHeartbeat().setOfflineLogDirs(
+            java.util.List.of(new Uuid(15L, 16L))
+        ), true, (short) 3, 102L, BrokerState.RUNNING, true).isEmpty());
+        assertTrue(dispatch(state, regularHeartbeat(), true, (short) 3, 103L,
+            BrokerState.RUNNING, true).isPresent());
+    }
+
+    @Test
+    void replacedBrokerEpochCannotSendOrReuseStagedSourceReport() {
+        var state = readyDispatchReport();
+        var changedEpoch = regularHeartbeat().setBrokerEpoch(55L);
+        assertTrue(dispatch(state, changedEpoch, true, (short) 3, 102L,
+            BrokerState.RUNNING, true).isEmpty());
+        assertTrue(dispatch(state, regularHeartbeat(), true, (short) 3, 103L,
+            BrokerState.RUNNING, true).isEmpty());
+    }
+
+    @Test
+    void unregisteredOrExpiredCaptureCannotCreateAReportHeartbeat() {
+        var state = readyDispatchReport();
+        assertTrue(dispatch(state, regularHeartbeat(), true, (short) 3, 102L,
+            BrokerState.RUNNING, false).isEmpty());
+        assertTrue(dispatch(state, regularHeartbeat(), true, (short) 3, 102L,
+            BrokerState.RECOVERY, true).isEmpty());
+        assertTrue(dispatch(state, regularHeartbeat(), true, (short) 3,
+            100L + SourceWalProbeCaptureState.MAX_AGE_NS,
+            BrokerState.RUNNING, true).isEmpty());
+    }
+
+    private static SourceWalProbeCaptureState readyDispatchReport() {
+        var state = new SourceWalProbeCaptureState();
+        Request request = challenge(1L);
+        Capture capture = state.begin(request, 100L);
+        assertTrue(complete(state, capture, Optional.of(report(request)), null, 101L));
+        return state;
+    }
+
+    private static BrokerHeartbeatRequestData regularHeartbeat() {
+        return new BrokerHeartbeatRequestData()
+            .setBrokerId(3).setBrokerEpoch(54L).setCurrentMetadataOffset(100L);
+    }
+
+    private static Optional<BrokerHeartbeatRequest.Builder> dispatch(
+        SourceWalProbeCaptureState state,
+        BrokerHeartbeatRequestData heartbeat,
+        boolean uniqueIdentityVerified,
+        short controllerMaxVersion,
+        long nowNs,
+        BrokerState brokerState,
+        boolean registered
+    ) {
+        return BrokerHeartbeatSourceWalReportDispatch.prepareOnce(
+            state, heartbeat,
+            Optional.of(NodeApiVersions.create(
+                ApiKeys.BROKER_HEARTBEAT.id, (short) 0, controllerMaxVersion
+            )),
+            uniqueIdentityVerified, nowNs, INCARNATION, brokerState, registered
+        );
     }
 
     private static Optional<BrokerHeartbeatRequestData.SourceWalProbeReport> takeWire(

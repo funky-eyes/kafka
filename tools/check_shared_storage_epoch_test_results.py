@@ -206,6 +206,8 @@ REQUIRED_TESTS = {
         "recoveredAndNewDurableFileBatchesJointlyCoverTheKafkaWindow",
         "ringWalCurrentWindowDoesNotBorrowAnotherPartitionData",
         "durableTruncateRevokesCurrentIndexedDataCoverage",
+        "independentReplicaFileWalReplaysNeverBorrowAPeersMissingKafkaBatch",
+        "ringWalTruncationRemainsRevokedAfterActualBackendReopen",
     ),
     "org.apache.kafka.storage.internals.shared.StartupWalReplayCoveragePrecheckTest": (
         "exactRecoveredRecordBatchWindowIsLocallyCovered",
@@ -353,6 +355,7 @@ REQUIRED_TESTS = {
         "testProductionV3HeartbeatNeverIssuesUnauthenticatedSourceChallenge",
         "testUniquelyBoundHeartbeatReportIsSerializedAndStillDeniedWithoutNonce",
         "testBoundBrokerCannotBorrowForeignIdentityOrFutureHeartbeatVersion",
+        "testMappedBrokerCannotReportWhileFencingOrShuttingDown",
     ),
     "org.apache.kafka.controller.PartitionRetirementHeartbeatReportGateTest": (
         "absentReportPreservesLegacyHeartbeatWithoutBrokerPrincipal",
@@ -368,6 +371,7 @@ REQUIRED_TESTS = {
         "missingOrEmptyNativeSourceWindowIsMalformed",
         "negativeLocalWalGenerationAndRevisionAreMalformed",
         "changedOuterBrokerEpochCannotBeAcceptedAsOriginalProof",
+        "boundBrokerFencingShutdownOrOfflineDirsCannotOfferWalEvidence",
     ),
     "org.apache.kafka.controller.PartitionRetirementBrokerPrincipalPolicyTest": (
         "productionDefaultDeniesEveryBrokerEvenWhenPrincipalLooksUnique",

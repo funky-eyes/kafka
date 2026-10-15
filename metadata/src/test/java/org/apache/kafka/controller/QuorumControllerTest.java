@@ -487,6 +487,37 @@ public class QuorumControllerTest {
         }
     }
 
+    @Test
+    public void testMappedBrokerCannotReportWhileFencingOrShuttingDown() throws Exception {
+        KafkaPrincipal uniqueBroker = new KafkaPrincipal(KafkaPrincipal.USER_TYPE, "broker-id-three");
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv)
+                .setControllerBuilderInitializer(builder ->
+                    builder.setPartitionRetirementBrokerPrincipalPolicy(
+                        new PartitionRetirementBrokerPrincipalPolicy(Map.of(3, uniqueBroker))
+                    )
+                ).build()
+        ) {
+            QuorumController controller = controlEnv.activeController(true);
+            long recordsBefore = retirementAuthorityRecordCount(clientEnv);
+            for (BrokerHeartbeatRequestData disallowed : List.of(
+                untrustedHeartbeatReport().setWantFence(true),
+                untrustedHeartbeatReport().setWantShutDown(true),
+                untrustedHeartbeatReport().setOfflineLogDirs(List.of(new Uuid(77L, 88L)))
+            )) {
+                ExecutionException failure = assertThrows(ExecutionException.class, () ->
+                    controller.processBrokerHeartbeat(
+                        retirementReportContext((short) 3, uniqueBroker), disallowed
+                    ).get(10, TimeUnit.SECONDS)
+                );
+                assertTrue(failure.getCause() instanceof InvalidRequestException);
+                assertTrue(failure.getCause().getMessage().contains("BROKER_NOT_ELIGIBLE"));
+            }
+            assertEquals(recordsBefore, retirementAuthorityRecordCount(clientEnv));
+        }
+    }
+
     private static ControllerRequestContext retirementReportContext(short version, KafkaPrincipal principal) {
         return new ControllerRequestContext(
             new RequestHeaderData().setRequestApiKey((short) 63).setRequestApiVersion(version),

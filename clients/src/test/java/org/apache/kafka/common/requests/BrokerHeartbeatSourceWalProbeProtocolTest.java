@@ -77,6 +77,32 @@ public class BrokerHeartbeatSourceWalProbeProtocolTest {
     }
 
     @Test
+    public void defaultBuilderSnapshotsDataBeforeCallerCanInjectAReport() {
+        var mutable = baseRequest();
+        var builder = new BrokerHeartbeatRequest.Builder(mutable);
+        mutable.setSourceWalProbeReport(report());
+        assertNull(builder.build().data().sourceWalProbeReport());
+        assertEquals(2, builder.latestAllowedVersion());
+    }
+
+    @Test
+    public void mutatingOneBuiltHeartbeatCannotInjectReportIntoAnotherBuild() {
+        var builder = new BrokerHeartbeatRequest.Builder(baseRequest());
+        var first = builder.build();
+        first.data().setSourceWalProbeReport(report());
+        assertNull(builder.build().data().sourceWalProbeReport());
+    }
+
+    @Test
+    public void explicitVThreeBuilderSnapshotsReportAndRejectsBuildTimeDowngrade() {
+        var mutable = baseRequest().setSourceWalProbeReport(report());
+        var builder = new BrokerHeartbeatRequest.Builder(mutable, (short) 3);
+        mutable.setSourceWalProbeReport(null);
+        assertEquals(report(), builder.build().data().sourceWalProbeReport());
+        assertThrows(UnsupportedVersionException.class, () -> builder.build((short) 2));
+    }
+
+    @Test
     public void legacyRequestVersionsNeverCarrySourceWalReport() {
         for (short version = 0; version <= 2; version++) {
             BrokerHeartbeatRequestData request = baseRequest();

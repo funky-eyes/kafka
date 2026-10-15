@@ -1220,3 +1220,60 @@ reference retirement or physical MinIO DELETE is enabled.
 PR #2 stays Draft pending actual per-Broker authenticated
 round-trip and multi-node durability evidence. A new exact
 SHA must pass its own 17 CI workflows before validation.
+
+## Batches 194–196 — fail-closed, non-emitting report dispatch seam and independent WAL replay
+
+The last fully validated parent `9e7b7fc73c5c038ee88a606c7f9c4834135a8ceb`
+passed **17/17 CI** after Batch 193. These follow-up changes require their
+own exact-HEAD Java 25, real MinIO, WAL Crash, Ring WAL and Controller HA
+validation before they can be marked green.
+
+- **194 — mutable heartbeat/report isolation.** Both ordinary and
+  explicit v3 `BrokerHeartbeatRequest.Builder` instances snapshot
+  generated protocol data, and each `build` returns an independent
+  snapshot. A late caller mutation cannot inject a report into a
+  stable v0-v2 request, nor can a diagnostic builder silently
+  downgrade a non-null report. Five targeted protocol tests (including
+  the two from Batch 193) are required in addition to the original
+  six, bringing the protocol XML evidence to **11 methods**.
+- **195 — dormant identity/version-gated preparation and strict Controller
+  ingress.** The package-private
+  `BrokerHeartbeatSourceWalReportDispatch` accepts a local one-shot
+  Report only when a trusted caller explicitly confirms unique
+  authenticated Broker-channel binding, Controller API versions
+  support exact v3, and the Broker remains registered, RUNNING,
+  unfenced, not shutting down, and free of offline log directories.
+  Missing channel versions or v2 refuse to drain the staged report.
+  An epoch mismatch burns old diagnostic evidence; neither ordinary
+  heartbeats nor production startup invokes this helper.
+  The Controller ingress independently denies report-bearing
+  fencing, shutdown, or offline-log-dir heartbeats before normal
+  Broker heartbeat bookkeeping, even with a uniquely mapped
+  Principal. **Seven** new Broker tests and **two** Controller
+  negative-path tests enforce these conditions.
+- **196 — WAL persistence/replay isolation.** Real independent File
+  WAL directories model two Broker instances: one replays a full
+  Kafka RecordBatch source window while the other is missing its
+  second batch, and the incomplete peer must still fail after close
+  and restart. An actual Ring WAL reopen proves a durable TRUNCATE
+  cannot restore obsolete indexed coverage. Both are deterministic
+  backend tests, not forged self-reports. Combined metadata/storage
+  mandatory inventory **569 → 573 methods**, across the existing
+  **34 suites**. Broker capture CI additionally requires
+  **31 tests**, including all seven dispatch regressions.
+
+**Limitations:** A caller-provided Boolean is NOT authentication.
+Neither an authenticated Broker-to-Controller production transport
+nor current distributed WAL replica attestation is wired in.
+These backend tests demonstrate independent close/restart replay,
+not unclean process-crash durability or a quorum certificate; the
+existing WAL Crash Workflow remains a separate required gate.
+The Controller still consumes single-use nonces inside its serialized
+event, verifies current BrokerRegistration/leader/CAS, and always
+rejects Source/WAL Reports as non-authoritative. Source/WAL sampling
+and Report sending remain disabled in normal Broker startup.
+`PartitionRetirementBrokerPrincipalPolicy.DENY_ALL` remains the
+production default. No KRaft retirement authority writer, COMMITTED
+reference retirement or physical MinIO DELETE is enabled. Frozen
+MinIO GA remains `9a28c11b6d97ecacafe1b8566cde5cc34d604889`;
+PR #2 stays Draft.

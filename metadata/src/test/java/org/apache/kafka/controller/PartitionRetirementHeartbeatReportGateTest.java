@@ -89,6 +89,17 @@ class PartitionRetirementHeartbeatReportGateTest {
     }
 
     @Test
+    void boundBrokerFencingShutdownOrOfflineDirsCannotOfferWalEvidence() {
+        assertEquals(Finding.BROKER_NOT_ELIGIBLE,
+            inspectBound(heartbeat().setWantFence(true)));
+        assertEquals(Finding.BROKER_NOT_ELIGIBLE,
+            inspectBound(heartbeat().setWantShutDown(true)));
+        assertEquals(Finding.BROKER_NOT_ELIGIBLE,
+            inspectBound(heartbeat().setOfflineLogDirs(java.util.List.of(new Uuid(15L, 16L)))));
+        assertEquals(Finding.UNVERIFIED, inspectBound(heartbeat()));
+    }
+
+    @Test
     void decodingPreservesBrokerEpochNonceAndExactSourceWindow() {
         var decoded = PartitionRetirementHeartbeatReportGate.fromWire(heartbeat()).orElseThrow();
         assertEquals(new Uuid(1L, 2L), decoded.request().nonce());

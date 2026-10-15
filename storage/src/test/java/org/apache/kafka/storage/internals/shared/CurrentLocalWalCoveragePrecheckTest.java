@@ -166,6 +166,59 @@ class CurrentLocalWalCoveragePrecheckTest {
         }
     }
 
+    @Test
+    void independentReplicaFileWalReplaysNeverBorrowAPeersMissingKafkaBatch() throws Exception {
+        Path firstBrokerDir = tempDir.resolve("replica-a-wal");
+        Path secondBrokerDir = tempDir.resolve("replica-b-wal");
+        try (
+            SharedStorageEngine first = new SharedStorageEngine(
+                new FileSharedWal(firstBrokerDir, 1024 * 1024, 4096));
+            SharedStorageEngine second = new SharedStorageEngine(
+                new FileSharedWal(secondBrokerDir, 1024 * 1024, 4096))
+        ) {
+            first.appendData(FIRST, 8, 0L, 9L, ByteBuffer.wrap(new byte[]{1})).join();
+            first.appendData(FIRST, 8, 10L, 19L, ByteBuffer.wrap(new byte[]{2})).join();
+            second.appendData(FIRST, 8, 0L, 9L, ByteBuffer.wrap(new byte[]{1})).join();
+            assertEquals(Finding.INDEXED_BATCH_WINDOW, first.localDurableWindowCoverage(FIRST, 0L, 20L));
+            assertEquals(Finding.SOURCE_WINDOW_NOT_INDEXED,
+                second.localDurableWindowCoverage(FIRST, 0L, 20L));
+        }
+        try (
+            SharedStorageEngine firstRestarted = new SharedStorageEngine(
+                new FileSharedWal(firstBrokerDir, 1024 * 1024, 4096));
+            SharedStorageEngine secondRestarted = new SharedStorageEngine(
+                new FileSharedWal(secondBrokerDir, 1024 * 1024, 4096))
+        ) {
+            assertEquals(2L, firstRestarted.startupWalReplayEvidence().replayedRecords());
+            assertEquals(1L, secondRestarted.startupWalReplayEvidence().replayedRecords());
+            assertEquals(Finding.INDEXED_BATCH_WINDOW,
+                firstRestarted.localDurableWindowCoverage(FIRST, 0L, 20L));
+            assertEquals(Finding.SOURCE_WINDOW_NOT_INDEXED,
+                secondRestarted.localDurableWindowCoverage(FIRST, 0L, 20L));
+            assertEquals(0L, secondRestarted.liveWalDurabilityObservation(FIRST).dataBatches());
+        }
+    }
+
+    @Test
+    void ringWalTruncationRemainsRevokedAfterActualBackendReopen() throws Exception {
+        Path path = tempDir.resolve("ring-truncate-restart.wal");
+        try (SharedStorageEngine engine = new SharedStorageEngine(new RingSharedWal(path, 1024L * 1024L))) {
+            engine.appendData(FIRST, 8, 0L, 9L, ByteBuffer.wrap(new byte[]{1})).join();
+            assertEquals(Finding.INDEXED_BATCH_WINDOW,
+                engine.localDurableWindowCoverage(FIRST, 0L, 10L));
+            engine.truncate(FIRST, 9, 0L).join();
+            assertEquals(Finding.NO_INDEXED_DATA,
+                engine.localDurableWindowCoverage(FIRST, 0L, 10L));
+        }
+        try (SharedStorageEngine reopened = new SharedStorageEngine(new RingSharedWal(path, 1024L * 1024L))) {
+            assertEquals(Finding.NO_INDEXED_DATA,
+                reopened.localDurableWindowCoverage(FIRST, 0L, 10L));
+            assertEquals(1L,
+                reopened.startupWalReplayEvidence().partition(FIRST).orElseThrow().truncateRecords());
+            assertEquals(0L, reopened.liveWalDurabilityObservation(FIRST).dataBatches());
+        }
+    }
+
     private static WalLocation location(long walPosition, long first, long last) {
         return new WalLocation(walPosition, 61, 8, first, last);
     }

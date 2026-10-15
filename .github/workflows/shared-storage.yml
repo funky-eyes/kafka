@@ -21,6 +21,7 @@ on:
       - shared-wal-s3-4.3.1
     paths:
       - 'server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java'
+      - 'server/src/main/java/org/apache/kafka/server/BrokerHeartbeatSourceWalReportDispatch.java'
       - 'gradle.properties'
       - 'gradle/dependencies.gradle'
       - 'gradlew'
@@ -43,10 +44,12 @@ on:
       - 'metadata/src/main/java/org/apache/kafka/metadata/BrokerHeartbeatReply.java'
       - 'clients/src/main/java/org/apache/kafka/common/replica/PartitionRetirementSourceProbe.java'
       - 'server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java'
+      - 'server/src/main/java/org/apache/kafka/server/BrokerHeartbeatSourceWalReportDispatch.java'
       - 'server/src/test/java/org/apache/kafka/server/BrokerHeartbeatSourceProbeChallengeGateTest.java'
       - 'server/src/test/java/org/apache/kafka/server/BrokerHeartbeatSourceProbeCaptureStateTest.java'
       - 'clients/src/main/resources/common/message/BrokerHeartbeatRequest.json'
       - 'clients/src/main/resources/common/message/BrokerHeartbeatResponse.json'
+      - 'clients/src/main/java/org/apache/kafka/common/requests/BrokerHeartbeatRequest.java'
       - 'clients/src/test/java/org/apache/kafka/common/requests/BrokerHeartbeatSourceWalProbeProtocolTest.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirement*.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/PartitionRetirement*.java'
@@ -107,6 +110,7 @@ on:
   pull_request:
     paths:
       - 'server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java'
+      - 'server/src/main/java/org/apache/kafka/server/BrokerHeartbeatSourceWalReportDispatch.java'
       - 'build.gradle'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/**'
       - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementControllerPrecheck.java'
@@ -119,10 +123,12 @@ on:
       - 'metadata/src/main/java/org/apache/kafka/metadata/BrokerHeartbeatReply.java'
       - 'clients/src/main/java/org/apache/kafka/common/replica/PartitionRetirementSourceProbe.java'
       - 'server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java'
+      - 'server/src/main/java/org/apache/kafka/server/BrokerHeartbeatSourceWalReportDispatch.java'
       - 'server/src/test/java/org/apache/kafka/server/BrokerHeartbeatSourceProbeChallengeGateTest.java'
       - 'server/src/test/java/org/apache/kafka/server/BrokerHeartbeatSourceProbeCaptureStateTest.java'
       - 'clients/src/main/resources/common/message/BrokerHeartbeatRequest.json'
       - 'clients/src/main/resources/common/message/BrokerHeartbeatResponse.json'
+      - 'clients/src/main/java/org/apache/kafka/common/requests/BrokerHeartbeatRequest.java'
       - 'clients/src/test/java/org/apache/kafka/common/requests/BrokerHeartbeatSourceWalProbeProtocolTest.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirement*.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/PartitionRetirement*.java'
@@ -235,7 +241,12 @@ jobs:
               'unstableReportRoundTripsWithExactBrokerSourceCoordinates',
               'unstableControllerChallengeRoundTripsAndLegacyReplyStaysEmpty',
               'legacyRequestCannotSilentlyDowngradeNonemptyReport',
-              'legacyResponseCannotSilentlyDowngradeNonemptyChallenge'
+              'legacyResponseCannotSilentlyDowngradeNonemptyChallenge',
+              'defaultBuilderRejectsUnstableReportBeforeNetworkDispatch',
+              'explicitDiagnosticBuilderPinsExactVersionThree',
+              'defaultBuilderSnapshotsDataBeforeCallerCanInjectAReport',
+              'mutatingOneBuiltHeartbeatCannotInjectReportIntoAnotherBuild',
+              'explicitVThreeBuilderSnapshotsReportAndRejectsBuildTimeDowngrade'
           }
           assert root.get('name') == suite
           assert all(root.get(field) == '0' for field in ('skipped', 'failures', 'errors'))
@@ -305,6 +316,13 @@ jobs:
               'wireAndTypedViewsShareTheSameOneShotResult',
               'wireReportIsSuppressedAfterEpochChangeOrExpiry',
               'revokingBrokerRegistrationDiscardsWireReportBeforeEncoding',
+              'reportDispatchRequiresIndependentlyVerifiedBrokerChannelIdentity',
+              'versionTwoControllerCannotDrainStagedWalReport',
+              'missingControllerApiNegotiationCannotDrainStagedReport',
+              'explicitVThreeDispatchPreservesOrdinaryHeartbeatAndIsSingleUse',
+              'fencingShutdownOrOfflineLogDirCannotReportWalDurability',
+              'replacedBrokerEpochCannotSendOrReuseStagedSourceReport',
+              'unregisteredOrExpiredCaptureCannotCreateAReportHeartbeat',
           }
           assert capture_root.tag == 'testsuite'
           assert capture_root.get('name') == capture_suite
@@ -396,6 +414,7 @@ jobs:
             --tests 'org.apache.kafka.controller.QuorumControllerTest.testProductionV3HeartbeatNeverIssuesUnauthenticatedSourceChallenge' \
             --tests 'org.apache.kafka.controller.QuorumControllerTest.testUniquelyBoundHeartbeatReportIsSerializedAndStillDeniedWithoutNonce' \
             --tests 'org.apache.kafka.controller.QuorumControllerTest.testBoundBrokerCannotBorrowForeignIdentityOrFutureHeartbeatVersion' \
+            --tests 'org.apache.kafka.controller.QuorumControllerTest.testMappedBrokerCannotReportWhileFencingOrShuttingDown' \
             --tests 'org.apache.kafka.controller.PartitionRetirementHeartbeatReportGateTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementBrokerPrincipalPolicyTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementSourceProbeRegistryTest' \
