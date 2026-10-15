@@ -272,6 +272,13 @@ REQUIRED_TESTS = {
         "reconstructedProbeAndReportMustUseValidBoundedCoordinates",
         "concurrentWalAppendDuringNativeCaptureInvalidatesProbeReport",
         "brokerIncarnationAbaDuringNativeCaptureInvalidatesProbeReport",
+        "extensionFacadeSamplesNativeKafkaSourceAndDurableWalOnly",
+        "classicKafkaLogsAndMissingBrokerReadyIdentityFailClosed",
+        "extensionFacadeRejectsStaleBrokerOrTopicIncarnation",
+        "asyncSamplerDefersNativeWalReadsUntilExecutorRuns",
+        "asyncSamplerNeverTurnsMissingLogOrClosedExtensionIntoEvidence",
+        "asyncExecutorRejectionCannotFallBackToHeartbeatThread",
+        "asynchronousSamplerStillRejectsNativeKafkaSourceDrift",
     ),
     "org.apache.kafka.storage.internals.shared.kafka.SharedStorageExtensionWalRuntimeTest": (
         "defaultRuntimeActuallyStartsRingWal",

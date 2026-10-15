@@ -942,3 +942,73 @@ calling it validated. Following work must attach the real
 native Source/WAL sampler behind an authenticated Broker identity
 and consume Controller-issued nonces inside the serialized
 Controller event, with MinIO and Controller HA evidence.
+
+## Batches 177–180 — real native WAL capture adapter, deliberately no production activation
+
+**Verified baseline:** `9f086c90204e49f3ef2e79994d6c6fbf1e77f584`
+completed **17/17 GitHub Actions SUCCESS**. Frozen MinIO GA
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`
+remains unchanged. The sole objective of this checkpoint is
+to bridge the Broker's real current Kafka log to the *existing*
+strict Source/WAL evidence precheck, without pretending this
+is an authenticated GC release.
+
+- **177 — native-only extension adapter.** Extend the existing
+  `SharedStorageExtension` with
+  `captureSourceWalProbe(challenge, log)`. Reject classic/null
+  logs, closed extensions, missing Broker-ready identity,
+  wrong registered BrokerId, stale BrokerEpoch/incarnation,
+  recreated TopicId or missing current WAL coverage. Accept
+  only `SharedUnifiedLog`, build the partition identity from
+  exact TopicId and partition coordinates, and call the existing
+  `BrokerLocalStartupReplayPrecheck.captureCurrentSourceWalReport`.
+  The precheck, not this adapter, remains the authority for the
+  native Source offset/HW/LEO, actual role/leader epoch,
+  broker-registration pairing, WAL index and mutation fences.
+  This is an **unsigned read-only local diagnostic**.
+- **178 — genuinely asynchronous factory.** Add
+  `readOnlySourceWalSampler(logLookup, executor)` on the existing
+  extension, returning a deferred `CompletableFuture`.
+  Both TopicId lookup and native Source/WAL inspection run
+  **only on the caller-supplied Executor**; the lifecycle event
+  thread never performs this I/O. Caller must supply a bounded
+  worker. Executor saturation fails fast and is *not* retried
+  on the heartbeat thread; checked I/O failure completes the
+  future exceptionally, so BrokerLifecycleManager discards it.
+  No sampler is installed during ordinary extension startup.
+- **179 — real Broker topic-to-log bridge.** `BrokerServer`
+  has a package-restricted factory using the live metadata
+  cache's `TopicId→topicName` lookup and LogManager's current
+  `getLog(TopicPartition)` path (never future log/missing
+  replica), delegating to the extension's asynchronous factory.
+  It can be assembled with the actual BrokerServer fields, but
+  is **not installed** on BrokerLifecycleManager until
+  a unique authenticated Broker principal and negotiated
+  feature gate exist. There is no new public protocol,
+  credential bypass or background executor initialized by
+  default.
+- **180 — exact-source and compatibility regressions.**
+  Seven new deterministic storage methods exercise actual
+  recovered Ring WAL/native Source evidence, classic/no-log,
+  unbound identity, stale epoch/recreated TopicId, delayed
+  asynchronous execution, closed extension, missing lookup,
+  rejected saturated executor and native source drift.
+  Four new Scala `BrokerSourceWalProbeAdapterTest` methods
+  verify BrokerServer's current TopicId→log resolution,
+  missing/deleted TopicIds, removed local replicas and worker
+  saturation without synchronous fallback. The main CI
+  selects and checks those four Scala JUnit XML cases with no
+  skips/failures. Storage/metadata mandatory named inventory
+  increases **550→557 methods, still 34 suites**.
+
+**Remaining release blockers:** The factory does not register
+itself and never inserts a report into BrokerHeartbeatRequest.
+The Controller continues rejecting incoming reports under
+`PartitionRetirementBrokerPrincipalPolicy.DENY_ALL`.
+The next gates are unique per-Broker authenticated identity,
+single-use nonce consumption + fresh KRaft CAS revalidation
+inside the serialized Controller event, cross-replica durable
+Source/WAL provenance, real multi-Broker MinIO tests and
+finally an independently gated authority writer. Logical
+COMMITTED retirement and physical S3 DELETE remain **OFF**.
+The feature PR stays Draft; new exact-HEAD CI must pass.

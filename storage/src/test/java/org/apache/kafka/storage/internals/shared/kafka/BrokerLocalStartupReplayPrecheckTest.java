@@ -27,6 +27,7 @@ import org.apache.kafka.common.security.auth.SecurityProtocol;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.storage.internals.log.StorageExtensionBrokerContext;
 import org.apache.kafka.storage.internals.log.StorageExtensionContext;
+import org.apache.kafka.storage.internals.log.UnifiedLog;
 import org.apache.kafka.storage.internals.shared.CurrentLocalWalCoveragePrecheck;
 import org.apache.kafka.storage.internals.shared.LocalWalDurabilityObservation;
 import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
@@ -39,13 +40,18 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayDeque;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -684,6 +690,121 @@ class BrokerLocalStartupReplayPrecheckTest {
             new PartitionRetirementSourceProbe.Report(probe(), 1L, 1L, 10L, 10L, 0L, 0L));
         assertThrows(IllegalArgumentException.class, () ->
             new PartitionRetirementSourceProbe.Report(probe(), 1L, 0L, 10L, 10L, -1L, 0L));
+    }
+
+    @Test
+    void extensionFacadeSamplesNativeKafkaSourceAndDurableWalOnly() throws Exception {
+        try (SharedStorageExtension extension = started("adapter-positive", true, true)) {
+            leader(extension);
+            var observed = extension.captureSourceWalProbe(probe(), source(0L, 10L, 10L));
+            assertEquals(probe(), observed.orElseThrow().request());
+            assertEquals(10L, observed.orElseThrow().nativeHighWatermark());
+            assertEquals(10L, observed.orElseThrow().nativeLogEndOffset());
+        }
+    }
+
+    @Test
+    void classicKafkaLogsAndMissingBrokerReadyIdentityFailClosed() throws Exception {
+        try (SharedStorageExtension extension = started("adapter-classic", true, true)) {
+            leader(extension);
+            assertTrue(extension.captureSourceWalProbe(probe(), mock(UnifiedLog.class)).isEmpty());
+            assertTrue(extension.captureSourceWalProbe(probe(), null).isEmpty());
+        }
+        try (SharedStorageExtension extension = started("adapter-unbound", true, false)) {
+            leader(extension);
+            assertTrue(extension.captureSourceWalProbe(probe(), source(0L, 10L, 10L)).isEmpty());
+        }
+    }
+
+    @Test
+    void extensionFacadeRejectsStaleBrokerOrTopicIncarnation() throws Exception {
+        try (SharedStorageExtension extension = started("adapter-stale", true, true)) {
+            leader(extension);
+            var wrongBroker = request(TOPIC_ID, 0, 3, 55L,
+                new Uuid(10L, 11L), 8, "cluster-a", 0L);
+            var wrongTopic = request(new Uuid(31L, 32L), 0, 3, 54L,
+                new Uuid(10L, 11L), 8, "cluster-a", 0L);
+            var log = source(0L, 10L, 10L);
+            assertTrue(extension.captureSourceWalProbe(wrongBroker, log).isEmpty());
+            assertTrue(extension.captureSourceWalProbe(wrongTopic, log).isEmpty());
+        }
+    }
+
+    @Test
+    void asyncSamplerDefersNativeWalReadsUntilExecutorRuns() throws Exception {
+        try (SharedStorageExtension extension = started("adapter-deferred", true, true)) {
+            leader(extension);
+            var tasks = new ArrayDeque<Runnable>();
+            AtomicInteger lookups = new AtomicInteger();
+            var sampler = extension.readOnlySourceWalSampler(challenge -> {
+                lookups.incrementAndGet();
+                return Optional.of(sourceUnchecked(0L, 10L, 10L));
+            }, tasks::add);
+            var future = sampler.apply(probe());
+            assertFalse(future.isDone());
+            assertEquals(0, lookups.get());
+            assertEquals(1, tasks.size());
+            tasks.removeFirst().run();
+            assertEquals(1, lookups.get());
+            assertEquals(probe(), future.join().orElseThrow().request());
+        }
+    }
+
+    @Test
+    void asyncSamplerNeverTurnsMissingLogOrClosedExtensionIntoEvidence() throws Exception {
+        try (SharedStorageExtension extension = started("adapter-missing", true, true)) {
+            leader(extension);
+            var sampler = extension.readOnlySourceWalSampler(
+                challenge -> Optional.empty(), Runnable::run
+            );
+            assertTrue(sampler.apply(probe()).join().isEmpty());
+            var closedSampler = extension.readOnlySourceWalSampler(
+                challenge -> Optional.of(sourceUnchecked(0L, 10L, 10L)), Runnable::run
+            );
+            extension.close();
+            assertTrue(closedSampler.apply(probe()).join().isEmpty());
+        }
+    }
+
+    @Test
+    void asyncExecutorRejectionCannotFallBackToHeartbeatThread() throws Exception {
+        try (SharedStorageExtension extension = started("adapter-reject", true, true)) {
+            leader(extension);
+            AtomicInteger lookups = new AtomicInteger();
+            Executor rejected = command -> {
+                throw new RejectedExecutionException("bounded worker is saturated");
+            };
+            var sampler = extension.readOnlySourceWalSampler(challenge -> {
+                lookups.incrementAndGet();
+                return Optional.of(sourceUnchecked(0L, 10L, 10L));
+            }, rejected);
+            assertThrows(RejectedExecutionException.class, () -> sampler.apply(probe()));
+            assertEquals(0, lookups.get());
+        }
+    }
+
+    @Test
+    void asynchronousSamplerStillRejectsNativeKafkaSourceDrift() throws Exception {
+        try (SharedStorageExtension extension = started("adapter-drift", true, true)) {
+            leader(extension);
+            SharedUnifiedLog log = source(0L, 10L, 10L);
+            when(log.captureNativeSourceWindow()).thenReturn(
+                Optional.of(new SharedUnifiedLog.NativeSourceWindow(0L, 10L, 10L)),
+                Optional.of(new SharedUnifiedLog.NativeSourceWindow(0L, 11L, 11L))
+            );
+            var sampler = extension.readOnlySourceWalSampler(
+                challenge -> Optional.of(log), Runnable::run
+            );
+            assertTrue(sampler.apply(probe()).join().isEmpty());
+        }
+    }
+
+    private static SharedUnifiedLog sourceUnchecked(long start, long hw, long leo) {
+        try {
+            return source(start, hw, leo);
+        } catch (Exception failure) {
+            throw new CompletionException(failure);
+        }
     }
 
     private static PartitionRetirementSourceProbe.Request probe() {

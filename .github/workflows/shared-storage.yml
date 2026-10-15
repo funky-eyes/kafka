@@ -321,6 +321,7 @@ jobs:
             --tests 'kafka.server.ControllerApisTest.testStableHeartbeatNeverIncludesSourceWalChallenge' \
             --tests 'kafka.server.ControllerApisTest.testFencedOrShuttingDownBrokerCannotReceiveDiagnostic' \
             --tests 'kafka.server.ControllerApisTest.testControllerDiagnosticRoundTripsOnHeartbeatVersionThree' \
+            --tests 'kafka.server.BrokerSourceWalProbeAdapterTest' \
             --no-scan 2>&1 | tee shared-storage-logmanager-regression.log
           python3 - <<'PY'
           from pathlib import Path
@@ -337,6 +338,24 @@ jobs:
           actual = {case.get('name', '').removesuffix('()') for case in root.findall('testcase')}
           assert expected <= actual, sorted(expected - actual)
           print(f'PASS: {len(expected)} ControllerApis v3 response contract tests')
+          broker_suite = 'kafka.server.BrokerSourceWalProbeAdapterTest'
+          broker_root = ET.parse(
+              Path('core/build/test-results/test/TEST-' + broker_suite + '.xml')
+          ).getroot()
+          broker_methods = {
+              'testResolutionIsDeferredUntilExecutorAndUsesExactTopicPartition',
+              'testMissingTopicIdNeverTouchesLogManager',
+              'testRemovedLocalReplicaCannotSupplySourceWalEvidence',
+              'testRejectedWorkerDoesNotRunNativeSamplingOnHeartbeatThread',
+          }
+          assert broker_root.get('name') == broker_suite
+          assert all(broker_root.get(k) == '0' for k in ('skipped', 'failures', 'errors'))
+          actual_broker = {
+              case.get('name', '').removesuffix('()')
+              for case in broker_root.findall('testcase')
+          }
+          assert broker_methods <= actual_broker, sorted(broker_methods - actual_broker)
+          print(f'PASS: {len(broker_methods)} Broker native Source/WAL lookup tests')
           PY
 
       - name: Run shared storage tests

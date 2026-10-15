@@ -16,18 +16,24 @@
  */
 package org.apache.kafka.storage.internals.shared.kafka;
 
+import org.apache.kafka.common.replica.PartitionRetirementSourceProbe;
 import org.apache.kafka.storage.internals.log.KafkaStorageExtension;
 import org.apache.kafka.storage.internals.log.StorageExtensionBrokerContext;
 import org.apache.kafka.storage.internals.log.StorageExtensionContext;
 import org.apache.kafka.storage.internals.log.StoragePartitionRoleListener;
+import org.apache.kafka.storage.internals.log.UnifiedLog;
 import org.apache.kafka.storage.internals.log.UnifiedLogFactory;
 import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
+import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 import org.apache.kafka.storage.internals.shared.wal.SharedWal;
 
 import java.io.IOException;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.Executor;
+import java.util.function.Function;
 
 /**
  * Broker-wide shared WAL extension.
@@ -165,6 +171,70 @@ public final class SharedStorageExtension implements KafkaStorageExtension {
             throw new IllegalStateException("Shared storage extension has not been started");
         }
         return commitProgress;
+    }
+
+    /**
+     * Sample the native Kafka source and indexed, durable local WAL for a
+     * Controller diagnostic. The selected log must be a real SharedUnifiedLog;
+     * classic or unbound logs cannot manufacture a Source/WAL report.
+     *
+     * <p>Do not hold the extension monitor across Kafka/WAL reads. The
+     * precheck independently fences role, broker-ready incarnation, source
+     * offsets and WAL mutation/admission revisions before returning data.
+     * This does not attest network origin or authorize physical deletion.</p>
+     */
+    public Optional<PartitionRetirementSourceProbe.Report> captureSourceWalProbe(
+        PartitionRetirementSourceProbe.Request challenge,
+        UnifiedLog log
+    ) throws IOException {
+        Objects.requireNonNull(challenge, "challenge");
+        if (!(log instanceof SharedUnifiedLog nativeLog)) {
+            return Optional.empty();
+        }
+        SharedPartitionRoleListener roles;
+        synchronized (this) {
+            if (storage == null || !(partitionRoleListener instanceof SharedPartitionRoleListener listener)
+                || brokerStartupReplayObservation == null
+                || challenge.brokerId() != startedBrokerId) {
+                return Optional.empty();
+            }
+            roles = listener;
+        }
+        SharedPartitionId partition = new SharedPartitionId(
+            challenge.topicId().getMostSignificantBits(),
+            challenge.topicId().getLeastSignificantBits(), challenge.partitionId()
+        );
+        return BrokerLocalStartupReplayPrecheck.captureCurrentSourceWalReport(
+            this, roles, nativeLog, partition, challenge
+        );
+    }
+
+    /**
+     * Adapt a live LogManager source lookup into an asynchronous, read-only
+     * diagnostic sampler. The caller must provide a bounded executor; never
+     * run this supplier on the BrokerHeartbeat event queue.
+     *
+     * <p>No sampler is registered during ordinary extension startup.
+     * In particular, this factory does not send a Kafka request or
+     * install any authenticated Broker-to-Controller report channel.</p>
+     */
+    public Function<PartitionRetirementSourceProbe.Request,
+        CompletableFuture<Optional<PartitionRetirementSourceProbe.Report>>> readOnlySourceWalSampler(
+        Function<PartitionRetirementSourceProbe.Request, Optional<UnifiedLog>> logLookup,
+        Executor executor
+    ) {
+        Objects.requireNonNull(logLookup, "logLookup");
+        Objects.requireNonNull(executor, "executor");
+        return challenge -> CompletableFuture.supplyAsync(() -> {
+            try {
+                Optional<UnifiedLog> log = Objects.requireNonNull(
+                    logLookup.apply(challenge), "logLookup result"
+                );
+                return captureSourceWalProbe(challenge, log.orElse(null));
+            } catch (IOException failure) {
+                throw new CompletionException(failure);
+            }
+        }, executor);
     }
 
     @Override

@@ -3413,3 +3413,48 @@ is installed, no diagnostic report is transmitted,
 Controller per-Broker Principal policy is `DENY_ALL`,
 and neither KRaft authority CAS writing nor physical
 COMMITTED garbage collection is enabled.
+
+## Batches 177–180 — off-heartbeat native Source/WAL adapter and lookup boundaries
+
+The immediately prior `9f086c90` checkpoint passed all
+17 required workflows (including real MinIO, WAL Crash,
+Controller HA, Ring WAL, JVM tests and GA Consistency).
+
+The pre-existing broker-local `BrokerLocalStartupReplayPrecheck`
+already validates real Kafka `SharedUnifiedLog` offsets,
+TopicId/partition, native leader epoch/generation,
+registered BrokerEpoch/incarnation, stable WAL mutation
+revisions, append admission revision and covered durable
+batch index. The new extension facade simply selects
+that trusted local precheck rather than duplicating WAL
+decisions. It refuses classic/null log objects, unbound or
+closed extension identity and the wrong Broker registration.
+No data is uploaded, written or retired by this inspection.
+
+The new asynchronous factory takes a supplied current-log
+resolver and Executor. It constructs its future with
+`CompletableFuture.supplyAsync`, keeping even metadata
+lookup off the serialized Broker lifecycle event queue.
+A saturated executor rejects immediately; never fall back
+to in-queue native WAL I/O. A closed extension or absent
+current replica cannot produce a report.
+
+`BrokerServer` now provides an explicitly callable,
+package-restricted adapter from the actual metadata
+`getTopicName(TopicId)` to current
+`LogManager.getLog(TopicPartition)` to the
+`SharedStorageExtension` reader. It **does not invoke**
+`BrokerLifecycleManager.setSourceWalProbeSampler`: per-Broker
+authenticated identity is not yet available in production
+and `DENY_ALL` remains active at the Controller.
+The extension reader remains unsigned local evidence, and
+the Report is never attached to the network heartbeat.
+
+Seven new storage JUnit methods and four new core Scala
+methods cover positive native WAL capture and all fail-closed
+lookup, identity, drift, closure, scheduling and executor
+capacity fences. Strict mandatory source/WAL Java/Scala
+evidence now totals **557 methods across 34 suites**,
+plus four independently XML-enforced BrokerServer
+resolution tests. Frozen MinIO GA and all COMMITTED
+logical/physical deletion gates remain unchanged.
