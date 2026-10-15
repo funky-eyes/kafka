@@ -56,6 +56,27 @@ public class BrokerHeartbeatSourceWalProbeProtocolTest {
     }
 
     @Test
+    public void defaultBuilderRejectsUnstableReportBeforeNetworkDispatch() {
+        assertEquals(2, new BrokerHeartbeatRequest.Builder(baseRequest()).latestAllowedVersion());
+        assertThrows(IllegalArgumentException.class, () ->
+            new BrokerHeartbeatRequest.Builder(baseRequest().setSourceWalProbeReport(report())));
+    }
+
+    @Test
+    public void explicitDiagnosticBuilderPinsExactVersionThree() {
+        var data = baseRequest().setSourceWalProbeReport(report());
+        var builder = new BrokerHeartbeatRequest.Builder(data, (short) 3);
+        assertEquals(3, builder.oldestAllowedVersion());
+        assertEquals(3, builder.latestAllowedVersion());
+        assertEquals(3, builder.build().version());
+        assertEquals(data, builder.build().data());
+        assertThrows(IllegalArgumentException.class,
+            () -> new BrokerHeartbeatRequest.Builder(data, (short) 2));
+        assertThrows(IllegalArgumentException.class,
+            () -> new BrokerHeartbeatRequest.Builder(baseRequest(), (short) 3));
+    }
+
+    @Test
     public void legacyRequestVersionsNeverCarrySourceWalReport() {
         for (short version = 0; version <= 2; version++) {
             BrokerHeartbeatRequestData request = baseRequest();

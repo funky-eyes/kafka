@@ -22,6 +22,8 @@ import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.protocol.Readable;
 
+import java.util.Objects;
+
 public class BrokerHeartbeatRequest extends AbstractRequest {
 
     public static class Builder extends AbstractRequest.Builder<BrokerHeartbeatRequest> {
@@ -29,7 +31,24 @@ public class BrokerHeartbeatRequest extends AbstractRequest {
 
         public Builder(BrokerHeartbeatRequestData data) {
             super(ApiKeys.BROKER_HEARTBEAT);
-            this.data = data;
+            this.data = Objects.requireNonNull(data, "data");
+            if (data.sourceWalProbeReport() != null) {
+                throw new IllegalArgumentException(
+                    "Source/WAL reports require an explicitly pinned v3 builder");
+            }
+        }
+
+        /**
+         * Use only for explicitly gated v3 diagnostics, not ordinary heartbeats.
+         * Pinning both bounds prevents controller version negotiation from
+         * silently downgrading a report to an older protocol.
+         */
+        public Builder(BrokerHeartbeatRequestData data, short reportVersion) {
+            super(ApiKeys.BROKER_HEARTBEAT, reportVersion);
+            this.data = Objects.requireNonNull(data, "data");
+            if (reportVersion != 3 || data.sourceWalProbeReport() == null) {
+                throw new IllegalArgumentException("A non-null Source/WAL report requires exact v3");
+            }
         }
 
         @Override
