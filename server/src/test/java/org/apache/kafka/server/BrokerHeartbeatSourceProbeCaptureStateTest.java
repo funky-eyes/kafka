@@ -71,6 +71,56 @@ class BrokerHeartbeatSourceProbeCaptureStateTest {
     }
 
     @Test
+    void interleavedChallengesCannotReplayAnEarlierNonce() {
+        var state = new SourceWalProbeCaptureState();
+        Request first = challenge(1L);
+        Capture firstCapture = state.begin(first, 100L);
+        assertFalse(complete(state, firstCapture, Optional.empty(), null, 101L));
+        Capture secondCapture = state.begin(challenge(2L), 102L);
+        assertNotNull(secondCapture);
+        assertFalse(complete(state, secondCapture, Optional.empty(), null, 103L));
+        // A one-element "last nonce" fence would incorrectly accept this.
+        assertNull(state.begin(first, 104L));
+    }
+
+    @Test
+    void saturatedNonceHistoryRejectsNewChallengesWithoutEvictingLiveFences() {
+        var state = new SourceWalProbeCaptureState();
+        for (int i = 1; i <= SourceWalProbeCaptureState.MAX_RECENT_NONCES; i++) {
+            Capture capture = state.begin(challenge(i), 100L + i);
+            assertNotNull(capture);
+            state.abandon(capture);
+        }
+        assertNull(state.begin(challenge(65L), 200L));
+        // After the oldest five-second TTL elapses a slot can be reused.
+        assertNotNull(state.begin(challenge(65L), SourceWalProbeCaptureState.MAX_AGE_NS + 101L));
+    }
+
+    @Test
+    void revokedChallengesRetainReplayFencesAcrossProviderReplacement() {
+        var state = new SourceWalProbeCaptureState();
+        Request first = challenge(1L);
+        Capture old = state.begin(first, 100L);
+        state.clear();
+        assertFalse(complete(state, old, Optional.empty(), null, 101L));
+        Capture next = state.begin(challenge(2L), 102L);
+        assertNotNull(next);
+        state.abandon(next);
+        assertNull(state.begin(first, 103L));
+    }
+
+    @Test
+    void nonceHistoryHandlesMonotonicClockWrapWithoutPrematureEviction() {
+        var state = new SourceWalProbeCaptureState();
+        long start = Long.MAX_VALUE - 1L;
+        Request request = challenge(1L);
+        Capture initial = state.begin(request, start);
+        state.abandon(initial);
+        assertNull(state.begin(request, Long.MIN_VALUE + 2L));
+        assertNotNull(state.begin(challenge(2L), Long.MIN_VALUE + 3L));
+    }
+
+    @Test
     void laterNonceFencesOutOfOrderCompletionFromOlderCapture() {
         var state = new SourceWalProbeCaptureState();
         Request first = challenge(1L);

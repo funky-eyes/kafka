@@ -875,3 +875,70 @@ connecting the actual native sampler and safely returning one
 nonce-bound report remain follow-up work. Do not call this
 an authenticated end-to-end GC implementation until the real
 multi-Broker MinIO/Controller HA run proves those properties.
+
+## Batches 173–176 — Checkstyle recovery and bounded multi-nonce replay fencing
+
+The prior development HEAD `71a23c6e45efaf4afbe26df9f6af4baa48e06fa8`
+completed **16/17 GitHub Actions SUCCESS**. The sole failed
+`Shared Storage` main workflow stopped at **two exact Checkstyle
+findings**, confirmed from the Java 25 job logs:
+
+- `BrokerLifecycleManager.java:765`, `NPathComplexity` **972 > 500**.
+- `BrokerLifecycleManager.java:1027`,
+  `BooleanExpressionComplexity` **6 > 5**.
+
+No correctness failure is inferred for the later Broker JUnit tests:
+they did not run after `:server:checkstyleMain` failed. MinIO,
+Controller HA, Ring WAL, WAL Crash, and the other 15 completed
+workflows passed; the independent MinIO GA release remains frozen at
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
+
+- **173 — refactor the real BrokerHeartbeat ingress.**
+  Split the monolithic `inspectSourceWalChallenge` into small
+  `eligibleSourceWalChallenge`, `scheduleSourceWalCapture` and
+  `enqueueSourceWalCapture` helpers, retaining the existing
+  Controller v3/registered RUNNING Broker/nonce checks. Exceptions
+  while initiating asynchronous capture release only the
+  appropriate in-flight fence. Callback state changes still
+  enqueue onto the Broker lifecycle event queue.
+- **174 — fail-closed simplified eligibility.**
+  Refactor `SourceWalProbeCaptureState.eligible` to reject
+  unregistered/non-RUNNING Broker state and expired or
+  backwards monotonic time before separately verifying
+  BrokerId/Epoch/Incarnation. Retain the five-second strict TTL
+  and `nanoTime` wrap semantics. Do not alter Checkstyle
+  thresholds or add suppressions.
+- **175 — bounded multi-nonce replay history.**
+  Replace the unsafe one-element `mostRecentNonce` fence
+  with a `LinkedHashMap<Uuid, Long>` tracking up to
+  **64 distinct accepted nonces** for the diagnostic TTL.
+  Previously, nonce A could be presented again after nonce B
+  had been processed. Now all nonces observed within five seconds
+  are blocked, including after provider reconfiguration or
+  failed/empty captures. Expire entries by monotonic elapsed
+  time only; if all 64 entries are still live, reject new
+  challenges instead of evicting a still-valid replay fence.
+  Retain the single active native I/O Future across
+  provider changes. This history is Broker-local diagnostic
+  state, not Controller authority.
+- **176 — deterministic replay and mandatory CI.**
+  Four new `BrokerHeartbeatSourceProbeCaptureStateTest`
+  cases cover interleaved nonce replay, bounded saturation
+  and expiry, revoked nonce persistence across changes and
+  signed `nanoTime` wrap. The main CI selects and requires
+  all **18** capture-state tests, as well as the existing
+  10 Broker challenge tests, and explicitly retains
+  `:server:checkstyleMain` and `:server:spotbugsMain`.
+  The independent Java/Scala storage/metadata inventory
+  remains **550 methods / 34 suites**.
+
+**Safety:** There is still no production-installed native sampler
+or network Source/WAL Report sender. Controller production
+per-Broker Principal mapping is `DENY_ALL`; no report becomes
+a KRaft retirement grant, no COMMITTED reference retirement
+or physical MinIO DELETE is enabled. This corrective development
+checkpoint requires its **own exact HEAD CI results** before
+calling it validated. Following work must attach the real
+native Source/WAL sampler behind an authenticated Broker identity
+and consume Controller-issued nonces inside the serialized
+Controller event, with MinIO and Controller HA evidence.

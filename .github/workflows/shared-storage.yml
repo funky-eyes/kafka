@@ -248,7 +248,9 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          ./gradlew :server:test --no-scan \
+          # Running the ordinary Gradle checks enforces the unchanged
+          # server Checkstyle and SpotBugs rules (no baseline exclusions).
+          ./gradlew :server:checkstyleMain :server:spotbugsMain :server:test --no-scan \
             --tests 'org.apache.kafka.server.BrokerHeartbeatSourceProbeChallengeGateTest' \
             --tests 'org.apache.kafka.server.BrokerHeartbeatSourceProbeCaptureStateTest' \
             2>&1 | tee shared-storage-broker-probe-test.log
@@ -281,6 +283,10 @@ jobs:
           required_capture = {
               'successfulCaptureIsAvailableExactlyOnce',
               'duplicateNonceCannotResampleOrOverwritePriorEvidence',
+              'interleavedChallengesCannotReplayAnEarlierNonce',
+              'saturatedNonceHistoryRejectsNewChallengesWithoutEvictingLiveFences',
+              'revokedChallengesRetainReplayFencesAcrossProviderReplacement',
+              'nonceHistoryHandlesMonotonicClockWrapWithoutPrematureEviction',
               'laterNonceFencesOutOfOrderCompletionFromOlderCapture',
               'singleFlightPreventsAnUnboundedQueueOfNativeCaptureTasks',
               'providerReconfigurationRevokesPendingAndStagedCaptures',

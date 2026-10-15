@@ -43,6 +43,8 @@ import org.slf4j.Logger;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -772,6 +774,15 @@ public class BrokerLifecycleManager {
         }
         short requestVersion = response.requestHeader() == null
             ? (short) -1 : response.requestHeader().apiVersion();
+        Optional<PartitionRetirementSourceProbe.Request> request =
+            eligibleSourceWalChallenge(data, requestVersion);
+        request.ifPresent(this::scheduleSourceWalCapture);
+    }
+
+    private Optional<PartitionRetirementSourceProbe.Request> eligibleSourceWalChallenge(
+        BrokerHeartbeatResponseData data,
+        short requestVersion
+    ) {
         BrokerHeartbeatSourceProbeChallengeGate.Finding finding =
             BrokerHeartbeatSourceProbeChallengeGate.inspect(
                 data, requestVersion, clusterId, nodeId, brokerEpoch, incarnationId, state, registered
@@ -779,43 +790,49 @@ public class BrokerLifecycleManager {
         if (finding != BrokerHeartbeatSourceProbeChallengeGate.Finding.MATCHED_UNTRUSTED
             || sourceWalProbeSampler == null) {
             logger.debug("Ignoring non-authorizing Controller Source/WAL challenge ({}).", finding);
-            return;
+            return Optional.empty();
         }
-        PartitionRetirementSourceProbe.Request request = BrokerHeartbeatSourceProbeChallengeGate
-            .diagnosticRequest(
-                data, requestVersion, clusterId, nodeId, brokerEpoch, incarnationId, state, registered
-            ).orElseThrow();
+        return BrokerHeartbeatSourceProbeChallengeGate.diagnosticRequest(
+            data, requestVersion, clusterId, nodeId, brokerEpoch, incarnationId, state, registered
+        );
+    }
+
+    private void scheduleSourceWalCapture(PartitionRetirementSourceProbe.Request request) {
         SourceWalProbeCaptureState.Capture capture =
             sourceWalProbeCaptureState.begin(request, time.nanoseconds());
         if (capture == null) {
             return;
         }
-        CompletionStage<Optional<PartitionRetirementSourceProbe.Report>> future;
         try {
-            future = sourceWalProbeSampler.capture(request);
+            CompletionStage<Optional<PartitionRetirementSourceProbe.Report>> future =
+                sourceWalProbeSampler.capture(request);
             if (future == null) {
                 sourceWalProbeCaptureState.abandon(capture);
                 return;
             }
+            future.whenComplete((report, error) -> enqueueSourceWalCapture(capture, report, error));
         } catch (RuntimeException failure) {
             logger.debug("Local Source/WAL diagnostic capture could not be scheduled.", failure);
             sourceWalProbeCaptureState.abandon(capture);
-            return;
         }
-        future.whenComplete((report, error) -> {
-            try {
-                eventQueue.append(() -> {
-                    boolean retained = sourceWalProbeCaptureState.complete(
-                        capture, report, error, time.nanoseconds(),
-                        nodeId, brokerEpoch, incarnationId, state, registered
-                    );
-                    logger.debug("Completed local, non-authorizing Source/WAL diagnostic: {}", retained);
-                });
-            } catch (RejectedExecutionException closed) {
-                // A closing lifecycle manager must not resurrect an expired
-                // diagnostic. The capture result is deliberately discarded.
-            }
-        });
+    }
+
+    private void enqueueSourceWalCapture(
+        SourceWalProbeCaptureState.Capture capture,
+        Optional<PartitionRetirementSourceProbe.Report> report,
+        Throwable error
+    ) {
+        try {
+            eventQueue.append(() -> {
+                boolean retained = sourceWalProbeCaptureState.complete(
+                    capture, report, error, time.nanoseconds(),
+                    nodeId, brokerEpoch, incarnationId, state, registered
+                );
+                logger.debug("Completed local, non-authorizing Source/WAL diagnostic: {}", retained);
+            });
+        } catch (RejectedExecutionException closed) {
+            // No callback may resurrect a closed lifecycle manager.
+        }
     }
 
     private void scheduleNextCommunicationImmediately() {
@@ -901,6 +918,7 @@ public class BrokerLifecycleManager {
      */
     static final class SourceWalProbeCaptureState {
         static final long MAX_AGE_NS = TimeUnit.SECONDS.toNanos(5);
+        static final int MAX_RECENT_NONCES = 64;
 
         static final class Capture {
             private final PartitionRetirementSourceProbe.Request request;
@@ -918,7 +936,10 @@ public class BrokerLifecycleManager {
         private Capture pending;
         private Capture ready;
         private PartitionRetirementSourceProbe.Report report;
-        private Uuid mostRecentNonce;
+        // Track all recent nonces, not just the immediately preceding one.
+        // Fail closed on saturation instead of evicting an unexpired replay
+        // fence. This remains bounded even under repeated challenges.
+        private final Map<Uuid, Long> recentNonces = new LinkedHashMap<>();
 
         Capture begin(PartitionRetirementSourceProbe.Request request, long nowNs) {
             Objects.requireNonNull(request, "request");
@@ -927,12 +948,14 @@ public class BrokerLifecycleManager {
             if (active != null) {
                 return null;
             }
-            // A duplicate nonce, even with altered fields, cannot restart
-            // sampling or overwrite evidence from a previous attempt.
-            if (request.nonce().equals(mostRecentNonce)) {
+            // Never accept a replay among multiple in-flight/previously
+            // processed challenges within the five-second diagnostic TTL.
+            expireRecentNonces(nowNs);
+            if (recentNonces.containsKey(request.nonce())
+                || recentNonces.size() >= MAX_RECENT_NONCES) {
                 return null;
             }
-            mostRecentNonce = request.nonce();
+            recentNonces.put(request.nonce(), nowNs);
             pending = new Capture(request, nowNs);
             active = pending;
             ready = null;
@@ -1010,7 +1033,20 @@ public class BrokerLifecycleManager {
             report = null;
             // Keep active until the old asynchronous callback has actually
             // finished, preventing concurrent I/O across provider changes.
-            // Keep mostRecentNonce so the same challenge cannot be reopened.
+            // Keep recentNonces, including those from revoked captures, so
+            // neither reconfiguration nor heartbeat errors reopen replay.
+        }
+
+        private void expireRecentNonces(long nowNs) {
+            Iterator<Long> times = recentNonces.values().iterator();
+            while (times.hasNext()) {
+                long age = nowNs - times.next();
+                // Signed subtraction also handles nanoTime crossing the
+                // Long.MAX_VALUE boundary for five-second intervals.
+                if (age >= MAX_AGE_NS) {
+                    times.remove();
+                }
+            }
         }
 
         private static boolean eligible(
@@ -1022,11 +1058,15 @@ public class BrokerLifecycleManager {
             BrokerState state,
             boolean registered
         ) {
-            PartitionRetirementSourceProbe.Request request = capture.request;
+            if (!registered || state != BrokerState.RUNNING) {
+                return false;
+            }
             long elapsed = nowNs - capture.startedNs;
-            return elapsed >= 0L && elapsed < MAX_AGE_NS
-                && registered && state == BrokerState.RUNNING
-                && request.brokerId() == brokerId && request.brokerEpoch() == brokerEpoch
+            if (elapsed < 0L || elapsed >= MAX_AGE_NS) {
+                return false;
+            }
+            PartitionRetirementSourceProbe.Request request = capture.request;
+            return request.brokerId() == brokerId && request.brokerEpoch() == brokerEpoch
                 && request.brokerIncarnationId().equals(incarnationId);
         }
     }

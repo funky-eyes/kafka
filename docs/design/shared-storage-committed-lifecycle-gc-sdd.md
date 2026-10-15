@@ -3369,3 +3369,47 @@ coverage of these fences; the main Java 25 workflow verifies the
 exact JUnit XML set with zero skipped/failing cases. The existing
 550-method/34-suite metadata-storage inventory is unchanged.
 The MinIO GA release branch remains frozen.
+
+## Batches 173–176 — complexity gates and bounded replay-window design
+
+On development SHA `71a23c6e`, 16/17 Actions succeeded.
+Only the primary Shared Storage job failed, at
+`:server:checkstyleMain`, with `NPathComplexity=972 > 500`
+in the Controller Source/WAL challenge handler and
+`BooleanExpressionComplexity=6 > 5` in the Broker capture
+eligibility method. The previous Broker JUnit suite was
+not executed; this was a static rule gate, not a JUnit
+assertion or proven WAL correctness regression.
+
+The heartbeat ingress is split into small helpers for
+diagnostic eligibility, bounded off-thread scheduling and
+serialized completion. Registration/RUNNING/timeout/
+incarnation checks now use straightforward fail-fast guards;
+neither Checkstyle nor SpotBugs rule limits are weakened.
+
+The original Broker nonce fence remembered only the last
+nonce. A challenged Broker could process nonce A, then B,
+then accept replayed A while all were still fresh. The
+replacement is a **64-entry maximum**, insertion-ordered,
+Broker-local nonce history. It retains every nonce accepted
+in the last five seconds, including revocations and provider
+changes. Pruning is based on elapsed monotonic time with
+signed overflow-safe subtraction. At full capacity, it
+rejects new source sampling until older entries expire,
+never evicting live replay barriers. Single in-flight
+native I/O, late callback fencing, strict request equality
+and one-shot local report consumption remain unchanged.
+
+Four new deterministic server-side regressions cover
+interleaved nonce replay, saturation without premature
+eviction, reconfiguration and signed monotonic clock wrap.
+The main CI requires **18 capture-state** and
+**10 challenge-gate** test methods with zero skipped/failing
+JUnit entries and retains the ordinary server static checks.
+The strict metadata/storage manifest remains **550 / 34**.
+
+The feature remains default-disabled: no storage adapter
+is installed, no diagnostic report is transmitted,
+Controller per-Broker Principal policy is `DENY_ALL`,
+and neither KRaft authority CAS writing nor physical
+COMMITTED garbage collection is enabled.
