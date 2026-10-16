@@ -1308,3 +1308,49 @@ new SHA. The frozen MinIO GA branch
 is untouched. PR #2 remains Draft. This change adds no Broker
 sender, no authenticated credential mapping, no KRaft authority
 writer and no physical COMMITTED object deletion.
+
+## Batches 199–202 — complete all GA trigger coverage and cross-replica Ring WAL replay negatives
+
+The previous `ad1ff0ec1e99298e94a0e33fbdce118825000ab9` checkpoint
+completed **16/17** workflows. The only failed job,
+`Shared Storage GA Workflow Consistency`, reported that
+eighteen independent GA evidence workflows lacked `push.paths`
+coverage for five newly hashed Broker v3 diagnostic inputs.
+That failure is a release evidence contract issue, not a
+WAL correctness or Controller HA assertion failure.
+
+- **199 — exact-scope workflow triggers:** Add the four
+  Broker v3 Source/WAL client protocol inputs and
+  `BrokerHeartbeatSourceWalReportDispatch.java` to all
+  eighteen other eligible GA evidence workflows. Their
+  existing `pull_request` events also gain matching paths.
+  Do not use a broad `clients/**` wildcard or trigger
+  unrelated Real S3 evidence.
+- **200 — mandatory trigger regression:** Add a fast
+  unit test to check each protected path belongs to the
+  GA production fingerprint and is covered by `push`
+  and any supported `pull_request` on every eligible
+  evidence workflow. Keep the existing graph validator
+  strict; do not relax its coverage assertion.
+- **201 — independent Ring WAL source windows:** Use
+  two physically separate real Ring WAL files with the
+  same logical topic/partition. After both brokers close
+  and reopen, a missing local Kafka batch remains missing
+  even though the peer's Ring WAL contains it.
+- **202 — independent Ring WAL TRUNCATE:** Reopen two
+  physical Ring WAL backends after only one replica
+  durably truncates its indexed source data. The revoked
+  replica cannot borrow the healthy peer's complete window.
+  Both WAL regressions are mandatory XML/JUnit evidence:
+  the strict storage/metadata method inventory rises
+  from **573 to 575**.
+
+These two physical backend tests do **not** prove durable
+cross-replica consensus, broker transport authentication or
+current ControllerRegistration. No production report sender,
+KRaft retirement authority writer, COMMITTED reference retirement
+or MinIO physical DELETE is enabled. Production `DENY_ALL`
+and the frozen MinIO GA source
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`
+remain unchanged. PR #2 remains Draft. This checkpoint
+requires its own exact-source-SHA 17/17 CI before validation.

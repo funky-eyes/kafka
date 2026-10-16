@@ -208,6 +208,8 @@ REQUIRED_TESTS = {
         "durableTruncateRevokesCurrentIndexedDataCoverage",
         "independentReplicaFileWalReplaysNeverBorrowAPeersMissingKafkaBatch",
         "ringWalTruncationRemainsRevokedAfterActualBackendReopen",
+        "independentReplicaRingWalReplaysCannotBorrowPeerOnlyKafkaBatches",
+        "independentReplicaRingWalTruncationCannotBorrowHealthyPeerOnReopen",
     ),
     "org.apache.kafka.storage.internals.shared.StartupWalReplayCoveragePrecheckTest": (
         "exactRecoveredRecordBatchWindowIsLocallyCovered",

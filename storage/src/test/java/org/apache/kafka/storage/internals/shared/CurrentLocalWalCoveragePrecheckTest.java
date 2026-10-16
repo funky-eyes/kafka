@@ -219,6 +219,70 @@ class CurrentLocalWalCoveragePrecheckTest {
         }
     }
 
+    @Test
+    void independentReplicaRingWalReplaysCannotBorrowPeerOnlyKafkaBatches() throws Exception {
+        Path firstBrokerPath = tempDir.resolve("replica-a-ring.wal");
+        Path secondBrokerPath = tempDir.resolve("replica-b-ring.wal");
+        try (
+            SharedStorageEngine first = new SharedStorageEngine(
+                new RingSharedWal(firstBrokerPath, 1024L * 1024L));
+            SharedStorageEngine second = new SharedStorageEngine(
+                new RingSharedWal(secondBrokerPath, 1024L * 1024L))
+        ) {
+            first.appendData(FIRST, 8, 0L, 9L, ByteBuffer.wrap(new byte[]{1})).join();
+            first.appendData(FIRST, 8, 10L, 19L, ByteBuffer.wrap(new byte[]{2})).join();
+            second.appendData(FIRST, 8, 0L, 9L, ByteBuffer.wrap(new byte[]{1})).join();
+            assertEquals(Finding.INDEXED_BATCH_WINDOW,
+                first.localDurableWindowCoverage(FIRST, 0L, 20L));
+            assertEquals(Finding.SOURCE_WINDOW_NOT_INDEXED,
+                second.localDurableWindowCoverage(FIRST, 0L, 20L));
+        }
+        try (
+            SharedStorageEngine firstReopened = new SharedStorageEngine(
+                new RingSharedWal(firstBrokerPath, 1024L * 1024L));
+            SharedStorageEngine secondReopened = new SharedStorageEngine(
+                new RingSharedWal(secondBrokerPath, 1024L * 1024L))
+        ) {
+            assertEquals(Finding.INDEXED_BATCH_WINDOW,
+                firstReopened.localDurableWindowCoverage(FIRST, 0L, 20L));
+            assertEquals(Finding.SOURCE_WINDOW_NOT_INDEXED,
+                secondReopened.localDurableWindowCoverage(FIRST, 0L, 20L));
+            assertEquals(0L, secondReopened.liveWalDurabilityObservation(FIRST).dataBatches());
+        }
+    }
+
+    @Test
+    void independentReplicaRingWalTruncationCannotBorrowHealthyPeerOnReopen() throws Exception {
+        Path revokedPath = tempDir.resolve("replica-revoked-ring.wal");
+        Path healthyPath = tempDir.resolve("replica-healthy-ring.wal");
+        try (
+            SharedStorageEngine revoked = new SharedStorageEngine(
+                new RingSharedWal(revokedPath, 1024L * 1024L));
+            SharedStorageEngine healthy = new SharedStorageEngine(
+                new RingSharedWal(healthyPath, 1024L * 1024L))
+        ) {
+            revoked.appendData(FIRST, 8, 0L, 9L, ByteBuffer.wrap(new byte[]{1})).join();
+            healthy.appendData(FIRST, 8, 0L, 9L, ByteBuffer.wrap(new byte[]{1})).join();
+            revoked.truncate(FIRST, 9, 0L).join();
+            assertEquals(Finding.NO_INDEXED_DATA,
+                revoked.localDurableWindowCoverage(FIRST, 0L, 10L));
+            assertEquals(Finding.INDEXED_BATCH_WINDOW,
+                healthy.localDurableWindowCoverage(FIRST, 0L, 10L));
+        }
+        try (
+            SharedStorageEngine revokedReopened = new SharedStorageEngine(
+                new RingSharedWal(revokedPath, 1024L * 1024L));
+            SharedStorageEngine healthyReopened = new SharedStorageEngine(
+                new RingSharedWal(healthyPath, 1024L * 1024L))
+        ) {
+            assertEquals(Finding.NO_INDEXED_DATA,
+                revokedReopened.localDurableWindowCoverage(FIRST, 0L, 10L));
+            assertEquals(Finding.INDEXED_BATCH_WINDOW,
+                healthyReopened.localDurableWindowCoverage(FIRST, 0L, 10L));
+            assertEquals(0L, revokedReopened.liveWalDurabilityObservation(FIRST).dataBatches());
+        }
+    }
+
     private static WalLocation location(long walPosition, long first, long last) {
         return new WalLocation(walPosition, 61, 8, first, last);
     }

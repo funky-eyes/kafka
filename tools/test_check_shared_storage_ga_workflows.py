@@ -17,6 +17,8 @@
 import unittest
 from pathlib import Path
 
+from shared_storage_ga_manifest import EVIDENCE_WORKFLOW_PATHS, PRODUCTION_PATHS, REAL_S3_REQUIRED
+
 from check_shared_storage_ga_workflows import (
     foreign_evidence_workflow_triggers,
     event_path_patterns,
@@ -31,6 +33,36 @@ from check_shared_storage_ga_workflows import (
 
 
 class WorkflowTriggerOwnershipTest(unittest.TestCase):
+    def test_gc_protocol_changes_trigger_every_ga_evidence_workflow(self):
+        # Exactly these five inputs were added to the release fingerprint
+        # for the Source/WAL diagnostics. Every eligible source-SHA gate
+        # must rerun when any of their blobs changes.
+        protected = {
+            "server/src/main/java/org/apache/kafka/server/BrokerHeartbeatSourceWalReportDispatch.java",
+            "clients/src/main/java/org/apache/kafka/common/replica/PartitionRetirementSourceProbe.java",
+            "clients/src/main/java/org/apache/kafka/common/requests/BrokerHeartbeatRequest.java",
+            "clients/src/main/resources/common/message/BrokerHeartbeatRequest.json",
+            "clients/src/main/resources/common/message/BrokerHeartbeatResponse.json",
+        }
+        self.assertTrue(protected.issubset(PRODUCTION_PATHS))
+        root = Path(__file__).resolve().parents[1]
+        for name, filename in sorted(EVIDENCE_WORKFLOW_PATHS.items()):
+            if name == REAL_S3_REQUIRED:
+                # The special Real S3 workflow is manually/branch dispatched.
+                continue
+            workflow = (root / filename).read_text(encoding="utf-8")
+            events = ["push"]
+            if "\n  pull_request:\n" in workflow:
+                events.append("pull_request")
+            for event in events:
+                patterns = event_path_patterns(workflow, event)
+                for source in sorted(protected):
+                    with self.subTest(gate=name, event=event, source=source):
+                        self.assertTrue(
+                            path_is_triggered(source, patterns),
+                            f"{filename}: {event}.paths must cover {source}",
+                        )
+
     def test_explicit_client_protocol_paths_require_ga_fingerprint_coverage(self):
         workflow = """on:
   push:

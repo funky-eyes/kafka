@@ -21,6 +21,11 @@ on:
       - shared-wal-s3-4.3.1
     paths:
       - 'server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java'
+      - 'server/src/main/java/org/apache/kafka/server/BrokerHeartbeatSourceWalReportDispatch.java'
+      - 'clients/src/main/java/org/apache/kafka/common/replica/PartitionRetirementSourceProbe.java'
+      - 'clients/src/main/java/org/apache/kafka/common/requests/BrokerHeartbeatRequest.java'
+      - 'clients/src/main/resources/common/message/BrokerHeartbeatRequest.json'
+      - 'clients/src/main/resources/common/message/BrokerHeartbeatResponse.json'
       - 'gradle.properties'
       - 'gradle/dependencies.gradle'
       - 'gradlew'
@@ -47,6 +52,11 @@ on:
   pull_request:
     paths:
       - 'server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java'
+      - 'server/src/main/java/org/apache/kafka/server/BrokerHeartbeatSourceWalReportDispatch.java'
+      - 'clients/src/main/java/org/apache/kafka/common/replica/PartitionRetirementSourceProbe.java'
+      - 'clients/src/main/java/org/apache/kafka/common/requests/BrokerHeartbeatRequest.java'
+      - 'clients/src/main/resources/common/message/BrokerHeartbeatRequest.json'
+      - 'clients/src/main/resources/common/message/BrokerHeartbeatResponse.json'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/**'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/log/**'
       - 'core/src/main/scala/kafka/cluster/Partition.scala'
