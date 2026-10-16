@@ -412,6 +412,29 @@ public class QuorumControllerTest {
     }
 
     @Test
+    public void testSourceProbeHeartbeatEligibilityRejectsUnsafeBrokerStates() {
+        BrokerHeartbeatRequestData heartbeat = new BrokerHeartbeatRequestData()
+            .setBrokerId(3).setBrokerEpoch(54L);
+        BrokerHeartbeatReply ready = new BrokerHeartbeatReply(true, false, false, false);
+        assertTrue(QuorumController.sourceProbeHeartbeatEligible(heartbeat, ready, false));
+        assertFalse(QuorumController.sourceProbeHeartbeatEligible(heartbeat, ready, true));
+        assertFalse(QuorumController.sourceProbeHeartbeatEligible(
+            heartbeat.duplicate().setWantFence(true), ready, false));
+        assertFalse(QuorumController.sourceProbeHeartbeatEligible(
+            heartbeat.duplicate().setWantShutDown(true), ready, false));
+        assertFalse(QuorumController.sourceProbeHeartbeatEligible(
+            heartbeat.duplicate().setOfflineLogDirs(List.of(new Uuid(71L, 72L))), ready, false));
+        assertFalse(QuorumController.sourceProbeHeartbeatEligible(
+            heartbeat, new BrokerHeartbeatReply(false, false, false, false), false));
+        assertFalse(QuorumController.sourceProbeHeartbeatEligible(
+            heartbeat, new BrokerHeartbeatReply(true, true, false, false), false));
+        assertFalse(QuorumController.sourceProbeHeartbeatEligible(
+            heartbeat, new BrokerHeartbeatReply(true, false, true, false), false));
+        assertFalse(QuorumController.sourceProbeHeartbeatEligible(
+            heartbeat, new BrokerHeartbeatReply(true, false, false, true), false));
+    }
+
+    @Test
     public void testUniquelyBoundHeartbeatReportIsSerializedAndStillDeniedWithoutNonce() throws Exception {
         KafkaPrincipal uniqueBroker = new KafkaPrincipal(KafkaPrincipal.USER_TYPE, "broker-id-three");
         try (

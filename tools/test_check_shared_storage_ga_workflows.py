@@ -17,7 +17,7 @@
 import unittest
 from pathlib import Path
 
-from shared_storage_ga_manifest import EVIDENCE_WORKFLOW_PATHS, PRODUCTION_PATHS, REAL_S3_REQUIRED
+from shared_storage_ga_manifest import EVIDENCE_WORKFLOW_PATHS, PRODUCTION_PATHS, REAL_S3_REQUIRED, is_production_path
 
 from check_shared_storage_ga_workflows import (
     foreign_evidence_workflow_triggers,
@@ -33,6 +33,34 @@ from check_shared_storage_ga_workflows import (
 
 
 class WorkflowTriggerOwnershipTest(unittest.TestCase):
+    def test_kraft_gc_controller_changes_trigger_every_ga_workflow(self):
+        protected = {
+            "metadata/src/main/java/org/apache/kafka/controller/QuorumController.java",
+            "metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementSourceProbeRegistry.java",
+            "metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementHeartbeatReportGate.java",
+            "metadata/src/main/java/org/apache/kafka/metadata/BrokerHeartbeatReply.java",
+            "metadata/src/main/java/org/apache/kafka/metadata/PartitionRetirementAuthorityState.java",
+            "metadata/src/main/java/org/apache/kafka/image/PartitionRetirementAuthorityImage.java",
+        }
+        root = Path(__file__).resolve().parents[1]
+        for path in protected:
+            self.assertTrue(is_production_path(path), path)
+        for name, filename in sorted(EVIDENCE_WORKFLOW_PATHS.items()):
+            if name == REAL_S3_REQUIRED:
+                continue
+            workflow = (root / filename).read_text(encoding="utf-8")
+            events = ["push"]
+            if "\n  pull_request:\n" in workflow:
+                events.append("pull_request")
+            for event in events:
+                patterns = event_path_patterns(workflow, event)
+                for source in sorted(protected):
+                    with self.subTest(gate=name, event=event, source=source):
+                        self.assertTrue(
+                            path_is_triggered(source, patterns),
+                            f"{filename}: {event}.paths must cover {source}",
+                        )
+
     def test_gc_protocol_changes_trigger_every_ga_evidence_workflow(self):
         # Exactly these five inputs were added to the release fingerprint
         # for the Source/WAL diagnostics. Every eligible source-SHA gate

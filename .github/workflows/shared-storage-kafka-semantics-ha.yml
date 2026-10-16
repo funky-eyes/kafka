@@ -21,6 +21,11 @@ on:
       - shared-wal-s3-4.3.1
     paths:
       - 'server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/QuorumController.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirement*.java'
+      - 'metadata/src/main/java/org/apache/kafka/metadata/BrokerHeartbeatReply.java'
+      - 'metadata/src/main/java/org/apache/kafka/metadata/PartitionRetirementAuthorityState.java'
+      - 'metadata/src/main/java/org/apache/kafka/image/PartitionRetirementAuthority*.java'
       - 'server/src/main/java/org/apache/kafka/server/BrokerHeartbeatSourceWalReportDispatch.java'
       - 'clients/src/main/java/org/apache/kafka/common/replica/PartitionRetirementSourceProbe.java'
       - 'clients/src/main/java/org/apache/kafka/common/requests/BrokerHeartbeatRequest.java'
@@ -54,6 +59,11 @@ on:
   pull_request:
     paths:
       - 'server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/QuorumController.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirement*.java'
+      - 'metadata/src/main/java/org/apache/kafka/metadata/BrokerHeartbeatReply.java'
+      - 'metadata/src/main/java/org/apache/kafka/metadata/PartitionRetirementAuthorityState.java'
+      - 'metadata/src/main/java/org/apache/kafka/image/PartitionRetirementAuthority*.java'
       - 'server/src/main/java/org/apache/kafka/server/BrokerHeartbeatSourceWalReportDispatch.java'
       - 'clients/src/main/java/org/apache/kafka/common/replica/PartitionRetirementSourceProbe.java'
       - 'clients/src/main/java/org/apache/kafka/common/requests/BrokerHeartbeatRequest.java'

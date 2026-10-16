@@ -60,11 +60,11 @@ class PartitionRetirementSourceProbeRegistryTest {
         var registry = registry();
         Challenge issued = issue(registry, 100L);
         assertEquals(issued,
-            registry.pendingForHeartbeat(3, 54L, BROKER_THREE, 101L).orElseThrow());
-        assertTrue(registry.pendingForHeartbeat(4, 54L, BROKER_THREE, 101L).isEmpty());
-        assertTrue(registry.pendingForHeartbeat(3, 54L, BROKER_FOUR, 101L).isEmpty());
-        assertTrue(registry.pendingForHeartbeat(3, 54L, KafkaPrincipal.ANONYMOUS, 101L).isEmpty());
-        assertTrue(registry.pendingForHeartbeat(3, 54L, null, 101L).isEmpty());
+            registry.pendingForHeartbeat(3, 54L, BROKER_THREE, 101L, candidate -> true).orElseThrow());
+        assertTrue(registry.pendingForHeartbeat(4, 54L, BROKER_THREE, 101L, candidate -> true).isEmpty());
+        assertTrue(registry.pendingForHeartbeat(3, 54L, BROKER_FOUR, 101L, candidate -> true).isEmpty());
+        assertTrue(registry.pendingForHeartbeat(3, 54L, KafkaPrincipal.ANONYMOUS, 101L, candidate -> true).isEmpty());
+        assertTrue(registry.pendingForHeartbeat(3, 54L, null, 101L, candidate -> true).isEmpty());
         assertEquals(Finding.MATCHED_UNTRUSTED,
             registry.consume(issued, CANDIDATE, BROKER_THREE, 102L));
     }
@@ -77,14 +77,14 @@ class PartitionRetirementSourceProbeRegistryTest {
         Challenge third = issue(registry, 102L);
         for (long nowNs = 103L; nowNs < 106L; nowNs++) {
             assertEquals(first,
-                registry.pendingForHeartbeat(3, 54L, BROKER_THREE, nowNs).orElseThrow());
+                registry.pendingForHeartbeat(3, 54L, BROKER_THREE, nowNs, candidate -> true).orElseThrow());
         }
         assertEquals(Finding.MATCHED_UNTRUSTED,
             registry.consume(first, CANDIDATE, BROKER_THREE, 106L));
-        assertEquals(second, registry.pendingForHeartbeat(3, 54L, BROKER_THREE, 107L).orElseThrow());
+        assertEquals(second, registry.pendingForHeartbeat(3, 54L, BROKER_THREE, 107L, candidate -> true).orElseThrow());
         assertEquals(Finding.MATCHED_UNTRUSTED,
             registry.consume(second, CANDIDATE, BROKER_THREE, 108L));
-        assertEquals(third, registry.pendingForHeartbeat(3, 54L, BROKER_THREE, 109L).orElseThrow());
+        assertEquals(third, registry.pendingForHeartbeat(3, 54L, BROKER_THREE, 109L, candidate -> true).orElseThrow());
     }
 
     @Test
@@ -94,8 +94,8 @@ class PartitionRetirementSourceProbeRegistryTest {
         Challenge second = issue(registry, 101L);
         long firstExpired = 100L + PartitionRetirementSourceProbeRegistry.MAX_AGE_NS;
         assertEquals(second,
-            registry.pendingForHeartbeat(3, 54L, BROKER_THREE, firstExpired).orElseThrow());
-        assertTrue(registry.pendingForHeartbeat(3, 54L, BROKER_THREE, firstExpired + 1L).isEmpty());
+            registry.pendingForHeartbeat(3, 54L, BROKER_THREE, firstExpired, candidate -> true).orElseThrow());
+        assertTrue(registry.pendingForHeartbeat(3, 54L, BROKER_THREE, firstExpired + 1L, candidate -> true).isEmpty());
     }
 
     @Test
@@ -106,27 +106,90 @@ class PartitionRetirementSourceProbeRegistryTest {
         Challenge foreign = registry.issue(other, BROKER_FOUR, POLICY, 101L).orElseThrow();
         Challenge next = issue(registry, 102L);
         assertEquals(foreign,
-            registry.pendingForHeartbeat(4, 54L, BROKER_FOUR, 103L).orElseThrow());
+            registry.pendingForHeartbeat(4, 54L, BROKER_FOUR, 103L, candidate -> true).orElseThrow());
         assertEquals(first,
-            registry.pendingForHeartbeat(3, 54L, BROKER_THREE, 103L).orElseThrow());
+            registry.pendingForHeartbeat(3, 54L, BROKER_THREE, 103L, candidate -> true).orElseThrow());
         assertEquals(Finding.MATCHED_UNTRUSTED,
             registry.consume(first, CANDIDATE, BROKER_THREE, 104L));
         assertEquals(next,
-            registry.pendingForHeartbeat(3, 54L, BROKER_THREE, 105L).orElseThrow());
+            registry.pendingForHeartbeat(3, 54L, BROKER_THREE, 105L, candidate -> true).orElseThrow());
         assertEquals(foreign,
-            registry.pendingForHeartbeat(4, 54L, BROKER_FOUR, 105L).orElseThrow());
+            registry.pendingForHeartbeat(4, 54L, BROKER_FOUR, 105L, candidate -> true).orElseThrow());
     }
 
     @Test
     void heartbeatOfferMustRejectOldBrokerEpochAndExpiredNonce() {
         var registry = registry();
         Challenge issued = issue(registry, 100L);
-        assertTrue(registry.pendingForHeartbeat(3, 55L, BROKER_THREE, 101L).isEmpty());
-        assertTrue(registry.pendingForHeartbeat(3, -1L, BROKER_THREE, 101L).isEmpty());
-        assertTrue(registry.pendingForHeartbeat(-1, 54L, BROKER_THREE, 101L).isEmpty());
+        assertTrue(registry.pendingForHeartbeat(3, 55L, BROKER_THREE, 101L, candidate -> true).isEmpty());
+        assertTrue(registry.pendingForHeartbeat(3, -1L, BROKER_THREE, 101L, candidate -> true).isEmpty());
+        assertTrue(registry.pendingForHeartbeat(-1, 54L, BROKER_THREE, 101L, candidate -> true).isEmpty());
         long expiry = 100L + PartitionRetirementSourceProbeRegistry.MAX_AGE_NS;
-        assertTrue(registry.pendingForHeartbeat(3, 54L, BROKER_THREE, expiry).isEmpty());
+        assertTrue(registry.pendingForHeartbeat(3, 54L, BROKER_THREE, expiry, candidate -> true).isEmpty());
         assertEquals(Finding.EXPIRED, registry.consume(issued, CANDIDATE, BROKER_THREE, expiry));
+    }
+
+    @Test
+    void staleOldestCandidateDoesNotStarveNewerValidChallenge() {
+        var registry = registry();
+        Challenge stale = issue(registry, 100L);
+        Candidate current = candidate(3, 54L, new Uuid(10L, 11L), 9, 21L);
+        Challenge newer = registry.issue(current, BROKER_THREE, POLICY, 101L).orElseThrow();
+        assertEquals(newer, registry.pendingForHeartbeat(
+            3, 54L, BROKER_THREE, 102L, candidate -> candidate.equals(current)
+        ).orElseThrow());
+        assertEquals(Finding.MATCHED_UNTRUSTED,
+            registry.consume(newer, current, BROKER_THREE, 103L));
+        // Skipping is read-only and does not silently consume the older nonce.
+        assertEquals(stale, registry.pendingForHeartbeat(
+            3, 54L, BROKER_THREE, 104L, candidate -> candidate.equals(CANDIDATE)
+        ).orElseThrow());
+    }
+
+    @Test
+    void staleCandidateFilterNeverConsumesAStillPendingNonce() {
+        var registry = registry();
+        Challenge issued = issue(registry, 100L);
+        assertTrue(registry.pendingForHeartbeat(
+            3, 54L, BROKER_THREE, 101L, candidate -> false
+        ).isEmpty());
+        assertEquals(Finding.MATCHED_UNTRUSTED,
+            registry.consume(issued, CANDIDATE, BROKER_THREE, 102L));
+        assertEquals(Finding.UNKNOWN_OR_ALREADY_USED,
+            registry.consume(issued, CANDIDATE, BROKER_THREE, 103L));
+    }
+
+    @Test
+    void foreignPrincipalOrEpochCannotRunTheKraftValidationCallback() {
+        var registry = registry();
+        issue(registry, 100L);
+        java.util.function.Predicate<Candidate> failIfCalled = candidate -> {
+            throw new AssertionError("Unbound identity must not query live KRaft state");
+        };
+        assertTrue(registry.pendingForHeartbeat(
+            3, 54L, BROKER_FOUR, 101L, failIfCalled
+        ).isEmpty());
+        assertTrue(registry.pendingForHeartbeat(
+            3, 55L, BROKER_THREE, 101L, failIfCalled
+        ).isEmpty());
+        assertTrue(registry.pendingForHeartbeat(
+            4, 54L, BROKER_THREE, 101L, failIfCalled
+        ).isEmpty());
+    }
+
+    @Test
+    void changedIncarnationWithSameBrokerEpochCannotBorrowAChallenge() {
+        var registry = registry();
+        Challenge issued = issue(registry, 100L);
+        Candidate replaced = candidate(3, 54L, new Uuid(30L, 31L), 8, 20L);
+        assertTrue(registry.pendingForHeartbeat(
+            3, 54L, BROKER_THREE, 101L,
+            candidate -> candidate.brokerIncarnationId().equals(replaced.brokerIncarnationId())
+        ).isEmpty());
+        assertEquals(Finding.CANDIDATE_CHANGED,
+            registry.consume(issued, replaced, BROKER_THREE, 102L));
+        assertEquals(Finding.UNKNOWN_OR_ALREADY_USED,
+            registry.consume(issued, CANDIDATE, BROKER_THREE, 103L));
     }
 
     @Test
@@ -135,16 +198,16 @@ class PartitionRetirementSourceProbeRegistryTest {
         Challenge issued = issue(registry, 100L);
         assertEquals(Finding.MATCHED_UNTRUSTED,
             registry.consume(issued, CANDIDATE, BROKER_THREE, 101L));
-        assertTrue(registry.pendingForHeartbeat(3, 54L, BROKER_THREE, 102L).isEmpty());
+        assertTrue(registry.pendingForHeartbeat(3, 54L, BROKER_THREE, 102L, candidate -> true).isEmpty());
     }
 
     @Test
     void controllerLeadershipChangeRevokesHeartbeatOffers() {
         var registry = registry();
         issue(registry, 100L);
-        assertTrue(registry.pendingForHeartbeat(3, 54L, BROKER_THREE, 101L).isPresent());
+        assertTrue(registry.pendingForHeartbeat(3, 54L, BROKER_THREE, 101L, candidate -> true).isPresent());
         registry.invalidateAll();
-        assertTrue(registry.pendingForHeartbeat(3, 54L, BROKER_THREE, 102L).isEmpty());
+        assertTrue(registry.pendingForHeartbeat(3, 54L, BROKER_THREE, 102L, candidate -> true).isEmpty());
     }
 
     @Test

@@ -128,6 +128,8 @@ REAL_S3_EVIDENCE_BRANCH_SUFFIX = "-real-s3"
 
 JAVA_PRODUCTION_PREFIXES = (
     "storage/src/main/java/org/apache/kafka/storage/internals/shared/",
+    "metadata/src/main/java/org/apache/kafka/controller/PartitionRetirement",
+    "metadata/src/main/java/org/apache/kafka/image/PartitionRetirementAuthority",
 )
 
 PRODUCTION_PREFIXES = (
@@ -135,6 +137,9 @@ PRODUCTION_PREFIXES = (
 )
 
 PRODUCTION_PATHS = {
+    "metadata/src/main/java/org/apache/kafka/controller/QuorumController.java",
+    "metadata/src/main/java/org/apache/kafka/metadata/BrokerHeartbeatReply.java",
+    "metadata/src/main/java/org/apache/kafka/metadata/PartitionRetirementAuthorityState.java",
     "clients/src/main/java/org/apache/kafka/common/replica/PartitionRetirementSourceProbe.java",
     "clients/src/main/java/org/apache/kafka/common/requests/BrokerHeartbeatRequest.java",
     "clients/src/main/resources/common/message/BrokerHeartbeatRequest.json",

@@ -2264,11 +2264,7 @@ public final class QuorumController implements Controller {
         if (context.requestHeader() == null || context.requestHeader().requestApiVersion() != 3) {
             return reply;
         }
-        if (!result.records().isEmpty() || !reply.isCaughtUp() || reply.isFenced()
-            || reply.shouldShutDown() || reply.inControlledShutdown()) {
-            return reply;
-        }
-        if (request.wantFence() || request.wantShutDown()) {
+        if (!sourceProbeHeartbeatEligible(request, reply, !result.records().isEmpty())) {
             return reply;
         }
         if (!retirementBrokerPrincipalPolicy.matches(context.principal(), request.brokerId())) {
@@ -2276,16 +2272,13 @@ public final class QuorumController implements Controller {
         }
         Optional<PartitionRetirementSourceProbeRegistry.Challenge> pending =
             retirementSourceProbeRegistry.pendingForHeartbeat(
-                request.brokerId(), request.brokerEpoch(), context.principal(), time.nanoseconds()
+                request.brokerId(), request.brokerEpoch(), context.principal(), time.nanoseconds(),
+                candidate -> PartitionRetirementCandidatePrecheck.assess(
+                    featureControl, clusterControl, replicationControl, partitionRetirementControl,
+                    candidate, offsetControl.nextWriteOffset()
+                ) == PartitionRetirementCandidatePrecheck.Finding.SOURCE_LOG_START_NOT_VERIFIED
             );
         if (pending.isEmpty()) {
-            return reply;
-        }
-        PartitionRetirementCandidatePrecheck.Candidate candidate = pending.get().candidate();
-        if (PartitionRetirementCandidatePrecheck.assess(
-                featureControl, clusterControl, replicationControl, partitionRetirementControl,
-                candidate, offsetControl.nextWriteOffset()
-            ) != PartitionRetirementCandidatePrecheck.Finding.SOURCE_LOG_START_NOT_VERIFIED) {
             return reply;
         }
         // The immutable value is diagnostic only, held within this one
@@ -2295,6 +2288,23 @@ public final class QuorumController implements Controller {
             reply.isCaughtUp(), reply.isFenced(), reply.inControlledShutdown(),
             reply.shouldShutDown(), pending.get().toProtocolRequest()
         );
+    }
+
+    /**
+     * The diagnostic can only be offered on an ordinary, healthy Broker
+     * heartbeat. In particular, an offline log directory invalidates the
+     * current native source observation even when other heartbeat flags
+     * indicate that the Broker is running.
+     */
+    static boolean sourceProbeHeartbeatEligible(
+        BrokerHeartbeatRequestData request,
+        BrokerHeartbeatReply reply,
+        boolean emitsMetadataRecords
+    ) {
+        return !emitsMetadataRecords && reply.isCaughtUp() && !reply.isFenced()
+            && !reply.shouldShutDown() && !reply.inControlledShutdown()
+            && !request.wantFence() && !request.wantShutDown()
+            && request.offlineLogDirs().isEmpty();
     }
 
     @Override

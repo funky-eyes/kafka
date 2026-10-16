@@ -28,6 +28,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
 
 /**
  * One-time, bounded, controller-volatile Source/WAL probe correlation.
@@ -167,16 +168,20 @@ final class PartitionRetirementSourceProbeRegistry {
      * authenticated Broker heartbeat. Called only on the Controller event
      * thread. It never mints a nonce, extends its expiry, or consumes it.
      *
-     * <p>Callers must also revalidate the candidate against the *current*
-     * KRaft broker registration, partition leader and CAS positions before
-     * carrying this diagnostic on a heartbeat response.</p>
+     * <p>The live predicate is evaluated only for matching Broker principals
+     * and epochs; it must recheck the current BrokerRegistration, partition
+     * leader and KRaft CAS on the same serialized Controller event. A stale
+     * oldest nonce must not starve a newer, still-current challenge. Neither
+     * skipped challenges nor selected challenges are consumed here.</p>
      */
     Optional<Challenge> pendingForHeartbeat(
         int brokerId,
         long brokerEpoch,
         KafkaPrincipal authenticatedPrincipal,
-        long nowNs
+        long nowNs,
+        Predicate<Candidate> stillCurrent
     ) {
+        Objects.requireNonNull(stillCurrent, "stillCurrent");
         if (brokerId < 0 || brokerEpoch < 0L || authenticatedPrincipal == null) {
             return Optional.empty();
         }
@@ -188,6 +193,7 @@ final class PartitionRetirementSourceProbeRegistry {
             .map(Pending::challenge)
             .filter(challenge -> challenge.candidate().brokerId() == brokerId)
             .filter(challenge -> challenge.candidate().brokerEpoch() == brokerEpoch)
+            .filter(challenge -> stillCurrent.test(challenge.candidate()))
             .findFirst();
     }
 

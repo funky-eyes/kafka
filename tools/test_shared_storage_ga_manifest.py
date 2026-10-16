@@ -233,6 +233,40 @@ class ProductionFingerprintTest(unittest.TestCase):
         self.assertEqual(1, second_count)
         self.assertNotEqual(first_fingerprint, second_fingerprint)
 
+    def test_gc_controller_sources_are_part_of_production_fingerprint(self):
+        protected = (
+            "metadata/src/main/java/org/apache/kafka/controller/QuorumController.java",
+            "metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementSourceProbeRegistry.java",
+            "metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementHeartbeatReportGate.java",
+            "metadata/src/main/java/org/apache/kafka/metadata/BrokerHeartbeatReply.java",
+            "metadata/src/main/java/org/apache/kafka/metadata/PartitionRetirementAuthorityState.java",
+            "metadata/src/main/java/org/apache/kafka/image/PartitionRetirementAuthorityImage.java",
+        )
+        for path in protected:
+            with self.subTest(path=path):
+                self.assertTrue(is_production_path(path))
+        self.assertFalse(is_production_path(
+            "metadata/src/test/java/org/apache/kafka/controller/PartitionRetirementSourceProbeRegistryTest.java"
+        ))
+
+    def test_controller_nonce_registry_mutation_invalidates_ga_production_fingerprint(self):
+        path = "metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementSourceProbeRegistry.java"
+
+        def current_tree(blob_sha):
+            return StubGitHub({
+                "git/commits/candidate": {"tree": {"sha": "tree-sha"}},
+                "git/trees/tree-sha": {
+                    "truncated": False,
+                    "tree": [{"type": "blob", "path": path, "sha": blob_sha}],
+                },
+            })
+
+        first, first_count = current_tree("registry-before").production_fingerprint("candidate")
+        second, second_count = current_tree("registry-after").production_fingerprint("candidate")
+        self.assertEqual(1, first_count)
+        self.assertEqual(1, second_count)
+        self.assertNotEqual(first, second)
+
     def test_rejects_truncated_recursive_tree(self):
         github = StubGitHub({
             "git/commits/candidate": {"tree": {"sha": "tree-sha"}},

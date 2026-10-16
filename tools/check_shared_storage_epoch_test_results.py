@@ -358,6 +358,7 @@ REQUIRED_TESTS = {
         "testUniquelyBoundHeartbeatReportIsSerializedAndStillDeniedWithoutNonce",
         "testBoundBrokerCannotBorrowForeignIdentityOrFutureHeartbeatVersion",
         "testMappedBrokerCannotReportWhileFencingOrShuttingDown",
+        "testSourceProbeHeartbeatEligibilityRejectsUnsafeBrokerStates",
     ),
     "org.apache.kafka.controller.PartitionRetirementHeartbeatReportGateTest": (
         "absentReportPreservesLegacyHeartbeatWithoutBrokerPrincipal",
@@ -415,6 +416,10 @@ REQUIRED_TESTS = {
         "malformedChallengeIdentifiersAndMissingCandidatesFailConstruction",
         "challengeMapsToSharedProtocolRequestWithoutLosingCasCoordinates",
         "pendingChallengeIsReadOnlyAndRequiresExactBrokerPrincipal",
+        "staleOldestCandidateDoesNotStarveNewerValidChallenge",
+        "staleCandidateFilterNeverConsumesAStillPendingNonce",
+        "foreignPrincipalOrEpochCannotRunTheKraftValidationCallback",
+        "changedIncarnationWithSameBrokerEpochCannotBorrowAChallenge",
         "heartbeatRetriesOfferOldestOutstandingNonceUntilItIsConsumed",
         "expiredOldestNonceIsSkippedWithoutChangingNewerPendingOrder",
         "pendingChallengeOrderingIsIsolatedByBrokerIdentity",

@@ -415,6 +415,7 @@ jobs:
             --tests 'org.apache.kafka.controller.QuorumControllerTest.testUniquelyBoundHeartbeatReportIsSerializedAndStillDeniedWithoutNonce' \
             --tests 'org.apache.kafka.controller.QuorumControllerTest.testBoundBrokerCannotBorrowForeignIdentityOrFutureHeartbeatVersion' \
             --tests 'org.apache.kafka.controller.QuorumControllerTest.testMappedBrokerCannotReportWhileFencingOrShuttingDown' \
+            --tests 'org.apache.kafka.controller.QuorumControllerTest.testSourceProbeHeartbeatEligibilityRejectsUnsafeBrokerStates' \
             --tests 'org.apache.kafka.controller.PartitionRetirementHeartbeatReportGateTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementBrokerPrincipalPolicyTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementSourceProbeRegistryTest' \

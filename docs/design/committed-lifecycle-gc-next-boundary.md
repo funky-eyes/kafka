@@ -1354,3 +1354,44 @@ and the frozen MinIO GA source
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889`
 remain unchanged. PR #2 remains Draft. This checkpoint
 requires its own exact-source-SHA 17/17 CI before validation.
+
+## Batches 203–206 — live nonce selection and Controller heartbeat safety
+
+Validated baseline: `4556b4319838771c0923ef8897e6a0c04e7db89b`,
+**17/17** exact-HEAD workflows successful.
+
+- **203 — oldest-live Challenge selection:** On the serialized
+  Controller event the nonce registry evaluates the latest KRaft
+  candidate predicate and skips stale oldest challenges, rather
+  than allowing stale pending nonces to starve later valid ones.
+  Neither a skip nor an offer consumes a nonce.
+- **204 — authenticated Broker and epoch fencing:** Matching
+  Broker Principal and BrokerEpoch are checked *before* reading
+  live KRaft state for a challenge. An incarnation change cannot
+  reuse the old challenge even under the same numeric epoch.
+  Four deterministic registry regressions cover stale selection,
+  non-consuming behavior, unauthorized identities and epoch ABA.
+- **205 — offline-directory safety:** The v3 Challenge eligibility
+  gate rejects Broker heartbeats with offline log directories,
+  incomplete catchup, pending metadata records, fencing or
+  shutdown signals. One Controller regression covers these
+  independent negative conditions.
+- **206 — Controller GA source contract:** Include
+  `QuorumController`, all `PartitionRetirement*` Controller
+  and image sources, BrokerHeartbeatReply and authority-state
+  production classes in the GA fingerprint. Update the exact
+  `push` and applicable `pull_request` trigger paths of
+  every eligible evidence workflow, without broad unrelated
+  wildcards. Add Python regressions to protect both the
+  production-fingerprint and trigger-scope invariants.
+  Mandatory metadata/storage JUnit methods increase **575 → 580**.
+
+This checkpoint remains non-authorizing: no production Broker
+Source/WAL sender or transport authentication is activated,
+no KRaft retirement authority writer is enabled and no
+COMMITTED physical object DELETE can be executed. Production
+`DENY_ALL`, frozen MinIO GA
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`
+and PR #2 Draft status are preserved. The new SHA must
+pass its own exact-HEAD CI; earlier successful runs are
+not reusable evidence for the changed source fingerprint.
