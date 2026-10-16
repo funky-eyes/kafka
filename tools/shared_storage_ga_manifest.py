@@ -135,6 +135,10 @@ PRODUCTION_PREFIXES = (
 )
 
 PRODUCTION_PATHS = {
+    "clients/src/main/java/org/apache/kafka/common/replica/PartitionRetirementSourceProbe.java",
+    "clients/src/main/java/org/apache/kafka/common/requests/BrokerHeartbeatRequest.java",
+    "clients/src/main/resources/common/message/BrokerHeartbeatRequest.json",
+    "clients/src/main/resources/common/message/BrokerHeartbeatResponse.json",
     "build.gradle",
     "settings.gradle",
     "gradle.properties",
@@ -158,6 +162,7 @@ PRODUCTION_PATHS = {
     "core/src/main/java/kafka/server/builders/LogManagerBuilder.java",
     "core/src/main/scala/kafka/server/BrokerServer.scala",
     "server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java",
+    "server/src/main/java/org/apache/kafka/server/BrokerHeartbeatSourceWalReportDispatch.java",
     "core/src/main/scala/kafka/server/ControllerServer.scala",
     "core/src/main/scala/kafka/server/ReplicaManager.scala",
     "core/src/main/scala/kafka/server/ReplicaFetcherManager.scala",

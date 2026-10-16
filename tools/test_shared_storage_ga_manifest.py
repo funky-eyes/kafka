@@ -205,6 +205,34 @@ class ProductionFingerprintTest(unittest.TestCase):
         self.assertTrue(is_production_path("gradle.properties"))
         self.assertTrue(is_production_path("gradle/dependencies.gradle"))
 
+    def test_gc_protocol_and_dispatch_paths_are_part_of_production_fingerprint(self):
+        paths = (
+            "clients/src/main/java/org/apache/kafka/common/replica/PartitionRetirementSourceProbe.java",
+            "clients/src/main/java/org/apache/kafka/common/requests/BrokerHeartbeatRequest.java",
+            "clients/src/main/resources/common/message/BrokerHeartbeatRequest.json",
+            "clients/src/main/resources/common/message/BrokerHeartbeatResponse.json",
+            "server/src/main/java/org/apache/kafka/server/BrokerHeartbeatSourceWalReportDispatch.java",
+        )
+        for path in paths:
+            with self.subTest(path=path):
+                self.assertTrue(is_production_path(path))
+
+    def test_untrusted_source_report_dispatch_mutation_invalidates_fingerprint(self):
+        path = "server/src/main/java/org/apache/kafka/server/BrokerHeartbeatSourceWalReportDispatch.java"
+        def stub(blob):
+            return StubGitHub({
+                "git/commits/candidate": {"tree": {"sha": "tree-sha"}},
+                "git/trees/tree-sha": {
+                    "truncated": False,
+                    "tree": [{"type": "blob", "path": path, "sha": blob}],
+                },
+            })
+        first_fingerprint, first_count = stub("dispatch-a").production_fingerprint("candidate")
+        second_fingerprint, second_count = stub("dispatch-b").production_fingerprint("candidate")
+        self.assertEqual(1, first_count)
+        self.assertEqual(1, second_count)
+        self.assertNotEqual(first_fingerprint, second_fingerprint)
+
     def test_rejects_truncated_recursive_tree(self):
         github = StubGitHub({
             "git/commits/candidate": {"tree": {"sha": "tree-sha"}},

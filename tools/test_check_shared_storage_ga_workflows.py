@@ -20,6 +20,7 @@ from pathlib import Path
 from check_shared_storage_ga_workflows import (
     foreign_evidence_workflow_triggers,
     event_path_patterns,
+    concrete_production_paths,
     path_is_triggered,
     full_manifest_after_source_wait_loop,
     missing_minio_evidence_requirements,
@@ -30,6 +31,26 @@ from check_shared_storage_ga_workflows import (
 
 
 class WorkflowTriggerOwnershipTest(unittest.TestCase):
+    def test_explicit_client_protocol_paths_require_ga_fingerprint_coverage(self):
+        workflow = """on:
+  push:
+    paths:
+      - 'clients/src/main/java/org/apache/kafka/common/replica/PartitionRetirementSourceProbe.java'
+      - 'clients/src/main/java/org/apache/kafka/common/requests/BrokerHeartbeatRequest.java'
+      - 'clients/src/main/resources/common/message/BrokerHeartbeatRequest.json'
+      - 'clients/src/main/resources/common/message/BrokerHeartbeatResponse.json'
+      - 'clients/src/test/java/org/apache/kafka/common/requests/HeartbeatRequestTest.java'
+"""
+        self.assertEqual(
+            {
+                "clients/src/main/java/org/apache/kafka/common/replica/PartitionRetirementSourceProbe.java",
+                "clients/src/main/java/org/apache/kafka/common/requests/BrokerHeartbeatRequest.java",
+                "clients/src/main/resources/common/message/BrokerHeartbeatRequest.json",
+                "clients/src/main/resources/common/message/BrokerHeartbeatResponse.json",
+            },
+            concrete_production_paths(workflow),
+        )
+
     def test_rejects_exact_foreign_workflow_trigger(self):
         text = """on:
   push:

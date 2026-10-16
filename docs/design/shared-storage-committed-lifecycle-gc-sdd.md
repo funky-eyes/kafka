@@ -3659,3 +3659,34 @@ production default. No KRaft retirement authority writer, COMMITTED
 reference retirement or physical MinIO DELETE is enabled. Frozen
 MinIO GA remains `9a28c11b6d97ecacafe1b8566cde5cc34d604889`;
 PR #2 stays Draft.
+
+## Batches 197–198 — GA fingerprint completeness for Broker v3 diagnostics
+
+Base: `305b25e5eb95ffab875de94213d833e172b00641`.
+Batch 194–196 has passed **16/17** exact-HEAD workflows. The only
+failed workflow, `Shared Storage GA Workflow Consistency`, identified
+an omitted production fingerprint input:
+`server/src/main/java/org/apache/kafka/server/BrokerHeartbeatSourceWalReportDispatch.java`.
+All Java 25/MinIO, Ring WAL, WAL Crash, and Controller HA runtime
+workflows on that SHA were successful.
+
+- **197 — repair real GA evidence contract.** Add the compiled v3
+  report dispatch implementation to the hash-based production
+  fingerprint. Do not remove the file from workflow triggers and
+  do not relax the GA graph's strict source-coverage assertion.
+- **198 — guard GC client-protocol prerequisites.** Explicitly hash
+  both broker heartbeat v3 JSON protocol definitions, the
+  transport-neutral `PartitionRetirementSourceProbe` and the
+  `BrokerHeartbeatRequest` implementation. Teach workflow
+  consistency analysis to recognize concrete
+  `clients/src/main/` production paths. Deterministic Python
+  regressions require coverage of all five inputs and prove that
+  mutating the dispatch source changes the production fingerprint.
+
+This intentionally changes the *development* evidence fingerprint:
+old successful workflow runs cannot be recycled as evidence for the
+new SHA. The frozen MinIO GA branch
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`
+is untouched. PR #2 remains Draft. This change adds no Broker
+sender, no authenticated credential mapping, no KRaft authority
+writer and no physical COMMITTED object deletion.
