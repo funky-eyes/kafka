@@ -19,8 +19,10 @@ package org.apache.kafka.controller;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.errors.UnsupportedVersionException;
 import org.apache.kafka.common.message.BrokerHeartbeatResponseData;
+import org.apache.kafka.common.message.RequestHeaderData;
 import org.apache.kafka.common.protocol.MessageUtil;
 import org.apache.kafka.common.security.auth.KafkaPrincipal;
+import org.apache.kafka.common.security.auth.SecurityProtocol;
 import org.apache.kafka.controller.PartitionRetirementCandidatePrecheck.Candidate;
 import org.apache.kafka.controller.PartitionRetirementSourceProbeRegistry.Challenge;
 import org.apache.kafka.controller.PartitionRetirementSourceProbeRegistry.Finding;
@@ -30,6 +32,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.OptionalLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -191,6 +194,81 @@ class PartitionRetirementSourceProbeRegistryTest {
             registry.consume(issued, replaced, BROKER_THREE, 102L));
         assertEquals(Finding.UNKNOWN_OR_ALREADY_USED,
             registry.consume(issued, CANDIDATE, BROKER_THREE, 103L));
+    }
+
+    @Test
+    void forwardedPlaintextSyntheticAndTokenIdentityCannotBurnValidNonce() {
+        var registry = registry();
+        Challenge issued = issue(registry, 100L);
+        KafkaPrincipal token = new KafkaPrincipal(
+            BROKER_THREE.getPrincipalType(), BROKER_THREE.getName(), true
+        );
+        var contexts = java.util.List.of(
+            ControllerRequestContextUtil.brokerDiagnosticContext(
+                (short) 3, BROKER_THREE, SecurityProtocol.PLAINTEXT, false),
+            ControllerRequestContextUtil.brokerDiagnosticContext(
+                (short) 3, BROKER_THREE, SecurityProtocol.SASL_PLAINTEXT, false),
+            ControllerRequestContextUtil.brokerDiagnosticContext(
+                (short) 3, BROKER_THREE, SecurityProtocol.SASL_SSL, true),
+            ControllerRequestContextUtil.brokerDiagnosticContext(
+                (short) 3, token, SecurityProtocol.SASL_SSL, false),
+            new ControllerRequestContext(
+                new RequestHeaderData(), BROKER_THREE, OptionalLong.empty())
+        );
+        for (ControllerRequestContext context : contexts) {
+            assertEquals(Finding.PRINCIPAL_MISMATCH, registry.consumeAuthenticated(
+                issued, CANDIDATE, context, POLICY, 101L));
+        }
+        assertEquals(issued, registry.pendingForHeartbeat(
+            3, 54L, BROKER_THREE, 102L, candidate -> true).orElseThrow());
+        assertEquals(Finding.MATCHED_UNTRUSTED, registry.consumeAuthenticated(
+            issued, CANDIDATE,
+            ControllerRequestContextUtil.brokerDiagnosticContext(
+                (short) 3, BROKER_THREE, SecurityProtocol.SASL_SSL, false),
+            POLICY, 103L));
+        assertEquals(Finding.UNKNOWN_OR_ALREADY_USED, registry.consumeAuthenticated(
+            issued, CANDIDATE,
+            ControllerRequestContextUtil.brokerDiagnosticContext(
+                (short) 3, BROKER_THREE, SecurityProtocol.SASL_SSL, false),
+            POLICY, 104L));
+    }
+
+    @Test
+    void separatelyMappedAuthenticatedBrokerCannotBurnForeignNonce() {
+        var registry = registry();
+        Challenge first = issue(registry, 100L);
+        Candidate other = candidate(4, 54L, new Uuid(20L, 21L), 8, 20L);
+        Challenge second = registry.issue(other, BROKER_FOUR, POLICY, 100L).orElseThrow();
+        ControllerRequestContext brokerThree = ControllerRequestContextUtil.brokerDiagnosticContext(
+            (short) 3, BROKER_THREE, SecurityProtocol.SASL_SSL, false
+        );
+        ControllerRequestContext brokerFour = ControllerRequestContextUtil.brokerDiagnosticContext(
+            (short) 3, BROKER_FOUR, SecurityProtocol.SASL_SSL, false
+        );
+        assertEquals(Finding.PRINCIPAL_MISMATCH, registry.consumeAuthenticated(
+            first, CANDIDATE, brokerFour, POLICY, 101L));
+        // Even if a forged outer BrokerId matches this Principal, the
+        // nonce still belongs to the other registered Broker.
+        assertEquals(Finding.PRINCIPAL_MISMATCH, registry.consumeAuthenticated(
+            second, CANDIDATE, brokerThree, POLICY, 101L));
+        assertEquals(Finding.MATCHED_UNTRUSTED, registry.consumeAuthenticated(
+            first, CANDIDATE, brokerThree, POLICY, 102L));
+        assertEquals(Finding.MATCHED_UNTRUSTED, registry.consumeAuthenticated(
+            second, other, brokerFour, POLICY, 103L));
+    }
+
+    @Test
+    void authenticatedOwnerMalformedEnvelopeStillBurnsNonceOnce() {
+        var registry = registry();
+        Challenge issued = issue(registry, 100L);
+        ControllerRequestContext authenticated = ControllerRequestContextUtil.brokerDiagnosticContext(
+            (short) 3, BROKER_THREE, SecurityProtocol.SASL_SSL, false
+        );
+        Challenge altered = new Challenge(issued.nonce(), "other-cluster", CANDIDATE);
+        assertEquals(Finding.ENVELOPE_MISMATCH, registry.consumeAuthenticated(
+            altered, CANDIDATE, authenticated, POLICY, 101L));
+        assertEquals(Finding.UNKNOWN_OR_ALREADY_USED, registry.consumeAuthenticated(
+            issued, CANDIDATE, authenticated, POLICY, 102L));
     }
 
     @Test

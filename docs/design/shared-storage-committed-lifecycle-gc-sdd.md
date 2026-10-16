@@ -3907,3 +3907,40 @@ and physical MinIO DELETE remain disabled, frozen MinIO GA
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889`
 is untouched, and PR #2 remains Draft. A new exact-HEAD 17/17
 CI run is required before this branch becomes a validated baseline.
+
+## Batches 219–222 — authenticated one-shot nonce consumption
+
+Verified previous checkpoint: `dd45e345dd53f13a4dd2e8de11aa18c4289ccf44` (17/17).
+The preceding `028d02b032a3d38bf3640f4fa6c405a2fd6a303e`
+revision finished **16/17** workflows: `Shared Storage` failed only
+because `QuorumControllerTest.java` imported `SecurityProtocol`
+twice, rejected by `metadata:checkstyleTest`.
+
+- **219 — recover static checks:** Remove the duplicate import; keep
+  all existing transport-identity tests and production checks intact.
+- **220 — protect the destructive nonce consume:** Controller event
+  handling now calls `consumeAuthenticated`, which requires a direct
+  authenticated Kafka transport and a trusted unique Broker Principal
+  mapping *before* any nonce removal. An unauthorized caller therefore
+  cannot burn a legitimate Broker's one-shot token.
+- **221 — protect cross-Broker nonce ownership:** Even an authenticated
+  Broker with its own mapping cannot consume a different Broker's
+  nonce by forging outer Broker fields: look up the pending nonce owner
+  and compare to the authenticated channel principal first. An
+  authenticated owner submitting a malformed envelope still burns
+  its nonce, preventing replay.
+- **222 — deterministic tests and CI evidence:** Three new registry
+  tests cover PLAINTEXT, SASL_PLAINTEXT, forwarded, token and synthetic
+  contexts, foreign Broker nonce interference, and legitimate
+  one-shot/forged-envelope behavior. The strict metadata/storage
+  JUnit method inventory increases **591 -> 594**. The existing
+  `PartitionRetirementSourceProbeRegistryTest` selector already
+  runs the entire class; no extra Gradle job or native build is added.
+
+This is a defense-in-depth step toward authenticated report ingress,
+not evidence of an enabled Broker-side report sender, cross-replica
+WAL durability, or COMMITTED GC permission. Default `DENY_ALL`,
+disabled KRaft authority writer and physical DELETE remain unchanged;
+the MinIO GA branch
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`
+remains frozen. PR #2 stays Draft until required exact-HEAD CI.

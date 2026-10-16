@@ -813,9 +813,10 @@ public final class QuorumController implements Controller {
         Objects.requireNonNull(context, "context");
         Objects.requireNonNull(candidate, "candidate");
         return appendWriteEvent("inspectRetirementSourceProbe", context.deadlineNs(), () -> {
-            PartitionRetirementSourceProbeRegistry.Finding status = retirementSourceProbeRegistry.consume(
-                challenge, candidate, context.principal(), time.nanoseconds()
-            );
+            PartitionRetirementSourceProbeRegistry.Finding status =
+                retirementSourceProbeRegistry.consumeAuthenticated(
+                    challenge, candidate, context, retirementBrokerPrincipalPolicy, time.nanoseconds()
+                );
             if (status != PartitionRetirementSourceProbeRegistry.Finding.MATCHED_UNTRUSTED) {
                 return ControllerResult.of(
                     List.of(), PartitionRetirementCandidatePrecheck.Finding.SOURCE_PROBE_NOT_VERIFIED

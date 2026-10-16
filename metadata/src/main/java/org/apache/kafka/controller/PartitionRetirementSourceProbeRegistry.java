@@ -206,6 +206,43 @@ final class PartitionRetirementSourceProbeRegistry {
             .findFirst();
     }
 
+    /**
+     * Consume a Controller-issued nonce only after checking the actual
+     * authenticated request channel and its uniquely bound Broker identity.
+     *
+     * <p>A foreign authenticated Broker cannot burn another Broker's nonce:
+     * the pending owner is checked before the destructive removal. Once the
+     * owner and transport match, even malformed/replayed reports burn their
+     * nonce to preserve the one-shot replay fence.</p>
+     */
+    Finding consumeAuthenticated(
+        Challenge reported,
+        Candidate currentCandidate,
+        ControllerRequestContext context,
+        PartitionRetirementBrokerPrincipalPolicy principalPolicy,
+        long nowNs
+    ) {
+        Objects.requireNonNull(currentCandidate, "currentCandidate");
+        Objects.requireNonNull(context, "context");
+        Objects.requireNonNull(principalPolicy, "principalPolicy");
+        if (!context.isDirectAuthenticatedBrokerChannel()
+            || !principalPolicy.matches(context.principal(), currentCandidate.brokerId())) {
+            return Finding.PRINCIPAL_MISMATCH;
+        }
+        if (reported != null) {
+            Pending owner = outstanding.get(reported.nonce());
+            if (owner != null && !owner.principal().equals(context.principal())) {
+                return Finding.PRINCIPAL_MISMATCH;
+            }
+        }
+        return consume(reported, currentCandidate, context.principal(), nowNs);
+    }
+
+    /**
+     * Low-level, single-use nonce state transition. Call the authenticated
+     * entrypoint from Controller runtime; package-local tests can also use
+     * this primitive for deterministic expiry and envelope regressions.
+     */
     Finding consume(
         Challenge reported,
         Candidate currentCandidate,
