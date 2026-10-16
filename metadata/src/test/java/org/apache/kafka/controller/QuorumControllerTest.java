@@ -70,6 +70,7 @@ import org.apache.kafka.common.requests.AlterPartitionRequest;
 import org.apache.kafka.common.requests.ApiError;
 import org.apache.kafka.common.security.auth.KafkaPrincipal;
 import org.apache.kafka.common.security.auth.SecurityProtocol;
+import org.apache.kafka.common.security.auth.SecurityProtocol;
 import org.apache.kafka.common.test.api.Flaky;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.Time;
@@ -539,6 +540,43 @@ public class QuorumControllerTest {
     }
 
     @Test
+    public void testPlaintextForwardedOrSyntheticBrokerReportRejectedBeforeControllerQueue() throws Exception {
+        KafkaPrincipal bound = new KafkaPrincipal(KafkaPrincipal.USER_TYPE, "broker-id-three");
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv env = new QuorumControllerTestEnv.Builder(clientEnv)
+                .setControllerBuilderInitializer(builder ->
+                    builder.setPartitionRetirementBrokerPrincipalPolicy(
+                        new PartitionRetirementBrokerPrincipalPolicy(Map.of(3, bound))
+                    )
+                ).build()
+        ) {
+            QuorumController controller = env.activeController(true);
+            long before = retirementAuthorityRecordCount(clientEnv);
+            List<ControllerRequestContext> denied = List.of(
+                ControllerRequestContextUtil.brokerDiagnosticContext(
+                    (short) 3, bound, SecurityProtocol.PLAINTEXT, false),
+                ControllerRequestContextUtil.brokerDiagnosticContext(
+                    (short) 3, bound, SecurityProtocol.SASL_PLAINTEXT, false),
+                ControllerRequestContextUtil.brokerDiagnosticContext(
+                    (short) 3, bound, SecurityProtocol.SASL_SSL, true),
+                new ControllerRequestContext(
+                    new RequestHeaderData().setRequestApiKey((short) 63).setRequestApiVersion((short) 3),
+                    bound, OptionalLong.empty()
+                )
+            );
+            for (ControllerRequestContext context : denied) {
+                ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> controller.processBrokerHeartbeat(context, untrustedHeartbeatReport())
+                        .get(10, TimeUnit.SECONDS)
+                );
+                assertTrue(failure.getCause() instanceof ClusterAuthorizationException);
+            }
+            assertEquals(before, retirementAuthorityRecordCount(clientEnv));
+        }
+    }
+
+    @Test
     public void testMappedBrokerCannotReportWhileFencingOrShuttingDown() throws Exception {
         KafkaPrincipal uniqueBroker = new KafkaPrincipal(KafkaPrincipal.USER_TYPE, "broker-id-three");
         try (
@@ -570,9 +608,8 @@ public class QuorumControllerTest {
     }
 
     private static ControllerRequestContext retirementReportContext(short version, KafkaPrincipal principal) {
-        return new ControllerRequestContext(
-            new RequestHeaderData().setRequestApiKey((short) 63).setRequestApiVersion(version),
-            principal, OptionalLong.empty()
+        return ControllerRequestContextUtil.brokerDiagnosticContext(
+            version, principal, SecurityProtocol.SASL_SSL, false
         );
     }
 

@@ -138,6 +138,8 @@ PRODUCTION_PREFIXES = (
 
 PRODUCTION_PATHS = {
     "metadata/src/main/java/org/apache/kafka/controller/QuorumController.java",
+    "metadata/src/main/java/org/apache/kafka/controller/ControllerRequestContext.java",
+    "core/src/main/scala/kafka/server/ControllerApis.scala",
     "metadata/src/main/java/org/apache/kafka/metadata/BrokerHeartbeatReply.java",
     "metadata/src/main/java/org/apache/kafka/metadata/PartitionRetirementAuthorityState.java",
     "clients/src/main/java/org/apache/kafka/common/replica/PartitionRetirementSourceProbe.java",

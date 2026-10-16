@@ -38,6 +38,7 @@ final class PartitionRetirementHeartbeatReportGate {
         ABSENT,
         VERSION_NOT_NEGOTIATED,
         PRINCIPAL_UNBOUND,
+        CHANNEL_NOT_AUTHENTICATED,
         MALFORMED,
         BROKER_NOT_ELIGIBLE,
         UNVERIFIED
@@ -65,6 +66,12 @@ final class PartitionRetirementHeartbeatReportGate {
         }
         if (!principalPolicy.matches(context.principal(), heartbeat.brokerId())) {
             return Finding.PRINCIPAL_UNBOUND;
+        }
+        // A mapped name alone is not a network authentication proof. No
+        // report can reach nonce correlation on a forwarded or plaintext
+        // connection, even with the exact current BrokerId.
+        if (!context.isDirectAuthenticatedBrokerChannel()) {
+            return Finding.CHANNEL_NOT_AUTHENTICATED;
         }
         // Failed directories, broker fencing, and controlled shutdown
         // invalidate any claim of an available native Source/WAL window.

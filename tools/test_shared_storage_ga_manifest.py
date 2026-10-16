@@ -236,6 +236,8 @@ class ProductionFingerprintTest(unittest.TestCase):
     def test_gc_controller_sources_are_part_of_production_fingerprint(self):
         protected = (
             "metadata/src/main/java/org/apache/kafka/controller/QuorumController.java",
+            "metadata/src/main/java/org/apache/kafka/controller/ControllerRequestContext.java",
+            "core/src/main/scala/kafka/server/ControllerApis.scala",
             "metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementSourceProbeRegistry.java",
             "metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementHeartbeatReportGate.java",
             "metadata/src/main/java/org/apache/kafka/metadata/BrokerHeartbeatReply.java",

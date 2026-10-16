@@ -41,6 +41,8 @@ on:
       - 'metadata/src/main/java/org/apache/kafka/image/PartitionRetirementAuthority*.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementControlManager.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/QuorumController.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/ControllerRequestContext.java'
+      - 'core/src/main/scala/kafka/server/ControllerApis.scala'
       - 'metadata/src/main/java/org/apache/kafka/metadata/BrokerHeartbeatReply.java'
       - 'clients/src/main/java/org/apache/kafka/common/replica/PartitionRetirementSourceProbe.java'
       - 'server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java'
@@ -120,6 +122,8 @@ on:
       - 'metadata/src/main/java/org/apache/kafka/image/PartitionRetirementAuthority*.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementControlManager.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/QuorumController.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/ControllerRequestContext.java'
+      - 'core/src/main/scala/kafka/server/ControllerApis.scala'
       - 'metadata/src/main/java/org/apache/kafka/metadata/BrokerHeartbeatReply.java'
       - 'clients/src/main/java/org/apache/kafka/common/replica/PartitionRetirementSourceProbe.java'
       - 'server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java'
@@ -416,6 +420,7 @@ jobs:
             --tests 'org.apache.kafka.controller.QuorumControllerTest.testBoundBrokerCannotBorrowForeignIdentityOrFutureHeartbeatVersion' \
             --tests 'org.apache.kafka.controller.QuorumControllerTest.testMappedBrokerCannotReportWhileFencingOrShuttingDown' \
             --tests 'org.apache.kafka.controller.QuorumControllerTest.testBoundBrokerForeignRequestApiKeyCannotIssueSourceWalReport' \
+            --tests 'org.apache.kafka.controller.QuorumControllerTest.testPlaintextForwardedOrSyntheticBrokerReportRejectedBeforeControllerQueue' \
             --tests 'org.apache.kafka.controller.QuorumControllerTest.testSourceProbeHeartbeatEligibilityRejectsUnsafeBrokerStates' \
             --tests 'org.apache.kafka.controller.PartitionRetirementHeartbeatReportGateTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementBrokerPrincipalPolicyTest' \

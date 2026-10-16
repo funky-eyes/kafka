@@ -21,6 +21,7 @@ import org.apache.kafka.common.message.BrokerHeartbeatRequestData;
 import org.apache.kafka.common.message.BrokerHeartbeatRequestData.SourceWalProbeReport;
 import org.apache.kafka.common.message.RequestHeaderData;
 import org.apache.kafka.common.security.auth.KafkaPrincipal;
+import org.apache.kafka.common.security.auth.SecurityProtocol;
 import org.apache.kafka.controller.PartitionRetirementHeartbeatReportGate.Finding;
 
 import org.junit.jupiter.api.Test;
@@ -110,6 +111,64 @@ class PartitionRetirementHeartbeatReportGateTest {
         assertEquals(Finding.UNVERIFIED, PartitionRetirementHeartbeatReportGate.inspect(
             context((short) 3, BROKER_THREE), heartbeat(), BOUND
         ));
+    }
+
+    @Test
+    void mappedPrincipalDoesNotAuthorizePlaintextOrForwardedReport() {
+        for (SecurityProtocol protocol : java.util.List.of(
+            SecurityProtocol.PLAINTEXT, SecurityProtocol.SASL_PLAINTEXT
+        )) {
+            assertEquals(Finding.CHANNEL_NOT_AUTHENTICATED,
+                PartitionRetirementHeartbeatReportGate.inspect(
+                    ControllerRequestContextUtil.brokerDiagnosticContext(
+                        (short) 3, BROKER_THREE, protocol, false
+                    ), heartbeat(), BOUND
+                ));
+        }
+        assertEquals(Finding.CHANNEL_NOT_AUTHENTICATED,
+            PartitionRetirementHeartbeatReportGate.inspect(
+                ControllerRequestContextUtil.brokerDiagnosticContext(
+                    (short) 3, BROKER_THREE, SecurityProtocol.SASL_SSL, true
+                ), heartbeat(), BOUND
+            ));
+        assertEquals(Finding.CHANNEL_NOT_AUTHENTICATED,
+            PartitionRetirementHeartbeatReportGate.inspect(
+                new ControllerRequestContext(
+                    new RequestHeaderData().setRequestApiKey((short) 63).setRequestApiVersion((short) 3),
+                    BROKER_THREE, OptionalLong.empty()
+                ), heartbeat(), BOUND
+            ));
+    }
+
+    @Test
+    void sslClientIdentityAllowsOnlyNonAuthorizingDiagnostic() {
+        assertEquals(Finding.UNVERIFIED,
+            PartitionRetirementHeartbeatReportGate.inspect(
+                ControllerRequestContextUtil.brokerDiagnosticContext(
+                    (short) 3, BROKER_THREE, SecurityProtocol.SSL, false
+                ), heartbeat(), BOUND
+            ));
+        assertEquals(Finding.PRINCIPAL_UNBOUND,
+            PartitionRetirementHeartbeatReportGate.inspect(
+                ControllerRequestContextUtil.brokerDiagnosticContext(
+                    (short) 3, KafkaPrincipal.ANONYMOUS, SecurityProtocol.SSL, false
+                ), heartbeat(), BOUND
+            ));
+    }
+
+    @Test
+    void tokenPrincipalCannotBorrowMappedBrokerIdentity() {
+        KafkaPrincipal token = new KafkaPrincipal(
+            BROKER_THREE.getPrincipalType(), BROKER_THREE.getName(), true
+        );
+        // KafkaPrincipal equality intentionally ignores tokenAuthenticated.
+        assertEquals(BROKER_THREE, token);
+        assertEquals(Finding.CHANNEL_NOT_AUTHENTICATED,
+            PartitionRetirementHeartbeatReportGate.inspect(
+                ControllerRequestContextUtil.brokerDiagnosticContext(
+                    (short) 3, token, SecurityProtocol.SASL_SSL, false
+                ), heartbeat(), BOUND
+            ));
     }
 
     @Test
@@ -210,9 +269,8 @@ class PartitionRetirementHeartbeatReportGateTest {
     }
 
     private static ControllerRequestContext context(short apiVersion, KafkaPrincipal principal) {
-        return new ControllerRequestContext(
-            new RequestHeaderData().setRequestApiKey((short) 63).setRequestApiVersion(apiVersion),
-            principal, OptionalLong.empty()
+        return ControllerRequestContextUtil.brokerDiagnosticContext(
+            apiVersion, principal, SecurityProtocol.SASL_SSL, false
         );
     }
 

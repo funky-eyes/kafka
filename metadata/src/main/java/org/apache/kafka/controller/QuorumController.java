@@ -785,7 +785,8 @@ public final class QuorumController implements Controller {
         Objects.requireNonNull(candidate, "candidate");
         return appendWriteEvent("beginRetirementSourceProbe", context.deadlineNs(), () -> {
             Optional<PartitionRetirementSourceProbeRegistry.Challenge> nonce = Optional.empty();
-            if (PartitionRetirementCandidatePrecheck.assess(
+            if (context.isDirectAuthenticatedBrokerChannel()
+                && PartitionRetirementCandidatePrecheck.assess(
                     featureControl, clusterControl, replicationControl, partitionRetirementControl,
                     candidate, offsetControl.nextWriteOffset()
                 ) == PartitionRetirementCandidatePrecheck.Finding.SOURCE_LOG_START_NOT_VERIFIED) {
@@ -2164,7 +2165,8 @@ public final class QuorumController implements Controller {
             PartitionRetirementHeartbeatReportGate.inspect(
                 context, request, retirementBrokerPrincipalPolicy
             );
-        if (probe == PartitionRetirementHeartbeatReportGate.Finding.PRINCIPAL_UNBOUND) {
+        if (probe == PartitionRetirementHeartbeatReportGate.Finding.PRINCIPAL_UNBOUND
+            || probe == PartitionRetirementHeartbeatReportGate.Finding.CHANNEL_NOT_AUTHENTICATED) {
             return CompletableFuture.failedFuture(
                 new ClusterAuthorizationException("Broker identity cannot authorize a Source/WAL probe")
             );
@@ -2261,7 +2263,8 @@ public final class QuorumController implements Controller {
         ControllerResult<BrokerHeartbeatReply> result
     ) {
         BrokerHeartbeatReply reply = result.response();
-        if (!PartitionRetirementHeartbeatReportGate.isVersionThreeHeartbeat(context)) {
+        if (!PartitionRetirementHeartbeatReportGate.isVersionThreeHeartbeat(context)
+            || !context.isDirectAuthenticatedBrokerChannel()) {
             return reply;
         }
         if (!sourceProbeHeartbeatEligible(request, reply, !result.records().isEmpty())) {

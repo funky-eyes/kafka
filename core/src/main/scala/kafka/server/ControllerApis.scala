@@ -611,8 +611,11 @@ class ControllerApis(
   def handleBrokerHeartBeatRequest(request: RequestChannel.Request): CompletableFuture[Unit] = {
     val heartbeatRequest = request.body[BrokerHeartbeatRequest]
     authHelper.authorizeClusterOperation(request, CLUSTER_ACTION)
-    val context = new ControllerRequestContext(request.context.header.data, request.context.principal,
-      requestTimeoutMsToDeadlineNs(time, config.brokerHeartbeatIntervalMs / 2))
+    // Carry the actual network security protocol and forwarding state to
+    // the Controller: the principal alone cannot attest a Broker channel.
+    val context = new ControllerRequestContext(request.context,
+      requestTimeoutMsToDeadlineNs(time, config.brokerHeartbeatIntervalMs / 2),
+      request.isForwarded)
     controller.processBrokerHeartbeat(context, heartbeatRequest.data).handle[Unit] { (reply, e) =>
       def createResponseCallback(requestThrottleMs: Int,
                                  reply: BrokerHeartbeatReply,

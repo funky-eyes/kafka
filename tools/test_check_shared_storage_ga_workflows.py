@@ -49,9 +49,24 @@ class BrokerSourceWalNonEmissionContractTest(unittest.TestCase):
 
 
 class WorkflowTriggerOwnershipTest(unittest.TestCase):
+    def test_heartbeat_network_context_preserves_transport_and_forwarding(self):
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "core/src/main/scala/kafka/server/ControllerApis.scala"
+                  ).read_text(encoding="utf-8")
+        block = source.split("def handleBrokerHeartBeatRequest(", 1)[1].split(
+            "def handleUnregisterBroker(", 1
+        )[0]
+        self.assertIn("new ControllerRequestContext(request.context,", block)
+        self.assertIn("request.isForwarded", block)
+        self.assertNotIn(
+            "new ControllerRequestContext(request.context.header.data", block
+        )
+
     def test_kraft_gc_controller_changes_trigger_every_ga_workflow(self):
         protected = {
             "metadata/src/main/java/org/apache/kafka/controller/QuorumController.java",
+            "metadata/src/main/java/org/apache/kafka/controller/ControllerRequestContext.java",
+            "core/src/main/scala/kafka/server/ControllerApis.scala",
             "metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementSourceProbeRegistry.java",
             "metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementHeartbeatReportGate.java",
             "metadata/src/main/java/org/apache/kafka/metadata/BrokerHeartbeatReply.java",

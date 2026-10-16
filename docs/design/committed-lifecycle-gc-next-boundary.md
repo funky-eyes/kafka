@@ -1474,3 +1474,54 @@ reference retirement or physical MinIO DELETE is enabled. Frozen
 MinIO GA remains `9a28c11b6d97ecacafe1b8566cde5cc34d604889`,
 PR #2 remains Draft, and exact-new-HEAD 17/17 CI is required before
 promoting this checkpoint.
+
+## Batch 215–218 — bind diagnostics to real authenticated Controller request transport
+
+Parent checkpoint: `dd45e345dd53f13a4dd2e8de11aa18c4289ccf44`.
+The Controller's unique Broker Principal mapping is necessary but
+insufficient proof of a direct authenticated transport: the old
+`ControllerApis` handler constructed `ControllerRequestContext`
+from a header and Principal alone, dropping the actual network
+security protocol and `isForwarded` flag.
+
+- **215 — preserve network authentication provenance:** BrokerHeartbeat
+  handling now constructs `ControllerRequestContext` from Kafka's
+  real `AuthorizableRequestContext`, carrying the connection's
+  `SecurityProtocol` and the actual request forwarding state.
+  Synthetic contexts built only from claimed header/Principal remain
+  untrusted by default. Other normal Controller APIs and stable
+  BrokerHeartbeat behavior are unchanged.
+- **216 — transport-bound ingress:** Even a uniquely mapped Broker
+  Principal cannot submit v3 Source/WAL diagnostics on PLAINTEXT,
+  SASL_PLAINTEXT, forwarded requests, token-derived identities or
+  synthetic contexts with unknown transport. Direct SASL_SSL or SSL
+  carrying a *non-anonymous* Principal may reach **non-authorizing**
+  nonce correlation, subject to the existing exact Broker mapping,
+  version, source window, KRaft BrokerRegistration and CAS checks.
+  SSL still requires correctly configured client certificate
+  verification; this code does not inspect or invent a certificate.
+- **217 — Controller issuance is equally gated:** Only a direct
+  authenticated Controller request may issue a nonce (the existing
+  feature and live KRaft preflight still applies) or receive a
+  diagnostic Challenge. Bad transport reports reject before heartbeat
+  contact-time mutation or nonce consumption.
+- **218 — 4 JUnit regressions and release evidence:** Require three
+  ingress tests for transport, SSL/nonanonymous, forwarded and
+  token-authenticated conditions, plus one production
+  QuorumController test asserting network rejects and zero GC
+  authority records. Exact method inventory increases **587 → 591**.
+  Include `ControllerRequestContext.java` and
+  `ControllerApis.scala` in the GA production fingerprint and all
+  eligible evidence workflow triggers. A Python source-contract test
+  prevents regressing to the old header-only ControllerApis call.
+
+**Important:** The TLS/SASL checks do not by themselves prove
+current BrokerRegistration ownership, durable multi-replica WAL
+state, or safe COMMITTED object deletion. The production Broker
+still does not emit Source/WAL Reports; this is an authenticated
+Controller ingress contract for future integration. The default
+Controller policy remains `DENY_ALL`, KRaft GC authority writing
+and physical MinIO DELETE remain disabled, frozen MinIO GA
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`
+is untouched, and PR #2 remains Draft. A new exact-HEAD 17/17
+CI run is required before this branch becomes a validated baseline.
