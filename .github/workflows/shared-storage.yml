@@ -349,6 +349,9 @@ jobs:
             --tests 'kafka.server.ControllerApisTest.testStableHeartbeatNeverIncludesSourceWalChallenge' \
             --tests 'kafka.server.ControllerApisTest.testFencedOrShuttingDownBrokerCannotReceiveDiagnostic' \
             --tests 'kafka.server.ControllerApisTest.testControllerDiagnosticRoundTripsOnHeartbeatVersionThree' \
+            --tests 'kafka.server.ControllerApisTest.testAuthenticatedVThreeReportReachesControllerWithWireFieldsIntact' \
+            --tests 'kafka.server.ControllerApisTest.testForwardedAndPlaintextReportsNeverAcquireAuthenticatedChannelIdentity' \
+            --tests 'kafka.server.ControllerApisTest.testLegacyBrokerHeartbeatStillTraversesUnmodifiedControllerPath' \
             --tests 'kafka.server.BrokerSourceWalProbeAdapterTest' \
             --no-scan 2>&1 | tee shared-storage-logmanager-regression.log
           python3 - <<'PY'
@@ -360,6 +363,9 @@ jobs:
               'testStableHeartbeatNeverIncludesSourceWalChallenge',
               'testFencedOrShuttingDownBrokerCannotReceiveDiagnostic',
               'testControllerDiagnosticRoundTripsOnHeartbeatVersionThree',
+              'testAuthenticatedVThreeReportReachesControllerWithWireFieldsIntact',
+              'testForwardedAndPlaintextReportsNeverAcquireAuthenticatedChannelIdentity',
+              'testLegacyBrokerHeartbeatStillTraversesUnmodifiedControllerPath',
           }
           assert root.get('name') == suite
           assert all(root.get(field) == '0' for field in ('skipped', 'failures', 'errors'))

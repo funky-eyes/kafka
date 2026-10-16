@@ -131,6 +131,137 @@ class ControllerApisTest {
   }
 
 
+  private def diagnosticReportRequest(): BrokerHeartbeatRequest = {
+    val data = new BrokerHeartbeatRequestData()
+      .setBrokerId(3)
+      .setBrokerEpoch(54L)
+      .setCurrentMetadataOffset(100L)
+      .setSourceWalProbeReport(new BrokerHeartbeatRequestData.SourceWalProbeReport()
+        .setNonce(new Uuid(1L, 2L))
+        .setClusterId("cluster-a")
+        .setTopicId(new Uuid(3L, 4L))
+        .setPartitionId(0)
+        .setBrokerIncarnationId(new Uuid(5L, 6L))
+        .setSourceLeaderEpoch(8)
+        .setExpectedPreviousAuthorityOffset(-1L)
+        .setNextAuthorityOffset(100L)
+        .setLocalLeadershipGeneration(2L)
+        .setNativeLogStartOffset(0L)
+        .setNativeHighWatermark(10L)
+        .setNativeLogEndOffset(10L)
+        .setWalMutationRevision(12L)
+        .setWalAdmissionRevision(13L))
+    new BrokerHeartbeatRequest.Builder(data, 3.toShort).build()
+  }
+
+  /**
+   * A parsed network request, not a hand-crafted ControllerRequestContext.
+   * This is a mock-channel routing test; it does not perform a TLS handshake.
+   */
+  private def heartbeatOnChannel(request: BrokerHeartbeatRequest,
+                                 principal: KafkaPrincipal,
+                                 protocol: SecurityProtocol,
+                                 forwarded: Boolean): RequestChannel.Request = {
+    val buffer = request.serializeWithHeader(
+      new RequestHeader(request.apiKey, request.version, clientID, 0))
+    val header = RequestHeader.parse(buffer)
+    val context = new RequestContext(
+      header, "broker-diagnostic-channel", InetAddress.getLocalHost, principal,
+      ListenerName.forSecurityProtocol(protocol), protocol, ClientInformation.EMPTY, false)
+    val enclosing = if (forwarded) {
+      Some(buildRequest(new FetchRequest(new FetchRequestData(), 12)))
+    } else {
+      None
+    }
+    new RequestChannel.Request(1, context, 0L, MemoryPool.NONE, buffer,
+      requestChannelMetrics, enclosing)
+  }
+
+  @Test
+  def testAuthenticatedVThreeReportReachesControllerWithWireFieldsIntact(): Unit = {
+    val controller = mock(classOf[Controller])
+    when(controller.processBrokerHeartbeat(
+      any(classOf[ControllerRequestContext]),
+      any(classOf[BrokerHeartbeatRequestData])
+    )).thenReturn(CompletableFuture.completedFuture(
+      new BrokerHeartbeatReply(true, false, false, false)))
+    controllerApis = createControllerApis(None, controller)
+    val principal = new KafkaPrincipal(KafkaPrincipal.USER_TYPE, "uniquely-bound-broker-three")
+    val request = heartbeatOnChannel(
+      diagnosticReportRequest(), principal, SecurityProtocol.SASL_SSL, false)
+    assertFalse(request.isForwarded)
+    controllerApis.handleBrokerHeartBeatRequest(request).get(10, TimeUnit.SECONDS)
+
+    val contexts = ArgumentCaptor.forClass(classOf[ControllerRequestContext])
+    val payloads = ArgumentCaptor.forClass(classOf[BrokerHeartbeatRequestData])
+    verify(controller).processBrokerHeartbeat(contexts.capture(), payloads.capture())
+    assertTrue(contexts.getValue.isDirectAuthenticatedBrokerChannel())
+    assertEquals(principal, contexts.getValue.principal())
+    assertEquals(ApiKeys.BROKER_HEARTBEAT.id, contexts.getValue.requestHeader().requestApiKey())
+    assertEquals(3, contexts.getValue.requestHeader().requestApiVersion())
+    assertEquals(3, payloads.getValue.brokerId())
+    assertEquals(54L, payloads.getValue.brokerEpoch())
+    val report = payloads.getValue.sourceWalProbeReport()
+    assertNotNull(report)
+    assertEquals(new Uuid(1L, 2L), report.nonce())
+    assertEquals(new Uuid(3L, 4L), report.topicId())
+    assertEquals(new Uuid(5L, 6L), report.brokerIncarnationId())
+    assertEquals(12L, report.walMutationRevision())
+    assertEquals(13L, report.walAdmissionRevision())
+  }
+
+  @Test
+  def testForwardedAndPlaintextReportsNeverAcquireAuthenticatedChannelIdentity(): Unit = {
+    val controller = mock(classOf[Controller])
+    when(controller.processBrokerHeartbeat(
+      any(classOf[ControllerRequestContext]),
+      any(classOf[BrokerHeartbeatRequestData])
+    )).thenReturn(CompletableFuture.completedFuture(
+      new BrokerHeartbeatReply(true, false, false, false)))
+    controllerApis = createControllerApis(None, controller)
+    val principal = new KafkaPrincipal(KafkaPrincipal.USER_TYPE, "uniquely-bound-broker-three")
+    val channels = Seq(
+      (SecurityProtocol.PLAINTEXT, false),
+      (SecurityProtocol.SASL_PLAINTEXT, false),
+      (SecurityProtocol.SASL_SSL, true)
+    )
+    channels.foreach { case (protocol, forwarded) =>
+      val request = heartbeatOnChannel(
+        diagnosticReportRequest(), principal, protocol, forwarded)
+      assertEquals(forwarded, request.isForwarded)
+      controllerApis.handleBrokerHeartBeatRequest(request).get(10, TimeUnit.SECONDS)
+    }
+    val contexts = ArgumentCaptor.forClass(classOf[ControllerRequestContext])
+    verify(controller, times(channels.size)).processBrokerHeartbeat(
+      contexts.capture(), any(classOf[BrokerHeartbeatRequestData]))
+    contexts.getAllValues.asScala.foreach { context =>
+      assertFalse(context.isDirectAuthenticatedBrokerChannel())
+    }
+  }
+
+  @Test
+  def testLegacyBrokerHeartbeatStillTraversesUnmodifiedControllerPath(): Unit = {
+    val controller = mock(classOf[Controller])
+    when(controller.processBrokerHeartbeat(
+      any(classOf[ControllerRequestContext]),
+      any(classOf[BrokerHeartbeatRequestData])
+    )).thenReturn(CompletableFuture.completedFuture(
+      new BrokerHeartbeatReply(true, false, false, false)))
+    controllerApis = createControllerApis(None, controller)
+    val stableRequest = new BrokerHeartbeatRequest.Builder(
+      new BrokerHeartbeatRequestData().setBrokerId(3).setBrokerEpoch(54L)).build(2.toShort)
+    val networkRequest = heartbeatOnChannel(
+      stableRequest, KafkaPrincipal.ANONYMOUS, SecurityProtocol.PLAINTEXT, false)
+    controllerApis.handleBrokerHeartBeatRequest(networkRequest).get(10, TimeUnit.SECONDS)
+    val contexts = ArgumentCaptor.forClass(classOf[ControllerRequestContext])
+    val payloads = ArgumentCaptor.forClass(classOf[BrokerHeartbeatRequestData])
+    verify(controller).processBrokerHeartbeat(contexts.capture(), payloads.capture())
+    assertFalse(contexts.getValue.isDirectAuthenticatedBrokerChannel())
+    assertEquals(2, contexts.getValue.requestHeader().requestApiVersion())
+    assertNull(payloads.getValue.sourceWalProbeReport())
+    assertEquals(3, payloads.getValue.brokerId())
+  }
+
   object MockControllerMutationQuota {
     val errorMessage = "quota exceeded in test"
     var throttleTimeMs = 1000

@@ -3944,3 +3944,42 @@ disabled KRaft authority writer and physical DELETE remain unchanged;
 the MinIO GA branch
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889`
 remains frozen. PR #2 stays Draft until required exact-HEAD CI.
+
+## Batch 223–226 — parsed v3 ControllerApis transport relay test evidence
+
+Starting parent: `0cf762d3a1e86cd0d297b39bdaa0fc82fea7e64a`.
+Production Broker Source/WAL sending and GC authority remain disabled.
+
+- **223 — real Kafka protocol parse boundary:** The core ControllerApis
+  suite now builds a v3 BrokerHeartbeatRequest containing an exact
+  Source/WAL report, serializes it with a Kafka RequestHeader and
+  parses it through RequestContext and RequestChannel.Request before
+  invoking the Controller APIs handler. The mocked Controller receives
+  an unchanged nonce, BrokerEpoch, Broker incarnation and WAL revisions.
+- **224 — network-origin trust classification:** Direct SASL_SSL with
+  a uniquely named nonanonymous Broker principal is propagated into
+  ControllerRequestContext; PLAINTEXT, SASL_PLAINTEXT and a forwarded
+  SASL_SSL request are all classified as ineligible. The forwarded
+  case uses a RequestChannel.Request with a real enclosing request,
+  not a Boolean value invented in Controller code.
+- **225 — stable protocol compatibility:** Version-two BrokerHeartbeat
+  without a Report still traverses the ordinary ControllerApis
+  call path and is never classified as a v3 diagnostic.
+- **226 — enforced executable evidence:** Three new
+  `ControllerApisTest` methods are explicitly selected in the
+  existing Java 25 Shared Storage core test step and required
+  by its JUnit XML no-skips gate. No duplicate heavyweight workflow
+  or Native Image build is introduced; the metadata/storage
+  inventory remains at **594** since these are `core:test` methods.
+
+This is an in-process parsed-RPC integration using a mocked
+Controller, *not* evidence that a real SASL_SSL socket has completed
+a TLS/SASL handshake or that a multi-node Broker has transmitted a
+Report. It does not issue a Controller challenge, prove current
+BrokerRegistration across a leader failover, or grant GC authority.
+The existing authenticated Controller nonce and KRaft CAS checks
+continue to reject unverified reports. The production sender,
+KRaft authority writer and COMMITTED physical DELETE remain disabled;
+production policy stays `DENY_ALL`, frozen MinIO GA
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`
+is untouched and PR #2 remains Draft.
