@@ -451,6 +451,101 @@ class PartitionRetirementSourceProbeRegistryTest {
     }
 
     @Test
+    void changedBrokerEpochReclaimsStaleQuotaWithoutTouchingPeer() {
+        var registry = registry();
+        Challenge stale = issue(registry, 100L);
+        for (int i = 1; i < PartitionRetirementSourceProbeRegistry.MAX_PENDING_PER_BROKER; i++) {
+            issue(registry, 100L);
+        }
+        Candidate peer = candidate(4, 54L, new Uuid(20L, 21L), 8, 20L);
+        Challenge peerChallenge = registry.issue(peer, BROKER_FOUR, POLICY, 100L).orElseThrow();
+        Candidate newer = candidate(3, 55L, new Uuid(12L, 13L), 8, 20L);
+        Challenge replacement = registry.issue(newer, BROKER_THREE, POLICY, 101L).orElseThrow();
+        assertTrue(registry.pendingForHeartbeat(
+            3, 54L, BROKER_THREE, 102L, candidate -> true).isEmpty());
+        assertEquals(Finding.UNKNOWN_OR_ALREADY_USED,
+            registry.consume(stale, CANDIDATE, BROKER_THREE, 102L));
+        assertEquals(Finding.MATCHED_UNTRUSTED,
+            registry.consume(peerChallenge, peer, BROKER_FOUR, 102L));
+        assertEquals(Finding.MATCHED_UNTRUSTED,
+            registry.consume(replacement, newer, BROKER_THREE, 103L));
+    }
+
+    @Test
+    void changedIncarnationAtSameEpochRevokesOldNonceAndReleasesSlots() {
+        var registry = registry();
+        Challenge stale = issue(registry, 100L);
+        for (int i = 1; i < PartitionRetirementSourceProbeRegistry.MAX_PENDING_PER_BROKER; i++) {
+            issue(registry, 100L);
+        }
+        Candidate restarted = candidate(3, 54L, new Uuid(90L, 91L), 8, 20L);
+        Challenge newNonce = registry.issue(restarted, BROKER_THREE, POLICY, 101L).orElseThrow();
+        assertEquals(Finding.UNKNOWN_OR_ALREADY_USED,
+            registry.consume(stale, CANDIDATE, BROKER_THREE, 102L));
+        assertEquals(newNonce, registry.pendingForHeartbeat(
+            3, 54L, BROKER_THREE, 102L,
+            candidate -> candidate.brokerIncarnationId().equals(restarted.brokerIncarnationId())
+        ).orElseThrow());
+        assertEquals(Finding.MATCHED_UNTRUSTED,
+            registry.consume(newNonce, restarted, BROKER_THREE, 103L));
+    }
+
+    @Test
+    void sameRegistrationKeepsIndependentSourceCasChallenges() {
+        var registry = registry();
+        Challenge first = issue(registry, 100L);
+        Candidate changedCas = candidate(3, 54L, CANDIDATE.brokerIncarnationId(), 8, 21L);
+        Challenge second = registry.issue(changedCas, BROKER_THREE, POLICY, 101L).orElseThrow();
+        assertEquals(first, registry.pendingForHeartbeat(
+            3, 54L, BROKER_THREE, 102L, candidate -> true).orElseThrow());
+        assertEquals(Finding.MATCHED_UNTRUSTED,
+            registry.consume(first, CANDIDATE, BROKER_THREE, 103L));
+        assertEquals(Finding.MATCHED_UNTRUSTED,
+            registry.consume(second, changedCas, BROKER_THREE, 104L));
+    }
+
+    @Test
+    void invalidProtocolAndApiKeyCannotConsumeAuthenticatedNonce() {
+        var registry = registry();
+        Challenge issued = issue(registry, 100L);
+        ControllerRequestContext vTwo = ControllerRequestContextUtil.brokerDiagnosticContext(
+            (short) 2, BROKER_THREE, SecurityProtocol.SASL_SSL, false
+        );
+        ControllerRequestContext vFour = ControllerRequestContextUtil.brokerDiagnosticContext(
+            (short) 4, BROKER_THREE, SecurityProtocol.SASL_SSL, false
+        );
+        ControllerRequestContext foreignApi = ControllerRequestContextUtil.brokerDiagnosticContext(
+            (short) 3, BROKER_THREE, SecurityProtocol.SASL_SSL, false
+        );
+        foreignApi.requestHeader().setRequestApiKey(org.apache.kafka.common.protocol.ApiKeys.FETCH.id);
+        for (ControllerRequestContext context : java.util.List.of(vTwo, vFour, foreignApi)) {
+            assertEquals(Finding.VERSION_NOT_NEGOTIATED,
+                registry.consumeAuthenticated(issued, CANDIDATE, context, POLICY, 101L));
+            assertEquals(issued, registry.pendingForHeartbeat(
+                3, 54L, BROKER_THREE, 102L, candidate -> true).orElseThrow());
+        }
+        ControllerRequestContext authorized = ControllerRequestContextUtil.brokerDiagnosticContext(
+            (short) 3, BROKER_THREE, SecurityProtocol.SASL_SSL, false
+        );
+        assertEquals(Finding.MATCHED_UNTRUSTED,
+            registry.consumeAuthenticated(issued, CANDIDATE, authorized, POLICY, 103L));
+        assertEquals(Finding.UNKNOWN_OR_ALREADY_USED,
+            registry.consumeAuthenticated(issued, CANDIDATE, authorized, POLICY, 104L));
+    }
+
+    @Test
+    void foreignPrincipalCannotPruneVictimsPendingBrokerGeneration() {
+        var registry = registry();
+        Challenge original = issue(registry, 100L);
+        Candidate forgedReplacement = candidate(3, 55L, new Uuid(22L, 23L), 8, 20L);
+        assertTrue(registry.issue(forgedReplacement, BROKER_FOUR, POLICY, 101L).isEmpty());
+        assertEquals(original, registry.pendingForHeartbeat(
+            3, 54L, BROKER_THREE, 102L, candidate -> true).orElseThrow());
+        assertEquals(Finding.MATCHED_UNTRUSTED,
+            registry.consume(original, CANDIDATE, BROKER_THREE, 103L));
+    }
+
+    @Test
     void leadershipChangeReleasesBrokerQuotaButNeverRevivesOldNonce() {
         var registry = registry();
         Challenge first = issue(registry, 100L);

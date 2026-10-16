@@ -121,6 +121,7 @@ final class PartitionRetirementSourceProbeRegistry {
         EXPIRED,
         ENVELOPE_MISMATCH,
         PRINCIPAL_MISMATCH,
+        VERSION_NOT_NEGOTIATED,
         CANDIDATE_CHANGED,
         MATCHED_UNTRUSTED
     }
@@ -153,7 +154,12 @@ final class PartitionRetirementSourceProbeRegistry {
         if (!principalPolicy.matches(authenticatedPrincipal, candidate.brokerId())) {
             return Optional.empty();
         }
-        outstanding.entrySet().removeIf(entry -> !fresh(entry.getValue().issuedAtNs(), nowNs));
+        outstanding.entrySet().removeIf(entry ->
+            !fresh(entry.getValue().issuedAtNs(), nowNs)
+                || supersededBrokerRegistration(entry.getValue(), candidate));
+        // A successful current-epoch issuance fences a prior BrokerEpoch or
+        // incarnation immediately. Otherwise old unused diagnostics can hold
+        // all per-Broker slots until their TTL after a fast re-registration.
         // The global limit is not a fairness boundary by itself: one
         // authenticated Broker must not exhaust diagnostic capacity for
         // every other Broker. Count live challenges only, after pruning.
@@ -229,6 +235,12 @@ final class PartitionRetirementSourceProbeRegistry {
             || !principalPolicy.matches(context.principal(), currentCandidate.brokerId())) {
             return Finding.PRINCIPAL_MISMATCH;
         }
+        // Do not rely solely on the network ingress caller to check the
+        // unstable protocol: the destructive nonce API must fail closed
+        // even when invoked by a future internal Controller call site.
+        if (!PartitionRetirementHeartbeatReportGate.isVersionThreeHeartbeat(context)) {
+            return Finding.VERSION_NOT_NEGOTIATED;
+        }
         if (reported != null) {
             Pending owner = outstanding.get(reported.nonce());
             if (owner != null && !owner.principal().equals(context.principal())) {
@@ -272,6 +284,17 @@ final class PartitionRetirementSourceProbeRegistry {
             return Finding.CANDIDATE_CHANGED;
         }
         return Finding.MATCHED_UNTRUSTED;
+    }
+
+    private static boolean supersededBrokerRegistration(Pending pending, Candidate candidate) {
+        Candidate issuedFor = pending.challenge().candidate();
+        if (issuedFor.brokerId() != candidate.brokerId()) {
+            return false;
+        }
+        // Different topics/partitions and source CAS windows under the SAME
+        // registration remain independently valid.
+        return issuedFor.brokerEpoch() != candidate.brokerEpoch()
+            || !issuedFor.brokerIncarnationId().equals(candidate.brokerIncarnationId());
     }
 
     /** Revoke every volatile probe when the controller leadership epoch changes. */

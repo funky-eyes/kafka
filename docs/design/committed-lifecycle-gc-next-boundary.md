@@ -1601,3 +1601,45 @@ KRaft authority writer and COMMITTED physical DELETE remain disabled;
 production policy stays `DENY_ALL`, frozen MinIO GA
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889`
 is untouched and PR #2 remains Draft.
+
+## Batches 227–230 — Broker re-registration nonce isolation
+
+Validated baseline: `0cf762d3a1e86cd0d297b39bdaa0fc82fea7e64a`
+(**17/17** exact-HEAD CI). The preceding parsed-request test change,
+`87cdbffbb09d1f58d1364571a5d60e465830e35a`,
+must complete its own CI before this checkpoint can inherit new evidence.
+
+- **227 — reclaim superseded registration quotas:** On an authorized
+  new diagnostic issue, Controller discards only live pending nonces
+  issued to that Broker under a different BrokerEpoch or incarnation
+  before checking the single-Broker/global capacity limits. This
+  prevents a re-registered Broker from being starved for five seconds
+  by the former instance's outstanding requests. Other Broker
+  principals and challenges are unchanged.
+- **228 — preserve same-registration concurrent CAS observations:**
+  Challenges belonging to different source partitions/CAS
+  observations under the SAME BrokerEpoch and incarnation are kept,
+  preserving the original nonce ordering and one-shot semantics.
+- **229 — require exact protocol at destructive consume:** In addition
+  to the Controller network ingress guard, the authenticated registry
+  consumption itself requires the exact `BROKER_HEARTBEAT` API key and
+  version 3. A synthetic internal call using v2, a future version, or
+  a foreign API key never burns another valid nonce. The
+  package-private Controller begin path applies the same v3
+  requirement before issuing a nonce.
+- **230 — mandatory regressions:** Five new
+  `PartitionRetirementSourceProbeRegistryTest` methods verify quota
+  reclamation after BrokerEpoch changes, ABA at the same epoch with a
+  new incarnation, preservation of independent CAS windows, explicit
+  API/version replay refusal, and prevention of foreign-Broker quota
+  eviction. The strict metadata/storage XML evidence requirement
+  increases from **594 to 599** without another heavyweight CI job.
+
+This remains diagnostic, with production `DENY_ALL`, no Broker
+automatic Source/WAL emission, no KRaft GC-authority writer and no
+physical MinIO DELETE. The frozen MinIO GA branch
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`
+is untouched; PR #2 remains Draft. Neither a mocked network channel
+nor a one-time nonce proves real TLS authentication, multi-Broker WAL
+durability or safe COMMITTED deletion. A fresh 17/17 exact-HEAD CI is
+required.

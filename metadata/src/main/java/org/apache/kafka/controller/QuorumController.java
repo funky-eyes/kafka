@@ -786,6 +786,7 @@ public final class QuorumController implements Controller {
         return appendWriteEvent("beginRetirementSourceProbe", context.deadlineNs(), () -> {
             Optional<PartitionRetirementSourceProbeRegistry.Challenge> nonce = Optional.empty();
             if (context.isDirectAuthenticatedBrokerChannel()
+                && PartitionRetirementHeartbeatReportGate.isVersionThreeHeartbeat(context)
                 && PartitionRetirementCandidatePrecheck.assess(
                     featureControl, clusterControl, replicationControl, partitionRetirementControl,
                     candidate, offsetControl.nextWriteOffset()
