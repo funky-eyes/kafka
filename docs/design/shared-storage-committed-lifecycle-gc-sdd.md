@@ -2492,3 +2492,1536 @@ fsync contract, KRaft metadata encodings, controller writer or remote
 retirement protocol. The most recent fully validated GA baseline is
 Batch 85-88 until a new source-SHA run passes the complete normalized
 Seal. COMMITTED remote-object physical deletion remains disabled.
+
+## Batches 97–100: separate MinIO GA freeze from non-emitting KRaft identity hardening
+
+**Release split.** The canonical 2026-10-13 MinIO GA evidence checkpoint is
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`, validated by the
+normalized 20/20-workflow SUCCESS evidence
+[run 38354435176](https://github.com/funky-eyes/kafka/actions/runs/38354435176).
+The immutable release-candidate branch is
+`release/shared-storage-minio-ga-20261013`. Actual release dispatch,
+artifact QA, tags and canary remain release-operator actions, not implied
+by source-SHA evidence success.
+
+**Implementation scope.** The follow-up branch
+`feat/committed-lifecycle-authority` does not alter the sealed release
+candidate. `PartitionRetirementAuthorityState.Key` now rejects
+`Uuid.ZERO_UUID` as a reserved immutable Topic ID, aligning its persisted
+KRaft decoder with the earlier non-emitting Controller Candidate guard.
+Direct construction, generated-record decode, Controller timeline replay,
+KRaft log/snapshot replay and negotiated MetadataImage replay all have
+negative regression tests. Rejection must preserve existing authority
+state; malformed input must never create an alternative Topic incarnation.
+
+**Test ownership.** Six new named Java/JUnit methods increase the strict
+Java/Scala source-identity inventory from 348 to 354. All are non-emitting:
+the KRaft record writer, certified broker source LogStart, durable
+COMMITTED reference retirement, reader/upload quiescence and physical
+object DELETE remain OFF. The next P0 code boundary is a fresh,
+controller-verifiable native-source and WAL horizon witness, not another
+caller-supplied advisory preflight receipt.
+
+See [MinIO GA freeze](shared-storage-minio-ga-freeze-2026-10-13.md)
+and [next implementation boundary](committed-lifecycle-gc-next-boundary.md).
+
+## Batches 101–104: native-source and metadata-replay horizon double-checks
+
+This development-only checkpoint addresses two gaps in the advisory P0
+broker-side observation. After two native `SharedUnifiedLog` observations,
+matching Topic ID, partition, local role generation and LogStart alone are
+insufficient: an in-place truncate can keep LogStart constant while reducing
+High Watermark or LogEndOffset. The second sample must not regress either
+HW or LEO from the first. Ordinary monotonic HW/LEO advance remains legal.
+
+The metadata classifier reads `SharedMetadataImage`, which can replay new
+records between the first native source sample and the final source sample.
+The precheck now snapshots the target partition's explicit LogStart and
+the image's last consumed metadata offset before classification, then
+compares both after source revalidation. Even replay of an unrelated
+metadata record invalidates the old observation, rather than returning
+an advisory finding derived from an obsolete image generation.
+
+Five regression cases cover HW regression, LEO regression, consumed metadata
+position advance, changed LogStart at unchanged local replay position and
+the fact that a stable local WAL mutation revision cannot override a
+concurrently changed metadata image. The named Java/Scala manifest grows
+from 354 to **359**.
+
+**Safety boundary:** All results remain advisory, including a stable
+pair of native source and metadata snapshots. They are not durable WAL
+certificates, authenticated BrokerEpoch/Incarnation witnesses, a current
+Controller KRaft CAS, or a remote-object deletion permit. No Controller
+record writer and no COMMITTED physical GC are enabled.
+
+## Batch 105: make pending durable WAL writes visible to source preflight
+
+The broker-local `walMutationRevision` deliberately ignores ordinary
+tail appends, so a stable destructive generation alone cannot show the
+absence of uncompleted WAL Futures. `PartitionWalIndex` now maintains a
+second, independently observed WAL admission generation. Each admission
+and completion atomically changes a *single* packed 64-bit state containing
+the generation and in-flight count. A sample returns -1 while any
+write is outstanding. This avoids a stale "pending = 0" read caused by
+two independent atomic counters. Capacity exhaustion fails closed.
+
+## Batch 106: cover copied/owned DATA, groups and TRUNCATE through publication
+
+`SharedStorageEngine` now tracks the full Future including its index
+publication continuation. Copied DATA, owned DATA, durable group append and
+TRUNCATE all enter the admission fence **before** calling `SharedWal`.
+Success, backend failure, invalid durable result and synchronous backend
+exceptions must release exactly one admission. Backend callbacks only
+perform atomic state updates and never acquire WAL maintenance or Kafka
+native log locks.
+
+## Batch 107: compare admission generations around native source classification
+
+The native source/read-committed metadata precheck now checks both
+`walMutationRevision` and `walAdmissionRevision` around its read-only
+classification. If an append was pending before capture it returns
+`LOCAL_WAL_ADMISSION_IN_FLIGHT`; if a new admission or completion occurs
+across capture it returns `LOCAL_WAL_ADMISSION_CHANGED`, without any
+value finding. Destructive WAL mutation checks retain priority.
+
+## Batch 108: deterministic ordering, failure and independence regressions
+
+Thirteen named Java tests cover WAL Future admission/completion of copied
+and owned data, group and TRUNCATE, synchronous and asynchronous failure,
+independent partition fences, multiple concurrent pending futures, null
+backend results, and the read-only precheck's before/after generation
+behavior. The strict test-name manifest grows from **359 to 372**.
+
+**Scope:** This is a local, short-lived admission activity observation,
+not a durable-WAL replay horizon, fsync attestation, broker-incarnation
+authentication, signed cross-broker certificate, KRaft authorization,
+or permission to delete a COMMITTED object. Actual full-GC milestones
+remain P0 trusted source provenance, P1 Controller atomic CAS, P2 durable
+reference retirement and P3 safe physical MinIO deletion.
+
+## Batch 109: capture backend-originated startup WAL replay inventory
+
+A successful `SharedStorageEngine` construction now records immutable
+`StartupWalReplayEvidence` from the very same `SharedWal.replay` callback
+that reconstructs the local partition index. It reports counts of DATA
+and TRUNCATE records by Topic ID/partition and the highest observed logical
+WAL record end. It reports what actually survived startup recovery, not
+what a producer or preflight caller claims to have persisted. The
+snapshot is deliberately frozen after construction; it is not advanced
+by live append acknowledgments.
+
+## Batch 110: keep recovery provenance private and fail on broken ordering
+
+The new inventory has no public constructor or public mutator; an internal
+Builder consumes only actual replayed user records. The Builder rejects
+GROUP_COMMIT markers presented as user data and rejects overlapping or
+regressed logical WAL addresses, including cross-partition interleaving.
+An invalid backend replay aborts engine construction and closes the WAL.
+The returned partition map is an immutable defensive copy.
+
+## Batch 111: File and Ring durable recovery evidence tests
+
+Two actual-backend tests close and reopen File WAL and Ring WAL with a
+durable two-partition DATA group followed by a TRUNCATE. The recovered
+inventory contains only user records made visible by the backend's
+group-commit recovery or ring superblock checkpoint, including TRUNCATE.
+The local index independently verifies that the truncated Kafka range
+is not readable. Neither record counts nor the maximum logical WAL
+address implies contiguous live Kafka coverage.
+
+## Batch 112: crash-incomplete group and post-start mutation boundaries
+
+A File WAL test removes the GROUP_COMMIT segment after a successful write
+and validates that recovery produces EMPTY inventory and no indexed DATA.
+Other tests cover empty WAL, malicious out-of-order replay, immutable
+summary copies and the fact that only a subsequent process restart may
+include live appends in the startup inventory. Seven new mandatory
+Java/JUnit tests grow the named strict source inventory from **372 to 379**.
+
+**Authorization boundary:** This inventory is incomplete when physical
+WAL prefixes were reclaimed, is not bound to current BrokerEpoch /
+BrokerIncarnationId, and is neither a signed record nor a durable
+WAL-to-Source-LogStart continuity certificate. It does not establish
+cross-broker replication, reader/upload quiescence, controller commit or
+safe COMMITTED deletion. KRaft authority writers and physical GC remain
+disabled. P0 still requires an authenticated broker-originated durability
+and replay horizon revalidated at the Controller's serialized CAS event.
+
+## Batch 113: restore the Java 25 -Werror startup evidence integration gate
+
+The first Batch 109-112 source-SHA run failed in `storage:compileJava`
+with the Java 25 `dangling-doc-comments` warning (treated as an error)
+because two method JavaDoc blocks became adjacent in
+`SharedStorageEngine`. The shared Java preflight caught the same
+incorrect doc attachment. Every other workflow stopped at the common
+preflight or compile barrier. Separate and attach JavaDoc to the
+correct startup replay getter and WAL admission revision method. Do
+not relax `-Werror`, Checkstyle, or the release/PR test contracts.
+
+## Batch 114: join real Kafka broker-ready identity to startup WAL replay
+
+`SharedStorageExtension` receives Kafka's actual
+`StorageExtensionBrokerContext` after the broker starts its listeners.
+Only when the callback contains a complete BrokerEpoch and
+BrokerIncarnationId and matches the extension's startup BrokerId may
+it pair that local registration snapshot with the immutable,
+backend-originated `StartupWalReplayEvidence`. This new
+`BrokerStartupReplayObservation` has no public constructor or
+authority writer. An unbound legacy context leaves it absent, without
+breaking Kafka request processing.
+
+## Batch 115: revoke replay pairing across incarnation/epoch/cluster ABA
+
+The extension permits only one initial broker-ready pairing per WAL
+startup lifecycle. A repeated identical callback is idempotent; a
+BrokerId, BrokerEpoch, IncarnationId or ClusterId mismatch invalidates
+the pairing. The old pairing never reappears on a later ABA callback
+within the same extension lifetime. An unbound first callback cannot
+be upgraded without a complete new extension startup and WAL replay.
+Closing the extension invalidates the local pairing.
+
+## Batch 116: real Ring WAL reopen + broker identity regressions
+
+A real broker-extension runtime test writes to the Ring WAL, closes
+the original extension, reopens the same WAL from a new extension and
+pairs only the newly replayed records with a new BrokerEpoch and
+IncarnationId on broker-ready. Further tests cover no ready callback,
+unbound identity, wrong broker ID, changed ClusterId/IncarnationId,
+repeated callbacks, revocation at close and callback-before-start.
+The previously existing two WAL runtime tests are also registered as
+strict named mandatory evidence. The mandatory source-identity list
+grows from **379 to 391 methods** across 25 suites.
+
+**Still NOT an authority certificate:** The broker-ready values are
+Kafka lifecycle snapshots, not rechecked current KRaft registration or
+authenticated, durable source-log provenance. There is no guarantee
+the recovered WAL byte inventory covers an entire Kafka LogStart
+window or the other brokers. No Controller KRaft writer, durable
+COMMITTED-reference retirement or physical object DELETE is enabled.
+
+## Batch 117: compare recovered DATA by complete Kafka RecordBatch intervals
+
+A per-partition startup inventory of WAL record *counts* cannot establish
+that any actual Kafka Source LogStart..HW window is covered. The new
+read-only `StartupWalReplayCoveragePrecheck` compares the broker's
+currently indexed `WalLocation` ranges against the immutable per-partition
+startup replay high-water byte position. Its positive result requires
+exactly aligned Kafka batch boundaries and no offset gap/overlap across
+the source window. It does not require physically contiguous WAL addresses
+when another partition was interleaved into the shared WAL.
+
+## Batch 118: prevent post-start and incomplete records from filling recovery gaps
+
+Missing startup replay, reclaimed/trimmed data, partial first batches,
+HW splitting a batch, historical TRUNCATE, missing tail records and
+post-start WAL appends all produce non-success findings. A location that
+extends past the partition's highest *replayed* logical WAL end is never
+credited to startup recovery. Even an extra unexpected index entry past
+HW must be checked instead of accepting an early successful prefix.
+Thirteen deterministic tests cover these invariants and bounds.
+
+## Batch 119: read-only native Source / Broker identity / WAL replay join
+
+`BrokerLocalStartupReplayPrecheck` joins the current extension's
+Broker-ready identity pairing, epoch-aware local leader ticket, two
+actual native Kafka LogStart/HW/LEO observations and the indexed data
+actually recovered at startup. The WAL source's destructive mutation
+revision and live-write admission revision are sampled around the whole
+classification. Incomplete identity, a changed Kafka window/leader,
+or WAL activity suppresses every finding. It returns only local
+diagnostics, not a transferable proof or API grant.
+
+## Batch 120: revoke diagnostics after registration ABA and runtime changes
+
+Real Ring WAL close/reopen regression coverage compares an actual
+recovered Kafka batch with the native source sample and valid broker-ready
+snapshot. Other tests ensure empty recovery, post-start appends, Topic ID
+recreation, native LogEnd/HW drift, local demotion, broker re-registration
+ABA and a WAL append during source capture cannot masquerade as a stable
+observation. Nine integration-style JUnit tests cover this join.
+
+The strict Java/Scala mandatory test manifest grows from
+**391 to 413 methods** across **27 suites**.
+
+**P0 remains unfulfilled:** local startup completeness says nothing about
+other broker replicas, a currently authoritative BrokerRegistration,
+future WAL fsync, Kafka source-log provenance across LeaderEpoch or
+a stable Controller event-queue CAS. These findings must not be sent as
+KRaft retirement authorization. No metadata writer, logical reference
+retirement or physical COMMITTED deletion is enabled.
+
+## Batch 121: observe successful live WAL durability futures after index publication
+
+The existing local WAL admission generation intentionally tracks *pending*
+work rather than reporting successful completions or logical addresses.
+`LocalWalDurabilityObservation` now separately records only successful,
+backend-returned WAL logical locations after both the `SharedWal`
+durability Future and its index-publication continuation have completed.
+A per-partition immutable CAS snapshot reports DATA batch count, DATA
+group count, TRUNCATE count and the highest observed successful WAL end.
+
+## Batch 122: fail closed on failed groups and non-durable operations
+
+The copied and owned DATA append path, owned batch-group path and
+TRUNCATE path record observations only after valid WAL result length and
+successful local index application. A pending Future, failed force,
+invalid backend result or incomplete/partial group produces no positive
+completion observation. Synchronous backend errors also never fabricate
+one. Observations are per-partition and completion-ordered by a
+monotonic logical maximum, not by a last-writer assignment.
+
+## Batch 123: prove reboot resets live observations on real File/Ring WAL
+
+Real File and Ring WAL append/close/reopen tests distinguish a successful
+post-start durability Future from the next process's startup replay.
+The new process starts with an empty *live* completion snapshot and may
+only rebuild its immutable startup replay evidence from backend recovery.
+No live observation is persisted, transferable or reusable after an
+incarnation restart. Immutable earlier snapshots are not mutated.
+
+## Batch 124: recheck live completion snapshots across native source capture
+
+The existing read-only local Broker/source/replay classification now
+compares the identity of its CAS-published live completion snapshot
+before/after source and index observation. It invalidates the finding
+if that snapshot was replaced, even when separately mocked WAL
+admission/mutation generations remain constant. A regression case
+simulates precisely this torn-view gap. Eleven deterministic tests
+increase the strict named Java/Scala inventory from **413 to 424**
+methods across **28 suites**.
+
+**Trust limit:** a SharedWal successful Future is a backend's local
+durability contract for this process, not proof that any range survives
+another broker's failure or remains recoverable after local WAL
+reclamation. Highest successful WAL end is NOT contiguous Kafka DATA
+coverage, replicated HW, a stable native Source LogStart, KRaft
+Controller registration, or a signed authority receipt. No KRaft
+retirement authority writer or COMMITTED physical GC has been enabled.
+
+## Batch 125: current locally durable Kafka RecordBatch coverage
+
+The initial `StartupWalReplayCoveragePrecheck` deliberately rejected
+records written after this process's startup, even if their WAL Future
+successfully completed. A separate
+`CurrentLocalWalCoveragePrecheck` now classifies exactly aligned,
+gap-free Kafka RecordBatch ranges in the current `PartitionWalIndex`.
+The `SharedStorageEngine.localDurableWindowCoverage` entrypoint obtains
+its input from the actual WAL index rather than a caller-provided list.
+Every indexed entry was admitted via successful WAL replay or a completed
+backend durability Future followed by successful index publication.
+
+A positive local result requires full batch-aligned coverage of
+LogStart..HW, never just a maximum WAL logical address, a count of
+acknowledgments, or an implicit assumption that gaps are covered.
+A distinct EMPTY_SOURCE_WINDOW is not a positive DATA proof.
+
+## Batch 126: mix startup replay and post-start durable WAL without duplicating indexes
+
+Thirteen direct and real-backend regressions cover Kafka gaps,
+overlaps, partial first/last batches, missing tails, unfinished/failed
+durability Futures, cross-partition physical-WAL interleaving, true
+File WAL close/restart plus newly durably appended data, Ring WAL
+per-partition separation and durable TRUNCATE eviction.
+The current index is reused: there is no second unbounded per-batch
+provenance table.
+
+## Batch 127: apply exactly the existing Broker/native Source/WAL fences
+
+`BrokerLocalStartupReplayPrecheck` gains a separate
+`assessCurrent` result type. Both startup-only and current-local
+coverage share one generic read-only double-capture sequence over
+Kafka's native LogStart/HW/LEO, role generation and LeaderEpoch.
+It also rechecks the initial broker-ready incarnation pairing, WAL
+destructive generation, in-flight admission generation and immutable
+live-durability completion snapshot.
+
+A current-local finding is not a startup-replay finding; neither is
+a Controller-issued attestation or a usable retirement permit.
+
+## Batch 128: isolate local ABA / stale Source / pending WAL cases
+
+Seven integration-style tests cover recovery+live windows, exclusively
+live durable windows, offset gaps, changed native Source samples,
+re-registration/Incarnation ABA, append completion during capture
+and missing broker-ready registration. A fence violation discards the
+finding even when the WAL index would otherwise cover the window.
+Strict required Java/JUnit inventory grows from **424 to 444 methods**
+across **29 suites**.
+
+**P0/GC still blocked:** all observations are process-local. This does
+not prove which replicas must retain Kafka's committed bytes, freshness
+of Controller BrokerRegistration, metadata quorum applied position,
+replicated/fsynced recoverability after broker loss, or a serialized
+KRaft authority CAS. Never use a local complete interval to authorize
+COMMITTED physical-object GC. No Controller record emitter or physical
+delete path was enabled; the frozen MinIO GA candidate remains separate.
+
+## Batch 129: introduce an explicitly untrusted Controller source/WAL claim
+
+A Controller-local `PartitionRetirementUntrustedSourceClaim` now
+describes the proposed Topic ID, partition, BrokerId, BrokerEpoch,
+BrokerIncarnationId, native Source LeaderEpoch, local role generation,
+LogStart/HW/LEO and observed WAL mutation/admission generations.
+Construction rejects impossible native Kafka offset ordering, missing
+leader and broker identities, negative/unknown WAL generations and
+a purported COMPLETE DATA window that is actually empty.
+
+This is a **caller-reported claim**, not an attestation, signed
+certificate or proof of KRaft BrokerRegistration ownership.
+It cannot be used to authorize remote-object retirement.
+
+## Batch 130: make untrusted source claims agree with live Controller CAS
+
+`PartitionRetirementCandidatePrecheck.assessUntrustedSourceClaim`
+first runs the existing NON-EMITTING current KRaft feature, write-position,
+authority-timeline CAS, partition leadership and BrokerRegistration checks.
+Only after those checks are valid does it compare the source claim
+against the exact Candidate's topic identity, broker identity,
+LeaderEpoch, claimed Source LogStart and local batch coverage flag.
+Mismatches have explicit fail-closed findings.
+
+**Even matching positive claims return SOURCE_LOG_START_NOT_VERIFIED.**
+No caller-originated bytes, WAL Future count or boolean can switch that
+finding to an authorization; this code never appends authority records.
+
+## Batch 131: stale registrations and KRaft movement invalidate old claims
+
+After a matching read-only preflight, a new Controller BrokerEpoch or
+IncarnationId, different partition leader, non-current next KRaft
+write offset, feature disablement or retirement authority timeline
+advance is evaluated against the *current* manager state again.
+Old claims cannot survive registration ABA, leadership movement,
+KRaft commit or feature reconfiguration by being replayed unchanged.
+A new authenticated Broker-to-Controller source verification transport
+and serialized CAS event remain missing.
+
+## Batch 132: deterministic untrusted source boundary verification
+
+Eighteen named JUnit tests exercise positive-but-unverified claims,
+missing and incomplete local coverage, immutable Topic/partition and
+broker identity disagreement, leader epoch/LogStart mismatch,
+impossible native HW/LEO and empty windows, in-flight WAL generations,
+malformed local leadership, feature disablement, BrokerEpoch rotation,
+KRaft leader change and authority CAS/replay changes. They also
+assert that no KRaft authority record is emitted.
+
+Strict named Java/Scala test inventory grows from **444 to 462**
+methods across **29 suites**.
+
+**GA limit:** This does not authenticate any source identity or durable
+Kafka/WAL range and has no Broker-to-Controller RPC. A future
+transport must establish the sender's current registered process
+identity and validate a fresh actual source/WAL continuity proof
+*inside* the serialized Controller KRaft event. Controller authority
+writers, durable COMMITTED reference retirement and physical object
+DELETE all remain OFF; the frozen MinIO GA branch is unchanged.
+
+## Batches 133–136 — broker-local snapshot capture and Controller event-queue diagnostic
+
+A broker-local `CurrentSourceWalClaim` is now populated from the same
+immutable broker-ready WAL replay identity, exact native Kafka Source window
+and currently indexed backend WAL batch coverage used by the read-only
+`CURRENT_WINDOW_CLASSIFIED` classifier. The positive capture requires a
+non-empty Kafka RecordBatch-complete window, unchanged source before/after
+classification, stable WAL admission/mutation generations and an identical
+live completion snapshot. It deliberately does not accept an injected
+positive-coverage boolean. The payload includes ClusterId, TopicId,
+PartitionId, BrokerId/Epoch/IncarnationId, LeaderEpoch, local role generation,
+native LogStart/HW/LEO and WAL revision coordinates.
+
+A new `QuorumController.preflightUntrustedPartitionRetirement` method
+executes the matching Controller claim agreement gate in the serialized
+Controller write-event queue, using the event's **current** next KRaft write
+position, current BrokerRegistration/partition leader/feature gate and
+replayed retirement authority. It always emits **zero records**, and a
+matching claim still returns `SOURCE_LOG_START_NOT_VERIFIED`. Its
+ControllerRequestContext deadline is honored; it is not exposed as a
+public `Controller` API or RPC endpoint.
+
+Nine deterministic broker-origin capture tests cover real WAL replay,
+mixed replay/live durability, missing broker-ready identity, offset gaps,
+empty windows, native source drift, BrokerIncarnation ABA, concurrent
+backend WAL completion, and invalid reconstructed payloads. Two real
+QuorumController tests verify default feature rejection, no KRaft emissions
+and event ordering. Mandatory evidence inventory: **473 / 30 suites**.
+
+**No authenticated broker transport exists at this checkpoint.** Both the
+new local claim and Controller method are independently invocable; they
+have not been connected by an authenticated Kafka-native RPC. They cannot
+prevent forgery or replay of wire bytes, and current KRaft registration
+does not prove the RPC's unique broker-process identity. Broker-to-Controller
+authenticated ingress, freshness/non-replayability inside the serialized
+commit event, quorum durability/cross-broker proof, an atomic KRaft authority
+writer, COMMITTED retirement and physical MinIO deletion remain blocked.
+The frozen MinIO GA branch is unchanged.
+
+## Batches 137–140 — compile recovery and Controller-only probe security prerequisites
+
+**CI root cause from prior checkpoint:** Batch 133–136 source-SHA CI ended
+16/16 failed in common Java compilation because a new
+`Objects.requireNonNull` invocation in `QuorumController` lacked its
+`java.util.Objects` import. Batch 137 repairs that defect without
+weakening compiler checks or changing the frozen MinIO GA branch.
+
+A new immutable broker principal allowlist rejects missing, anonymous,
+wildcard and shared principals. It performs an exact match on the trusted
+`ControllerRequestContext.principal()` rather than on a self-reported
+BrokerId. Crucially, the default runtime allowlist is EMPTY/DENY_ALL,
+because Kafka's normal CLUSTER_ACTION privileges and a nonunique
+interbroker principal are insufficient to prove individual broker
+incarnation ownership.
+
+A controller-volatile one-shot Source/WAL probe registry issues an opaque
+Uuid nonce bound to the proposed TopicId/partition and exact Controller
+candidate. Creation requires a uniquely bound principal. Its 5-second
+TTL uses signed-origin-safe monotonic `nanoTime` subtraction; issuance
+has a strict 128-entry outstanding cap and expires old pending sessions.
+Consumption removes the nonce *before* any check so wrong-principal,
+forged-envelope, expired, moved-epoch or changed-KRaft-position requests
+cannot retry it later. A new Controller instance has no session; the
+current one clears outstanding sessions on claim, re-epoch and renounce.
+
+Two Controller-internal methods issue and consume probes in the
+`appendWriteEvent` serialized queue, respect the request deadline,
+and emit an EMPTY record list. Once consumed, the existing
+`PartitionRetirementCandidatePrecheck.assessUntrustedSourceClaim` is
+rerun against fresh feature negotiation, registration, partition
+leadership, KRaft write position and retirement authority timeline.
+A positive nonce remains **MATCHED_UNTRUSTED**, and even a matching
+claim never becomes an authority writer or physical GC grant.
+
+Mandatory regression inventory increases by 27 methods (9 principal
+mapping, 16 nonce/lease and 2 Controller diagnostics) to
+**500 named Java/Scala tests over 32 suites**. This is a test
+inventory, not a CI success claim; this development SHA must pass its
+own full Java 25/MinIO/WAL/Controller gates.
+
+**Security and scope:** The application does not yet transport probes
+over the network, inject trusted principal mappings or authenticate
+actual Broker→Controller evidence. Possession of a nonce is not data
+origin proof, nor is a successful local SharedWal Future an object
+retirement certificate. Cross-replica persistency, Controller KRaft CAS
+writer, COMMITTED logical-retirement transition and physical MinIO
+DELETE remain forbidden. The frozen GA release remains unchanged.
+
+## Batches 141–144 — challenge-bound native source read-only adapter
+
+The Batch 137–140 HEAD passed 15/16 GitHub workflows. The only failure
+was a Checkstyle BooleanExpressionComplexity violation (12 > allowed 5)
+in the positive broker-local claim constructor, reached after actual
+storage tests. Guard clauses now separately validate identity, broker
+and source epochs, WAL admission/mutation revisions, and native Kafka
+LogStart/HW/LEO; existing invalid domains still fail closed.
+
+To avoid prematurely allocating a Kafka protocol API key or changing
+production heartbeat semantics, the next handshake is represented by
+a transport-neutral immutable `PartitionRetirementSourceProbe.Request`
+and `Report` in the `clients` dependency shared by `metadata` and
+`storage`. No wire endpoint, parser or sender has been activated.
+Request preserves a one-time nonce, cluster, immutable topic,
+partition, registered broker incarnation, leader epoch and expected
+authority CAS; Report carries native Kafka offset coordinates, local
+role generation, and stable WAL revision observations. Each record is
+freely constructible and **must be considered untrusted**.
+
+The broker-local adapter samples the existing real native
+`SharedUnifiedLog` and current Indexed WAL coverage, double checks the
+same source/role/identity/WAL generations, then compares the observed
+coordinates to the request. It rejects wrong Topic ID, partition,
+cluster, BrokerId, BrokerEpoch, BrokerIncarnationId, LeaderEpoch,
+LogStart, incomplete batches or any transient WAL mutation. This is
+a synchronous local diagnosis, **not** evidence that bytes are
+durable across replicas or remain unchanged after capture.
+
+The Controller nonce registry now round trips the immutable request
+coordinates through the shared model; the report adapter converts
+the caller's self-reported fields into the already non-authoritative
+`PartitionRetirementUntrustedSourceClaim`. It invokes exactly one
+`inspectRetirementSourceProbe` Controller queue event; the nonce is
+burnt and the current KRaft registration, leader, metadata position
+and feature negotiation are rechecked. The production principal
+allowlist remains DENY_ALL; no KRaft record can be emitted and a
+positive payload is always `SOURCE_LOG_START_NOT_VERIFIED`.
+
+**New deterministic regressions:** 12 in the real broker-local source
+capture suite, 3 nonce model round-trip/replay cases, and 2 in the
+QuorumController suite. Required named test inventory is
+**517 methods / 32 suites**. This count is not a CI success assertion
+for the new SHA.
+
+**Next:** design and implement an experimental Kafka-native
+Controller-listener API with explicit version/feature negotiation,
+dedicated per-broker network-authenticated credentials, bounded input
+and no best-effort fallback to CLUSTER_ACTION-only auth. Do not add
+the actual KRaft CAS writer, logical COMMITTED retirement or physical
+DELETE before authenticated origin and cross-broker durability proofs
+can be replayed and tested under crashes and leadership changes.
+
+## Batches 146–148 — Java 11 DTO compile and mandatory Controller evidence
+
+Batch 145's Java-11 class conversion was syntactically incorrect:
+the generated equals methods referenced the cast variable `that` before
+declaring it. Consequently all 16 workflows failed at a shared
+`:clients:compileJava` gate. The correction makes each immutable
+Request/Report `equals` method strictly Java 11: identity fast-path,
+type check, explicit cast and short bounded comparisons. The same
+source compiled under `javac --release 11 -Xlint:all -Werror` with
+a stub matching the Kafka Uuid API used by the DTO. Its equality and
+invalid-window smoke harness passed. The full repository Gradle compile
+and JUnit verification remain separate CI requirements.
+
+Eight deterministic `PartitionRetirementSourceProbeValueTest` tests
+now verify equality/hash contracts under reconstructed source
+requests/reports and negative identity, CAS, epoch, WAL and source
+offset cases. Required tests grow **517 -> 525 methods, 32 -> 33 suites**.
+
+Critically, the Shared Storage workflow's explicit metadata
+`--tests` filter had not included the existing mandatory
+`QuorumControllerTest`, principal policy, or source probe registry
+suites. The filter now schedules all mandatory Controller test
+methods, including the new value-contract suite, so the fail-closed
+report verifier can inspect actually executed JUnit XML rather
+than only test method names in source. `:clients:compileJava` runs
+before the resource-intensive E2E steps. Workflow path filters
+include relevant new clients and metadata Probe files.
+
+**Scope:** No network RPC, producer or Consumer API, Java version
+upgrade, principal trust shortcut, KRaft writer, reference retirement
+or physical COMMITTED deletion. The next transport step must remain
+separate until the corrected SHA establishes 16/16 CI success.
+
+## Batches 149–152 — metadata layer boundary and experimental native heartbeat schema
+
+The primary Shared Storage CI on `f229b4d5` encountered five
+`ImportControl` errors because the new clients-layer
+`PartitionRetirementSourceProbe` values were consumed by
+`QuorumController`, `PartitionRetirementSourceProbeRegistry`
+and their tests without an import-control declaration. The
+dependency exception is now restricted to exactly those three
+classes; global package access remains forbidden. Metadata
+Checkstyle is executed in the early Java 11 compilation preflight
+instead of after large storage and WAL test batches.
+
+A new *unstable version 3* adds optional Kafka protocol tagged
+`SourceWalProbeReport` to `BrokerHeartbeatRequest` and optional
+`SourceWalProbeChallenge` to `BrokerHeartbeatResponse`.
+The report carries immutable TopicId/partition, nonce, cluster,
+broker incarnation, source LeaderEpoch/LogStart/HW/LEO, local
+leadership and WAL mutation/admission revision, and authority
+CAS coordinates. The challenge carries the current registered
+BrokerId/Epoch/Incarnation, Source LeaderEpoch, TopicId/partition,
+nonce and Controller authority coordinates. Legacy v0–v2 fields
+retain their exact schema and tags. Only the request JSON declares
+`latestVersionUnstable`, because the Kafka protocol generator
+rejects that property on responses. Default production
+`ApiVersions` must still cap heartbeat at v2.
+
+Six clients-JUnit serialization tests are added as a mandatory early
+gate: stable/unstable advertised versions; v0–v2 null defaults;
+v3 Source/WAL report and Controller challenge round trips; and
+deterministic rejection of non-null v3 tagged fields serialized
+under v2. The existing Controller/Storage mandatory evidence count
+remains **525 Java/Scala methods / 33 suites**; the six clients wire
+tests are executed and XML-verified separately.
+
+No Broker or Controller handler yet generates or consumes the new
+wire tags. In particular, a self-reported Source/WAL report is not
+an authenticated replica certificate. Unique per-broker credentials,
+registration-incarnation binding, real replayable durable proofs,
+CAS writer, reference retirement and physical COMMITTED GC are all
+still pending. Production remains DENY_ALL; frozen MinIO GA remains
+unchanged.
+
+## Batches 153–156 — correct metadata ImportControl and reject untrusted v3 wire reports
+
+The preceding experimental BrokerHeartbeat v3 checkpoint passed
+**16 of 17 workflows**. Its single main Shared Storage failure was
+`:metadata:checkstyleMain` rejecting two Source/WAL diagnostic imports
+after an earlier patch updated the wrong ImportControl file. Metadata
+compiles with the dedicated
+`checkstyle/import-control-metadata.xml`; the new classes now have
+explicit allow rules only under its `controller` subpackage.
+The unnecessary change to the shared `import-control.xml` is
+reverted. Workflow triggers track the correct rules file.
+
+`PartitionRetirementHeartbeatReportGate` is a pure validation and
+decoding boundary around the optional unstable v3
+`BrokerHeartbeatRequestData.SourceWalProbeReport`.
+An absent report takes the unchanged heartbeat path. Present reports
+require protocol v3, a uniquely mapped authenticated Principal and
+valid immutable Source/WAL coordinates; invalid/unknown fields are
+rejected. A report with valid syntax and a matching Principal is
+**still unverified** because the Controller has not correlated it to a
+live nonce, current KRaft BrokerRegistration, native Kafka Source or
+replica-durable WAL proof. It NEVER grants GC.
+
+`QuorumController.processBrokerHeartbeat` invokes the gate **before**
+its broker contact metric and lockless heartbeat tracking. Wrong
+principal produces a cluster authorization failure; any other
+non-absent finding produces an invalid request. These failures are
+represented by failed futures so ControllerApis retains the existing
+asynchronous heartbeat error handling. A rejected report cannot
+trigger a KRaft event. The network sender has not been enabled,
+and even an explicit experimental v3 API negotiation does not
+change the production allowlist `DENY_ALL`.
+
+Eleven gate/codec tests verify version/identity bounds, malformed
+Source/WAL windows and revision fields, absence on v2, and that a
+matching but caller-supplied report stays UNVERIFIED. Two real
+QuorumController tests assert the wire report is refused before
+KRaft records can be emitted. Mandatory named evidence now comprises
+**540 methods in 34 suites**, but the new source SHA must independently
+pass its CI gates; this count is not a success declaration.
+
+Remaining blockers: real Broker-source sample sender, Controller
+nonce challenge issued through the network, unique authenticated
+principal-to-current-BrokerRegistration binding, anti-replay evidence
+inside one serialized Controller event, cross-broker durable proof,
+then explicit KRaft authority writer and COMMITTED retirement/physical
+MinIO deletion. All write/delete paths remain OFF on the independent
+feature branch; frozen MinIO GA remains unchanged.
+ 
+A read-only broker-side `captureCurrentSourceWalHeartbeatReport`
+adapter now serializes a fresh native Source/WAL observation into the
+generated v3 tagged field without launching a heartbeat. Two additional
+storage regressions cover native capture -> v3 bytes -> parsed report
+and broker-incarnation mismatch rejection. Mandatory named evidence
+is therefore **540 methods in 34 suites** rather than 538.
+
+## Batches 157–160: observable BrokerHeartbeat v3 challenge with no response authority
+
+The previous `e86a1d5c` HEAD passed 16 of 17 GitHub Actions, with
+only the Shared Storage `:metadata:spotbugsMain` static analyzer
+failing. The existing static-analysis artifact did not include
+metadata's SpotBugs HTML or XML, preventing attribution to an actual
+warning type. The primary workflow now uploads
+`metadata/build/reports/spotbugs` and runs this uncompromised
+SpotBugs gate **early** alongside Java 11 client compile and
+metadata Checkstyle, so future failures are independently reviewable.
+
+The broker's *real* heartbeat response event path now explicitly
+examines an optional unstable v3 Controller Source/WAL challenge. The
+read-only gate requires version 3, matching current
+BrokerId/Epoch/IncarnationId/ClusterId, registered RUNNING broker
+state, valid nonzero nonce, immutable TopicId, partition,
+SourceLeaderEpoch, LogStart and authority CAS fields. An exact,
+constructible challenge is classified `MATCHED_UNTRUSTED`, never
+"authenticated", "authorized", or "durable". There is no sampling
+callback or pending queue yet. The lifecycle handler intentionally
+ignores the challenge and continues ordinary broker registration,
+heartbeats, fencing/unfencing and controlled shutdown unchanged.
+
+Ten new deterministic server-side tests cover the challenge's
+wire-shape and identity checks plus the default non-authorizing
+diagnostic. `:server:test` selects the exact suite, and a separate
+fail-closed JUnit XML verifier checks all ten method names and
+zero skips/failures. Existing mandatory storage/metadata Java/Scala
+inventory remains **540 methods / 34 suites**, plus these ten
+separately required server tests. No network Report is emitted.
+
+Production Controller principal policy remains `DENY_ALL`.
+Actual v3 Controller challenge signing/issuance, unique broker
+principal configuration, authenticated transport, broker-native
+source and WAL asynchronous sampling, KRaft authority CAS writing,
+COMMITTED retirement and physical GC deletion are still blocked.
+The frozen MinIO GA release is unchanged.
+
+## Corrective evidence on Batch 157–160
+
+The exact SpotBugs HTML, now retained by Shared Storage CI,
+identified one failure only:
+`DCN_NULLPOINTER_EXCEPTION` in the metadata heartbeat report gate.
+Explicitly reject null nonce, ClusterId, TopicId or BrokerIncarnationId
+instead of catching `NullPointerException`; continue to reject
+illegal offsets via `IllegalArgumentException` only. A new
+controller-side negative regression enforces the null-field contract,
+taking mandatory Java/Scala evidence from 540 to **541 methods
+across 34 suites**.
+
+GA Workflow Consistency simultaneously identified a newly triggered
+production source missing from the established release fingerprint.
+The non-authorizing Broker v3 challenge parser is therefore nested
+inside the already fingerprinted `BrokerLifecycleManager` source;
+its independent 10-method JUnit suite remains and is still mandatory
+in main CI. No fingerprint exception or generic code exclusion
+was added. Frozen MinIO GA remains unchanged. The new corrective
+HEAD still requires its own end-to-end CI pass.
+
+## Batches 161–164 — independent offset namespaces and versioned diagnostic challenge transport
+
+The Shared Storage `:metadata:test` on `4d5a6d46` failed two
+tests while native source/WAL and other completed CI gates succeeded.
+
+The constructor must compare **KRaft retirement authority** CAS
+positions with each other, not with Kafka native Source LogStart
+offsets. The regression now asserts true CAS non-advancement is
+invalid, while Kafka LogStart greater than a numerically smaller
+KRaft authority offset is valid. No runtime tightening based
+on unrelated log coordinate systems has been added.
+
+A separate test incorrectly counted KRaft controller bootstrap
+feature/registration records as retirement mutations because it
+captured `allRecords()` before startup had finished asynchronously.
+All early retirement preflight tests now count only
+`PartitionRetirementAuthorityRecord` for "no GC record" assertions.
+The production writer remains OFF and tests still fail if one
+retirement authority record is emitted.
+
+`PartitionRetirementSourceProbeRegistry.Challenge` can now be
+encoded to the existing unstable `BrokerHeartbeatResponseData`
+v3 `SourceWalProbeChallenge` and reconstructed after decoding
+without dropping nonce, BrokerId/Epoch/Incarnation, TopicId,
+LeaderEpoch, source LogStart or CAS coordinates. Four tests prove
+successful v3 round-trip, strict single-use untrusted nonce,
+malformed/forged identity rejection and v2 downgrade rejection.
+Named mandatory evidence is **545 tests in 34 Java/Scala suites**,
+with separately verified clients/broker protocol suites unchanged.
+
+**Not yet live:** This conversion alone does not issue a Controller
+challenge, send it on BrokerHeartbeat, set a trusted Principal, or
+enable retirement. The production feature gate remains disabled,
+per-broker authentication remains DENY_ALL and physical GC remains
+disabled. MinIO GA release stays frozen.
+
+## Batches 165–168 — negotiated Controller diagnostic challenge delivery
+
+The development branch's preceding `0f223df3` SHA passed all
+**17/17 CI workflows**, including real MinIO and Controller HA.
+This section extends the transport boundary but deliberately does
+not change the frozen MinIO GA release or enable physical GC.
+
+A `PartitionRetirementSourceProbeRegistry` challenge is a
+Controller-volatile nonce, at most five seconds old. The new
+read-only `pendingForHeartbeat` lookup checks BrokerId/Epoch and
+the unique mapped authenticated Principal without minting,
+refreshing, or consuming a nonce; Controller promotion/deactivation
+still clears the registry. In the existing serialized Controller
+heartbeat event, `QuorumController` may return a previously issued
+pending Challenge only after **fresh, authoritative KRaft**
+registration/leadership/feature/CAS revalidation. It sends nothing
+if the heartbeat is non-v3, writes KRaft metadata, is behind
+metadata, seeks fencing/shutdown or describes a fenced/shutting-down
+broker. The original heartbeat records and atomicity remain intact.
+
+`BrokerHeartbeatReply` now optionally carries an immutable typed
+SourceProbe Request, while preserving its original four-argument
+constructor. `ControllerApis` serializes it as an optional
+`BrokerHeartbeatResponseData.SourceWalProbeChallenge` only when
+the actual negotiated request version equals 3. The generated
+stable v0–v2 wire envelope remains unchanged. The existing broker
+handler rejects or ignores this diagnostic and does not schedule
+source reads or send reports.
+
+Four registry-JUnit tests validate read-only principal fencing,
+BrokerEpoch ABA, TTL, one-use consume and leader turnover.
+Three Scala ControllerApis tests validate non-v3 silence,
+fenced/shutdown suppression and an exact v3 encode/decode.
+The Shared Storage CI explicitly runs and XML-verifies these
+three core tests and the existing strict Java/Scala contract
+inventory is now **550 methods / 34 suites**.
+
+No stable public API, new Kafka API key, production Principal
+configuration, signed native Source/WAL proof, KRaft authority
+writer or COMMITTED object DELETE is enabled. The full new
+SHA must independently pass its 17 Workflow release tests
+before this becomes a verified development checkpoint.
+ 
+An additional Controller runtime test registers a Broker and
+sends a v3 heartbeat under `DENY_ALL`, asserting neither a
+Source/WAL challenge nor a retirement authority record is emitted.
+The mandatory named inventory is 550 methods in 34 suites.
+
+## Batches 169–172 — one in-flight asynchronous Source/WAL sampler, fail closed
+
+Baseline `794f6d61` passed 17/17 Workflow gates. The new
+Broker-side `SourceWalProbeSampler` is only an explicit,
+default-null, transport-neutral asynchronous callback.
+BrokerLifecycleManager samples only after successful receipt
+of a Controller heartbeat v3 challenge with a registered RUNNING
+Broker, exact ClusterId/BrokerId/BrokerEpoch/incarnation and valid
+immutable Source/WAL CAS coordinates. A response indicating fencing,
+shutdown or incomplete metadata catch-up cannot start sampling.
+
+One pending capture, one staged result and one most-recent nonce
+are held exclusively on the existing Broker lifecycle event queue.
+Sampler Futures complete back into that queue, never directly
+mutating Broker state on arbitrary executor threads. Identity
+fencing prevents late callback ABA; null/error/empty results,
+wrong nonce/source, stale BrokerEpoch or changed incarnation
+fail closed. A hung provider cannot launch unlimited native I/O:
+its active I/O fence survives provider replacement until the prior
+callback finishes or synchronous scheduling fails. A valid result can only be
+consumed once through a diagnostic-only mailbox and expires
+at five seconds, with monotonic timer wrap handled by subtraction.
+Registration, controlled shutdown, shutdown and sampler change
+revoke pending or staged values without making the previous
+nonce eligible again.
+
+**No production adapter is installed and no Report is sent.**
+This intentionally avoids source reads, transport credentials,
+shared-storage mutations or KRaft writes in default deployments
+until unique Broker authentication and durable source evidence are
+implemented. All Controller denial, COMMITTED retirement and
+physical object deletion controls remain unchanged and OFF.
+
+Fourteen new `server:test` Java methods provide deterministic
+coverage of these fences; the main Java 25 workflow verifies the
+exact JUnit XML set with zero skipped/failing cases. The existing
+550-method/34-suite metadata-storage inventory is unchanged.
+The MinIO GA release branch remains frozen.
+
+## Batches 173–176 — complexity gates and bounded replay-window design
+
+On development SHA `71a23c6e`, 16/17 Actions succeeded.
+Only the primary Shared Storage job failed, at
+`:server:checkstyleMain`, with `NPathComplexity=972 > 500`
+in the Controller Source/WAL challenge handler and
+`BooleanExpressionComplexity=6 > 5` in the Broker capture
+eligibility method. The previous Broker JUnit suite was
+not executed; this was a static rule gate, not a JUnit
+assertion or proven WAL correctness regression.
+
+The heartbeat ingress is split into small helpers for
+diagnostic eligibility, bounded off-thread scheduling and
+serialized completion. Registration/RUNNING/timeout/
+incarnation checks now use straightforward fail-fast guards;
+neither Checkstyle nor SpotBugs rule limits are weakened.
+
+The original Broker nonce fence remembered only the last
+nonce. A challenged Broker could process nonce A, then B,
+then accept replayed A while all were still fresh. The
+replacement is a **64-entry maximum**, insertion-ordered,
+Broker-local nonce history. It retains every nonce accepted
+in the last five seconds, including revocations and provider
+changes. Pruning is based on elapsed monotonic time with
+signed overflow-safe subtraction. At full capacity, it
+rejects new source sampling until older entries expire,
+never evicting live replay barriers. Single in-flight
+native I/O, late callback fencing, strict request equality
+and one-shot local report consumption remain unchanged.
+
+Four new deterministic server-side regressions cover
+interleaved nonce replay, saturation without premature
+eviction, reconfiguration and signed monotonic clock wrap.
+The main CI requires **18 capture-state** and
+**10 challenge-gate** test methods with zero skipped/failing
+JUnit entries and retains the ordinary server static checks.
+The strict metadata/storage manifest remains **550 / 34**.
+
+The feature remains default-disabled: no storage adapter
+is installed, no diagnostic report is transmitted,
+Controller per-Broker Principal policy is `DENY_ALL`,
+and neither KRaft authority CAS writing nor physical
+COMMITTED garbage collection is enabled.
+
+## Batches 177–180 — off-heartbeat native Source/WAL adapter and lookup boundaries
+
+The immediately prior `9f086c90` checkpoint passed all
+17 required workflows (including real MinIO, WAL Crash,
+Controller HA, Ring WAL, JVM tests and GA Consistency).
+
+The pre-existing broker-local `BrokerLocalStartupReplayPrecheck`
+already validates real Kafka `SharedUnifiedLog` offsets,
+TopicId/partition, native leader epoch/generation,
+registered BrokerEpoch/incarnation, stable WAL mutation
+revisions, append admission revision and covered durable
+batch index. The new extension facade simply selects
+that trusted local precheck rather than duplicating WAL
+decisions. It refuses classic/null log objects, unbound or
+closed extension identity and the wrong Broker registration.
+No data is uploaded, written or retired by this inspection.
+
+The new asynchronous factory takes a supplied current-log
+resolver and Executor. It constructs its future with
+`CompletableFuture.supplyAsync`, keeping even metadata
+lookup off the serialized Broker lifecycle event queue.
+A saturated executor rejects immediately; never fall back
+to in-queue native WAL I/O. A closed extension or absent
+current replica cannot produce a report.
+
+`BrokerServer` now provides an explicitly callable,
+package-restricted adapter from the actual metadata
+`getTopicName(TopicId)` to current
+`LogManager.getLog(TopicPartition)` to the
+`SharedStorageExtension` reader. It **does not invoke**
+`BrokerLifecycleManager.setSourceWalProbeSampler`: per-Broker
+authenticated identity is not yet available in production
+and `DENY_ALL` remains active at the Controller.
+The extension reader remains unsigned local evidence, and
+the Report is never attached to the network heartbeat.
+
+Seven new storage JUnit methods and four new core Scala
+methods cover positive native WAL capture and all fail-closed
+lookup, identity, drift, closure, scheduling and executor
+capacity fences. Strict mandatory source/WAL Java/Scala
+evidence now totals **557 methods across 34 suites**,
+plus four independently XML-enforced BrokerServer
+resolution tests. Frozen MinIO GA and all COMMITTED
+logical/physical deletion gates remain unchanged.
+
+## Batches 181–184 — exact SpotBugs finding and double-fenced native capture
+
+At `00ed9ee1` the development workflows finished
+**16 SUCCESS / 1 FAILURE**. The main Storage Java 25 job
+passed Java 11, metadata Checkstyle/SpotBugs, clients
+protocol, broker challenge/capture JUnit, and the core
+BrokerServer tests. It failed only at
+`:storage:spotbugsMain` due to
+**BC_VACUOUS_INSTANCEOF**, at
+`SharedStorageExtension.java:196` in a redundant
+`SharedPartitionRoleListener` type guard.
+The field is now the concrete extension-owned listener
+with an explicit non-null check; the external
+`StoragePartitionRoleListener` contract is unchanged.
+The static rule remains enabled.
+
+An asynchronous sampler must not trust a native Source/WAL
+claim when its `SharedUnifiedLog` has been replaced or
+removed after the existing native/WAL source precheck.
+The sampler now re-resolves the current log and checks
+the **same Java object reference** before accepting a
+diagnostic report; a missing or different source refuses
+the result even if offset ranges match. It also captures
+and rechecks the exact Broker-ready identity observation
+around the sample and final log lookup, so BrokerEpoch
+or incarnation revocation cannot leak a report across
+that post-capture window. The pre-existing KRaft
+Controller precheck remains separately mandatory.
+
+The supplied executor must truly schedule work off the
+heartbeat event queue. `CompletableFuture.supplyAsync`
+alone permits a synchronous `Runnable::run` executor;
+the implementation now rejects an inline worker **before
+metadata or native WAL access**. This is a fail-closed
+guard, not a general guarantee that no externally supplied
+executor can block the submitter.
+
+Six additional storage JUnit tests cover these races and
+worker properties. Two additional core Scala tests
+verify inline execution and null metadata do not
+fall through to LogManager; previous positive async
+tests use distinct worker threads. Main CI requires all
+**six** named Scala cases and the strict storage/metadata
+inventory rises to **563 methods / 34 suites**.
+
+No report transmission or Controller permission has been
+added. The sampler is not installed on production startup,
+Controller per-Broker policy remains `DENY_ALL`, KRaft
+authority mutation and COMMITTED object deletion are
+OFF, and the MinIO GA release remains frozen.
+
+## Batches 185–188 — one-use Controller report correlation with default-deny identity
+
+Baseline `20b79319` finished **16/17 Actions SUCCESS**.
+The sole failure was two Scala core tests: an obsolete
+inline Executor in the removed-replica test, and a
+null-metadata test expecting an exception rather than
+the correct `Optional.empty`. Both test contracts
+were fixed; the fail-closed production lookup and
+off-heartbeat scheduling stayed unchanged.
+
+`QuorumController.Builder` now offers a **package-private**
+internal test seam for an already validated, unique
+BrokerId→KafkaPrincipal map. The production builder's
+default remains `PartitionRetirementBrokerPrincipalPolicy.DENY_ALL`;
+no controller server startup code passes another value.
+Shared principals, anonymous principals and wildcards
+are still disallowed by the pre-existing policy.
+
+Previously every inbound v3 Source/WAL Report was rejected
+before Controller contact-time updates. That remains
+true in production. When the internal test-only policy
+maps the authenticated Broker Principal and the v3
+wire passes strict shape checks, the report is now
+**correlated inside the existing serialized Controller
+event**. The event consumes a Controller-issued nonce
+exactly once (including on a forged reply), checks
+BrokerRegistration, TopicId/partition leadership,
+incarnation, source epoch and current KRaft CAS.
+**Regardless of these checks, the public heartbeat
+request still returns a non-authorizing error.**
+No KRaft authority mutation, retention or object
+DELETE is attached to this path. A unique network
+Principal establishes only the claimed channel's
+identity; it does not independently attest WAL
+persistence on other replicas.
+
+Two Controller integration regressions assert
+event queue ordering, error/no-authority outcome
+and foreign Principal denial. A separate strict
+gate regression forbids implicit trust of unknown
+future report-bearing protocol versions. Mandatory
+Java/Scala method inventory: **566 across 34 suites**.
+No feature is enabled at ordinary Kafka startup.
+
+## Batches 189–192 — disabled-by-default Broker v3 Report mapper and stable Controller nonce offers
+
+The last independently verified development checkpoint
+`10da64ff84b1bcaa059063b532e8c63357e6c85c`
+passed **17/17 Workflow gates**. This checkpoint adds
+the missing *local* Broker Report-to-v3-wire conversion
+without changing production request transmission, auth
+or object deletion.
+
+`BrokerLifecycleManager.SourceWalProbeCaptureState`
+now serializes a consumed immutable diagnostic
+`PartitionRetirementSourceProbe.Report` to
+`BrokerHeartbeatRequestData.SourceWalProbeReport`
+through `takeWireOnce`. The same single-use staged
+mailbox backs both typed and wire reads, preserving
+BrokerId/Epoch/Incarnation, original nonce,
+TopicId/partition, source LeaderEpoch and KRaft CAS.
+No report is transmitted; `sendBrokerHeartbeat()`
+still constructs the ordinary untagged request.
+The native Source/WAL report can never become a
+credential or authorize KRaft state mutation.
+
+The Controller's outstanding nonce map is now
+insertion ordered, so an authenticated Broker
+receives the **oldest pending, still-live Challenge**
+across heartbeat retries. The Controller still
+issues secure random nonces, enforces exact per-Broker
+principal binding, five-second TTL, max 128 pending
+probes and immediate invalidation on leadership
+change. Consuming any nonce removes it and
+never turns a self-reported WAL sample into
+a COMMITTED-retirement grant.
+
+Six Broker JUnit cases hard-gate exact wire mapping,
+version 3 roundtrip, v2 refusal, single-use consumption
+and stale Broker/TTL denial. Three extra Controller
+JUnit cases hard-gate deterministic retry ordering,
+expiration and cross-Broker isolation. Required
+evidence is **569 named metadata/storage methods /
+34 suites**, plus **24 separately XML-checked
+Broker capture-state tests** and the existing
+challenge/clients regressions.
+
+Production remains `DENY_ALL`; no native
+report sender is activated, no physical MinIO
+object deletion or authority writer is introduced.
+MinIO GA `9a28c11b6d97ecacafe1b8566cde5cc34d604889`
+remains frozen, and PR #2 stays Draft.
+
+## Batches 194–196 — fail-closed, non-emitting report dispatch seam and independent WAL replay
+
+The last fully validated parent `9e7b7fc73c5c038ee88a606c7f9c4834135a8ceb`
+passed **17/17 CI** after Batch 193. These follow-up changes require their
+own exact-HEAD Java 25, real MinIO, WAL Crash, Ring WAL and Controller HA
+validation before they can be marked green.
+
+- **194 — mutable heartbeat/report isolation.** Both ordinary and
+  explicit v3 `BrokerHeartbeatRequest.Builder` instances snapshot
+  generated protocol data, and each `build` returns an independent
+  snapshot. A late caller mutation cannot inject a report into a
+  stable v0-v2 request, nor can a diagnostic builder silently
+  downgrade a non-null report. Five targeted protocol tests (including
+  the two from Batch 193) are required in addition to the original
+  six, bringing the protocol XML evidence to **11 methods**.
+- **195 — dormant identity/version-gated preparation and strict Controller
+  ingress.** The package-private
+  `BrokerHeartbeatSourceWalReportDispatch` accepts a local one-shot
+  Report only when a trusted caller explicitly confirms unique
+  authenticated Broker-channel binding, Controller API versions
+  support exact v3, and the Broker remains registered, RUNNING,
+  unfenced, not shutting down, and free of offline log directories.
+  Missing channel versions or v2 refuse to drain the staged report.
+  An epoch mismatch burns old diagnostic evidence; neither ordinary
+  heartbeats nor production startup invokes this helper.
+  The Controller ingress independently denies report-bearing
+  fencing, shutdown, or offline-log-dir heartbeats before normal
+  Broker heartbeat bookkeeping, even with a uniquely mapped
+  Principal. **Seven** new Broker tests and **two** Controller
+  negative-path tests enforce these conditions.
+- **196 — WAL persistence/replay isolation.** Real independent File
+  WAL directories model two Broker instances: one replays a full
+  Kafka RecordBatch source window while the other is missing its
+  second batch, and the incomplete peer must still fail after close
+  and restart. An actual Ring WAL reopen proves a durable TRUNCATE
+  cannot restore obsolete indexed coverage. Both are deterministic
+  backend tests, not forged self-reports. Combined metadata/storage
+  mandatory inventory **569 → 573 methods**, across the existing
+  **34 suites**. Broker capture CI additionally requires
+  **31 tests**, including all seven dispatch regressions.
+
+**Limitations:** A caller-provided Boolean is NOT authentication.
+Neither an authenticated Broker-to-Controller production transport
+nor current distributed WAL replica attestation is wired in.
+These backend tests demonstrate independent close/restart replay,
+not unclean process-crash durability or a quorum certificate; the
+existing WAL Crash Workflow remains a separate required gate.
+The Controller still consumes single-use nonces inside its serialized
+event, verifies current BrokerRegistration/leader/CAS, and always
+rejects Source/WAL Reports as non-authoritative. Source/WAL sampling
+and Report sending remain disabled in normal Broker startup.
+`PartitionRetirementBrokerPrincipalPolicy.DENY_ALL` remains the
+production default. No KRaft retirement authority writer, COMMITTED
+reference retirement or physical MinIO DELETE is enabled. Frozen
+MinIO GA remains `9a28c11b6d97ecacafe1b8566cde5cc34d604889`;
+PR #2 stays Draft.
+
+## Batches 197–198 — GA fingerprint completeness for Broker v3 diagnostics
+
+Base: `305b25e5eb95ffab875de94213d833e172b00641`.
+Batch 194–196 has passed **16/17** exact-HEAD workflows. The only
+failed workflow, `Shared Storage GA Workflow Consistency`, identified
+an omitted production fingerprint input:
+`server/src/main/java/org/apache/kafka/server/BrokerHeartbeatSourceWalReportDispatch.java`.
+All Java 25/MinIO, Ring WAL, WAL Crash, and Controller HA runtime
+workflows on that SHA were successful.
+
+- **197 — repair real GA evidence contract.** Add the compiled v3
+  report dispatch implementation to the hash-based production
+  fingerprint. Do not remove the file from workflow triggers and
+  do not relax the GA graph's strict source-coverage assertion.
+- **198 — guard GC client-protocol prerequisites.** Explicitly hash
+  both broker heartbeat v3 JSON protocol definitions, the
+  transport-neutral `PartitionRetirementSourceProbe` and the
+  `BrokerHeartbeatRequest` implementation. Teach workflow
+  consistency analysis to recognize concrete
+  `clients/src/main/` production paths. Deterministic Python
+  regressions require coverage of all five inputs and prove that
+  mutating the dispatch source changes the production fingerprint.
+
+This intentionally changes the *development* evidence fingerprint:
+old successful workflow runs cannot be recycled as evidence for the
+new SHA. The frozen MinIO GA branch
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`
+is untouched. PR #2 remains Draft. This change adds no Broker
+sender, no authenticated credential mapping, no KRaft authority
+writer and no physical COMMITTED object deletion.
+
+## Batches 199–202 — complete all GA trigger coverage and cross-replica Ring WAL replay negatives
+
+The previous `ad1ff0ec1e99298e94a0e33fbdce118825000ab9` checkpoint
+completed **16/17** workflows. The only failed job,
+`Shared Storage GA Workflow Consistency`, reported that
+eighteen independent GA evidence workflows lacked `push.paths`
+coverage for five newly hashed Broker v3 diagnostic inputs.
+That failure is a release evidence contract issue, not a
+WAL correctness or Controller HA assertion failure.
+
+- **199 — exact-scope workflow triggers:** Add the four
+  Broker v3 Source/WAL client protocol inputs and
+  `BrokerHeartbeatSourceWalReportDispatch.java` to all
+  eighteen other eligible GA evidence workflows. Their
+  existing `pull_request` events also gain matching paths.
+  Do not use a broad `clients/**` wildcard or trigger
+  unrelated Real S3 evidence.
+- **200 — mandatory trigger regression:** Add a fast
+  unit test to check each protected path belongs to the
+  GA production fingerprint and is covered by `push`
+  and any supported `pull_request` on every eligible
+  evidence workflow. Keep the existing graph validator
+  strict; do not relax its coverage assertion.
+- **201 — independent Ring WAL source windows:** Use
+  two physically separate real Ring WAL files with the
+  same logical topic/partition. After both brokers close
+  and reopen, a missing local Kafka batch remains missing
+  even though the peer's Ring WAL contains it.
+- **202 — independent Ring WAL TRUNCATE:** Reopen two
+  physical Ring WAL backends after only one replica
+  durably truncates its indexed source data. The revoked
+  replica cannot borrow the healthy peer's complete window.
+  Both WAL regressions are mandatory XML/JUnit evidence:
+  the strict storage/metadata method inventory rises
+  from **573 to 575**.
+
+These two physical backend tests do **not** prove durable
+cross-replica consensus, broker transport authentication or
+current ControllerRegistration. No production report sender,
+KRaft retirement authority writer, COMMITTED reference retirement
+or MinIO physical DELETE is enabled. Production `DENY_ALL`
+and the frozen MinIO GA source
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`
+remain unchanged. PR #2 remains Draft. This checkpoint
+requires its own exact-source-SHA 17/17 CI before validation.
+
+## Batches 203–206 — live nonce selection and Controller heartbeat safety
+
+Validated baseline: `4556b4319838771c0923ef8897e6a0c04e7db89b`,
+**17/17** exact-HEAD workflows successful.
+
+- **203 — oldest-live Challenge selection:** On the serialized
+  Controller event the nonce registry evaluates the latest KRaft
+  candidate predicate and skips stale oldest challenges, rather
+  than allowing stale pending nonces to starve later valid ones.
+  Neither a skip nor an offer consumes a nonce.
+- **204 — authenticated Broker and epoch fencing:** Matching
+  Broker Principal and BrokerEpoch are checked *before* reading
+  live KRaft state for a challenge. An incarnation change cannot
+  reuse the old challenge even under the same numeric epoch.
+  Four deterministic registry regressions cover stale selection,
+  non-consuming behavior, unauthorized identities and epoch ABA.
+- **205 — offline-directory safety:** The v3 Challenge eligibility
+  gate rejects Broker heartbeats with offline log directories,
+  incomplete catchup, pending metadata records, fencing or
+  shutdown signals. One Controller regression covers these
+  independent negative conditions.
+- **206 — Controller GA source contract:** Include
+  `QuorumController`, all `PartitionRetirement*` Controller
+  and image sources, BrokerHeartbeatReply and authority-state
+  production classes in the GA fingerprint. Update the exact
+  `push` and applicable `pull_request` trigger paths of
+  every eligible evidence workflow, without broad unrelated
+  wildcards. Add Python regressions to protect both the
+  production-fingerprint and trigger-scope invariants.
+  Mandatory metadata/storage JUnit methods increase **575 → 580**.
+
+This checkpoint remains non-authorizing: no production Broker
+Source/WAL sender or transport authentication is activated,
+no KRaft retirement authority writer is enabled and no
+COMMITTED physical object DELETE can be executed. Production
+`DENY_ALL`, frozen MinIO GA
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`
+and PR #2 Draft status are preserved. The new SHA must
+pass its own exact-HEAD CI; earlier successful runs are
+not reusable evidence for the changed source fingerprint.
+
+## Batches 207–210 — recover Java 25 gate and pin diagnostic API identity
+
+Base: `15c486d25ea5e1f7e28af6eb9ea6b58ccc067ae7`.
+The preceding Batch 203–206 completed 16/17 workflows; the sole
+`Shared Storage` failure was Checkstyle's
+`BooleanExpressionComplexity = 7 > 5` in
+`QuorumController.sourceProbeHeartbeatEligible`, not a WAL or
+MinIO runtime failure.
+
+- **207 — recover metadata Checkstyle:** Preserve the current
+  fail-closed eligibility logic, splitting Broker metadata, shutdown,
+  fencing and offline-log-directory checks into smaller independent
+  conditions. No policy is relaxed.
+- **208 — exact API and protocol binding:** Both v3 source report
+  ingress and Controller Challenge egress now share one predicate that
+  checks the actual `ApiKeys.BROKER_HEARTBEAT.id` and exactly protocol
+  version 3. A version-three header belonging to a different Kafka
+  API cannot enable an unstable diagnostic field.
+- **209 — deterministic live-Controller rejection:** Two local
+  protocol-regression tests and one real QuorumController event test
+  reject foreign API headers even with a correctly mapped Broker
+  Principal. The request is denied before nonce consumption, normal
+  heartbeat contact refresh, or KRaft GC-authority emission.
+- **210 — block premature production Report emission:** A fast
+  Python regression asserts that the ordinary
+  `BrokerLifecycleManager` still sends its original non-reporting
+  heartbeat, rather than activating the currently dormant one-time
+  v3 diagnostic dispatcher. Controller tests are explicit CI selectors,
+  and the mandatory storage/metadata inventory becomes **583 methods**
+  (from 580).
+
+The above is preparatory security hardening, NOT delivery of a
+genuine authenticated Broker-to-Controller production Report sender.
+That sender requires proof of a unique Broker Principal bound to
+the actual network channel, current BrokerRegistration and a
+real Controller-issued nonce before enabling any traffic. Even a
+one-time matched diagnostic cannot establish distributed WAL
+durability or authorize GC. Production `DENY_ALL`, no KRaft
+retirement authority writer, no COMMITTED physical DELETE,
+frozen MinIO GA `9a28c11b6d97ecacafe1b8566cde5cc34d604889`
+and PR #2 Draft remain intact. Exact-new-HEAD CI is mandatory.
+
+## Batches 211–214 — per-Broker nonce quota, global bound, expiry and failover
+
+Verified parent: `7a349ffffb2e094fc46d9ca5cea9a110f6b0884c`,
+with all **17/17** exact-HEAD CI workflows successful.
+
+- **211 — isolated authenticated diagnostic quota:** Pending Controller
+  Source/WAL challenges now have both a global ceiling of **128** and
+  a per-Broker ceiling of **16**. The second limit prevents one
+  correctly mapped Broker Principal from monopolizing the global
+  diagnostic nonce registry. Neither cap is a substitute for transport
+  authentication or the existing Controller feature/CAS preflight.
+- **212 — independent Broker admission:** Deterministic regression
+  exhausts Broker 3's 16 challenges and verifies that Broker 4 can
+  still issue, advertise and consume its own nonce. Another regression
+  separately tests the global ceiling with 129 distinct Broker
+  Principals and verifies that consuming a challenge frees capacity.
+- **213 — bounded TTL and leadership revocation:** Real nonce-history
+  regression verifies that pruning at the five-second expiry frees a
+  Broker quota without allowing the old nonce to reappear; Controller
+  epoch invalidation immediately frees the quota while preserving the
+  old nonce's rejection.
+- **214 — mandatory evidence:** The above four new JUnit methods
+  are included in the existing strict metadata/storage JUnit XML gate.
+  Its requirement rises **583 → 587**. No Gradle job is duplicated:
+  the existing `PartitionRetirementSourceProbeRegistryTest` suite is
+  already compiled, run and checked in the main Shared Storage CI.
+
+The per-Broker cap protects in-memory, volatile *diagnostic*
+resources. There is still no authenticated Broker-to-Controller
+production report sender, no quorum durability certificate and no
+authorization to advance COMMITTED GC. The default Broker Principal
+policy is `DENY_ALL`; no KRaft GC authority writer, durable
+reference retirement or physical MinIO DELETE is enabled. Frozen
+MinIO GA remains `9a28c11b6d97ecacafe1b8566cde5cc34d604889`,
+PR #2 remains Draft, and exact-new-HEAD 17/17 CI is required before
+promoting this checkpoint.
+
+## Batch 215–218 — bind diagnostics to real authenticated Controller request transport
+
+Parent checkpoint: `dd45e345dd53f13a4dd2e8de11aa18c4289ccf44`.
+The Controller's unique Broker Principal mapping is necessary but
+insufficient proof of a direct authenticated transport: the old
+`ControllerApis` handler constructed `ControllerRequestContext`
+from a header and Principal alone, dropping the actual network
+security protocol and `isForwarded` flag.
+
+- **215 — preserve network authentication provenance:** BrokerHeartbeat
+  handling now constructs `ControllerRequestContext` from Kafka's
+  real `AuthorizableRequestContext`, carrying the connection's
+  `SecurityProtocol` and the actual request forwarding state.
+  Synthetic contexts built only from claimed header/Principal remain
+  untrusted by default. Other normal Controller APIs and stable
+  BrokerHeartbeat behavior are unchanged.
+- **216 — transport-bound ingress:** Even a uniquely mapped Broker
+  Principal cannot submit v3 Source/WAL diagnostics on PLAINTEXT,
+  SASL_PLAINTEXT, forwarded requests, token-derived identities or
+  synthetic contexts with unknown transport. Direct SASL_SSL or SSL
+  carrying a *non-anonymous* Principal may reach **non-authorizing**
+  nonce correlation, subject to the existing exact Broker mapping,
+  version, source window, KRaft BrokerRegistration and CAS checks.
+  SSL still requires correctly configured client certificate
+  verification; this code does not inspect or invent a certificate.
+- **217 — Controller issuance is equally gated:** Only a direct
+  authenticated Controller request may issue a nonce (the existing
+  feature and live KRaft preflight still applies) or receive a
+  diagnostic Challenge. Bad transport reports reject before heartbeat
+  contact-time mutation or nonce consumption.
+- **218 — 4 JUnit regressions and release evidence:** Require three
+  ingress tests for transport, SSL/nonanonymous, forwarded and
+  token-authenticated conditions, plus one production
+  QuorumController test asserting network rejects and zero GC
+  authority records. Exact method inventory increases **587 → 591**.
+  Include `ControllerRequestContext.java` and
+  `ControllerApis.scala` in the GA production fingerprint and all
+  eligible evidence workflow triggers. A Python source-contract test
+  prevents regressing to the old header-only ControllerApis call.
+
+**Important:** The TLS/SASL checks do not by themselves prove
+current BrokerRegistration ownership, durable multi-replica WAL
+state, or safe COMMITTED object deletion. The production Broker
+still does not emit Source/WAL Reports; this is an authenticated
+Controller ingress contract for future integration. The default
+Controller policy remains `DENY_ALL`, KRaft GC authority writing
+and physical MinIO DELETE remain disabled, frozen MinIO GA
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`
+is untouched, and PR #2 remains Draft. A new exact-HEAD 17/17
+CI run is required before this branch becomes a validated baseline.
+
+## Batches 219–222 — authenticated one-shot nonce consumption
+
+Verified previous checkpoint: `dd45e345dd53f13a4dd2e8de11aa18c4289ccf44` (17/17).
+The preceding `028d02b032a3d38bf3640f4fa6c405a2fd6a303e`
+revision finished **16/17** workflows: `Shared Storage` failed only
+because `QuorumControllerTest.java` imported `SecurityProtocol`
+twice, rejected by `metadata:checkstyleTest`.
+
+- **219 — recover static checks:** Remove the duplicate import; keep
+  all existing transport-identity tests and production checks intact.
+- **220 — protect the destructive nonce consume:** Controller event
+  handling now calls `consumeAuthenticated`, which requires a direct
+  authenticated Kafka transport and a trusted unique Broker Principal
+  mapping *before* any nonce removal. An unauthorized caller therefore
+  cannot burn a legitimate Broker's one-shot token.
+- **221 — protect cross-Broker nonce ownership:** Even an authenticated
+  Broker with its own mapping cannot consume a different Broker's
+  nonce by forging outer Broker fields: look up the pending nonce owner
+  and compare to the authenticated channel principal first. An
+  authenticated owner submitting a malformed envelope still burns
+  its nonce, preventing replay.
+- **222 — deterministic tests and CI evidence:** Three new registry
+  tests cover PLAINTEXT, SASL_PLAINTEXT, forwarded, token and synthetic
+  contexts, foreign Broker nonce interference, and legitimate
+  one-shot/forged-envelope behavior. The strict metadata/storage
+  JUnit method inventory increases **591 -> 594**. The existing
+  `PartitionRetirementSourceProbeRegistryTest` selector already
+  runs the entire class; no extra Gradle job or native build is added.
+
+This is a defense-in-depth step toward authenticated report ingress,
+not evidence of an enabled Broker-side report sender, cross-replica
+WAL durability, or COMMITTED GC permission. Default `DENY_ALL`,
+disabled KRaft authority writer and physical DELETE remain unchanged;
+the MinIO GA branch
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`
+remains frozen. PR #2 stays Draft until required exact-HEAD CI.
+
+## Batch 223–226 — parsed v3 ControllerApis transport relay test evidence
+
+Starting parent: `0cf762d3a1e86cd0d297b39bdaa0fc82fea7e64a`.
+Production Broker Source/WAL sending and GC authority remain disabled.
+
+- **223 — real Kafka protocol parse boundary:** The core ControllerApis
+  suite now builds a v3 BrokerHeartbeatRequest containing an exact
+  Source/WAL report, serializes it with a Kafka RequestHeader and
+  parses it through RequestContext and RequestChannel.Request before
+  invoking the Controller APIs handler. The mocked Controller receives
+  an unchanged nonce, BrokerEpoch, Broker incarnation and WAL revisions.
+- **224 — network-origin trust classification:** Direct SASL_SSL with
+  a uniquely named nonanonymous Broker principal is propagated into
+  ControllerRequestContext; PLAINTEXT, SASL_PLAINTEXT and a forwarded
+  SASL_SSL request are all classified as ineligible. The forwarded
+  case uses a RequestChannel.Request with a real enclosing request,
+  not a Boolean value invented in Controller code.
+- **225 — stable protocol compatibility:** Version-two BrokerHeartbeat
+  without a Report still traverses the ordinary ControllerApis
+  call path and is never classified as a v3 diagnostic.
+- **226 — enforced executable evidence:** Three new
+  `ControllerApisTest` methods are explicitly selected in the
+  existing Java 25 Shared Storage core test step and required
+  by its JUnit XML no-skips gate. No duplicate heavyweight workflow
+  or Native Image build is introduced; the metadata/storage
+  inventory remains at **594** since these are `core:test` methods.
+
+This is an in-process parsed-RPC integration using a mocked
+Controller, *not* evidence that a real SASL_SSL socket has completed
+a TLS/SASL handshake or that a multi-node Broker has transmitted a
+Report. It does not issue a Controller challenge, prove current
+BrokerRegistration across a leader failover, or grant GC authority.
+The existing authenticated Controller nonce and KRaft CAS checks
+continue to reject unverified reports. The production sender,
+KRaft authority writer and COMMITTED physical DELETE remain disabled;
+production policy stays `DENY_ALL`, frozen MinIO GA
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`
+is untouched and PR #2 remains Draft.
+
+## Batches 227–230 — Broker re-registration nonce isolation
+
+Validated baseline: `0cf762d3a1e86cd0d297b39bdaa0fc82fea7e64a`
+(**17/17** exact-HEAD CI). The preceding parsed-request test change,
+`87cdbffbb09d1f58d1364571a5d60e465830e35a`,
+must complete its own CI before this checkpoint can inherit new evidence.
+
+- **227 — reclaim superseded registration quotas:** On an authorized
+  new diagnostic issue, Controller discards only live pending nonces
+  issued to that Broker under a different BrokerEpoch or incarnation
+  before checking the single-Broker/global capacity limits. This
+  prevents a re-registered Broker from being starved for five seconds
+  by the former instance's outstanding requests. Other Broker
+  principals and challenges are unchanged.
+- **228 — preserve same-registration concurrent CAS observations:**
+  Challenges belonging to different source partitions/CAS
+  observations under the SAME BrokerEpoch and incarnation are kept,
+  preserving the original nonce ordering and one-shot semantics.
+- **229 — require exact protocol at destructive consume:** In addition
+  to the Controller network ingress guard, the authenticated registry
+  consumption itself requires the exact `BROKER_HEARTBEAT` API key and
+  version 3. A synthetic internal call using v2, a future version, or
+  a foreign API key never burns another valid nonce. The
+  package-private Controller begin path applies the same v3
+  requirement before issuing a nonce.
+- **230 — mandatory regressions:** Five new
+  `PartitionRetirementSourceProbeRegistryTest` methods verify quota
+  reclamation after BrokerEpoch changes, ABA at the same epoch with a
+  new incarnation, preservation of independent CAS windows, explicit
+  API/version replay refusal, and prevention of foreign-Broker quota
+  eviction. The strict metadata/storage XML evidence requirement
+  increases from **594 to 599** without another heavyweight CI job.
+
+This remains diagnostic, with production `DENY_ALL`, no Broker
+automatic Source/WAL emission, no KRaft GC-authority writer and no
+physical MinIO DELETE. The frozen MinIO GA branch
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`
+is untouched; PR #2 remains Draft. Neither a mocked network channel
+nor a one-time nonce proves real TLS authentication, multi-Broker WAL
+durability or safe COMMITTED deletion. A fresh 17/17 exact-HEAD CI is
+required.

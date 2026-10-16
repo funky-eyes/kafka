@@ -25,6 +25,7 @@ import org.apache.kafka.common.acl.AclBindingFilter;
 import org.apache.kafka.common.config.ConfigResource;
 import org.apache.kafka.common.errors.ApiException;
 import org.apache.kafka.common.errors.BrokerIdNotRegisteredException;
+import org.apache.kafka.common.errors.ClusterAuthorizationException;
 import org.apache.kafka.common.errors.InvalidRequestException;
 import org.apache.kafka.common.errors.StaleBrokerEpochException;
 import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
@@ -87,6 +88,7 @@ import org.apache.kafka.common.metadata.UserScramCredentialRecord;
 import org.apache.kafka.common.protocol.ApiMessage;
 import org.apache.kafka.common.quota.ClientQuotaAlteration;
 import org.apache.kafka.common.quota.ClientQuotaEntity;
+import org.apache.kafka.common.replica.PartitionRetirementSourceProbe;
 import org.apache.kafka.common.requests.ApiError;
 import org.apache.kafka.common.security.token.delegation.internals.DelegationTokenCache;
 import org.apache.kafka.common.utils.LogContext;
@@ -101,6 +103,7 @@ import org.apache.kafka.metadata.BrokerHeartbeatReply;
 import org.apache.kafka.metadata.BrokerRegistrationReply;
 import org.apache.kafka.metadata.FinalizedControllerFeatures;
 import org.apache.kafka.metadata.KafkaConfigSchema;
+import org.apache.kafka.metadata.PartitionRetirementAuthorityState.Key;
 import org.apache.kafka.metadata.SupportedConfigChecker;
 import org.apache.kafka.metadata.VersionRange;
 import org.apache.kafka.metadata.bootstrap.BootstrapMetadata;
@@ -136,6 +139,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
@@ -223,6 +227,9 @@ public final class QuorumController implements Controller {
         private long delegationTokenExpiryTimeMs;
         private long delegationTokenExpiryCheckIntervalMs = TimeUnit.MINUTES.toMillis(5);
         private long uncleanLeaderElectionCheckIntervalMs = TimeUnit.MINUTES.toMillis(5);
+        // Internal-only experiment seam. Production startup never sets this.
+        private PartitionRetirementBrokerPrincipalPolicy retirementBrokerPrincipalPolicy =
+            PartitionRetirementBrokerPrincipalPolicy.DENY_ALL;
 
         public Builder(int nodeId, String clusterId) {
             this.nodeId = nodeId;
@@ -388,6 +395,18 @@ public final class QuorumController implements Controller {
             return this;
         }
 
+        /**
+         * Visible only within the Controller package for authenticated
+         * diagnostic regressions. Do not expose this as a user configuration
+         * or bind a cluster-wide shared inter-broker Principal.
+         */
+        Builder setPartitionRetirementBrokerPrincipalPolicy(
+            PartitionRetirementBrokerPrincipalPolicy policy
+        ) {
+            this.retirementBrokerPrincipalPolicy = Objects.requireNonNull(policy, "policy");
+            return this;
+        }
+
 
         public QuorumController build() throws Exception {
             if (raftClient == null) {
@@ -455,7 +474,8 @@ public final class QuorumController implements Controller {
                     delegationTokenExpiryCheckIntervalMs,
                     uncleanLeaderElectionCheckIntervalMs,
                     controllerPerformanceSamplePeriodMs,
-                    controllerPerformanceAlwaysLogThresholdMs
+                    controllerPerformanceAlwaysLogThresholdMs,
+                    retirementBrokerPrincipalPolicy
                 );
             } catch (Exception e) {
                 Utils.closeQuietly(queue, "event queue");
@@ -722,6 +742,136 @@ public final class QuorumController implements Controller {
         );
     }
 
+
+    /**
+     * Evaluate a broker-reported source/WAL claim on the same serialized
+     * Controller event queue as BrokerRegistration, leader elections and
+     * retirement authority replay. Do not authenticate the sender here:
+     * an arbitrary caller can supply a matching self-reported claim.
+     *
+     * <p>The response is a diagnostic rejection, NEVER an authority grant.
+     * No Controller interface or network endpoint exposes this method and
+     * the event emits no KRaft records. The request's deadline is honored so
+     * a timed-out queue observation cannot be reused as fresh evidence.</p>
+     */
+    CompletableFuture<PartitionRetirementCandidatePrecheck.Finding> preflightUntrustedPartitionRetirement(
+        ControllerRequestContext context,
+        PartitionRetirementCandidatePrecheck.Candidate candidate,
+        PartitionRetirementUntrustedSourceClaim claim
+    ) {
+        Objects.requireNonNull(context, "context");
+        Objects.requireNonNull(candidate, "candidate");
+        return appendWriteEvent("partitionRetirementUntrustedSourcePreflight", context.deadlineNs(), () ->
+            ControllerResult.of(
+                List.of(),
+                PartitionRetirementCandidatePrecheck.assessUntrustedSourceClaim(
+                    featureControl, clusterControl, replicationControl, partitionRetirementControl,
+                    candidate, offsetControl.nextWriteOffset(), claim
+                )
+            )
+        );
+    }
+
+    /**
+     * Prepare a single-use diagnostic nonce on the serialized Controller event
+     * thread. The default empty broker principal policy deliberately refuses
+     * every candidate. This is not a remotely callable method or a GC grant.
+     */
+    CompletableFuture<Optional<PartitionRetirementSourceProbeRegistry.Challenge>> beginRetirementSourceProbe(
+        ControllerRequestContext context,
+        PartitionRetirementCandidatePrecheck.Candidate candidate
+    ) {
+        Objects.requireNonNull(context, "context");
+        Objects.requireNonNull(candidate, "candidate");
+        return appendWriteEvent("beginRetirementSourceProbe", context.deadlineNs(), () -> {
+            Optional<PartitionRetirementSourceProbeRegistry.Challenge> nonce = Optional.empty();
+            if (context.isDirectAuthenticatedBrokerChannel()
+                && PartitionRetirementHeartbeatReportGate.isVersionThreeHeartbeat(context)
+                && PartitionRetirementCandidatePrecheck.assess(
+                    featureControl, clusterControl, replicationControl, partitionRetirementControl,
+                    candidate, offsetControl.nextWriteOffset()
+                ) == PartitionRetirementCandidatePrecheck.Finding.SOURCE_LOG_START_NOT_VERIFIED) {
+                nonce = retirementSourceProbeRegistry.issue(
+                    candidate, context.principal(), retirementBrokerPrincipalPolicy, time.nanoseconds()
+                );
+            }
+            return ControllerResult.of(List.of(), nonce);
+        });
+    }
+
+    /**
+     * Consume an ephemeral nonce at most once and recheck live Controller CAS.
+     * A matching nonce plus self-reported WAL bytes still cannot establish
+     * transport authentication or source provenance. This always rejects
+     * retirement authorization and appends no KRaft records.
+     */
+    CompletableFuture<PartitionRetirementCandidatePrecheck.Finding> inspectRetirementSourceProbe(
+        ControllerRequestContext context,
+        PartitionRetirementCandidatePrecheck.Candidate candidate,
+        PartitionRetirementSourceProbeRegistry.Challenge challenge,
+        PartitionRetirementUntrustedSourceClaim claim
+    ) {
+        Objects.requireNonNull(context, "context");
+        Objects.requireNonNull(candidate, "candidate");
+        return appendWriteEvent("inspectRetirementSourceProbe", context.deadlineNs(), () -> {
+            PartitionRetirementSourceProbeRegistry.Finding status =
+                retirementSourceProbeRegistry.consumeAuthenticated(
+                    challenge, candidate, context, retirementBrokerPrincipalPolicy, time.nanoseconds()
+                );
+            if (status != PartitionRetirementSourceProbeRegistry.Finding.MATCHED_UNTRUSTED) {
+                return ControllerResult.of(
+                    List.of(), PartitionRetirementCandidatePrecheck.Finding.SOURCE_PROBE_NOT_VERIFIED
+                );
+            }
+            PartitionRetirementCandidatePrecheck.Finding controller =
+                PartitionRetirementCandidatePrecheck.assessUntrustedSourceClaim(
+                    featureControl, clusterControl, replicationControl, partitionRetirementControl,
+                    candidate, offsetControl.nextWriteOffset(), claim
+                );
+            if (controller != PartitionRetirementCandidatePrecheck.Finding.SOURCE_LOG_START_NOT_VERIFIED) {
+                return ControllerResult.of(List.of(), controller);
+            }
+            if (!retirementBrokerPrincipalPolicy.matches(context.principal(), candidate.brokerId())) {
+                return ControllerResult.of(
+                    List.of(), PartitionRetirementCandidatePrecheck.Finding.SOURCE_PRINCIPAL_UNBOUND
+                );
+            }
+            return ControllerResult.of(
+                List.of(), PartitionRetirementCandidatePrecheck.Finding.SOURCE_LOG_START_NOT_VERIFIED
+            );
+        });
+    }
+
+    /**
+     * Convert a transport-neutral broker report to the existing one-time
+     * Controller diagnostic event without introducing a second event or
+     * trusting caller-reported WAL fields. No network API is enabled.
+     *
+     * <p>Both the nonce consume and live KRaft revalidation happen inside
+     * inspectRetirementSourceProbe's same serialized Controller event.</p>
+     */
+    CompletableFuture<PartitionRetirementCandidatePrecheck.Finding> inspectRetirementSourceReport(
+        ControllerRequestContext context,
+        PartitionRetirementCandidatePrecheck.Candidate candidate,
+        PartitionRetirementSourceProbe.Report report
+    ) {
+        Objects.requireNonNull(context, "context");
+        Objects.requireNonNull(candidate, "candidate");
+        if (report == null) {
+            return inspectRetirementSourceProbe(context, candidate, null, null);
+        }
+        PartitionRetirementSourceProbe.Request request = report.request();
+        PartitionRetirementSourceProbeRegistry.Challenge challenge =
+            PartitionRetirementSourceProbeRegistry.Challenge.fromProtocolRequest(request);
+        PartitionRetirementUntrustedSourceClaim claim = new PartitionRetirementUntrustedSourceClaim(
+            new Key(request.topicId(), request.partitionId()),
+            request.brokerId(), request.brokerEpoch(), request.brokerIncarnationId(),
+            request.sourceLeaderEpoch(), report.localLeadershipGeneration(),
+            report.nativeLogStartOffset(), report.nativeHighWatermark(), report.nativeLogEndOffset(),
+            report.observedWalMutationRevision(), report.observedWalAdmissionRevision(), true
+        );
+        return inspectRetirementSourceProbe(context, candidate, challenge, claim);
+    }
 
     // Visible for testing
     ConfigurationControlManager configurationControl() {
@@ -1111,6 +1261,7 @@ public final class QuorumController implements Controller {
                     if (newLeader.isLeader(nodeId)) {
                         log.warn("We were the leader in epoch {}, and are still the leader " +
                                 "in the new epoch {}.", curClaimEpoch, newLeader.epoch());
+                        retirementSourceProbeRegistry.invalidateAll();
                         curClaimEpoch = newLeader.epoch();
                     } else {
                         log.warn("Renouncing the leadership due to a metadata log event. " +
@@ -1162,6 +1313,7 @@ public final class QuorumController implements Controller {
                 throw new RuntimeException("Cannot claim leadership because we are already the " +
                         "active controller.");
             }
+            retirementSourceProbeRegistry.invalidateAll();
             curClaimEpoch = epoch;
             offsetControl.activate(newNextWriteOffset);
             clusterControl.activate();
@@ -1212,6 +1364,7 @@ public final class QuorumController implements Controller {
                 throw new RuntimeException("Cannot renounce leadership because we are not the " +
                         "current leader.");
             }
+            retirementSourceProbeRegistry.invalidateAll();
             raftClient.resign(curClaimEpoch);
             curClaimEpoch = -1;
             deferredEventQueue.failAll(ControllerExceptions.
@@ -1462,6 +1615,16 @@ public final class QuorumController implements Controller {
     private final PartitionRetirementControlManager partitionRetirementControl;
 
     /**
+     * Deny-all in production. A package-private Builder seam permits tests
+     * to exercise uniquely authenticated broker identities; ordinary
+     * Controller startup must never install a shared inter-broker principal.
+     */
+    private final PartitionRetirementBrokerPrincipalPolicy retirementBrokerPrincipalPolicy;
+
+    /** One-time diagnostic probes; access exclusively in the Controller event queue. */
+    private final PartitionRetirementSourceProbeRegistry retirementSourceProbeRegistry;
+
+    /**
      * Manages SCRAM credentials, if there are any.
      */
     private final ScramControlManager scramControlManager;
@@ -1550,7 +1713,8 @@ public final class QuorumController implements Controller {
         long delegationTokenExpiryCheckIntervalMs,
         long uncleanLeaderElectionCheckIntervalMs,
         long controllerPerformanceSamplePeriodMs,
-        long controllerPerformanceAlwaysLogThresholdMs
+        long controllerPerformanceAlwaysLogThresholdMs,
+        PartitionRetirementBrokerPrincipalPolicy retirementBrokerPrincipalPolicy
     ) {
         this.nonFatalFaultHandler = nonFatalFaultHandler;
         this.fatalFaultHandler = fatalFaultHandler;
@@ -1562,6 +1726,10 @@ public final class QuorumController implements Controller {
         this.controllerMetrics = controllerMetrics;
         this.snapshotRegistry = new SnapshotRegistry(logContext);
         this.partitionRetirementControl = new PartitionRetirementControlManager(snapshotRegistry);
+        this.retirementSourceProbeRegistry = new PartitionRetirementSourceProbeRegistry(clusterId);
+        this.retirementBrokerPrincipalPolicy = Objects.requireNonNull(
+            retirementBrokerPrincipalPolicy, "retirementBrokerPrincipalPolicy"
+        );
         this.deferredEventQueue = new DeferredEventQueue(logContext);
         this.resourceExists = new ConfigResourceExistenceChecker();
         this.clientQuotaControlManager = new ClientQuotaControlManager.Builder().
@@ -1995,6 +2163,39 @@ public final class QuorumController implements Controller {
         ControllerRequestContext context,
         BrokerHeartbeatRequestData request
     ) {
+        PartitionRetirementHeartbeatReportGate.Finding probe =
+            PartitionRetirementHeartbeatReportGate.inspect(
+                context, request, retirementBrokerPrincipalPolicy
+            );
+        if (probe == PartitionRetirementHeartbeatReportGate.Finding.PRINCIPAL_UNBOUND
+            || probe == PartitionRetirementHeartbeatReportGate.Finding.CHANNEL_NOT_AUTHENTICATED) {
+            return CompletableFuture.failedFuture(
+                new ClusterAuthorizationException("Broker identity cannot authorize a Source/WAL probe")
+            );
+        }
+        if (probe == PartitionRetirementHeartbeatReportGate.Finding.UNVERIFIED) {
+            // A caller with an *explicitly* mapped, unique authenticated
+            // Broker Principal may correlate the nonce on the serialized
+            // Controller event queue. Even then its self-reported native
+            // bytes can never authorize retirement or refresh heartbeat
+            // contact, and the network request still receives an error.
+            PartitionRetirementSourceProbe.Report report =
+                PartitionRetirementHeartbeatReportGate.fromWire(request).orElseThrow();
+            PartitionRetirementCandidatePrecheck.Candidate candidate =
+                PartitionRetirementSourceProbeRegistry.Challenge
+                    .fromProtocolRequest(report.request()).candidate();
+            return inspectRetirementSourceReport(context, candidate, report)
+                .thenCompose(finding -> CompletableFuture.failedFuture(
+                    new InvalidRequestException("Source/WAL report is non-authoritative: " + finding)
+                ));
+        }
+        if (probe != PartitionRetirementHeartbeatReportGate.Finding.ABSENT) {
+            return CompletableFuture.failedFuture(
+                new InvalidRequestException("Source/WAL probe is not authorized: " + probe)
+            );
+        }
+        // Non-null reports never refresh Broker heartbeat contact time or
+        // mutate normal Broker heartbeat state.
         controllerMetrics.updateBrokerContactTime(request.brokerId());
         // We start by updating the broker heartbeat in a lockless data structure.
         // We do this first so that if the main controller thread is backlogged, the
@@ -2027,7 +2228,14 @@ public final class QuorumController implements Controller {
                     ControllerResult<BrokerHeartbeatReply> result = replicationControl.
                         processBrokerHeartbeat(request, offsetForRegisterBrokerRecord.getAsLong());
                     inControlledShutdown = result.response().inControlledShutdown();
-                    return result;
+                    BrokerHeartbeatReply reply = attachValidatedSourceProbe(context, request, result);
+                    if (reply == result.response()) {
+                        return result;
+                    }
+                    // Preserve the native heartbeat's atomicity and KRaft records.
+                    return result.isAtomic()
+                        ? ControllerResult.atomicOf(result.records(), reply)
+                        : ControllerResult.of(result.records(), reply);
                 }
 
                 @Override
@@ -2044,6 +2252,73 @@ public final class QuorumController implements Controller {
                     controllerMetrics.incrementTimedOutHeartbeats();
                 }
             });
+    }
+
+    /**
+     * Only the serialized Controller heartbeat event may select a previously
+     * issued probe. A v3 field is never fabricated from caller-supplied bytes
+     * and never grants Source/WAL authority or COMMITTED object retirement.
+     */
+    private BrokerHeartbeatReply attachValidatedSourceProbe(
+        ControllerRequestContext context,
+        BrokerHeartbeatRequestData request,
+        ControllerResult<BrokerHeartbeatReply> result
+    ) {
+        BrokerHeartbeatReply reply = result.response();
+        if (!PartitionRetirementHeartbeatReportGate.isVersionThreeHeartbeat(context)
+            || !context.isDirectAuthenticatedBrokerChannel()) {
+            return reply;
+        }
+        if (!sourceProbeHeartbeatEligible(request, reply, !result.records().isEmpty())) {
+            return reply;
+        }
+        if (!retirementBrokerPrincipalPolicy.matches(context.principal(), request.brokerId())) {
+            return reply;
+        }
+        Optional<PartitionRetirementSourceProbeRegistry.Challenge> pending =
+            retirementSourceProbeRegistry.pendingForHeartbeat(
+                request.brokerId(), request.brokerEpoch(), context.principal(), time.nanoseconds(),
+                candidate -> PartitionRetirementCandidatePrecheck.assess(
+                    featureControl, clusterControl, replicationControl, partitionRetirementControl,
+                    candidate, offsetControl.nextWriteOffset()
+                ) == PartitionRetirementCandidatePrecheck.Finding.SOURCE_LOG_START_NOT_VERIFIED
+            );
+        if (pending.isEmpty()) {
+            return reply;
+        }
+        // The immutable value is diagnostic only, held within this one
+        // Controller response. The nonce remains pending until consumed or
+        // expired; leader failover invalidates it.
+        return new BrokerHeartbeatReply(
+            reply.isCaughtUp(), reply.isFenced(), reply.inControlledShutdown(),
+            reply.shouldShutDown(), pending.get().toProtocolRequest()
+        );
+    }
+
+    /**
+     * The diagnostic can only be offered on an ordinary, healthy Broker
+     * heartbeat. In particular, an offline log directory invalidates the
+     * current native source observation even when other heartbeat flags
+     * indicate that the Broker is running.
+     */
+    static boolean sourceProbeHeartbeatEligible(
+        BrokerHeartbeatRequestData request,
+        BrokerHeartbeatReply reply,
+        boolean emitsMetadataRecords
+    ) {
+        // Group the guards by independent failure domains. This also
+        // avoids one long compound expression across broker state, KRaft
+        // writes, and local disk health.
+        if (emitsMetadataRecords || !reply.isCaughtUp() || reply.isFenced()) {
+            return false;
+        }
+        if (reply.shouldShutDown() || reply.inControlledShutdown()) {
+            return false;
+        }
+        if (request.wantFence() || request.wantShutDown()) {
+            return false;
+        }
+        return request.offlineLogDirs().isEmpty();
     }
 
     @Override

@@ -21,6 +21,7 @@ on:
       - shared-wal-s3-4.3.1
     paths:
       - 'server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java'
+      - 'server/src/main/java/org/apache/kafka/server/BrokerHeartbeatSourceWalReportDispatch.java'
       - 'gradle.properties'
       - 'gradle/dependencies.gradle'
       - 'gradlew'
@@ -40,6 +41,21 @@ on:
       - 'metadata/src/main/java/org/apache/kafka/image/PartitionRetirementAuthority*.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementControlManager.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/QuorumController.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/ControllerRequestContext.java'
+      - 'core/src/main/scala/kafka/server/ControllerApis.scala'
+      - 'metadata/src/main/java/org/apache/kafka/metadata/BrokerHeartbeatReply.java'
+      - 'clients/src/main/java/org/apache/kafka/common/replica/PartitionRetirementSourceProbe.java'
+      - 'server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java'
+      - 'server/src/main/java/org/apache/kafka/server/BrokerHeartbeatSourceWalReportDispatch.java'
+      - 'server/src/test/java/org/apache/kafka/server/BrokerHeartbeatSourceProbeChallengeGateTest.java'
+      - 'server/src/test/java/org/apache/kafka/server/BrokerHeartbeatSourceProbeCaptureStateTest.java'
+      - 'clients/src/main/resources/common/message/BrokerHeartbeatRequest.json'
+      - 'clients/src/main/resources/common/message/BrokerHeartbeatResponse.json'
+      - 'clients/src/main/java/org/apache/kafka/common/requests/BrokerHeartbeatRequest.java'
+      - 'clients/src/test/java/org/apache/kafka/common/requests/BrokerHeartbeatSourceWalProbeProtocolTest.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirement*.java'
+      - 'metadata/src/test/java/org/apache/kafka/controller/PartitionRetirement*.java'
+      - 'metadata/src/test/java/org/apache/kafka/controller/QuorumControllerTest.java'
       - 'metadata/src/main/java/org/apache/kafka/image/MetadataDelta.java'
       - 'metadata/src/main/java/org/apache/kafka/image/MetadataImage.java'
       - 'metadata/src/test/java/org/apache/kafka/metadata/PartitionRetirementAuthorityStateTest.java'
@@ -80,6 +96,7 @@ on:
       - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
       - 'core/src/test/**/kafka/log/**'
       - 'core/src/test/**/kafka/server/**'
+      - 'checkstyle/import-control-metadata.xml'
       - 'checkstyle/import-control-shared-storage-s3.xml'
       - 'settings.gradle'
       - '.github/actions/setup-gradle/**'
@@ -95,6 +112,7 @@ on:
   pull_request:
     paths:
       - 'server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java'
+      - 'server/src/main/java/org/apache/kafka/server/BrokerHeartbeatSourceWalReportDispatch.java'
       - 'build.gradle'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/**'
       - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementControllerPrecheck.java'
@@ -104,6 +122,21 @@ on:
       - 'metadata/src/main/java/org/apache/kafka/image/PartitionRetirementAuthority*.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementControlManager.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/QuorumController.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/ControllerRequestContext.java'
+      - 'core/src/main/scala/kafka/server/ControllerApis.scala'
+      - 'metadata/src/main/java/org/apache/kafka/metadata/BrokerHeartbeatReply.java'
+      - 'clients/src/main/java/org/apache/kafka/common/replica/PartitionRetirementSourceProbe.java'
+      - 'server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java'
+      - 'server/src/main/java/org/apache/kafka/server/BrokerHeartbeatSourceWalReportDispatch.java'
+      - 'server/src/test/java/org/apache/kafka/server/BrokerHeartbeatSourceProbeChallengeGateTest.java'
+      - 'server/src/test/java/org/apache/kafka/server/BrokerHeartbeatSourceProbeCaptureStateTest.java'
+      - 'clients/src/main/resources/common/message/BrokerHeartbeatRequest.json'
+      - 'clients/src/main/resources/common/message/BrokerHeartbeatResponse.json'
+      - 'clients/src/main/java/org/apache/kafka/common/requests/BrokerHeartbeatRequest.java'
+      - 'clients/src/test/java/org/apache/kafka/common/requests/BrokerHeartbeatSourceWalProbeProtocolTest.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirement*.java'
+      - 'metadata/src/test/java/org/apache/kafka/controller/PartitionRetirement*.java'
+      - 'metadata/src/test/java/org/apache/kafka/controller/QuorumControllerTest.java'
       - 'metadata/src/main/java/org/apache/kafka/image/MetadataDelta.java'
       - 'metadata/src/main/java/org/apache/kafka/image/MetadataImage.java'
       - 'metadata/src/test/java/org/apache/kafka/metadata/PartitionRetirementAuthorityStateTest.java'
@@ -144,6 +177,7 @@ on:
       - 'core/src/main/scala/kafka/server/ReplicaFetcherThread.scala'
       - 'core/src/test/**/kafka/log/**'
       - 'core/src/test/**/kafka/server/**'
+      - 'checkstyle/import-control-metadata.xml'
       - 'checkstyle/import-control-shared-storage-s3.xml'
       - 'settings.gradle'
       - 'tools/check_shared_storage_minio_test_results.py'
@@ -185,6 +219,125 @@ jobs:
           java-version: 25
           gradle-cache-read-only: true
 
+      - name: Enforce clients Java 11 and metadata import boundaries
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew :clients:compileJava :metadata:checkstyleMain :metadata:checkstyleTest \
+            :metadata:spotbugsMain --no-scan 2>&1 | tee shared-storage-clients-java11.log
+
+      - name: Verify experimental broker heartbeat protocol compatibility
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew :clients:test --no-scan \
+            --tests 'org.apache.kafka.common.requests.BrokerHeartbeatSourceWalProbeProtocolTest' \
+            2>&1 | tee shared-storage-source-probe-wire-test.log
+          python3 - <<'PY'
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+          suite = 'org.apache.kafka.common.requests.BrokerHeartbeatSourceWalProbeProtocolTest'
+          path = Path('clients/build/test-results/test/TEST-' + suite + '.xml')
+          root = ET.parse(path).getroot()
+          expected = {
+              'productionControllerHeartbeatRemainsAtVersionTwo',
+              'legacyRequestVersionsNeverCarrySourceWalReport',
+              'unstableReportRoundTripsWithExactBrokerSourceCoordinates',
+              'unstableControllerChallengeRoundTripsAndLegacyReplyStaysEmpty',
+              'legacyRequestCannotSilentlyDowngradeNonemptyReport',
+              'legacyResponseCannotSilentlyDowngradeNonemptyChallenge',
+              'defaultBuilderRejectsUnstableReportBeforeNetworkDispatch',
+              'explicitDiagnosticBuilderPinsExactVersionThree',
+              'defaultBuilderSnapshotsDataBeforeCallerCanInjectAReport',
+              'mutatingOneBuiltHeartbeatCannotInjectReportIntoAnotherBuild',
+              'explicitVThreeBuilderSnapshotsReportAndRejectsBuildTimeDowngrade'
+          }
+          assert root.get('name') == suite
+          assert all(root.get(field) == '0' for field in ('skipped', 'failures', 'errors'))
+          actual = {case.get('name', '').removesuffix('()') for case in root.findall('testcase')}
+          assert expected <= actual, sorted(expected - actual)
+          print(f'PASS: {len(expected)} broker heartbeat protocol regression methods, zero skips')
+          PY
+
+      - name: Verify broker lifecycle source probe challenge rejection
+        shell: bash
+        run: |
+          set -o pipefail
+          # Running the ordinary Gradle checks enforces the unchanged
+          # server Checkstyle and SpotBugs rules (no baseline exclusions).
+          ./gradlew :server:checkstyleMain :server:spotbugsMain :server:test --no-scan \
+            --tests 'org.apache.kafka.server.BrokerHeartbeatSourceProbeChallengeGateTest' \
+            --tests 'org.apache.kafka.server.BrokerHeartbeatSourceProbeCaptureStateTest' \
+            2>&1 | tee shared-storage-broker-probe-test.log
+          python3 - <<'PY'
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+          suite = 'org.apache.kafka.server.BrokerHeartbeatSourceProbeChallengeGateTest'
+          xml = Path('server/build/test-results/test/TEST-' + suite + '.xml')
+          root = ET.parse(xml).getroot()
+          required = {
+              'missingChallengeCannotChangeNormalBrokerHeartbeat',
+              'controllerMustNegotiateExplicitUnstableVersionThree',
+              'unregisteredOrFencedBrokerCannotAcceptChallenge',
+              'wrongClusterOrBrokerIdCannotBorrowAnotherBrokerChallenge',
+              'brokerEpochOrIncarnationAbaCannotResurrectOldChallenge',
+              'invalidNonceOrRecreatedTopicFailsBeforeDiagnosticDecode',
+              'invalidAuthorityCasOrSourceLogStartIsMalformed',
+              'missingClusterAndRequiredUuidAreMalformedOrMismatched',
+              'validChallengeIsStillUntrustedAndNeverSelfAuthorizesGc',
+              'rejectedChallengeNeverYieldsLocalSamplingRequest',
+          }
+          assert root.tag == 'testsuite' and root.get('name') == suite
+          assert all(root.get(key) == '0' for key in ('skipped', 'failures', 'errors'))
+          executed = {node.get('name', '').removesuffix('()') for node in root.findall('testcase')}
+          assert required <= executed, sorted(required - executed)
+          print(f'PASS: {len(required)} broker challenge regression cases and zero skips')
+          capture_suite = 'org.apache.kafka.server.BrokerHeartbeatSourceProbeCaptureStateTest'
+          capture_xml = Path('server/build/test-results/test/TEST-' + capture_suite + '.xml')
+          capture_root = ET.parse(capture_xml).getroot()
+          required_capture = {
+              'successfulCaptureIsAvailableExactlyOnce',
+              'duplicateNonceCannotResampleOrOverwritePriorEvidence',
+              'interleavedChallengesCannotReplayAnEarlierNonce',
+              'saturatedNonceHistoryRejectsNewChallengesWithoutEvictingLiveFences',
+              'revokedChallengesRetainReplayFencesAcrossProviderReplacement',
+              'nonceHistoryHandlesMonotonicClockWrapWithoutPrematureEviction',
+              'laterNonceFencesOutOfOrderCompletionFromOlderCapture',
+              'singleFlightPreventsAnUnboundedQueueOfNativeCaptureTasks',
+              'providerReconfigurationRevokesPendingAndStagedCaptures',
+              'synchronousProviderFailureReleasesIOLockButNotNonceReplayFence',
+              'captureForWrongBrokerOrChangedEpochCannotBeStaged',
+              'brokerIncarnationChangeInvalidatesAsyncCompletion',
+              'fencingOrUnregistrationInvalidatesAsyncCompletion',
+              'emptyNullOrFailedProviderDoesNotProduceReport',
+              'reportForOtherNonceOrSourceCannotBeSubstituted',
+              'expiryAtExactMaxAgeInvalidatesCompletionAndStagedResult',
+              'monotonicTimerCanCrossSignedLongBoundary',
+              'backwardClockObservationCannotMakeOldCaptureFresh',
+              'stagedReportMapsToExactUnstableHeartbeatWireFields',
+              'diagnosticWireReportSurvivesVThreeEncodeDecodeWithoutAuthorizingGc',
+              'localWireReportNeverSilentlyDowngradesToStableVTwo',
+              'wireAndTypedViewsShareTheSameOneShotResult',
+              'wireReportIsSuppressedAfterEpochChangeOrExpiry',
+              'revokingBrokerRegistrationDiscardsWireReportBeforeEncoding',
+              'reportDispatchRequiresIndependentlyVerifiedBrokerChannelIdentity',
+              'versionTwoControllerCannotDrainStagedWalReport',
+              'missingControllerApiNegotiationCannotDrainStagedReport',
+              'explicitVThreeDispatchPreservesOrdinaryHeartbeatAndIsSingleUse',
+              'fencingShutdownOrOfflineLogDirCannotReportWalDurability',
+              'replacedBrokerEpochCannotSendOrReuseStagedSourceReport',
+              'unregisteredOrExpiredCaptureCannotCreateAReportHeartbeat',
+          }
+          assert capture_root.tag == 'testsuite'
+          assert capture_root.get('name') == capture_suite
+          assert all(capture_root.get(field) == '0' for field in ('skipped', 'failures', 'errors'))
+          capture_names = {
+              case.get('name', '').removesuffix('()') for case in capture_root.findall('testcase')
+          }
+          assert required_capture <= capture_names, sorted(required_capture - capture_names)
+          print(f'PASS: {len(required_capture)} asynchronous broker capture fences and zero skips')
+          PY
+
       - name: Run shared storage LogManager startup regression
         shell: bash
         run: |
@@ -193,7 +346,53 @@ jobs:
             --tests 'kafka.log.LogManagerTest.testLoadLogsSkipsIncompleteInitializationWithoutOffliningParentDir' \
             --tests 'kafka.server.BrokerLifecycleManagerTest.testIncarnationChangesAcrossBrokerProcessRestart' \
             --tests 'kafka.server.BrokerLifecycleManagerTest.testKraftJBODMetadataVersionUpdateEvent' \
+            --tests 'kafka.server.ControllerApisTest.testStableHeartbeatNeverIncludesSourceWalChallenge' \
+            --tests 'kafka.server.ControllerApisTest.testFencedOrShuttingDownBrokerCannotReceiveDiagnostic' \
+            --tests 'kafka.server.ControllerApisTest.testControllerDiagnosticRoundTripsOnHeartbeatVersionThree' \
+            --tests 'kafka.server.ControllerApisTest.testAuthenticatedVThreeReportReachesControllerWithWireFieldsIntact' \
+            --tests 'kafka.server.ControllerApisTest.testForwardedAndPlaintextReportsNeverAcquireAuthenticatedChannelIdentity' \
+            --tests 'kafka.server.ControllerApisTest.testLegacyBrokerHeartbeatStillTraversesUnmodifiedControllerPath' \
+            --tests 'kafka.server.BrokerSourceWalProbeAdapterTest' \
             --no-scan 2>&1 | tee shared-storage-logmanager-regression.log
+          python3 - <<'PY'
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+          suite = 'kafka.server.ControllerApisTest'
+          root = ET.parse(Path('core/build/test-results/test/TEST-' + suite + '.xml')).getroot()
+          expected = {
+              'testStableHeartbeatNeverIncludesSourceWalChallenge',
+              'testFencedOrShuttingDownBrokerCannotReceiveDiagnostic',
+              'testControllerDiagnosticRoundTripsOnHeartbeatVersionThree',
+              'testAuthenticatedVThreeReportReachesControllerWithWireFieldsIntact',
+              'testForwardedAndPlaintextReportsNeverAcquireAuthenticatedChannelIdentity',
+              'testLegacyBrokerHeartbeatStillTraversesUnmodifiedControllerPath',
+          }
+          assert root.get('name') == suite
+          assert all(root.get(field) == '0' for field in ('skipped', 'failures', 'errors'))
+          actual = {case.get('name', '').removesuffix('()') for case in root.findall('testcase')}
+          assert expected <= actual, sorted(expected - actual)
+          print(f'PASS: {len(expected)} ControllerApis v3 response contract tests')
+          broker_suite = 'kafka.server.BrokerSourceWalProbeAdapterTest'
+          broker_root = ET.parse(
+              Path('core/build/test-results/test/TEST-' + broker_suite + '.xml')
+          ).getroot()
+          broker_methods = {
+              'testResolutionIsDeferredUntilExecutorAndUsesExactTopicPartition',
+              'testMissingTopicIdNeverTouchesLogManager',
+              'testRemovedLocalReplicaCannotSupplySourceWalEvidence',
+              'testRejectedWorkerDoesNotRunNativeSamplingOnHeartbeatThread',
+              'testInlineWorkerCannotReadMetadataOrNativeSource',
+              'testNullTopicMetadataResponseNeverFallsBackToLocalLog',
+          }
+          assert broker_root.get('name') == broker_suite
+          assert all(broker_root.get(k) == '0' for k in ('skipped', 'failures', 'errors'))
+          actual_broker = {
+              case.get('name', '').removesuffix('()')
+              for case in broker_root.findall('testcase')
+          }
+          assert broker_methods <= actual_broker, sorted(broker_methods - actual_broker)
+          print(f'PASS: {len(broker_methods)} Broker native Source/WAL lookup tests')
+          PY
 
       - name: Run shared storage tests
         shell: bash
@@ -213,7 +412,26 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          ./gradlew :metadata:checkstyleMain :metadata:checkstyleTest :metadata:test --no-scan \
+          ./gradlew :metadata:test --no-scan \
+            --tests 'org.apache.kafka.controller.QuorumControllerTest.testUntrustedRetirementClaimIsRejectedByProductionFeatureWithoutKRaftRecords' \
+            --tests 'org.apache.kafka.controller.QuorumControllerTest.testUntrustedRetirementClaimCannotBypassTheSerializedControllerEventQueue' \
+            --tests 'org.apache.kafka.controller.QuorumControllerTest.testProbeIssuanceIsDisabledUntilFeatureAndBrokerAuthAreNegotiated' \
+            --tests 'org.apache.kafka.controller.QuorumControllerTest.testForgedSourceProbeCannotPublishControllerAuthorityRecord' \
+            --tests 'org.apache.kafka.controller.QuorumControllerTest.testUnsignedSourceWalReportCannotBecomeControllerAuthority' \
+            --tests 'org.apache.kafka.controller.QuorumControllerTest.testMissingSourceWalReportNeverConsumesOrEmitsControllerRecords' \
+            --tests 'org.apache.kafka.controller.QuorumControllerTest.testUntrustedHeartbeatProbeRejectsBeforeAnyKRaftWrite' \
+            --tests 'org.apache.kafka.controller.QuorumControllerTest.testHeartbeatProbeCannotBypassStableProtocolVersion' \
+            --tests 'org.apache.kafka.controller.QuorumControllerTest.testProductionV3HeartbeatNeverIssuesUnauthenticatedSourceChallenge' \
+            --tests 'org.apache.kafka.controller.QuorumControllerTest.testUniquelyBoundHeartbeatReportIsSerializedAndStillDeniedWithoutNonce' \
+            --tests 'org.apache.kafka.controller.QuorumControllerTest.testBoundBrokerCannotBorrowForeignIdentityOrFutureHeartbeatVersion' \
+            --tests 'org.apache.kafka.controller.QuorumControllerTest.testMappedBrokerCannotReportWhileFencingOrShuttingDown' \
+            --tests 'org.apache.kafka.controller.QuorumControllerTest.testBoundBrokerForeignRequestApiKeyCannotIssueSourceWalReport' \
+            --tests 'org.apache.kafka.controller.QuorumControllerTest.testPlaintextForwardedOrSyntheticBrokerReportRejectedBeforeControllerQueue' \
+            --tests 'org.apache.kafka.controller.QuorumControllerTest.testSourceProbeHeartbeatEligibilityRejectsUnsafeBrokerStates' \
+            --tests 'org.apache.kafka.controller.PartitionRetirementHeartbeatReportGateTest' \
+            --tests 'org.apache.kafka.controller.PartitionRetirementBrokerPrincipalPolicyTest' \
+            --tests 'org.apache.kafka.controller.PartitionRetirementSourceProbeRegistryTest' \
+            --tests 'org.apache.kafka.controller.PartitionRetirementSourceProbeValueTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementControllerPrecheckTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementControlManagerTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementCandidatePrecheckTest' \
@@ -260,6 +478,8 @@ jobs:
           path: |
             shared-storage-logmanager-regression.log
             shared-storage-test.log
+            shared-storage-source-probe-wire-test.log
+            shared-storage-broker-probe-test.log
             shared-storage-controller-retirement-test.log
             shared-storage-retirement-feature-test.log
             shared-storage-s3-test.log
@@ -275,6 +495,7 @@ jobs:
             storage/build/reports/spotbugs
             storage/build/reports/checkstyle
             metadata/build/reports/checkstyle
+            metadata/build/reports/spotbugs
             storage/shared-storage-s3/build/reports/spotbugs
             storage/shared-storage-s3/build/reports/checkstyle
           if-no-files-found: ignore
@@ -286,6 +507,10 @@ jobs:
         with:
           name: shared-storage-test-reports
           path: |
+            clients/build/reports/tests/test
+            clients/build/test-results/test
+            server/build/reports/tests/test
+            server/build/test-results/test
             storage/build/reports/tests/test
             storage/build/test-results/test
             metadata/build/reports/tests/test

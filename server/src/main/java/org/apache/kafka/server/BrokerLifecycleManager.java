@@ -19,10 +19,13 @@ package org.apache.kafka.server;
 import org.apache.kafka.clients.ClientResponse;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.message.BrokerHeartbeatRequestData;
+import org.apache.kafka.common.message.BrokerHeartbeatRequestData.SourceWalProbeReport;
 import org.apache.kafka.common.message.BrokerHeartbeatResponseData;
+import org.apache.kafka.common.message.BrokerHeartbeatResponseData.SourceWalProbeChallenge;
 import org.apache.kafka.common.message.BrokerRegistrationRequestData;
 import org.apache.kafka.common.message.BrokerRegistrationRequestData.ListenerCollection;
 import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.replica.PartitionRetirementSourceProbe;
 import org.apache.kafka.common.requests.BrokerHeartbeatRequest;
 import org.apache.kafka.common.requests.BrokerHeartbeatResponse;
 import org.apache.kafka.common.requests.BrokerRegistrationRequest;
@@ -41,12 +44,18 @@ import org.slf4j.Logger;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -81,6 +90,14 @@ public class BrokerLifecycleManager {
     private final Map<String, Uuid> logDirs;
     private final Runnable shutdownHook;
     private final Supplier<Boolean> cordonedLogDirsSupported;
+
+    /**
+     * Installed only by an explicit caller. A null sampler keeps the feature
+     * completely dormant in production and never schedules WAL reads.
+     * Both fields are accessed only from the lifecycle event queue.
+     */
+    private SourceWalProbeSampler sourceWalProbeSampler;
+    private final SourceWalProbeCaptureState sourceWalProbeCaptureState = new SourceWalProbeCaptureState();
 
     /**
      * The broker id.
@@ -268,6 +285,19 @@ public class BrokerLifecycleManager {
                 channelManager, clusterId, advertisedListeners, supportedFeatures));
     }
 
+    /**
+     * Installs a read-only asynchronous capture adapter, or null to disable it.
+     * Does not enable any network Source/WAL report or GC authorization.
+     * Registration of a real native adapter must remain behind a separate
+     * authenticated feature negotiation gate.
+     */
+    public void setSourceWalProbeSampler(SourceWalProbeSampler sampler) {
+        eventQueue.append(() -> {
+            sourceWalProbeCaptureState.clear();
+            sourceWalProbeSampler = sampler;
+        });
+    }
+
     public CompletableFuture<Void> setReadyToUnfence() {
         eventQueue.append(new SetReadyToUnfenceEvent());
         return initialUnfenceFuture;
@@ -349,6 +379,7 @@ public class BrokerLifecycleManager {
                     logger.info("Attempted to enter pending controlled shutdown state, but we are already in that state.");
                 case RUNNING -> {
                     logger.info("Beginning controlled shutdown.");
+                    sourceWalProbeCaptureState.clear();
                     state = BrokerState.PENDING_CONTROLLED_SHUTDOWN;
                     // Send the next heartbeat immediately in order to let the controller
                     // begin processing the controlled shutdown as soon as possible.
@@ -557,6 +588,7 @@ public class BrokerLifecycleManager {
             } else {
                 Errors errorCode = Errors.forCode(message.data().errorCode());
                 if (errorCode == Errors.NONE) {
+                    sourceWalProbeCaptureState.clear();
                     brokerEpoch = message.data().brokerEpoch();
                     registered = true;
                     initialRegistrationSucceeded = true;
@@ -630,26 +662,32 @@ public class BrokerLifecycleManager {
         public void run() {
             communicationInFlight = false;
             if (timedOut) {
+                sourceWalProbeCaptureState.clear();
                 scheduleNextCommunicationAfterFailure();
                 return;
             }
             if (response.authenticationException() != null) {
+                sourceWalProbeCaptureState.clear();
                 logger.error("Unable to send broker heartbeat for {} because of an authentication exception.",
                         nodeId, response.authenticationException());
                 scheduleNextCommunicationAfterFailure();
             } else if (response.versionMismatch() != null) {
+                sourceWalProbeCaptureState.clear();
                 logger.error("Unable to send broker heartbeat for {} because of an API version problem.", nodeId, response.versionMismatch());
                 scheduleNextCommunicationAfterFailure();
             } else if (response.responseBody() == null) {
+                sourceWalProbeCaptureState.clear();
                 logger.warn("Unable to send broker heartbeat for {}. Retrying.", nodeId);
                 scheduleNextCommunicationAfterFailure();
             } else if (!(response.responseBody() instanceof BrokerHeartbeatResponse message)) {
+                sourceWalProbeCaptureState.clear();
                 logger.error("Unable to send broker heartbeat for {} because the controller returned an invalid response type.", nodeId);
                 scheduleNextCommunicationAfterFailure();
             } else {
                 Errors errorCode = Errors.forCode(message.data().errorCode());
                 if (errorCode == Errors.NONE) {
                     BrokerHeartbeatResponseData responseData = message.data();
+                    inspectSourceWalChallenge(response, responseData);
                     currentOfflineDirs.forEach(cur -> offlineDirs.put(cur, true));
                     switch (state) {
                         case STARTING -> {
@@ -710,10 +748,91 @@ public class BrokerLifecycleManager {
                         }
                     }
                 } else {
+                    sourceWalProbeCaptureState.clear();
                     logger.warn("Broker {} sent a heartbeat request but received error {}.", nodeId, errorCode);
                     scheduleNextCommunicationAfterFailure();
                 }
             }
+        }
+    }
+
+    /**
+     * Observe a challenge on the real Controller heartbeat response path.
+     * A matched v3 challenge is intentionally discarded: neither the
+     * provider of actual native Source/WAL evidence nor per-broker network
+     * authentication is wired into this lifecycle manager yet.
+     *
+     * <p>Never allow a speculative v3 field to affect broker readiness,
+     * registration, ordinary heartbeat scheduling or GC authority.</p>
+     */
+    private void inspectSourceWalChallenge(ClientResponse response, BrokerHeartbeatResponseData data) {
+        if (data.sourceWalProbeChallenge() == null) {
+            return;
+        }
+        if (data.isFenced() || data.shouldShutDown() || !data.isCaughtUp()) {
+            sourceWalProbeCaptureState.clear();
+            return;
+        }
+        short requestVersion = response.requestHeader() == null
+            ? (short) -1 : response.requestHeader().apiVersion();
+        Optional<PartitionRetirementSourceProbe.Request> request =
+            eligibleSourceWalChallenge(data, requestVersion);
+        request.ifPresent(this::scheduleSourceWalCapture);
+    }
+
+    private Optional<PartitionRetirementSourceProbe.Request> eligibleSourceWalChallenge(
+        BrokerHeartbeatResponseData data,
+        short requestVersion
+    ) {
+        BrokerHeartbeatSourceProbeChallengeGate.Finding finding =
+            BrokerHeartbeatSourceProbeChallengeGate.inspect(
+                data, requestVersion, clusterId, nodeId, brokerEpoch, incarnationId, state, registered
+            );
+        if (finding != BrokerHeartbeatSourceProbeChallengeGate.Finding.MATCHED_UNTRUSTED
+            || sourceWalProbeSampler == null) {
+            logger.debug("Ignoring non-authorizing Controller Source/WAL challenge ({}).", finding);
+            return Optional.empty();
+        }
+        return BrokerHeartbeatSourceProbeChallengeGate.diagnosticRequest(
+            data, requestVersion, clusterId, nodeId, brokerEpoch, incarnationId, state, registered
+        );
+    }
+
+    private void scheduleSourceWalCapture(PartitionRetirementSourceProbe.Request request) {
+        SourceWalProbeCaptureState.Capture capture =
+            sourceWalProbeCaptureState.begin(request, time.nanoseconds());
+        if (capture == null) {
+            return;
+        }
+        try {
+            CompletionStage<Optional<PartitionRetirementSourceProbe.Report>> future =
+                sourceWalProbeSampler.capture(request);
+            if (future == null) {
+                sourceWalProbeCaptureState.abandon(capture);
+                return;
+            }
+            future.whenComplete((report, error) -> enqueueSourceWalCapture(capture, report, error));
+        } catch (RuntimeException failure) {
+            logger.debug("Local Source/WAL diagnostic capture could not be scheduled.", failure);
+            sourceWalProbeCaptureState.abandon(capture);
+        }
+    }
+
+    private void enqueueSourceWalCapture(
+        SourceWalProbeCaptureState.Capture capture,
+        Optional<PartitionRetirementSourceProbe.Report> report,
+        Throwable error
+    ) {
+        try {
+            eventQueue.append(() -> {
+                boolean retained = sourceWalProbeCaptureState.complete(
+                    capture, report, error, time.nanoseconds(),
+                    nodeId, brokerEpoch, incarnationId, state, registered
+                );
+                logger.debug("Completed local, non-authorizing Source/WAL diagnostic: {}", retained);
+            });
+        } catch (RejectedExecutionException closed) {
+            // No callback may resurrect a closed lifecycle manager.
         }
     }
 
@@ -765,6 +884,8 @@ public class BrokerLifecycleManager {
     private class ShutdownEvent implements EventQueue.Event {
         @Override
         public void run() throws InterruptedException {
+            sourceWalProbeCaptureState.clear();
+            sourceWalProbeSampler = null;
             logger.info("Transitioning from {} to {}.", state, BrokerState.SHUTTING_DOWN);
             state = BrokerState.SHUTTING_DOWN;
             controlledShutdownFuture.complete(null);
@@ -773,6 +894,328 @@ public class BrokerLifecycleManager {
             if (channelManager != null) {
                 channelManager.shutdown();
                 channelManager = null;
+            }
+        }
+    }
+
+    /**
+     * Invoked on the lifecycle event queue. Implementations MUST return
+     * promptly with a CompletionStage; all native Source/WAL I/O must run
+     * off-thread. This callback never grants Controller authority or
+     * permission to delete an object.
+     */
+    @FunctionalInterface
+    public interface SourceWalProbeSampler {
+        CompletionStage<Optional<PartitionRetirementSourceProbe.Report>> capture(
+            PartitionRetirementSourceProbe.Request challenge
+        );
+    }
+
+    /**
+     * One-slot diagnostic mailbox. All methods run on the broker lifecycle
+     * event thread; an asynchronous producer can complete only by enqueuing
+     * its result back onto that thread. A capture is never automatically
+     * attached to BrokerHeartbeat, so no unauthenticated traffic is emitted.
+     */
+    static final class SourceWalProbeCaptureState {
+        static final long MAX_AGE_NS = TimeUnit.SECONDS.toNanos(5);
+        static final int MAX_RECENT_NONCES = 64;
+
+        static final class Capture {
+            private final PartitionRetirementSourceProbe.Request request;
+            private final long startedNs;
+
+            private Capture(PartitionRetirementSourceProbe.Request request, long startedNs) {
+                this.request = request;
+                this.startedNs = startedNs;
+            }
+        }
+
+        // Keep this fence across provider replacement: an abandoned Future
+        // might still be executing native I/O, even after its result is void.
+        private Capture active;
+        private Capture pending;
+        private Capture ready;
+        private PartitionRetirementSourceProbe.Report report;
+        // Track all recent nonces, not just the immediately preceding one.
+        // Fail closed on saturation instead of evicting an unexpired replay
+        // fence. This remains bounded even under repeated challenges.
+        private final Map<Uuid, Long> recentNonces = new LinkedHashMap<>();
+
+        Capture begin(PartitionRetirementSourceProbe.Request request, long nowNs) {
+            Objects.requireNonNull(request, "request");
+            // Bound native Source/WAL capture concurrency to one. An unfinished
+            // provider must not cause unbounded tasks as heartbeats arrive.
+            if (active != null) {
+                return null;
+            }
+            // Never accept a replay among multiple in-flight/previously
+            // processed challenges within the five-second diagnostic TTL.
+            expireRecentNonces(nowNs);
+            if (recentNonces.containsKey(request.nonce())
+                || recentNonces.size() >= MAX_RECENT_NONCES) {
+                return null;
+            }
+            recentNonces.put(request.nonce(), nowNs);
+            pending = new Capture(request, nowNs);
+            active = pending;
+            ready = null;
+            report = null;
+            return pending;
+        }
+
+        boolean complete(
+            Capture capture,
+            Optional<PartitionRetirementSourceProbe.Report> observed,
+            Throwable error,
+            long nowNs,
+            int brokerId,
+            long brokerEpoch,
+            Uuid incarnationId,
+            BrokerState state,
+            boolean registered
+        ) {
+            // Even a revoked capture releases its underlying native I/O
+            // fence only after its completion returns to this event queue.
+            if (active == capture) {
+                active = null;
+            }
+            // Compare by object identity: late callbacks from an earlier
+            // provider/registration cannot resurrect revoked evidence.
+            if (pending == null || pending != capture) {
+                return false;
+            }
+            pending = null;
+            if (error != null || observed == null || observed.isEmpty()
+                || !eligible(capture, nowNs, brokerId, brokerEpoch, incarnationId, state, registered)) {
+                return false;
+            }
+            PartitionRetirementSourceProbe.Report candidate = observed.get();
+            if (!capture.request.equals(candidate.request())) {
+                return false;
+            }
+            ready = capture;
+            report = candidate;
+            return true;
+        }
+
+        Optional<PartitionRetirementSourceProbe.Report> takeOnce(
+            long nowNs,
+            int brokerId,
+            long brokerEpoch,
+            Uuid incarnationId,
+            BrokerState state,
+            boolean registered
+        ) {
+            Capture staged = ready;
+            PartitionRetirementSourceProbe.Report stagedReport = report;
+            ready = null;
+            report = null;
+            if (staged == null || !eligible(
+                staged, nowNs, brokerId, brokerEpoch, incarnationId, state, registered
+            )) {
+                return Optional.empty();
+            }
+            return Optional.ofNullable(stagedReport);
+        }
+
+        /**
+         * Convert one already verified *local diagnostic* to the optional
+         * unstable v3 heartbeat wire value. The caller must still have its
+         * own authenticated return-channel policy and version negotiation.
+         *
+         * <p>This method is never invoked by sendBrokerHeartbeat: reporting
+         * self-asserted WAL bytes is disabled in production.</p>
+         */
+        Optional<SourceWalProbeReport> takeWireOnce(
+            long nowNs,
+            int brokerId,
+            long brokerEpoch,
+            Uuid incarnationId,
+            BrokerState state,
+            boolean registered
+        ) {
+            return takeOnce(
+                nowNs, brokerId, brokerEpoch, incarnationId, state, registered
+            ).map(SourceWalProbeCaptureState::toWire);
+        }
+
+        private static SourceWalProbeReport toWire(PartitionRetirementSourceProbe.Report report) {
+            PartitionRetirementSourceProbe.Request request = report.request();
+            return new SourceWalProbeReport()
+                .setNonce(request.nonce())
+                .setClusterId(request.clusterId())
+                .setTopicId(request.topicId())
+                .setPartitionId(request.partitionId())
+                .setBrokerIncarnationId(request.brokerIncarnationId())
+                .setSourceLeaderEpoch(request.sourceLeaderEpoch())
+                .setExpectedPreviousAuthorityOffset(request.expectedPreviousAuthorityOffset())
+                .setNextAuthorityOffset(request.nextAuthorityOffset())
+                .setLocalLeadershipGeneration(report.localLeadershipGeneration())
+                .setNativeLogStartOffset(report.nativeLogStartOffset())
+                .setNativeHighWatermark(report.nativeHighWatermark())
+                .setNativeLogEndOffset(report.nativeLogEndOffset())
+                .setWalMutationRevision(report.observedWalMutationRevision())
+                .setWalAdmissionRevision(report.observedWalAdmissionRevision());
+        }
+
+        void abandon(Capture capture) {
+            if (active == capture) {
+                active = null;
+            }
+            if (pending == capture) {
+                pending = null;
+            }
+        }
+
+        void clear() {
+            pending = null;
+            ready = null;
+            report = null;
+            // Keep active until the old asynchronous callback has actually
+            // finished, preventing concurrent I/O across provider changes.
+            // Keep recentNonces, including those from revoked captures, so
+            // neither reconfiguration nor heartbeat errors reopen replay.
+        }
+
+        private void expireRecentNonces(long nowNs) {
+            Iterator<Long> times = recentNonces.values().iterator();
+            while (times.hasNext()) {
+                long age = nowNs - times.next();
+                // Signed subtraction also handles nanoTime crossing the
+                // Long.MAX_VALUE boundary for five-second intervals.
+                if (age >= MAX_AGE_NS) {
+                    times.remove();
+                }
+            }
+        }
+
+        private static boolean eligible(
+            Capture capture,
+            long nowNs,
+            int brokerId,
+            long brokerEpoch,
+            Uuid incarnationId,
+            BrokerState state,
+            boolean registered
+        ) {
+            if (!registered || state != BrokerState.RUNNING) {
+                return false;
+            }
+            long elapsed = nowNs - capture.startedNs;
+            if (elapsed < 0L || elapsed >= MAX_AGE_NS) {
+                return false;
+            }
+            PartitionRetirementSourceProbe.Request request = capture.request;
+            return request.brokerId() == brokerId && request.brokerEpoch() == brokerEpoch
+                && request.brokerIncarnationId().equals(incarnationId);
+        }
+    }
+
+    /**
+     * Local, non-authorizing parser for optional unstable v3 challenges.
+     * This is nested to keep the Broker lifecycle's GA production fingerprint
+     * anchored to its existing, release-gated source path.
+     */
+    static final class BrokerHeartbeatSourceProbeChallengeGate {
+        enum Finding {
+            ABSENT,
+            VERSION_NOT_NEGOTIATED,
+            BROKER_NOT_RUNNING,
+            IDENTITY_MISMATCH,
+            MALFORMED,
+            MATCHED_UNTRUSTED
+        }
+    
+        private BrokerHeartbeatSourceProbeChallengeGate() {
+        }
+    
+        static Finding inspect(
+            BrokerHeartbeatResponseData response,
+            short requestVersion,
+            String clusterId,
+            int brokerId,
+            long brokerEpoch,
+            Uuid incarnationId,
+            BrokerState state,
+            boolean registered
+        ) {
+            Objects.requireNonNull(response, "response");
+            SourceWalProbeChallenge challenge = response.sourceWalProbeChallenge();
+            if (challenge == null) {
+                return Finding.ABSENT;
+            }
+            // Reject future versions until their challenge semantics have been reviewed.
+            if (requestVersion != 3) {
+                return Finding.VERSION_NOT_NEGOTIATED;
+            }
+            if (!registered || state != BrokerState.RUNNING || brokerEpoch < 0L) {
+                return Finding.BROKER_NOT_RUNNING;
+            }
+            if (!sameRegistration(challenge, clusterId, brokerId, brokerEpoch, incarnationId)) {
+                return Finding.IDENTITY_MISMATCH;
+            }
+            if (!shapeValid(challenge)) {
+                return Finding.MALFORMED;
+            }
+            // A syntactically matched, self-contained challenge is still not
+            // permission to send or accept an unauthenticated source report.
+            return Finding.MATCHED_UNTRUSTED;
+        }
+    
+        static Optional<PartitionRetirementSourceProbe.Request> diagnosticRequest(
+            BrokerHeartbeatResponseData response,
+            short requestVersion,
+            String clusterId,
+            int brokerId,
+            long brokerEpoch,
+            Uuid incarnationId,
+            BrokerState state,
+            boolean registered
+        ) {
+            Finding finding = inspect(
+                response, requestVersion, clusterId, brokerId, brokerEpoch, incarnationId, state, registered
+            );
+            if (finding != Finding.MATCHED_UNTRUSTED) {
+                return Optional.empty();
+            }
+            SourceWalProbeChallenge wire = response.sourceWalProbeChallenge();
+            return Optional.of(new PartitionRetirementSourceProbe.Request(
+                wire.nonce(), wire.clusterId(), wire.topicId(), wire.partitionId(),
+                wire.brokerId(), wire.brokerEpoch(), wire.brokerIncarnationId(),
+                wire.sourceLeaderEpoch(), wire.expectedPreviousAuthorityOffset(),
+                wire.nextAuthorityOffset(), wire.claimedLogStartOffset()
+            ));
+        }
+    
+        private static boolean sameRegistration(
+            SourceWalProbeChallenge challenge,
+            String clusterId,
+            int brokerId,
+            long brokerEpoch,
+            Uuid incarnationId
+        ) {
+            return clusterId != null && clusterId.equals(challenge.clusterId())
+                && brokerId == challenge.brokerId() && brokerEpoch == challenge.brokerEpoch()
+                && incarnationId != null && incarnationId.equals(challenge.brokerIncarnationId());
+        }
+    
+        private static boolean shapeValid(SourceWalProbeChallenge challenge) {
+            if (challenge.nonce() == null || challenge.clusterId() == null
+                || challenge.topicId() == null || challenge.brokerIncarnationId() == null) {
+                return false;
+            }
+            try {
+                new PartitionRetirementSourceProbe.Request(
+                    challenge.nonce(), challenge.clusterId(), challenge.topicId(),
+                    challenge.partitionId(), challenge.brokerId(), challenge.brokerEpoch(),
+                    challenge.brokerIncarnationId(), challenge.sourceLeaderEpoch(),
+                    challenge.expectedPreviousAuthorityOffset(), challenge.nextAuthorityOffset(),
+                    challenge.claimedLogStartOffset()
+                );
+                return true;
+            } catch (IllegalArgumentException invalid) {
+                return false;
             }
         }
     }

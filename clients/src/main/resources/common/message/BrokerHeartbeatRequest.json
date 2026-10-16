@@ -15,12 +15,14 @@
 
 // Version 1 adds the OfflineLogDirs flexible field
 // Version 2 adds the CordonedLogDirs flexible field
+// Version 3 adds an optional, UNTRUSTED source/WAL probe report (unstable).
 {
   "apiKey": 63,
   "type": "request",
   "listeners": ["controller"],
   "name": "BrokerHeartbeatRequest",
-  "validVersions": "0-2",
+  "validVersions": "0-3",
+  "latestVersionUnstable": true,
   "flexibleVersions": "0+",
   "fields": [
     { "name": "BrokerId", "type": "int32", "versions": "0+", "entityType": "brokerId",
@@ -37,6 +39,25 @@
       "about": "Log directories that failed and went offline." },
     { "name": "CordonedLogDirs", "type":  "[]uuid", "versions": "2+", "taggedVersions": "2+", "tag": 1,
       "nullableVersions": "2+", "default": "null",
-      "about": "List of log directories that are cordoned. This is null before the broker reaches the RECOVERY state." }
+      "about": "List of log directories that are cordoned. This is null before the broker reaches the RECOVERY state." },
+    { "name": "SourceWalProbeReport", "type": "SourceWalProbeReport", "versions": "3+",
+      "taggedVersions": "3+", "tag": 2, "nullableVersions": "3+", "default": "null",
+      "about": "An optional, unauthenticated broker-local source/WAL diagnostic; never authorizes object deletion.",
+      "fields": [
+        { "name": "Nonce", "type": "uuid", "versions": "3+" },
+        { "name": "ClusterId", "type": "string", "versions": "3+" },
+        { "name": "TopicId", "type": "uuid", "versions": "3+" },
+        { "name": "PartitionId", "type": "int32", "versions": "3+" },
+        { "name": "BrokerIncarnationId", "type": "uuid", "versions": "3+" },
+        { "name": "SourceLeaderEpoch", "type": "int32", "versions": "3+" },
+        { "name": "ExpectedPreviousAuthorityOffset", "type": "int64", "versions": "3+" },
+        { "name": "NextAuthorityOffset", "type": "int64", "versions": "3+" },
+        { "name": "LocalLeadershipGeneration", "type": "int64", "versions": "3+" },
+        { "name": "NativeLogStartOffset", "type": "int64", "versions": "3+" },
+        { "name": "NativeHighWatermark", "type": "int64", "versions": "3+" },
+        { "name": "NativeLogEndOffset", "type": "int64", "versions": "3+" },
+        { "name": "WalMutationRevision", "type": "int64", "versions": "3+" },
+        { "name": "WalAdmissionRevision", "type": "int64", "versions": "3+" }
+      ]}
   ]
 }

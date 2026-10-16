@@ -91,6 +91,43 @@ class PartitionRetirementControlManagerTest {
     }
 
     @Test
+    void reservedTopicIdCannotEnterControllerReplayOrOverwriteExistingState() {
+        PartitionRetirementControlManager manager = manager();
+        Value original = new Value(10L, 5, 1, 0L, false);
+        manager.replay(record(PARTITION, original));
+        PartitionRetirementAuthorityRecord forged = record(
+            PARTITION, new Value(20L, 6, 2, 20L, false)
+        ).setTopicId(Uuid.ZERO_UUID);
+
+        assertThrows(IllegalArgumentException.class, () -> manager.replay(forged));
+        assertEquals(original, manager.get(PARTITION));
+    }
+
+    @Test
+    void reservedTopicIdCannotEnterCommittedKRaftRecordReplay() {
+        PartitionRetirementControlManager manager = manager();
+        PartitionRetirementAuthorityRecord forged = record(
+            PARTITION, new Value(20L, 6, 2, 20L, false)
+        ).setTopicId(Uuid.ZERO_UUID);
+
+        assertThrows(IllegalArgumentException.class,
+            () -> manager.replayFromKRaft(forged, Optional.empty(), 20L));
+        assertNull(manager.get(PARTITION));
+    }
+
+    @Test
+    void reservedTopicIdCannotEnterKRaftSnapshotReplay() {
+        PartitionRetirementControlManager manager = manager();
+        PartitionRetirementAuthorityRecord forged = record(
+            PARTITION, new Value(20L, 6, 2, 20L, false)
+        ).setTopicId(Uuid.ZERO_UUID);
+
+        assertThrows(IllegalArgumentException.class, () ->
+            manager.replayFromKRaft(forged, Optional.of(new OffsetAndEpoch(50L, 9)), 49L));
+        assertNull(manager.get(PARTITION));
+    }
+
+    @Test
     void committedKRaftAppendOffsetMustMatchAuthorityOffset() {
         PartitionRetirementControlManager manager = manager();
         Value value = new Value(120L, 5, 1, 0L, false);

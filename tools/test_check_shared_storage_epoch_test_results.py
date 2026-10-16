@@ -43,8 +43,8 @@ class EpochEvidenceCheckerTest(unittest.TestCase):
                 ET.SubElement(case, "failure")
         ET.ElementTree(xml).write(self.root / ("TEST-" + suite + ".xml"), encoding="utf-8")
 
-    def test_all_348_methods_pass(self):
-        self.assertEqual(348, verify(self.root))
+    def test_all_599_methods_pass(self):
+        self.assertEqual(599, verify(self.root))
 
     def test_missing_controller_module_report_fails_closed(self):
         controller = "org.apache.kafka.controller.PartitionRetirementControllerPrecheckTest"
@@ -64,7 +64,7 @@ class EpochEvidenceCheckerTest(unittest.TestCase):
                     xml_name = "TEST-" + suite + ".xml"
                     (other / xml_name).write_bytes((self.root / xml_name).read_bytes())
                     (self.root / xml_name).unlink()
-            self.assertEqual(348, verify(self.root, other))
+            self.assertEqual(599, verify(self.root, other))
 
     def test_third_module_feature_report_must_be_present(self):
         feature = "org.apache.kafka.server.common.PartitionRetirementAuthorityVersionTest"
@@ -91,7 +91,7 @@ class EpochEvidenceCheckerTest(unittest.TestCase):
                     )):
                         (metadata / filename).write_bytes(source.read_bytes())
                         source.unlink()
-                self.assertEqual(348, verify(self.root, metadata, server))
+                self.assertEqual(599, verify(self.root, metadata, server))
 
     def test_missing_core_broker_lifecycle_report_fails_closed(self):
         suite = "kafka.server.BrokerLifecycleManagerTest"
@@ -106,7 +106,7 @@ class EpochEvidenceCheckerTest(unittest.TestCase):
             name = "TEST-" + suite + ".xml"
             (core / name).write_bytes((self.root / name).read_bytes())
             (self.root / name).unlink()
-            self.assertEqual(348, verify(self.root, core_results_dir=core))
+            self.assertEqual(599, verify(self.root, core_results_dir=core))
             with self.assertRaisesRegex(ValueError, "Missing mandatory test report"):
                 verify(self.root)
 
