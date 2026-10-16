@@ -82,6 +82,30 @@ class PartitionRetirementHeartbeatReportGateTest {
     }
 
     @Test
+    void unrelatedApiAtVersionThreeCannotOfferSourceWalReport() {
+        ControllerRequestContext unrelated = new ControllerRequestContext(
+            new RequestHeaderData().setRequestApiKey((short) 1).setRequestApiVersion((short) 3),
+            BROKER_THREE, OptionalLong.empty()
+        );
+        assertEquals(Finding.VERSION_NOT_NEGOTIATED,
+            PartitionRetirementHeartbeatReportGate.inspect(unrelated, heartbeat(), BOUND));
+        assertFalse(PartitionRetirementHeartbeatReportGate.isVersionThreeHeartbeat(unrelated));
+    }
+
+    @Test
+    void exactHeartbeatApiAndVThreeAreRequiredForBothDiagnosticDirections() {
+        assertTrue(PartitionRetirementHeartbeatReportGate.isVersionThreeHeartbeat(
+            context((short) 3, BROKER_THREE)));
+        assertFalse(PartitionRetirementHeartbeatReportGate.isVersionThreeHeartbeat(
+            context((short) 2, BROKER_THREE)));
+        assertFalse(PartitionRetirementHeartbeatReportGate.isVersionThreeHeartbeat(
+            context((short) 4, BROKER_THREE)));
+        assertEquals(Finding.UNVERIFIED, PartitionRetirementHeartbeatReportGate.inspect(
+            context((short) 3, BROKER_THREE), heartbeat(), BOUND
+        ));
+    }
+
+    @Test
     void matchingPrincipalStillCannotAuthorizeAnyGcAction() {
         assertEquals(Finding.UNVERIFIED, PartitionRetirementHeartbeatReportGate.inspect(
             context((short) 3, BROKER_THREE), heartbeat(), BOUND

@@ -511,6 +511,34 @@ public class QuorumControllerTest {
     }
 
     @Test
+    public void testBoundBrokerForeignRequestApiKeyCannotIssueSourceWalReport() throws Exception {
+        KafkaPrincipal uniqueBroker = new KafkaPrincipal(KafkaPrincipal.USER_TYPE, "broker-id-three");
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv)
+                .setControllerBuilderInitializer(builder ->
+                    builder.setPartitionRetirementBrokerPrincipalPolicy(
+                        new PartitionRetirementBrokerPrincipalPolicy(Map.of(3, uniqueBroker))
+                    )
+                ).build()
+        ) {
+            QuorumController controller = controlEnv.activeController(true);
+            long recordsBefore = retirementAuthorityRecordCount(clientEnv);
+            ControllerRequestContext unrelated = new ControllerRequestContext(
+                new RequestHeaderData().setRequestApiKey((short) 1).setRequestApiVersion((short) 3),
+                uniqueBroker, OptionalLong.empty()
+            );
+            ExecutionException failure = assertThrows(ExecutionException.class, () ->
+                controller.processBrokerHeartbeat(unrelated, untrustedHeartbeatReport())
+                    .get(10, TimeUnit.SECONDS)
+            );
+            assertTrue(failure.getCause() instanceof InvalidRequestException);
+            assertTrue(failure.getCause().getMessage().contains("VERSION_NOT_NEGOTIATED"));
+            assertEquals(recordsBefore, retirementAuthorityRecordCount(clientEnv));
+        }
+    }
+
+    @Test
     public void testMappedBrokerCannotReportWhileFencingOrShuttingDown() throws Exception {
         KafkaPrincipal uniqueBroker = new KafkaPrincipal(KafkaPrincipal.USER_TYPE, "broker-id-three");
         try (

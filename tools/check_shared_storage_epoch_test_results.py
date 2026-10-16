@@ -358,6 +358,7 @@ REQUIRED_TESTS = {
         "testUniquelyBoundHeartbeatReportIsSerializedAndStillDeniedWithoutNonce",
         "testBoundBrokerCannotBorrowForeignIdentityOrFutureHeartbeatVersion",
         "testMappedBrokerCannotReportWhileFencingOrShuttingDown",
+        "testBoundBrokerForeignRequestApiKeyCannotIssueSourceWalReport",
         "testSourceProbeHeartbeatEligibilityRejectsUnsafeBrokerStates",
     ),
     "org.apache.kafka.controller.PartitionRetirementHeartbeatReportGateTest": (
@@ -366,6 +367,8 @@ REQUIRED_TESTS = {
         "anonymousAndForeignBrokerPrincipalsCannotReport",
         "vTwoListenerCannotAcceptVThreeTaggedReport",
         "unknownFutureProtocolCannotImplicitlyAuthorizeVThreeDiagnostic",
+        "unrelatedApiAtVersionThreeCannotOfferSourceWalReport",
+        "exactHeartbeatApiAndVThreeAreRequiredForBothDiagnosticDirections",
         "matchingPrincipalStillCannotAuthorizeAnyGcAction",
         "decodingPreservesBrokerEpochNonceAndExactSourceWindow",
         "oldHeartbeatProducesNoReportObject",

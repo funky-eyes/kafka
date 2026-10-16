@@ -1395,3 +1395,45 @@ COMMITTED physical object DELETE can be executed. Production
 and PR #2 Draft status are preserved. The new SHA must
 pass its own exact-HEAD CI; earlier successful runs are
 not reusable evidence for the changed source fingerprint.
+
+## Batches 207–210 — recover Java 25 gate and pin diagnostic API identity
+
+Base: `15c486d25ea5e1f7e28af6eb9ea6b58ccc067ae7`.
+The preceding Batch 203–206 completed 16/17 workflows; the sole
+`Shared Storage` failure was Checkstyle's
+`BooleanExpressionComplexity = 7 > 5` in
+`QuorumController.sourceProbeHeartbeatEligible`, not a WAL or
+MinIO runtime failure.
+
+- **207 — recover metadata Checkstyle:** Preserve the current
+  fail-closed eligibility logic, splitting Broker metadata, shutdown,
+  fencing and offline-log-directory checks into smaller independent
+  conditions. No policy is relaxed.
+- **208 — exact API and protocol binding:** Both v3 source report
+  ingress and Controller Challenge egress now share one predicate that
+  checks the actual `ApiKeys.BROKER_HEARTBEAT.id` and exactly protocol
+  version 3. A version-three header belonging to a different Kafka
+  API cannot enable an unstable diagnostic field.
+- **209 — deterministic live-Controller rejection:** Two local
+  protocol-regression tests and one real QuorumController event test
+  reject foreign API headers even with a correctly mapped Broker
+  Principal. The request is denied before nonce consumption, normal
+  heartbeat contact refresh, or KRaft GC-authority emission.
+- **210 — block premature production Report emission:** A fast
+  Python regression asserts that the ordinary
+  `BrokerLifecycleManager` still sends its original non-reporting
+  heartbeat, rather than activating the currently dormant one-time
+  v3 diagnostic dispatcher. Controller tests are explicit CI selectors,
+  and the mandatory storage/metadata inventory becomes **583 methods**
+  (from 580).
+
+The above is preparatory security hardening, NOT delivery of a
+genuine authenticated Broker-to-Controller production Report sender.
+That sender requires proof of a unique Broker Principal bound to
+the actual network channel, current BrokerRegistration and a
+real Controller-issued nonce before enabling any traffic. Even a
+one-time matched diagnostic cannot establish distributed WAL
+durability or authorize GC. Production `DENY_ALL`, no KRaft
+retirement authority writer, no COMMITTED physical DELETE,
+frozen MinIO GA `9a28c11b6d97ecacafe1b8566cde5cc34d604889`
+and PR #2 Draft remain intact. Exact-new-HEAD CI is mandatory.

@@ -2261,7 +2261,7 @@ public final class QuorumController implements Controller {
         ControllerResult<BrokerHeartbeatReply> result
     ) {
         BrokerHeartbeatReply reply = result.response();
-        if (context.requestHeader() == null || context.requestHeader().requestApiVersion() != 3) {
+        if (!PartitionRetirementHeartbeatReportGate.isVersionThreeHeartbeat(context)) {
             return reply;
         }
         if (!sourceProbeHeartbeatEligible(request, reply, !result.records().isEmpty())) {
@@ -2301,10 +2301,19 @@ public final class QuorumController implements Controller {
         BrokerHeartbeatReply reply,
         boolean emitsMetadataRecords
     ) {
-        return !emitsMetadataRecords && reply.isCaughtUp() && !reply.isFenced()
-            && !reply.shouldShutDown() && !reply.inControlledShutdown()
-            && !request.wantFence() && !request.wantShutDown()
-            && request.offlineLogDirs().isEmpty();
+        // Group the guards by independent failure domains. This also
+        // avoids one long compound expression across broker state, KRaft
+        // writes, and local disk health.
+        if (emitsMetadataRecords || !reply.isCaughtUp() || reply.isFenced()) {
+            return false;
+        }
+        if (reply.shouldShutDown() || reply.inControlledShutdown()) {
+            return false;
+        }
+        if (request.wantFence() || request.wantShutDown()) {
+            return false;
+        }
+        return request.offlineLogDirs().isEmpty();
     }
 
     @Override

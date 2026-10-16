@@ -18,6 +18,7 @@ package org.apache.kafka.controller;
 
 import org.apache.kafka.common.message.BrokerHeartbeatRequestData;
 import org.apache.kafka.common.message.BrokerHeartbeatRequestData.SourceWalProbeReport;
+import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.replica.PartitionRetirementSourceProbe;
 
 import java.util.Objects;
@@ -59,7 +60,7 @@ final class PartitionRetirementHeartbeatReportGate {
         }
         // Future protocol versions are not implicitly trusted. Review any
         // new tagged-field semantics before accepting a different version.
-        if (context.requestHeader() == null || context.requestHeader().requestApiVersion() != 3) {
+        if (!isVersionThreeHeartbeat(context)) {
             return Finding.VERSION_NOT_NEGOTIATED;
         }
         if (!principalPolicy.matches(context.principal(), heartbeat.brokerId())) {
@@ -79,6 +80,18 @@ final class PartitionRetirementHeartbeatReportGate {
         // A syntactically valid self-report is still untrusted. Deliberately
         // do not call an authority writer or consume a Controller probe here.
         return Finding.UNVERIFIED;
+    }
+
+    /**
+     * Exact request-header binding for BOTH diagnostic ingress and challenge
+     * egress. Matching a version number on another API is never sufficient
+     * to opt into unstable BrokerHeartbeat tagged fields.
+     */
+    static boolean isVersionThreeHeartbeat(ControllerRequestContext context) {
+        Objects.requireNonNull(context, "context");
+        return context.requestHeader() != null
+            && context.requestHeader().requestApiKey() == ApiKeys.BROKER_HEARTBEAT.id
+            && context.requestHeader().requestApiVersion() == 3;
     }
 
     static Optional<PartitionRetirementSourceProbe.Report> fromWire(

@@ -32,6 +32,22 @@ from check_shared_storage_ga_workflows import (
 )
 
 
+class BrokerSourceWalNonEmissionContractTest(unittest.TestCase):
+    def test_production_broker_heartbeat_does_not_emit_unstable_gc_reports(self):
+        # The broker's normal heartbeat must remain a stable request until
+        # the transport is independently bound to an authenticated per-Broker
+        # principal. This is a negative-path guard, not authentication.
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java"
+                  ).read_text(encoding="utf-8")
+        self.assertNotIn("BrokerHeartbeatSourceWalReportDispatch.prepareOnce(", source)
+        self.assertNotIn(".setSourceWalProbeReport(", source)
+        self.assertIn(
+            "channelManager.sendRequest(new BrokerHeartbeatRequest.Builder(data), handler);",
+            source,
+        )
+
+
 class WorkflowTriggerOwnershipTest(unittest.TestCase):
     def test_kraft_gc_controller_changes_trigger_every_ga_workflow(self):
         protected = {
