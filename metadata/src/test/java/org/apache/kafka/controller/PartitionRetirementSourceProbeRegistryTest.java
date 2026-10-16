@@ -28,6 +28,7 @@ import org.apache.kafka.metadata.PartitionRetirementAuthorityState.Key;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.HashMap;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -300,12 +301,92 @@ class PartitionRetirementSourceProbeRegistryTest {
     @Test
     void pendingCapacityIsBoundedAndExpiredEntriesCanBePruned() {
         var registry = registry();
-        for (int i = 0; i < PartitionRetirementSourceProbeRegistry.MAX_PENDING; i++) {
+        for (int i = 0; i < PartitionRetirementSourceProbeRegistry.MAX_PENDING_PER_BROKER; i++) {
             assertTrue(registry.issue(CANDIDATE, BROKER_THREE, POLICY, 100L).isPresent());
         }
         assertFalse(registry.issue(CANDIDATE, BROKER_THREE, POLICY, 100L).isPresent());
         assertTrue(registry.issue(CANDIDATE, BROKER_THREE, POLICY,
             100L + PartitionRetirementSourceProbeRegistry.MAX_AGE_NS).isPresent());
+    }
+
+    @Test
+    void saturatedBrokerCannotConsumeAnotherBrokersChallengeCapacity() {
+        var registry = registry();
+        for (int i = 0; i < PartitionRetirementSourceProbeRegistry.MAX_PENDING_PER_BROKER; i++) {
+            assertTrue(registry.issue(CANDIDATE, BROKER_THREE, POLICY, 100L).isPresent());
+        }
+        assertTrue(registry.issue(CANDIDATE, BROKER_THREE, POLICY, 101L).isEmpty());
+        Candidate otherBroker = candidate(4, 54L, new Uuid(20L, 21L), 8, 20L);
+        Challenge other = registry.issue(otherBroker, BROKER_FOUR, POLICY, 101L).orElseThrow();
+        assertEquals(other, registry.pendingForHeartbeat(
+            4, 54L, BROKER_FOUR, 102L, candidate -> candidate.equals(otherBroker)
+        ).orElseThrow());
+        assertEquals(Finding.MATCHED_UNTRUSTED, registry.consume(
+            other, otherBroker, BROKER_FOUR, 103L));
+        assertTrue(registry.issue(CANDIDATE, BROKER_THREE, POLICY, 104L).isEmpty());
+    }
+
+    @Test
+    void globalCapacityStillRejectsAnAdditionalDistinctAuthenticatedBroker() {
+        var registry = registry();
+        Map<Integer, KafkaPrincipal> identities = new HashMap<>();
+        for (int i = 0; i <= PartitionRetirementSourceProbeRegistry.MAX_PENDING; i++) {
+            identities.put(i, broker("dedicated-broker-" + i));
+        }
+        var policy = new PartitionRetirementBrokerPrincipalPolicy(identities);
+        Challenge first = null;
+        for (int i = 0; i < PartitionRetirementSourceProbeRegistry.MAX_PENDING; i++) {
+            Candidate source = candidate(i, 54L, new Uuid(10L, 11L), 8, 20L);
+            Challenge issued = registry.issue(source, identities.get(i), policy, 100L).orElseThrow();
+            if (i == 0) {
+                first = issued;
+            }
+        }
+        Candidate overflow = candidate(
+            PartitionRetirementSourceProbeRegistry.MAX_PENDING, 54L,
+            new Uuid(10L, 11L), 8, 20L
+        );
+        assertTrue(registry.issue(
+            overflow, identities.get(PartitionRetirementSourceProbeRegistry.MAX_PENDING), policy, 101L
+        ).isEmpty());
+        Candidate firstSource = candidate(0, 54L, new Uuid(10L, 11L), 8, 20L);
+        assertEquals(Finding.MATCHED_UNTRUSTED, registry.consume(
+            first, firstSource, identities.get(0), 102L));
+        assertTrue(registry.issue(
+            overflow, identities.get(PartitionRetirementSourceProbeRegistry.MAX_PENDING), policy, 103L
+        ).isPresent());
+    }
+
+    @Test
+    void expiredBrokerQuotaPruningDoesNotRestoreAnOldChallenge() {
+        var registry = registry();
+        Challenge first = issue(registry, 100L);
+        for (int i = 1; i < PartitionRetirementSourceProbeRegistry.MAX_PENDING_PER_BROKER; i++) {
+            issue(registry, 100L);
+        }
+        long expiry = 100L + PartitionRetirementSourceProbeRegistry.MAX_AGE_NS;
+        Challenge fresh = issue(registry, expiry);
+        assertEquals(Finding.UNKNOWN_OR_ALREADY_USED, registry.consume(
+            first, CANDIDATE, BROKER_THREE, expiry + 1L));
+        assertEquals(Finding.MATCHED_UNTRUSTED, registry.consume(
+            fresh, CANDIDATE, BROKER_THREE, expiry + 1L));
+    }
+
+    @Test
+    void leadershipChangeReleasesBrokerQuotaButNeverRevivesOldNonce() {
+        var registry = registry();
+        Challenge first = issue(registry, 100L);
+        for (int i = 1; i < PartitionRetirementSourceProbeRegistry.MAX_PENDING_PER_BROKER; i++) {
+            issue(registry, 100L);
+        }
+        assertTrue(registry.issue(CANDIDATE, BROKER_THREE, POLICY, 101L).isEmpty());
+        registry.invalidateAll();
+        Challenge replacement = issue(registry, 102L);
+        assertNotEquals(first.nonce(), replacement.nonce());
+        assertEquals(Finding.UNKNOWN_OR_ALREADY_USED, registry.consume(
+            first, CANDIDATE, BROKER_THREE, 103L));
+        assertEquals(Finding.MATCHED_UNTRUSTED, registry.consume(
+            replacement, CANDIDATE, BROKER_THREE, 104L));
     }
 
     @Test

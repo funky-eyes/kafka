@@ -37,11 +37,14 @@ import java.util.function.Predicate;
  * or persisted lease is made. A matched probe is NOT a valid source or WAL
  * certificate: the payload remains caller-reported and not remotely verified.
  * Controller leadership change loses this map and intentionally rejects old
- * responses. There is no KRaft emitter or remote GC capability.</p>
+ * responses. Global and per-Broker limits prevent a single authenticated
+ * diagnostic source from monopolizing all outstanding challenges. There is
+ * no KRaft emitter or remote GC capability.</p>
  */
 final class PartitionRetirementSourceProbeRegistry {
     static final long MAX_AGE_NS = TimeUnit.SECONDS.toNanos(5);
     static final int MAX_PENDING = 128;
+    static final int MAX_PENDING_PER_BROKER = 16;
 
     record Challenge(Uuid nonce, String clusterId, Candidate candidate) {
         Challenge {
@@ -151,7 +154,13 @@ final class PartitionRetirementSourceProbeRegistry {
             return Optional.empty();
         }
         outstanding.entrySet().removeIf(entry -> !fresh(entry.getValue().issuedAtNs(), nowNs));
-        if (outstanding.size() >= MAX_PENDING) {
+        // The global limit is not a fairness boundary by itself: one
+        // authenticated Broker must not exhaust diagnostic capacity for
+        // every other Broker. Count live challenges only, after pruning.
+        long issuedToBroker = outstanding.values().stream()
+            .filter(pending -> pending.challenge().candidate().brokerId() == candidate.brokerId())
+            .count();
+        if (issuedToBroker >= MAX_PENDING_PER_BROKER || outstanding.size() >= MAX_PENDING) {
             return Optional.empty();
         }
         Uuid nonce;

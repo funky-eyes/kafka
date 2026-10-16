@@ -3819,3 +3819,40 @@ durability or authorize GC. Production `DENY_ALL`, no KRaft
 retirement authority writer, no COMMITTED physical DELETE,
 frozen MinIO GA `9a28c11b6d97ecacafe1b8566cde5cc34d604889`
 and PR #2 Draft remain intact. Exact-new-HEAD CI is mandatory.
+
+## Batches 211–214 — per-Broker nonce quota, global bound, expiry and failover
+
+Verified parent: `7a349ffffb2e094fc46d9ca5cea9a110f6b0884c`,
+with all **17/17** exact-HEAD CI workflows successful.
+
+- **211 — isolated authenticated diagnostic quota:** Pending Controller
+  Source/WAL challenges now have both a global ceiling of **128** and
+  a per-Broker ceiling of **16**. The second limit prevents one
+  correctly mapped Broker Principal from monopolizing the global
+  diagnostic nonce registry. Neither cap is a substitute for transport
+  authentication or the existing Controller feature/CAS preflight.
+- **212 — independent Broker admission:** Deterministic regression
+  exhausts Broker 3's 16 challenges and verifies that Broker 4 can
+  still issue, advertise and consume its own nonce. Another regression
+  separately tests the global ceiling with 129 distinct Broker
+  Principals and verifies that consuming a challenge frees capacity.
+- **213 — bounded TTL and leadership revocation:** Real nonce-history
+  regression verifies that pruning at the five-second expiry frees a
+  Broker quota without allowing the old nonce to reappear; Controller
+  epoch invalidation immediately frees the quota while preserving the
+  old nonce's rejection.
+- **214 — mandatory evidence:** The above four new JUnit methods
+  are included in the existing strict metadata/storage JUnit XML gate.
+  Its requirement rises **583 → 587**. No Gradle job is duplicated:
+  the existing `PartitionRetirementSourceProbeRegistryTest` suite is
+  already compiled, run and checked in the main Shared Storage CI.
+
+The per-Broker cap protects in-memory, volatile *diagnostic*
+resources. There is still no authenticated Broker-to-Controller
+production report sender, no quorum durability certificate and no
+authorization to advance COMMITTED GC. The default Broker Principal
+policy is `DENY_ALL`; no KRaft GC authority writer, durable
+reference retirement or physical MinIO DELETE is enabled. Frozen
+MinIO GA remains `9a28c11b6d97ecacafe1b8566cde5cc34d604889`,
+PR #2 remains Draft, and exact-new-HEAD 17/17 CI is required before
+promoting this checkpoint.
