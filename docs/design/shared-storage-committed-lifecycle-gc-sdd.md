@@ -4139,3 +4139,39 @@ Broker Report sender, no KRaft GC authority writer and no physical
 COMMITTED object DELETE. Production `DENY_ALL`, the frozen MinIO GA
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889` and Draft PR #2
 remain unchanged. A fresh exact-HEAD 17/17 CI run is required.
+
+## Batches 243–246 — close metadata-feature and KRaft authority diagnostic races
+
+The parent `82816e471a2dfbbfbcb358c3eb2960df2b4c9135`
+finished **16/17** CI. All runtime/MinIO/Controller/WAL checks
+passed. The one failure was a Python source-contract assertion
+matching a single-line `invalidatePartition` call against valid
+two-line Java formatting, not a Java assertion.
+
+- **243 — fix the evidence checker without weakening semantics:**
+  Match whitespace-independent Java statements, preserving exact
+  Topic ID/partition accessors and the mandatory
+  successful-replay-before-invalidation ordering.
+- **244 — feature-replay fence:** After successful
+  `FeatureLevelRecord` replay, drop every volatile Controller
+  Source/WAL Challenge. A metadata-version or authority-feature
+  negotiation change cannot leave pending preflight tokens valid.
+- **245 — authority-CAS replay fence:** After successful
+  `PartitionRetirementAuthorityRecord` replay and its genuine
+  KRaft-offset validation, revoke pending Challenges for the exact
+  Topic ID/partition. Failed replay does NOT execute the revocation.
+  Even when a feature is explicitly enabled in future test metadata,
+  an old expected authority generation cannot be reused.
+- **246 — evidence:** Four Java regressions cover global feature
+  invalidation and quota release, cross-Broker partition CAS
+  invalidation, and unrelated Topic-ID isolation. Mandatory JUnit
+  XML evidence increases from **607 to 611**. The workflow
+  source-contract adds ordering checks for both replay paths.
+  No extra CI job or Native build is introduced.
+
+This is a volatile diagnostic-only safety fence, not an authority
+writer or a verified distributed source/WAL certificate. Production
+`DENY_ALL`, the dormant Broker v3 report sender, disabled COMMITTED
+physical DELETE, frozen MinIO GA
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`
+and Draft PR #2 remain unchanged.

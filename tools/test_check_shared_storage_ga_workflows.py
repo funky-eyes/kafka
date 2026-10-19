@@ -89,15 +89,43 @@ class WorkflowTriggerOwnershipTest(unittest.TestCase):
             with self.subTest(event=kind):
                 block = replay.split("case " + kind + ":", 1)[1].split("break;", 1)[0]
                 applied = manager + ".replay((" + record + ") message)"
-                self.assertIn(applied, block)
                 if invalidator == "invalidatePartition":
                     revoke = ("retirementSourceProbeRegistry.invalidatePartition(((" + record
                               + ") message)." + getters + ");")
                 else:
                     revoke = ("retirementSourceProbeRegistry.invalidateTopic(((" + record
                               + ") message)." + getters + ");")
-                self.assertIn(revoke, block)
-                self.assertLess(block.index(applied), block.index(revoke))
+                # Check the actual Java expression rather than a particular
+                # line-wrap layout. Keep the exact record getters AND strict
+                # replay-before-revoke ordering as part of the contract.
+                compact = "".join(block.split())
+                compact_applied = "".join(applied.split())
+                compact_revoke = "".join(revoke.split())
+                self.assertIn(compact_applied, compact)
+                self.assertIn(compact_revoke, compact)
+                self.assertLess(compact.index(compact_applied), compact.index(compact_revoke))
+
+    def test_feature_and_authority_replay_revoke_diagnostics_after_successful_apply(self):
+        root = Path(__file__).resolve().parents[1]
+        controller = (root / "metadata/src/main/java/org/apache/kafka/controller/QuorumController.java"
+                      ).read_text(encoding="utf-8")
+        replay = controller.split("private void replay(ApiMessage message,", 1)[1]
+        feature = replay.split("case FEATURE_LEVEL_RECORD:", 1)[1].split("break;", 1)[0]
+        applied = "featureControl.replay((FeatureLevelRecord)message);"
+        revoked = "retirementSourceProbeRegistry.invalidateAll();"
+        compact_feature = "".join(feature.split())
+        self.assertIn(applied, compact_feature)
+        self.assertIn(revoked, compact_feature)
+        self.assertLess(compact_feature.index(applied), compact_feature.index(revoked))
+
+        authority = controller.split("private void replayPartitionRetirementAuthority(", 1)[1]
+        authority = authority.split("private final FaultHandler", 1)[0]
+        compact_authority = "".join(authority.split())
+        applied = "partitionRetirementControl.replayFromKRaft(record,snapshotId,offset);"
+        revoked = "retirementSourceProbeRegistry.invalidatePartition(record.topicId(),record.partitionId());"
+        self.assertIn(applied, compact_authority)
+        self.assertIn(revoked, compact_authority)
+        self.assertLess(compact_authority.index(applied), compact_authority.index(revoked))
 
     def test_heartbeat_network_context_preserves_transport_and_forwarding(self):
         root = Path(__file__).resolve().parents[1]

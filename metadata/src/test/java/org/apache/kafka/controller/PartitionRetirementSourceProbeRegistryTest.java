@@ -715,6 +715,89 @@ class PartitionRetirementSourceProbeRegistryTest {
             registry.consume(second, secondCandidate, BROKER_THREE, 105L));
     }
 
+
+    @Test
+    void featureChangeInvalidatesPendingNoncesFromEveryBroker() {
+        var registry = registry();
+        Challenge first = issue(registry, 100L);
+        Candidate other = candidate(4, 54L, new Uuid(20L, 21L), 8, 20L);
+        Challenge second = registry.issue(other, BROKER_FOUR, POLICY, 101L).orElseThrow();
+
+        registry.invalidateAll();
+
+        assertTrue(registry.pendingForHeartbeat(
+            3, 54L, BROKER_THREE, 102L, candidate -> true).isEmpty());
+        assertTrue(registry.pendingForHeartbeat(
+            4, 54L, BROKER_FOUR, 102L, candidate -> true).isEmpty());
+        assertEquals(Finding.UNKNOWN_OR_ALREADY_USED,
+            registry.consume(first, CANDIDATE, BROKER_THREE, 103L));
+        assertEquals(Finding.UNKNOWN_OR_ALREADY_USED,
+            registry.consume(second, other, BROKER_FOUR, 103L));
+    }
+
+    @Test
+    void featureChangeReclaimsQuotaWithoutExtendingOldNonceLifetime() {
+        var registry = registry();
+        Challenge previous = issue(registry, 100L);
+        for (int i = 1; i < PartitionRetirementSourceProbeRegistry.MAX_PENDING_PER_BROKER; i++) {
+            issue(registry, 100L);
+        }
+        assertTrue(registry.issue(CANDIDATE, BROKER_THREE, POLICY, 101L).isEmpty());
+
+        registry.invalidateAll();
+
+        for (int i = 0; i < PartitionRetirementSourceProbeRegistry.MAX_PENDING_PER_BROKER; i++) {
+            assertTrue(registry.issue(CANDIDATE, BROKER_THREE, POLICY, 102L).isPresent());
+        }
+        assertTrue(registry.issue(CANDIDATE, BROKER_THREE, POLICY, 103L).isEmpty());
+        assertEquals(Finding.UNKNOWN_OR_ALREADY_USED,
+            registry.consume(previous, CANDIDATE, BROKER_THREE, 104L));
+    }
+
+    @Test
+    void authorityReplayInvalidatesExactSourcePartitionAcrossBrokers() {
+        var registry = registry();
+        Challenge first = issue(registry, 100L);
+        Candidate otherBroker = candidate(
+            4, 54L, new Uuid(20L, 21L), CANDIDATE.key().topicId(), 0, 8, 20L
+        );
+        Challenge second = registry.issue(otherBroker, BROKER_FOUR, POLICY, 101L).orElseThrow();
+        Candidate unrelatedPartition = candidate(
+            3, 54L, CANDIDATE.brokerIncarnationId(), CANDIDATE.key().topicId(), 1, 8, 20L
+        );
+        Challenge survivor = registry.issue(unrelatedPartition, BROKER_THREE, POLICY, 102L).orElseThrow();
+
+        registry.invalidatePartition(CANDIDATE.key().topicId(), 0);
+
+        assertEquals(Finding.UNKNOWN_OR_ALREADY_USED,
+            registry.consume(first, CANDIDATE, BROKER_THREE, 103L));
+        assertEquals(Finding.UNKNOWN_OR_ALREADY_USED,
+            registry.consume(second, otherBroker, BROKER_FOUR, 103L));
+        assertEquals(survivor, registry.pendingForHeartbeat(
+            3, 54L, BROKER_THREE, 103L, candidate -> true).orElseThrow());
+        assertEquals(Finding.MATCHED_UNTRUSTED,
+            registry.consume(survivor, unrelatedPartition, BROKER_THREE, 104L));
+    }
+
+    @Test
+    void authorityReplayKeepsAnotherTopicWithSamePartitionNumberIntact() {
+        var registry = registry();
+        Challenge revoked = issue(registry, 100L);
+        Candidate otherTopic = candidate(
+            3, 54L, CANDIDATE.brokerIncarnationId(), new Uuid(40L, 41L), 0, 8, 20L
+        );
+        Challenge survivor = registry.issue(otherTopic, BROKER_THREE, POLICY, 101L).orElseThrow();
+
+        registry.invalidatePartition(CANDIDATE.key().topicId(), 0);
+
+        assertEquals(Finding.UNKNOWN_OR_ALREADY_USED,
+            registry.consume(revoked, CANDIDATE, BROKER_THREE, 102L));
+        assertEquals(survivor, registry.pendingForHeartbeat(
+            3, 54L, BROKER_THREE, 103L, candidate -> true).orElseThrow());
+        assertEquals(Finding.MATCHED_UNTRUSTED,
+            registry.consume(survivor, otherTopic, BROKER_THREE, 104L));
+    }
+
     @Test
     void leadershipChangeReleasesBrokerQuotaButNeverRevivesOldNonce() {
         var registry = registry();

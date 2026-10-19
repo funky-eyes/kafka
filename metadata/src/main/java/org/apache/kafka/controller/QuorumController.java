@@ -1439,6 +1439,10 @@ public final class QuorumController implements Controller {
                 break;
             case FEATURE_LEVEL_RECORD:
                 featureControl.replay((FeatureLevelRecord) message);
+                // Feature negotiation can invalidate every outstanding source
+                // preflight, including authority v1 and metadata.version.
+                // Revoke only after successful replay.
+                retirementSourceProbeRegistry.invalidateAll();
                 break;
             case CLIENT_QUOTA_RECORD:
                 clientQuotaControlManager.replay((ClientQuotaRecord) message);
@@ -1507,6 +1511,10 @@ public final class QuorumController implements Controller {
             );
         }
         partitionRetirementControl.replayFromKRaft(record, snapshotId, offset);
+        // The authoritative generation CAS changed. A still-live diagnostic
+        // tied to the previous write position is now stale, regardless of
+        // which Broker or leader produced it.
+        retirementSourceProbeRegistry.invalidatePartition(record.topicId(), record.partitionId());
     }
 
     /**
