@@ -48,6 +48,64 @@ class BrokerSourceWalNonEmissionContractTest(unittest.TestCase):
         )
 
 
+    def test_dedicated_report_dispatch_is_not_wired_into_production_server(self):
+        # The transport adapter is deliberately dormant until the active
+        # Controller channel can prove a unique authenticated Broker identity.
+        root = Path(__file__).resolve().parents[1]
+        production_root = root / "server/src/main/java"
+        dispatcher = production_root / (
+            "org/apache/kafka/server/BrokerHeartbeatSourceWalReportDispatch.java"
+        )
+        self.assertTrue(dispatcher.is_file(), str(dispatcher))
+        self.assertIn(
+            "static boolean sendDiagnosticOnce(",
+            dispatcher.read_text(encoding="utf-8"),
+        )
+        for java_source in sorted(production_root.rglob("*.java")):
+            if java_source == dispatcher:
+                continue
+            with self.subTest(source=java_source.relative_to(production_root)):
+                source = java_source.read_text(encoding="utf-8")
+                self.assertNotIn("sendDiagnosticOnce(", source)
+                self.assertNotIn(
+                    "BrokerHeartbeatSourceWalReportDispatch.prepareOnce(", source
+                )
+                self.assertNotIn(
+                    "import static org.apache.kafka.server."
+                    "BrokerHeartbeatSourceWalReportDispatch.sendDiagnosticOnce",
+                    source,
+                )
+
+    def test_controller_consumes_source_probe_only_via_authenticated_gate(self):
+        root = Path(__file__).resolve().parents[1]
+        controller_root = root / "metadata/src/main/java/org/apache/kafka/controller"
+        controller = controller_root / "QuorumController.java"
+        source = controller.read_text(encoding="utf-8")
+        self.assertIn("retirementSourceProbeRegistry.consumeAuthenticated(", source)
+        self.assertNotIn("retirementSourceProbeRegistry.consume(", source)
+        for java_source in sorted(controller_root.rglob("*.java")):
+            if java_source.name == "PartitionRetirementSourceProbeRegistry.java":
+                continue
+            with self.subTest(source=java_source.relative_to(controller_root)):
+                self.assertNotIn(
+                    "retirementSourceProbeRegistry.consume(", 
+                    java_source.read_text(encoding="utf-8"),
+                )
+
+    def test_synthetic_controller_request_cannot_claim_network_authentication(self):
+        root = Path(__file__).resolve().parents[1]
+        context = (root / "metadata/src/main/java/org/apache/kafka/controller/ControllerRequestContext.java"
+                   ).read_text(encoding="utf-8")
+        self.assertIn(
+            "this(requestHeader, principal, deadlineNs, partitionChangeQuotaApplier, null, false);",
+            context,
+        )
+        self.assertIn("requestContext.securityProtocol()", context)
+        self.assertIn("principal.tokenAuthenticated()", context)
+        self.assertIn("securityProtocol == SecurityProtocol.SASL_SSL", context)
+        self.assertIn("securityProtocol == SecurityProtocol.SSL", context)
+        self.assertIn("if (forwarded || principal == null", context)
+
 class WorkflowTriggerOwnershipTest(unittest.TestCase):
     def test_broker_registration_replay_revokes_diagnostics_after_successful_metadata_apply(self):
         root = Path(__file__).resolve().parents[1]

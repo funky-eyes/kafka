@@ -1793,3 +1793,34 @@ writer or a verified distributed source/WAL certificate. Production
 physical DELETE, frozen MinIO GA
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889`
 and Draft PR #2 remain unchanged.
+
+## Batch 247 — fail-closed source contracts for the dormant v3 sender
+
+Base: `936fb07dce4262a6f5100242902cba96b6e06b9a`, confirmed
+**17/17** GitHub Actions successful.
+
+This batch does not enable a production sender. It makes the existing
+security boundary executable in the GA consistency suite:
+
+- Recursively scan all production Java sources under
+  `server/src/main/java` and fail if any source other than the dormant
+  adapter calls `sendDiagnosticOnce` or directly prepares a diagnostic
+  report. This prevents a future helper from silently wiring the
+  experimental path into ordinary Broker lifecycle.
+- Scan all Controller production sources to ensure the
+  `QuorumController` consumes source-probe reports through
+  `consumeAuthenticated`, never the low-level destructive
+  `consume` method.
+- Assert that synthetic `ControllerRequestContext` constructors
+  default to unknown transport, and that the direct-authentication
+  predicate checks forwarding, anonymous/token principals, and actual
+  SASL_SSL/SSL transport metadata.
+- The tests live in `tools/test_check_shared_storage_ga_workflows.py`,
+  which the existing `Shared Storage GA Workflow Consistency` workflow
+  already executes and triggers on. No JUnit inventory bump, extra CI
+  workflow or Native Image build is needed.
+
+These are source-contract tests, not evidence of a TLS handshake or
+multi-Broker report roundtrip. Production `DENY_ALL`, the dormant
+diagnostic sender, no KRaft GC-authority writer, no COMMITTED physical
+DELETE, the frozen MinIO GA branch and Draft PR #2 remain unchanged.
