@@ -1724,3 +1724,36 @@ relaxation has been added. The production policy stays `DENY_ALL`.
 Frozen MinIO GA `9a28c11b6d97ecacafe1b8566cde5cc34d604889`
 and Draft PR #2 remain unchanged. This new SHA requires fresh
 exact-HEAD 17/17 CI evidence before promotion.
+
+## Batches 239–242 — revoke source/WAL Challenges on topic and partition replay
+
+Validated parent: `227b5a41afb678664f366042d0d095488eec0958`
+(**17/17** exact-HEAD CI).
+
+- **239 — partition/leader-epoch invalidation:** After successful
+  `PartitionRecord` or `PartitionChangeRecord` replay, immediately
+  invalidate every pending nonce for that exact Topic ID and partition.
+  A changed leader epoch, ISR/replica assignment or other partition
+  metadata mutation cannot leave a previously issued source-window
+  Challenge alive until its five-second TTL.
+- **240 — topic deletion/recreation fence:** After `TopicRecord`
+  or `RemoveTopicRecord` replay, invalidate the matching immutable
+  Topic ID. Deleting and recreating the same topic name cannot carry
+  the old topic's nonce into the new Topic ID.
+- **241 — strict isolation:** Four deterministic registry tests verify
+  leader-epoch invalidation, whole-topic revocation, recreated Topic ID
+  separation and non-eviction of unrelated partitions/topics. Other
+  Brokers and unrelated source windows retain their pending challenges.
+- **242 — mandatory evidence:** The strict metadata/storage JUnit
+  XML inventory increases **603 -> 607**. A Python source-contract
+  regression checks all four KRaft replay paths invalidate the matching
+  diagnostic only after successful metadata-state application. The
+  production source files are already in the GA fingerprint and all
+  eligible workflow trigger paths, so no duplicate CI job is added.
+
+The revocation registry remains volatile and diagnostic only. No
+authority is inferred from a metadata replay, and this change adds no
+Broker Report sender, no KRaft GC authority writer and no physical
+COMMITTED object DELETE. Production `DENY_ALL`, the frozen MinIO GA
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889` and Draft PR #2
+remain unchanged. A fresh exact-HEAD 17/17 CI run is required.

@@ -71,6 +71,34 @@ class WorkflowTriggerOwnershipTest(unittest.TestCase):
                 self.assertIn(revoke, block)
                 self.assertLess(block.index(applied), block.index(revoke))
 
+    def test_topic_and_partition_replay_revokes_diagnostics_after_successful_metadata_apply(self):
+        root = Path(__file__).resolve().parents[1]
+        controller = (root / "metadata/src/main/java/org/apache/kafka/controller/QuorumController.java"
+                      ).read_text(encoding="utf-8")
+        replay = controller.split("private void replay(ApiMessage message,", 1)[1]
+        events = {
+            "TOPIC_RECORD": ("TopicRecord", "replicationControl", "invalidateTopic", "topicId()"),
+            "PARTITION_RECORD": ("PartitionRecord", "replicationControl", "invalidatePartition",
+                                 "topicId(), ((PartitionRecord) message).partitionId()"),
+            "PARTITION_CHANGE_RECORD": ("PartitionChangeRecord", "replicationControl",
+                                        "invalidatePartition",
+                                        "topicId(), ((PartitionChangeRecord) message).partitionId()"),
+            "REMOVE_TOPIC_RECORD": ("RemoveTopicRecord", "replicationControl", "invalidateTopic", "topicId()"),
+        }
+        for kind, (record, manager, invalidator, getters) in events.items():
+            with self.subTest(event=kind):
+                block = replay.split("case " + kind + ":", 1)[1].split("break;", 1)[0]
+                applied = manager + ".replay((" + record + ") message)"
+                self.assertIn(applied, block)
+                if invalidator == "invalidatePartition":
+                    revoke = ("retirementSourceProbeRegistry.invalidatePartition(((" + record
+                              + ") message)." + getters + ");")
+                else:
+                    revoke = ("retirementSourceProbeRegistry.invalidateTopic(((" + record
+                              + ") message)." + getters + ");")
+                self.assertIn(revoke, block)
+                self.assertLess(block.index(applied), block.index(revoke))
+
     def test_heartbeat_network_context_preserves_transport_and_forwarding(self):
         root = Path(__file__).resolve().parents[1]
         source = (root / "core/src/main/scala/kafka/server/ControllerApis.scala"

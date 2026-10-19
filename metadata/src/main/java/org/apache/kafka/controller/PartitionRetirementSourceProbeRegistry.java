@@ -317,6 +317,36 @@ final class PartitionRetirementSourceProbeRegistry {
         );
     }
 
+
+    /**
+     * Revoke all outstanding diagnostics for a topic after the corresponding
+     * KRaft metadata record has been successfully applied. Topic ID, not topic
+     * name, is the identity so a deleted and recreated topic cannot share
+     * pending nonces.
+     */
+    void invalidateTopic(Uuid topicId) {
+        Objects.requireNonNull(topicId, "topicId");
+        outstanding.entrySet().removeIf(entry ->
+            entry.getValue().challenge().candidate().key().topicId().equals(topicId)
+        );
+    }
+
+    /**
+     * Revoke diagnostics for one exact topic-ID/partition pair after a
+     * partition metadata mutation (including leader-epoch changes). Other
+     * partitions and other topics retain their independent pending nonces.
+     */
+    void invalidatePartition(Uuid topicId, int partitionId) {
+        Objects.requireNonNull(topicId, "topicId");
+        if (partitionId < 0) {
+            throw new IllegalArgumentException("Invalid partition ID for diagnostic revocation");
+        }
+        outstanding.entrySet().removeIf(entry -> {
+            Key key = entry.getValue().challenge().candidate().key();
+            return key.topicId().equals(topicId) && key.partitionId() == partitionId;
+        });
+    }
+
     /** Revoke every volatile probe when the controller leadership epoch changes. */
     void invalidateAll() {
         outstanding.clear();

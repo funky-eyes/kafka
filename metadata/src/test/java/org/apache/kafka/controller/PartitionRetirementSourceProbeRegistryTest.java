@@ -619,6 +619,102 @@ class PartitionRetirementSourceProbeRegistryTest {
             registry.consume(second, peer, BROKER_FOUR, 104L));
     }
 
+
+    @Test
+    void partitionLeaderEpochReplayRevokesOnlyTheChangedPartition() {
+        var registry = registry();
+        Challenge staleLeader = issue(registry, 100L);
+        Candidate peerPartition = candidate(
+            3, 54L, CANDIDATE.brokerIncarnationId(), CANDIDATE.key().topicId(), 1, 8, 20L
+        );
+        Challenge peerChallenge = registry.issue(peerPartition, BROKER_THREE, POLICY, 101L).orElseThrow();
+
+        registry.invalidatePartition(CANDIDATE.key().topicId(), 0);
+
+        assertEquals(Finding.UNKNOWN_OR_ALREADY_USED,
+            registry.consume(staleLeader, CANDIDATE, BROKER_THREE, 102L));
+        assertEquals(peerChallenge, registry.pendingForHeartbeat(
+            3, 54L, BROKER_THREE, 102L, candidate -> true).orElseThrow());
+
+        Candidate newLeader = candidate(
+            3, 54L, CANDIDATE.brokerIncarnationId(), CANDIDATE.key().topicId(), 0, 9, 21L
+        );
+        Challenge currentLeader = registry.issue(newLeader, BROKER_THREE, POLICY, 103L).orElseThrow();
+        assertEquals(peerChallenge, registry.pendingForHeartbeat(
+            3, 54L, BROKER_THREE, 104L, candidate -> true).orElseThrow());
+        assertEquals(Finding.MATCHED_UNTRUSTED,
+            registry.consume(peerChallenge, peerPartition, BROKER_THREE, 105L));
+        assertEquals(currentLeader, registry.pendingForHeartbeat(
+            3, 54L, BROKER_THREE, 106L, candidate -> true).orElseThrow());
+        assertEquals(Finding.MATCHED_UNTRUSTED,
+            registry.consume(currentLeader, newLeader, BROKER_THREE, 107L));
+    }
+
+    @Test
+    void topicRemovalRevokesEveryPartitionForThatTopicOnly() {
+        var registry = registry();
+        Challenge firstPartition = issue(registry, 100L);
+        Candidate secondPartition = candidate(
+            3, 54L, CANDIDATE.brokerIncarnationId(), CANDIDATE.key().topicId(), 1, 8, 20L
+        );
+        Challenge second = registry.issue(secondPartition, BROKER_THREE, POLICY, 101L).orElseThrow();
+        Uuid unrelatedTopicId = new Uuid(30L, 31L);
+        Candidate unrelatedTopic = candidate(
+            3, 54L, CANDIDATE.brokerIncarnationId(), unrelatedTopicId, 0, 8, 20L
+        );
+        Challenge survivor = registry.issue(unrelatedTopic, BROKER_THREE, POLICY, 102L).orElseThrow();
+
+        registry.invalidateTopic(CANDIDATE.key().topicId());
+
+        assertEquals(Finding.UNKNOWN_OR_ALREADY_USED,
+            registry.consume(firstPartition, CANDIDATE, BROKER_THREE, 103L));
+        assertEquals(Finding.UNKNOWN_OR_ALREADY_USED,
+            registry.consume(second, secondPartition, BROKER_THREE, 103L));
+        assertEquals(survivor, registry.pendingForHeartbeat(
+            3, 54L, BROKER_THREE, 104L, candidate -> true).orElseThrow());
+        assertEquals(Finding.MATCHED_UNTRUSTED,
+            registry.consume(survivor, unrelatedTopic, BROKER_THREE, 105L));
+    }
+
+    @Test
+    void recreatedTopicIdCannotReuseDeletedTopicsPendingChallenge() {
+        var registry = registry();
+        Challenge oldTopic = issue(registry, 100L);
+        Uuid recreatedTopicId = new Uuid(40L, 41L);
+
+        registry.invalidateTopic(CANDIDATE.key().topicId());
+
+        Candidate recreated = candidate(
+            3, 54L, CANDIDATE.brokerIncarnationId(), recreatedTopicId, 0, 8, 20L
+        );
+        Challenge newTopic = registry.issue(recreated, BROKER_THREE, POLICY, 101L).orElseThrow();
+        assertEquals(Finding.UNKNOWN_OR_ALREADY_USED,
+            registry.consume(oldTopic, CANDIDATE, BROKER_THREE, 102L));
+        assertEquals(Finding.MATCHED_UNTRUSTED,
+            registry.consume(newTopic, recreated, BROKER_THREE, 103L));
+    }
+
+    @Test
+    void invalidatingAnUnrelatedPartitionPreservesBothPendingChallenges() {
+        var registry = registry();
+        Challenge first = issue(registry, 100L);
+        Candidate secondCandidate = candidate(
+            3, 54L, CANDIDATE.brokerIncarnationId(), CANDIDATE.key().topicId(), 1, 8, 20L
+        );
+        Challenge second = registry.issue(secondCandidate, BROKER_THREE, POLICY, 101L).orElseThrow();
+
+        registry.invalidatePartition(CANDIDATE.key().topicId(), 2);
+
+        assertEquals(first, registry.pendingForHeartbeat(
+            3, 54L, BROKER_THREE, 102L, candidate -> true).orElseThrow());
+        assertEquals(Finding.MATCHED_UNTRUSTED,
+            registry.consume(first, CANDIDATE, BROKER_THREE, 103L));
+        assertEquals(second, registry.pendingForHeartbeat(
+            3, 54L, BROKER_THREE, 104L, candidate -> true).orElseThrow());
+        assertEquals(Finding.MATCHED_UNTRUSTED,
+            registry.consume(second, secondCandidate, BROKER_THREE, 105L));
+    }
+
     @Test
     void leadershipChangeReleasesBrokerQuotaButNeverRevivesOldNonce() {
         var registry = registry();
@@ -790,6 +886,19 @@ class PartitionRetirementSourceProbeRegistryTest {
     private static Candidate candidate(int brokerId, long brokerEpoch, Uuid incarnation, int leaderEpoch,
                                         long writePosition) {
         return new Candidate(new Key(new Uuid(1L, 2L), 0), brokerId, brokerEpoch, incarnation,
+            leaderEpoch, -1L, writePosition, 0L);
+    }
+
+    private static Candidate candidate(
+        int brokerId,
+        long brokerEpoch,
+        Uuid incarnation,
+        Uuid topicId,
+        int partitionId,
+        int leaderEpoch,
+        long writePosition
+    ) {
+        return new Candidate(new Key(topicId, partitionId), brokerId, brokerEpoch, incarnation,
             leaderEpoch, -1L, writePosition, 0L);
     }
 

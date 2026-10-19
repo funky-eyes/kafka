@@ -1407,9 +1407,12 @@ public final class QuorumController implements Controller {
                 break;
             case TOPIC_RECORD:
                 replicationControl.replay((TopicRecord) message);
+                retirementSourceProbeRegistry.invalidateTopic(((TopicRecord) message).topicId());
                 break;
             case PARTITION_RECORD:
                 replicationControl.replay((PartitionRecord) message);
+                retirementSourceProbeRegistry.invalidatePartition(
+                    ((PartitionRecord) message).topicId(), ((PartitionRecord) message).partitionId());
                 break;
             case PARTITION_RETIREMENT_AUTHORITY_RECORD:
                 replayPartitionRetirementAuthority((PartitionRetirementAuthorityRecord) message, snapshotId, offset);
@@ -1419,6 +1422,8 @@ public final class QuorumController implements Controller {
                 break;
             case PARTITION_CHANGE_RECORD:
                 replicationControl.replay((PartitionChangeRecord) message);
+                retirementSourceProbeRegistry.invalidatePartition(
+                    ((PartitionChangeRecord) message).topicId(), ((PartitionChangeRecord) message).partitionId());
                 break;
             case FENCE_BROKER_RECORD:
                 clusterControl.replay((FenceBrokerRecord) message);
@@ -1430,6 +1435,7 @@ public final class QuorumController implements Controller {
                 break;
             case REMOVE_TOPIC_RECORD:
                 replicationControl.replay((RemoveTopicRecord) message);
+                retirementSourceProbeRegistry.invalidateTopic(((RemoveTopicRecord) message).topicId());
                 break;
             case FEATURE_LEVEL_RECORD:
                 featureControl.replay((FeatureLevelRecord) message);
