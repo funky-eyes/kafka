@@ -49,6 +49,28 @@ class BrokerSourceWalNonEmissionContractTest(unittest.TestCase):
 
 
 class WorkflowTriggerOwnershipTest(unittest.TestCase):
+    def test_broker_registration_replay_revokes_diagnostics_after_successful_metadata_apply(self):
+        root = Path(__file__).resolve().parents[1]
+        controller = (root / "metadata/src/main/java/org/apache/kafka/controller/QuorumController.java"
+                      ).read_text(encoding="utf-8")
+        replay = controller.split("private void replay(ApiMessage message,", 1)[1]
+        replay = replay.split("case ACCESS_CONTROL_ENTRY_RECORD:", 1)[0]
+        events = {
+            "REGISTER_BROKER_RECORD": ("RegisterBrokerRecord", "brokerId()"),
+            "UNREGISTER_BROKER_RECORD": ("UnregisterBrokerRecord", "brokerId()"),
+            "FENCE_BROKER_RECORD": ("FenceBrokerRecord", "id()"),
+            "UNFENCE_BROKER_RECORD": ("UnfenceBrokerRecord", "id()"),
+            "BROKER_REGISTRATION_CHANGE_RECORD": ("BrokerRegistrationChangeRecord", "brokerId()"),
+        }
+        for kind, (record, getter) in events.items():
+            with self.subTest(event=kind):
+                block = replay.split("case " + kind + ":", 1)[1].split("break;", 1)[0]
+                applied = "clusterControl.replay((" + record + ") message"
+                revoke = "retirementSourceProbeRegistry.invalidateBroker(((" + record + ") message)." + getter + ");"
+                self.assertIn(applied, block)
+                self.assertIn(revoke, block)
+                self.assertLess(block.index(applied), block.index(revoke))
+
     def test_heartbeat_network_context_preserves_transport_and_forwarding(self):
         root = Path(__file__).resolve().parents[1]
         source = (root / "core/src/main/scala/kafka/server/ControllerApis.scala"

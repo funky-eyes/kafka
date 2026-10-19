@@ -297,6 +297,26 @@ final class PartitionRetirementSourceProbeRegistry {
             || !issuedFor.brokerIncarnationId().equals(candidate.brokerIncarnationId());
     }
 
+
+    /**
+     * Revoke every outstanding source/WAL diagnostic for a Broker whose
+     * KRaft registration state changed. Called only on the serialized
+     * Controller event thread, AFTER successful metadata record replay.
+     *
+     * <p>Do not wait for another issuance or for five-second expiry: a
+     * registered incarnation can be replaced, fenced, unfenced or removed
+     * without ever requesting another diagnostic. Other Brokers' pending
+     * challenges, insertion order and quotas must remain unchanged.</p>
+     */
+    void invalidateBroker(int brokerId) {
+        if (brokerId < 0) {
+            throw new IllegalArgumentException("Invalid Broker ID for diagnostic revocation");
+        }
+        outstanding.entrySet().removeIf(
+            entry -> entry.getValue().challenge().candidate().brokerId() == brokerId
+        );
+    }
+
     /** Revoke every volatile probe when the controller leadership epoch changes. */
     void invalidateAll() {
         outstanding.clear();

@@ -545,6 +545,80 @@ class PartitionRetirementSourceProbeRegistryTest {
             registry.consume(original, CANDIDATE, BROKER_THREE, 103L));
     }
 
+
+    @Test
+    void replayedBrokerRegistrationRevokesOnlyThatBrokersPendingNonce() {
+        var registry = registry();
+        Challenge old = issue(registry, 100L);
+        Candidate peer = candidate(4, 54L, new Uuid(20L, 21L), 8, 20L);
+        Challenge untouched = registry.issue(peer, BROKER_FOUR, POLICY, 101L).orElseThrow();
+
+        registry.invalidateBroker(3);
+
+        assertTrue(registry.pendingForHeartbeat(
+            3, 54L, BROKER_THREE, 102L, candidate -> true).isEmpty());
+        assertEquals(untouched, registry.pendingForHeartbeat(
+            4, 54L, BROKER_FOUR, 102L, candidate -> true).orElseThrow());
+        assertEquals(Finding.UNKNOWN_OR_ALREADY_USED,
+            registry.consume(old, CANDIDATE, BROKER_THREE, 103L));
+        assertEquals(Finding.MATCHED_UNTRUSTED,
+            registry.consume(untouched, peer, BROKER_FOUR, 103L));
+        assertNotEquals(old.nonce(), issue(registry, 104L).nonce());
+    }
+
+    @Test
+    void replayedFenceImmediatelyReleasesPendingBrokerQuota() {
+        var registry = registry();
+        Challenge original = issue(registry, 100L);
+        for (int i = 1; i < PartitionRetirementSourceProbeRegistry.MAX_PENDING_PER_BROKER; i++) {
+            issue(registry, 100L);
+        }
+        assertTrue(registry.issue(CANDIDATE, BROKER_THREE, POLICY, 101L).isEmpty());
+
+        registry.invalidateBroker(3);
+
+        assertEquals(Finding.UNKNOWN_OR_ALREADY_USED,
+            registry.consume(original, CANDIDATE, BROKER_THREE, 102L));
+        for (int i = 0; i < PartitionRetirementSourceProbeRegistry.MAX_PENDING_PER_BROKER; i++) {
+            assertTrue(registry.issue(CANDIDATE, BROKER_THREE, POLICY, 103L).isPresent());
+        }
+        assertTrue(registry.issue(CANDIDATE, BROKER_THREE, POLICY, 103L).isEmpty());
+    }
+
+    @Test
+    void replayedRegistrationChangeRevokesAllSameBrokerCasWindows() {
+        var registry = registry();
+        Challenge first = issue(registry, 100L);
+        Candidate updatedCas = candidate(3, 54L, CANDIDATE.brokerIncarnationId(), 8, 21L);
+        Challenge second = registry.issue(updatedCas, BROKER_THREE, POLICY, 101L).orElseThrow();
+        registry.invalidateBroker(3);
+        assertEquals(Finding.UNKNOWN_OR_ALREADY_USED,
+            registry.consume(first, CANDIDATE, BROKER_THREE, 102L));
+        assertEquals(Finding.UNKNOWN_OR_ALREADY_USED,
+            registry.consume(second, updatedCas, BROKER_THREE, 102L));
+        Challenge newChallenge = issue(registry, 103L);
+        assertNotEquals(first.nonce(), newChallenge.nonce());
+        assertNotEquals(second.nonce(), newChallenge.nonce());
+    }
+
+    @Test
+    void replayForUnrelatedOrInvalidBrokerIdNeverEvictsValidNonces() {
+        var registry = registry();
+        Challenge first = issue(registry, 100L);
+        Candidate peer = candidate(4, 54L, new Uuid(20L, 21L), 8, 20L);
+        Challenge second = registry.issue(peer, BROKER_FOUR, POLICY, 101L).orElseThrow();
+        assertThrows(IllegalArgumentException.class, () -> registry.invalidateBroker(-1));
+        registry.invalidateBroker(99);
+        assertEquals(first, registry.pendingForHeartbeat(
+            3, 54L, BROKER_THREE, 102L, candidate -> true).orElseThrow());
+        assertEquals(second, registry.pendingForHeartbeat(
+            4, 54L, BROKER_FOUR, 102L, candidate -> true).orElseThrow());
+        assertEquals(Finding.MATCHED_UNTRUSTED,
+            registry.consume(first, CANDIDATE, BROKER_THREE, 103L));
+        assertEquals(Finding.MATCHED_UNTRUSTED,
+            registry.consume(second, peer, BROKER_FOUR, 104L));
+    }
+
     @Test
     void leadershipChangeReleasesBrokerQuotaButNeverRevivesOldNonce() {
         var registry = registry();

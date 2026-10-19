@@ -1399,9 +1399,11 @@ public final class QuorumController implements Controller {
         switch (type) {
             case REGISTER_BROKER_RECORD:
                 clusterControl.replay((RegisterBrokerRecord) message, offset);
+                retirementSourceProbeRegistry.invalidateBroker(((RegisterBrokerRecord) message).brokerId());
                 break;
             case UNREGISTER_BROKER_RECORD:
                 clusterControl.replay((UnregisterBrokerRecord) message);
+                retirementSourceProbeRegistry.invalidateBroker(((UnregisterBrokerRecord) message).brokerId());
                 break;
             case TOPIC_RECORD:
                 replicationControl.replay((TopicRecord) message);
@@ -1420,9 +1422,11 @@ public final class QuorumController implements Controller {
                 break;
             case FENCE_BROKER_RECORD:
                 clusterControl.replay((FenceBrokerRecord) message);
+                retirementSourceProbeRegistry.invalidateBroker(((FenceBrokerRecord) message).id());
                 break;
             case UNFENCE_BROKER_RECORD:
                 clusterControl.replay((UnfenceBrokerRecord) message);
+                retirementSourceProbeRegistry.invalidateBroker(((UnfenceBrokerRecord) message).id());
                 break;
             case REMOVE_TOPIC_RECORD:
                 replicationControl.replay((RemoveTopicRecord) message);
@@ -1438,6 +1442,7 @@ public final class QuorumController implements Controller {
                 break;
             case BROKER_REGISTRATION_CHANGE_RECORD:
                 clusterControl.replay((BrokerRegistrationChangeRecord) message);
+                retirementSourceProbeRegistry.invalidateBroker(((BrokerRegistrationChangeRecord) message).brokerId());
                 break;
             case ACCESS_CONTROL_ENTRY_RECORD:
                 aclControlManager.replay((AccessControlEntryRecord) message);

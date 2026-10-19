@@ -4063,3 +4063,46 @@ stays `DENY_ALL`, no KRaft GC writer exists, no COMMITTED object
 physical deletion is enabled, and the MinIO GA branch
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889`
 remains frozen. PR #2 remains Draft.
+
+## Batches 235–238 — revoke Broker diagnostic nonces on KRaft registration replay
+
+Validated parent: `342110ded226745d8408173d3a2a3315103d066f`
+(**17/17** exact-HEAD workflow success). This change does not activate
+the independent v3 diagnostic sender or enable an experimental feature.
+
+- **235 — durable registration replay fence:** Extend the volatile
+  Controller Source/WAL nonce registry with a per-Broker revocation.
+  Successful `RegisterBrokerRecord` and `UnregisterBrokerRecord`
+  replay now immediately invalidate that Broker's pending nonces.
+  This does not depend on requesting another Challenge or the
+  five-second expiration timer.
+- **236 — fencing and registration mutation coverage:** Apply the same
+  isolated revocation immediately after successful replay of
+  `FenceBrokerRecord`, `UnfenceBrokerRecord` and
+  `BrokerRegistrationChangeRecord`. Normal heartbeats with no
+  KRaft mutation do not revoke healthy diagnostics; other Broker
+  IDs' nonces and quotas are unaffected.
+- **237 — deterministic negative regressions:** Four JUnit registry
+  tests verify per-Broker isolation, immediate reclamation of all 16
+  per-Broker slots, revocation of multiple same-registration CAS
+  windows, and absence of side effects from unrelated or invalid
+  Broker IDs. Revoked nonces never become usable through an old
+  report; reissued nonces are independent.
+- **238 — evidence ownership:** Require these JUnit methods in the
+  existing strict metadata/storage XML gate, increasing mandatory
+  methods **599 -> 603**. A fast Python source-contract regression
+  checks that all five KRaft Broker metadata replay events revoke
+  the correct Broker's nonce **after** successful state replay.
+  Existing GA production source fingerprint and workflow triggers
+  already cover both affected production Java files; no extra
+  workflow or Native Image build is introduced.
+
+This is a Controller in-memory diagnostic safety change, not an
+authenticated Broker TLS/SASL E2E or quorum WAL durability proof.
+The v3 diagnostic dispatch remains dormant. Experimental GC
+authority version 1 still requires `IBP_4_4_IV0`; no KRaft authority
+record emitter, COMMITTED physical object DELETE, or authorization
+relaxation has been added. The production policy stays `DENY_ALL`.
+Frozen MinIO GA `9a28c11b6d97ecacafe1b8566cde5cc34d604889`
+and Draft PR #2 remain unchanged. This new SHA requires fresh
+exact-HEAD 17/17 CI evidence before promotion.
