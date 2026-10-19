@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.server;
 
+import org.apache.kafka.clients.ClientResponse;
 import org.apache.kafka.clients.NodeApiVersions;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.errors.UnsupportedVersionException;
@@ -24,6 +25,11 @@ import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.requests.BrokerHeartbeatRequest;
 import org.apache.kafka.metadata.BrokerState;
 import org.apache.kafka.server.BrokerLifecycleManager.SourceWalProbeCaptureState;
+import org.apache.kafka.server.common.ControllerRequestCompletionHandler;
+import org.apache.kafka.server.common.NodeToControllerChannelManager;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Objects;
 import java.util.Optional;
@@ -42,6 +48,61 @@ import java.util.Optional;
  */
 final class BrokerHeartbeatSourceWalReportDispatch {
     private static final short REPORT_VERSION = 3;
+    private static final Logger LOG = LoggerFactory.getLogger(BrokerHeartbeatSourceWalReportDispatch.class);
+
+    /**
+     * Dormant, package-private transport adapter; ordinary Broker heartbeats
+     * never call this path. A future production caller must demonstrate a
+     * unique per-Broker authenticated channel from the real TLS/SASL socket.
+     * The boolean prerequisite is not independently verified here and must
+     * never be used as a substitute for that transport proof.
+     *
+     * <p>The report is consumed locally before enqueue. A failed enqueue
+     * cannot reuse the same report. Controller errors/timeouts are handled
+     * by a dedicated callback which never changes Broker lifecycle state.
+     * The underlying channel may internally retry a queued RPC; Controller
+     * replay protection therefore remains mandatory.</p>
+     */
+    static boolean sendDiagnosticOnce(
+        NodeToControllerChannelManager channel,
+        SourceWalProbeCaptureState captures,
+        BrokerHeartbeatRequestData ordinaryHeartbeat,
+        boolean uniqueBrokerChannelIdentityVerified,
+        long nowNs,
+        Uuid brokerIncarnationId,
+        BrokerState state,
+        boolean registered
+    ) {
+        Objects.requireNonNull(channel, "channel");
+        Optional<BrokerHeartbeatRequest.Builder> prepared = prepareOnce(
+            captures, ordinaryHeartbeat, channel.controllerApiVersions(),
+            uniqueBrokerChannelIdentityVerified, nowNs, brokerIncarnationId,
+            state, registered
+        );
+        if (prepared.isEmpty()) {
+            return false;
+        }
+        // Never send through the ordinary BrokerHeartbeatResponseHandler.
+        channel.sendRequest(prepared.get(), new DiagnosticResponseHandler());
+        return true;
+    }
+
+    /** No diagnostic completion can change broker liveness or grant GC. */
+    private static final class DiagnosticResponseHandler implements ControllerRequestCompletionHandler {
+        @Override
+        public void onComplete(ClientResponse response) {
+            if (response == null || response.responseBody() == null) {
+                LOG.debug("Controller Source/WAL diagnostic yielded no response.");
+            } else {
+                LOG.debug("Controller Source/WAL diagnostic response remains non-authorizing.");
+            }
+        }
+
+        @Override
+        public void onTimeout() {
+            LOG.debug("Controller Source/WAL diagnostic timed out without affecting normal heartbeats.");
+        }
+    }
 
     private BrokerHeartbeatSourceWalReportDispatch() {
     }

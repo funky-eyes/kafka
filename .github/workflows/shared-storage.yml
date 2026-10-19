@@ -327,6 +327,10 @@ jobs:
               'fencingShutdownOrOfflineLogDirCannotReportWalDurability',
               'replacedBrokerEpochCannotSendOrReuseStagedSourceReport',
               'unregisteredOrExpiredCaptureCannotCreateAReportHeartbeat',
+              'diagnosticAdapterCannotEnqueueWithUnknownOrDowngradedControllerVersion',
+              'diagnosticAdapterCannotEnqueueWithoutExplicitIdentityGate',
+              'dedicatedVThreeDiagnosticDoesNotMutateOrdinaryHeartbeatOrRetry',
+              'failedDiagnosticEnqueueBurnsLocalReportWithoutAnotherSend',
           }
           assert capture_root.tag == 'testsuite'
           assert capture_root.get('name') == capture_suite

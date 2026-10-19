@@ -4025,3 +4025,41 @@ is untouched; PR #2 remains Draft. Neither a mocked network channel
 nor a one-time nonce proves real TLS authentication, multi-Broker WAL
 durability or safe COMMITTED deletion. A fresh 17/17 exact-HEAD CI is
 required.
+
+## Batches 231–234 — isolated Broker v3 report transport preparation
+
+Validated parent `7405b1dd9a7a787e1a2b547ea712bb17d567dc81`
+has all **17/17** existing GitHub CI workflows successful.
+
+- **231 — dedicated enqueue adapter:** An otherwise dormant,
+  package-private `BrokerHeartbeatSourceWalReportDispatch.sendDiagnosticOnce`
+  uses `NodeToControllerChannelManager` to enqueue a single logical,
+  exact-version-v3 report built from the existing Broker one-shot
+  local capture. It has NO ordinary `BrokerLifecycleManager` caller.
+- **232 — no downgrade / no identity bypass:** Missing Controller
+  API versions, max protocol below v3 and false identity precondition
+  all refuse enqueue without consuming the ready capture.
+  A Boolean precondition is NOT actual TLS/SASL authenticated Broker
+  identity: production must not call this adapter until an independent
+  channel-bound Broker Principal binding exists.
+- **233 — response isolation and fail closed:** The diagnostic
+  completion/timeout handler is deliberately separate from the normal
+  `BrokerHeartbeatResponseHandler`, never changing liveness,
+  registration or retirement authority. An enqueue exception
+  consumes the staged local report without automatic retry.
+- **234 — mandatory CI tests:** Four deterministic server tests check
+  version and identity rejection, exact v3 request enqueuing, local
+  one-shot behavior, callback isolation and failure/no-retry semantics.
+  The existing `server:test` and strict JUnit XML gate require all
+  four new methods; no extra native build or CI job. The separate
+  metadata/storage evidence inventory correctly remains **599**.
+
+This is a **dormant in-process adapter**, not real TLS/SASL
+authentication, a multi-node diagnostic roundtrip or positive
+Controller nonce acceptance. The Kafka 4.3.1 baseline does not meet
+the `IBP_4_4_IV0` prerequisite for experimental authority v1;
+do not bypass it. The Controller production Broker Principal policy
+stays `DENY_ALL`, no KRaft GC writer exists, no COMMITTED object
+physical deletion is enabled, and the MinIO GA branch
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`
+remains frozen. PR #2 remains Draft.

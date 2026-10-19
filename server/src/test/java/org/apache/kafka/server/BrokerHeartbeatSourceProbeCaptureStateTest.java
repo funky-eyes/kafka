@@ -16,9 +16,11 @@
  */
 package org.apache.kafka.server;
 
+import org.apache.kafka.clients.ClientResponse;
 import org.apache.kafka.clients.NodeApiVersions;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.protocol.ApiKeys;
+import org.apache.kafka.common.requests.AbstractRequest;
 import org.apache.kafka.common.requests.BrokerHeartbeatRequest;
 import org.apache.kafka.common.errors.UnsupportedVersionException;
 import org.apache.kafka.common.message.BrokerHeartbeatRequestData;
@@ -29,10 +31,13 @@ import org.apache.kafka.common.replica.PartitionRetirementSourceProbe.Request;
 import org.apache.kafka.metadata.BrokerState;
 import org.apache.kafka.server.BrokerLifecycleManager.SourceWalProbeCaptureState;
 import org.apache.kafka.server.BrokerLifecycleManager.SourceWalProbeCaptureState.Capture;
+import org.apache.kafka.server.common.ControllerRequestCompletionHandler;
+import org.apache.kafka.server.common.NodeToControllerChannelManager;
 
 import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -40,6 +45,14 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
  * Strictly local asynchronous Source/WAL diagnostic staging. No test enables
@@ -452,6 +465,90 @@ class BrokerHeartbeatSourceProbeCaptureStateTest {
         assertTrue(dispatch(state, regularHeartbeat(), true, (short) 3,
             100L + SourceWalProbeCaptureState.MAX_AGE_NS,
             BrokerState.RUNNING, true).isEmpty());
+    }
+
+    @Test
+    void diagnosticAdapterCannotEnqueueWithUnknownOrDowngradedControllerVersion() {
+        var state = readyDispatchReport();
+        NodeToControllerChannelManager channel = mock(NodeToControllerChannelManager.class);
+        when(channel.controllerApiVersions()).thenReturn(Optional.empty());
+        assertFalse(sendDiagnostic(channel, state, regularHeartbeat(), true, 102L));
+        when(channel.controllerApiVersions()).thenReturn(Optional.of(
+            NodeApiVersions.create(ApiKeys.BROKER_HEARTBEAT.id, (short) 0, (short) 2)
+        ));
+        assertFalse(sendDiagnostic(channel, state, regularHeartbeat(), true, 103L));
+        verify(channel, never()).sendRequest(any(), any());
+        assertTrue(takeWire(state, 104L).isPresent());
+    }
+
+    @Test
+    void diagnosticAdapterCannotEnqueueWithoutExplicitIdentityGate() {
+        var state = readyDispatchReport();
+        NodeToControllerChannelManager channel = mock(NodeToControllerChannelManager.class);
+        when(channel.controllerApiVersions()).thenReturn(Optional.of(
+            NodeApiVersions.create(ApiKeys.BROKER_HEARTBEAT.id, (short) 0, (short) 3)
+        ));
+        assertFalse(sendDiagnostic(channel, state, regularHeartbeat(), false, 102L));
+        verify(channel, never()).sendRequest(any(), any());
+        assertTrue(sendDiagnostic(channel, state, regularHeartbeat(), true, 103L));
+        verify(channel, times(1)).sendRequest(any(), any());
+    }
+
+    @Test
+    void dedicatedVThreeDiagnosticDoesNotMutateOrdinaryHeartbeatOrRetry() {
+        var state = readyDispatchReport();
+        NodeToControllerChannelManager channel = mock(NodeToControllerChannelManager.class);
+        when(channel.controllerApiVersions()).thenReturn(Optional.of(
+            NodeApiVersions.create(ApiKeys.BROKER_HEARTBEAT.id, (short) 0, (short) 3)
+        ));
+        AtomicReference<AbstractRequest.Builder<?>> queued = new AtomicReference<>();
+        AtomicReference<ControllerRequestCompletionHandler> callback = new AtomicReference<>();
+        doAnswer(invocation -> {
+            queued.set(invocation.getArgument(0));
+            callback.set(invocation.getArgument(1));
+            return null;
+        }).when(channel).sendRequest(any(), any());
+        BrokerHeartbeatRequestData ordinary = regularHeartbeat().setCurrentMetadataOffset(42L);
+        assertTrue(sendDiagnostic(channel, state, ordinary, true, 102L));
+        BrokerHeartbeatRequest sent = (BrokerHeartbeatRequest) queued.get().build();
+        assertEquals(3, sent.version());
+        assertEquals(42L, sent.data().currentMetadataOffset());
+        assertEquals(challenge(1L).nonce(), sent.data().sourceWalProbeReport().nonce());
+        assertNull(ordinary.sourceWalProbeReport());
+        callback.get().onComplete(mock(ClientResponse.class));
+        callback.get().onTimeout();
+        assertFalse(sendDiagnostic(channel, state, ordinary, true, 103L));
+        verify(channel, times(1)).sendRequest(any(), any());
+        assertNull(ordinary.sourceWalProbeReport());
+    }
+
+    @Test
+    void failedDiagnosticEnqueueBurnsLocalReportWithoutAnotherSend() {
+        var state = readyDispatchReport();
+        NodeToControllerChannelManager channel = mock(NodeToControllerChannelManager.class);
+        when(channel.controllerApiVersions()).thenReturn(Optional.of(
+            NodeApiVersions.create(ApiKeys.BROKER_HEARTBEAT.id, (short) 0, (short) 3)
+        ));
+        doThrow(new IllegalStateException("controller channel unavailable"))
+            .when(channel).sendRequest(any(), any());
+        assertThrows(IllegalStateException.class,
+            () -> sendDiagnostic(channel, state, regularHeartbeat(), true, 102L));
+        assertTrue(takeWire(state, 103L).isEmpty());
+        assertFalse(sendDiagnostic(channel, state, regularHeartbeat(), true, 104L));
+        verify(channel, times(1)).sendRequest(any(), any());
+    }
+
+    private static boolean sendDiagnostic(
+        NodeToControllerChannelManager channel,
+        SourceWalProbeCaptureState state,
+        BrokerHeartbeatRequestData heartbeat,
+        boolean verified,
+        long nowNs
+    ) {
+        return BrokerHeartbeatSourceWalReportDispatch.sendDiagnosticOnce(
+            channel, state, heartbeat, verified, nowNs,
+            INCARNATION, BrokerState.RUNNING, true
+        );
     }
 
     private static SourceWalProbeCaptureState readyDispatchReport() {
