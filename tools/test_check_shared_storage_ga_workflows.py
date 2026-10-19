@@ -76,6 +76,30 @@ class BrokerSourceWalNonEmissionContractTest(unittest.TestCase):
                     source,
                 )
 
+    def test_transport_dispatch_requires_real_broker_bound_connection_snapshot(self):
+        root = Path(__file__).resolve().parents[1]
+        interface = (root / "server-common/src/main/java/org/apache/kafka/server/common/"
+                     "NodeToControllerChannelManager.java").read_text(encoding="utf-8")
+        concrete = (root / "server/src/main/java/org/apache/kafka/server/"
+                    "NodeToControllerChannelManagerImpl.java").read_text(encoding="utf-8")
+        dispatcher = (root / "server/src/main/java/org/apache/kafka/server/"
+                      "BrokerHeartbeatSourceWalReportDispatch.java").read_text(encoding="utf-8")
+        self.assertIn("default Optional<NodeApiVersions> authenticatedBrokerDiagnosticVersions(", interface)
+        default_gate = interface.split(
+            "default Optional<NodeApiVersions> authenticatedBrokerDiagnosticVersions(", 1
+        )[1].split("\n    }", 1)[0]
+        self.assertIn("return Optional.empty();", default_gate)
+        # The existing production transport has no unique client-identity
+        # attestation; generic protocol negotiation cannot opt into sending.
+        self.assertNotIn("authenticatedBrokerDiagnosticVersions(", concrete)
+        send = dispatcher.split("static boolean sendDiagnosticOnce(", 1)[1].split(
+            "private static final class DiagnosticResponseHandler", 1
+        )[0]
+        self.assertIn("channel.authenticatedBrokerDiagnosticVersions(", send)
+        self.assertIn("authenticatedVersions.isPresent()", send)
+        self.assertNotIn("channel.controllerApiVersions()", send)
+        self.assertNotIn("boolean uniqueBrokerChannelIdentityVerified", send)
+
     def test_controller_consumes_source_probe_only_via_authenticated_gate(self):
         root = Path(__file__).resolve().parents[1]
         controller_root = root / "metadata/src/main/java/org/apache/kafka/controller"
@@ -229,11 +253,12 @@ class WorkflowTriggerOwnershipTest(unittest.TestCase):
                         )
 
     def test_gc_protocol_changes_trigger_every_ga_evidence_workflow(self):
-        # Exactly these five inputs were added to the release fingerprint
+        # Every GC protocol and Broker auth-boundary input below is included
         # for the Source/WAL diagnostics. Every eligible source-SHA gate
         # must rerun when any of their blobs changes.
         protected = {
             "server/src/main/java/org/apache/kafka/server/BrokerHeartbeatSourceWalReportDispatch.java",
+            "server-common/src/main/java/org/apache/kafka/server/common/NodeToControllerChannelManager.java",
             "clients/src/main/java/org/apache/kafka/common/replica/PartitionRetirementSourceProbe.java",
             "clients/src/main/java/org/apache/kafka/common/requests/BrokerHeartbeatRequest.java",
             "clients/src/main/resources/common/message/BrokerHeartbeatRequest.json",

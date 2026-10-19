@@ -37,11 +37,12 @@ import java.util.Optional;
 /**
  * Dormant, non-emitting Source/WAL report preparation for heartbeat v3.
  *
- * <p>A caller must independently verify a unique per-Broker authenticated
- * Controller channel before satisfying the identity precondition. Neither
- * Kafka's CLUSTER_ACTION permission nor a claimed BrokerId does that. This
- * helper never authenticates a caller, never sends a request, and is not
- * invoked by ordinary BrokerLifecycleManager heartbeats.</p>
+ * <p>Only an active Controller transport that independently attests the
+ * exact BrokerRegistration and returns the matching authenticated connection
+ * versions can satisfy the send gate. Kafka's CLUSTER_ACTION permission,
+ * an API version lookup, or a claimed BrokerId is never sufficient. The
+ * generic Controller channel currently returns no such attestation; this
+ * adapter is not invoked by ordinary BrokerLifecycleManager heartbeats.</p>
  *
  * <p>A locally prepared report is still untrusted by the Controller and
  * cannot authorize KRaft writes or COMMITTED object deletion.</p>
@@ -54,8 +55,8 @@ final class BrokerHeartbeatSourceWalReportDispatch {
      * Dormant, package-private transport adapter; ordinary Broker heartbeats
      * never call this path. A future production caller must demonstrate a
      * unique per-Broker authenticated channel from the real TLS/SASL socket.
-     * The boolean prerequisite is not independently verified here and must
-     * never be used as a substitute for that transport proof.
+     * Unlike the preparation-only helper, this transport adapter CANNOT
+     * accept a caller-supplied Boolean for that prerequisite.
      *
      * <p>The report is consumed locally before enqueue. A failed enqueue
      * cannot reuse the same report. Controller errors/timeouts are handled
@@ -67,16 +68,26 @@ final class BrokerHeartbeatSourceWalReportDispatch {
         NodeToControllerChannelManager channel,
         SourceWalProbeCaptureState captures,
         BrokerHeartbeatRequestData ordinaryHeartbeat,
-        boolean uniqueBrokerChannelIdentityVerified,
         long nowNs,
         Uuid brokerIncarnationId,
         BrokerState state,
         boolean registered
     ) {
         Objects.requireNonNull(channel, "channel");
+        Objects.requireNonNull(ordinaryHeartbeat, "ordinaryHeartbeat");
+        // This ONE connection-bound query must attest identity AND versions.
+        // Never combine generic controllerApiVersions() with a claimed BrokerId
+        // or a caller-controlled "verified" flag across an active-controller
+        // failover. The current network manager defaults to Optional.empty().
+        Optional<NodeApiVersions> authenticatedVersions = Objects.requireNonNull(
+            channel.authenticatedBrokerDiagnosticVersions(
+                ordinaryHeartbeat.brokerId(), ordinaryHeartbeat.brokerEpoch(), brokerIncarnationId
+            ),
+            "authenticatedBrokerDiagnosticVersions"
+        );
         Optional<BrokerHeartbeatRequest.Builder> prepared = prepareOnce(
-            captures, ordinaryHeartbeat, channel.controllerApiVersions(),
-            uniqueBrokerChannelIdentityVerified, nowNs, brokerIncarnationId,
+            captures, ordinaryHeartbeat, authenticatedVersions,
+            authenticatedVersions.isPresent(), nowNs, brokerIncarnationId,
             state, registered
         );
         if (prepared.isEmpty()) {

@@ -22,6 +22,7 @@ on:
     paths:
       - 'server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java'
       - 'server/src/main/java/org/apache/kafka/server/BrokerHeartbeatSourceWalReportDispatch.java'
+      - 'server-common/src/main/java/org/apache/kafka/server/common/NodeToControllerChannelManager.java'
       - 'gradle.properties'
       - 'gradle/dependencies.gradle'
       - 'gradlew'
@@ -47,6 +48,7 @@ on:
       - 'clients/src/main/java/org/apache/kafka/common/replica/PartitionRetirementSourceProbe.java'
       - 'server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java'
       - 'server/src/main/java/org/apache/kafka/server/BrokerHeartbeatSourceWalReportDispatch.java'
+      - 'server-common/src/main/java/org/apache/kafka/server/common/NodeToControllerChannelManager.java'
       - 'server/src/test/java/org/apache/kafka/server/BrokerHeartbeatSourceProbeChallengeGateTest.java'
       - 'server/src/test/java/org/apache/kafka/server/BrokerHeartbeatSourceProbeCaptureStateTest.java'
       - 'clients/src/main/resources/common/message/BrokerHeartbeatRequest.json'
@@ -113,6 +115,7 @@ on:
     paths:
       - 'server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java'
       - 'server/src/main/java/org/apache/kafka/server/BrokerHeartbeatSourceWalReportDispatch.java'
+      - 'server-common/src/main/java/org/apache/kafka/server/common/NodeToControllerChannelManager.java'
       - 'build.gradle'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/**'
       - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementControllerPrecheck.java'
@@ -128,6 +131,7 @@ on:
       - 'clients/src/main/java/org/apache/kafka/common/replica/PartitionRetirementSourceProbe.java'
       - 'server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java'
       - 'server/src/main/java/org/apache/kafka/server/BrokerHeartbeatSourceWalReportDispatch.java'
+      - 'server-common/src/main/java/org/apache/kafka/server/common/NodeToControllerChannelManager.java'
       - 'server/src/test/java/org/apache/kafka/server/BrokerHeartbeatSourceProbeChallengeGateTest.java'
       - 'server/src/test/java/org/apache/kafka/server/BrokerHeartbeatSourceProbeCaptureStateTest.java'
       - 'clients/src/main/resources/common/message/BrokerHeartbeatRequest.json'
@@ -331,6 +335,9 @@ jobs:
               'diagnosticAdapterCannotEnqueueWithoutExplicitIdentityGate',
               'dedicatedVThreeDiagnosticDoesNotMutateOrdinaryHeartbeatOrRetry',
               'failedDiagnosticEnqueueBurnsLocalReportWithoutAnotherSend',
+              'genericControllerApiVersionCannotImpersonateBoundBroker',
+              'foreignBrokerEpochOrIncarnationBindingCannotSendReport',
+              'authenticatedVersionSnapshotDoesNotReadSeparateControllerVersions',
           }
           assert capture_root.tag == 'testsuite'
           assert capture_root.get('name') == capture_suite

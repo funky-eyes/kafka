@@ -4206,3 +4206,48 @@ These are source-contract tests, not evidence of a TLS handshake or
 multi-Broker report roundtrip. Production `DENY_ALL`, the dormant
 diagnostic sender, no KRaft GC-authority writer, no COMMITTED physical
 DELETE, the frozen MinIO GA branch and Draft PR #2 remain unchanged.
+
+## Batches 248–251 — remove caller-Boolean identity bypass from dormant diagnostic sending
+
+Validated parent: `54f35163cd9b4a78f99e78126e3b51d368ead401`;
+17/17 CI workflows successful.
+
+- **248 — unified Controller-channel attestation contract.**
+  `NodeToControllerChannelManager.authenticatedBrokerDiagnosticVersions`
+  returns an `Optional<NodeApiVersions>` only for a **single current,
+  uniquely authenticated network session** bound to the specified Broker
+  ID, BrokerEpoch and incarnation, with versions from that SAME active
+  Controller session. The interface supplies `Optional.empty()` by
+  default, and the existing production
+  `NodeToControllerChannelManagerImpl` deliberately DOES NOT override
+  it. Generic negotiated versions, listener TLS configuration or
+  CLUSTER_ACTION are not identity proof.
+- **249 — remove send-side caller-controlled Boolean.**
+  `BrokerHeartbeatSourceWalReportDispatch.sendDiagnosticOnce` no longer
+  accepts a `uniqueBrokerChannelIdentityVerified` parameter. It
+  obtains exact Broker- and connection-bound versions from the channel;
+  absence prevents enqueue WITHOUT draining the staged one-shot report.
+  The package-private `prepareOnce` is still a non-network test/helper
+  and remains strictly dormant in production.
+- **250 — identity mismatch and version snapshot regressions.**
+  Update the existing dedicated dispatcher tests and add three tests
+  proving generic Controller API versions alone cannot send, a different
+  BrokerEpoch/incarnation/ID attestation cannot be borrowed, and the
+  authenticated version snapshot never queries a separate potentially
+  changed Controller connection. Mock-supplied positive bindings only
+  exercise local control flow; they are not proof of real TLS/SASL.
+- **251 — GA evidence ownership.** Include the channel interface in
+  the production fingerprint and all applicable push/PR workflow path
+  triggers. Add the three JUnit methods to the existing `server:test`
+  strict XML gate, plus a Python regression ensuring the production
+  channel implementation still defaults to **DENY** and the sender
+  cannot reintroduce the Boolean/independent-version bypass. No new
+  workflow or Native Image build is added.
+
+No real unique per-Broker authenticated Controller channel has yet been
+implemented or tested. Consequently production cannot enqueue these
+reports. Controller production policy `DENY_ALL` stays unchanged;
+there is no source-WAL durability certificate, KRaft GC-authority
+emitter or physical COMMITTED delete. MinIO GA
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`
+remains frozen and PR #2 remains Draft.

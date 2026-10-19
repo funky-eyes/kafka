@@ -471,12 +471,12 @@ class BrokerHeartbeatSourceProbeCaptureStateTest {
     void diagnosticAdapterCannotEnqueueWithUnknownOrDowngradedControllerVersion() {
         var state = readyDispatchReport();
         NodeToControllerChannelManager channel = mock(NodeToControllerChannelManager.class);
-        when(channel.controllerApiVersions()).thenReturn(Optional.empty());
-        assertFalse(sendDiagnostic(channel, state, regularHeartbeat(), true, 102L));
-        when(channel.controllerApiVersions()).thenReturn(Optional.of(
+        when(channel.authenticatedBrokerDiagnosticVersions(3, 54L, INCARNATION)).thenReturn(Optional.empty());
+        assertFalse(sendDiagnostic(channel, state, regularHeartbeat(), 102L));
+        when(channel.authenticatedBrokerDiagnosticVersions(3, 54L, INCARNATION)).thenReturn(Optional.of(
             NodeApiVersions.create(ApiKeys.BROKER_HEARTBEAT.id, (short) 0, (short) 2)
         ));
-        assertFalse(sendDiagnostic(channel, state, regularHeartbeat(), true, 103L));
+        assertFalse(sendDiagnostic(channel, state, regularHeartbeat(), 103L));
         verify(channel, never()).sendRequest(any(), any());
         assertTrue(takeWire(state, 104L).isPresent());
     }
@@ -488,9 +488,14 @@ class BrokerHeartbeatSourceProbeCaptureStateTest {
         when(channel.controllerApiVersions()).thenReturn(Optional.of(
             NodeApiVersions.create(ApiKeys.BROKER_HEARTBEAT.id, (short) 0, (short) 3)
         ));
-        assertFalse(sendDiagnostic(channel, state, regularHeartbeat(), false, 102L));
+        when(channel.authenticatedBrokerDiagnosticVersions(3, 54L, INCARNATION))
+            .thenReturn(Optional.empty());
+        assertFalse(sendDiagnostic(channel, state, regularHeartbeat(), 102L));
         verify(channel, never()).sendRequest(any(), any());
-        assertTrue(sendDiagnostic(channel, state, regularHeartbeat(), true, 103L));
+        when(channel.authenticatedBrokerDiagnosticVersions(3, 54L, INCARNATION)).thenReturn(Optional.of(
+            NodeApiVersions.create(ApiKeys.BROKER_HEARTBEAT.id, (short) 0, (short) 3)
+        ));
+        assertTrue(sendDiagnostic(channel, state, regularHeartbeat(), 103L));
         verify(channel, times(1)).sendRequest(any(), any());
     }
 
@@ -498,7 +503,7 @@ class BrokerHeartbeatSourceProbeCaptureStateTest {
     void dedicatedVThreeDiagnosticDoesNotMutateOrdinaryHeartbeatOrRetry() {
         var state = readyDispatchReport();
         NodeToControllerChannelManager channel = mock(NodeToControllerChannelManager.class);
-        when(channel.controllerApiVersions()).thenReturn(Optional.of(
+        when(channel.authenticatedBrokerDiagnosticVersions(3, 54L, INCARNATION)).thenReturn(Optional.of(
             NodeApiVersions.create(ApiKeys.BROKER_HEARTBEAT.id, (short) 0, (short) 3)
         ));
         AtomicReference<AbstractRequest.Builder<?>> queued = new AtomicReference<>();
@@ -509,7 +514,7 @@ class BrokerHeartbeatSourceProbeCaptureStateTest {
             return null;
         }).when(channel).sendRequest(any(), any());
         BrokerHeartbeatRequestData ordinary = regularHeartbeat().setCurrentMetadataOffset(42L);
-        assertTrue(sendDiagnostic(channel, state, ordinary, true, 102L));
+        assertTrue(sendDiagnostic(channel, state, ordinary, 102L));
         BrokerHeartbeatRequest sent = (BrokerHeartbeatRequest) queued.get().build();
         assertEquals(3, sent.version());
         assertEquals(42L, sent.data().currentMetadataOffset());
@@ -517,7 +522,7 @@ class BrokerHeartbeatSourceProbeCaptureStateTest {
         assertNull(ordinary.sourceWalProbeReport());
         callback.get().onComplete(mock(ClientResponse.class));
         callback.get().onTimeout();
-        assertFalse(sendDiagnostic(channel, state, ordinary, true, 103L));
+        assertFalse(sendDiagnostic(channel, state, ordinary, 103L));
         verify(channel, times(1)).sendRequest(any(), any());
         assertNull(ordinary.sourceWalProbeReport());
     }
@@ -526,27 +531,78 @@ class BrokerHeartbeatSourceProbeCaptureStateTest {
     void failedDiagnosticEnqueueBurnsLocalReportWithoutAnotherSend() {
         var state = readyDispatchReport();
         NodeToControllerChannelManager channel = mock(NodeToControllerChannelManager.class);
-        when(channel.controllerApiVersions()).thenReturn(Optional.of(
+        when(channel.authenticatedBrokerDiagnosticVersions(3, 54L, INCARNATION)).thenReturn(Optional.of(
             NodeApiVersions.create(ApiKeys.BROKER_HEARTBEAT.id, (short) 0, (short) 3)
         ));
         doThrow(new IllegalStateException("controller channel unavailable"))
             .when(channel).sendRequest(any(), any());
         assertThrows(IllegalStateException.class,
-            () -> sendDiagnostic(channel, state, regularHeartbeat(), true, 102L));
+            () -> sendDiagnostic(channel, state, regularHeartbeat(), 102L));
         assertTrue(takeWire(state, 103L).isEmpty());
-        assertFalse(sendDiagnostic(channel, state, regularHeartbeat(), true, 104L));
+        assertFalse(sendDiagnostic(channel, state, regularHeartbeat(), 104L));
         verify(channel, times(1)).sendRequest(any(), any());
+    }
+
+    @Test
+    void genericControllerApiVersionCannotImpersonateBoundBroker() {
+        var state = readyDispatchReport();
+        NodeToControllerChannelManager channel = mock(NodeToControllerChannelManager.class);
+        NodeApiVersions vThree = NodeApiVersions.create(
+            ApiKeys.BROKER_HEARTBEAT.id, (short) 0, (short) 3);
+        when(channel.controllerApiVersions()).thenReturn(Optional.of(vThree));
+        when(channel.authenticatedBrokerDiagnosticVersions(3, 54L, INCARNATION))
+            .thenReturn(Optional.empty());
+
+        assertFalse(sendDiagnostic(channel, state, regularHeartbeat(), 102L));
+        verify(channel, never()).sendRequest(any(), any());
+        verify(channel, never()).controllerApiVersions();
+        assertTrue(takeWire(state, 103L).isPresent());
+    }
+
+    @Test
+    void foreignBrokerEpochOrIncarnationBindingCannotSendReport() {
+        var state = readyDispatchReport();
+        NodeToControllerChannelManager channel = mock(NodeToControllerChannelManager.class);
+        NodeApiVersions vThree = NodeApiVersions.create(
+            ApiKeys.BROKER_HEARTBEAT.id, (short) 0, (short) 3);
+        when(channel.authenticatedBrokerDiagnosticVersions(3, 55L, INCARNATION))
+            .thenReturn(Optional.of(vThree));
+        when(channel.authenticatedBrokerDiagnosticVersions(3, 54L, new Uuid(7L, 8L)))
+            .thenReturn(Optional.of(vThree));
+        when(channel.authenticatedBrokerDiagnosticVersions(4, 54L, INCARNATION))
+            .thenReturn(Optional.of(vThree));
+
+        assertFalse(sendDiagnostic(channel, state, regularHeartbeat(), 102L));
+        verify(channel).authenticatedBrokerDiagnosticVersions(3, 54L, INCARNATION);
+        verify(channel, never()).sendRequest(any(), any());
+        assertTrue(takeWire(state, 103L).isPresent());
+    }
+
+    @Test
+    void authenticatedVersionSnapshotDoesNotReadSeparateControllerVersions() {
+        var state = readyDispatchReport();
+        NodeToControllerChannelManager channel = mock(NodeToControllerChannelManager.class);
+        when(channel.controllerApiVersions()).thenThrow(
+            new AssertionError("Generic API versions are not identity evidence"));
+        when(channel.authenticatedBrokerDiagnosticVersions(3, 54L, INCARNATION)).thenReturn(
+            Optional.of(NodeApiVersions.create(
+                ApiKeys.BROKER_HEARTBEAT.id, (short) 0, (short) 3))
+        );
+
+        assertTrue(sendDiagnostic(channel, state, regularHeartbeat(), 102L));
+        verify(channel, never()).controllerApiVersions();
+        verify(channel, times(1)).sendRequest(any(), any());
+        assertTrue(takeWire(state, 103L).isEmpty());
     }
 
     private static boolean sendDiagnostic(
         NodeToControllerChannelManager channel,
         SourceWalProbeCaptureState state,
         BrokerHeartbeatRequestData heartbeat,
-        boolean verified,
         long nowNs
     ) {
         return BrokerHeartbeatSourceWalReportDispatch.sendDiagnosticOnce(
-            channel, state, heartbeat, verified, nowNs,
+            channel, state, heartbeat, nowNs,
             INCARNATION, BrokerState.RUNNING, true
         );
     }

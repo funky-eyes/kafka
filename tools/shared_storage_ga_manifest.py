@@ -170,6 +170,7 @@ PRODUCTION_PATHS = {
     "core/src/main/scala/kafka/server/BrokerServer.scala",
     "server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java",
     "server/src/main/java/org/apache/kafka/server/BrokerHeartbeatSourceWalReportDispatch.java",
+    "server-common/src/main/java/org/apache/kafka/server/common/NodeToControllerChannelManager.java",
     "core/src/main/scala/kafka/server/ControllerServer.scala",
     "core/src/main/scala/kafka/server/ReplicaManager.scala",
     "core/src/main/scala/kafka/server/ReplicaFetcherManager.scala",

@@ -212,6 +212,7 @@ class ProductionFingerprintTest(unittest.TestCase):
             "clients/src/main/resources/common/message/BrokerHeartbeatRequest.json",
             "clients/src/main/resources/common/message/BrokerHeartbeatResponse.json",
             "server/src/main/java/org/apache/kafka/server/BrokerHeartbeatSourceWalReportDispatch.java",
+            "server-common/src/main/java/org/apache/kafka/server/common/NodeToControllerChannelManager.java",
         )
         for path in paths:
             with self.subTest(path=path):
