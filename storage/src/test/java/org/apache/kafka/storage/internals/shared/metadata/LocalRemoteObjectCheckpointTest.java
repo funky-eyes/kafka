@@ -103,6 +103,37 @@ class LocalRemoteObjectCheckpointTest {
     }
 
     @Test
+    void physicalDuplicateCheckpointConvergesAcrossOppositeReplicaReplayOrder() throws Exception {
+        LocalRemoteObjectCheckpoint first = new LocalRemoteObjectCheckpoint(tempDir.resolve("broker-one"));
+        LocalRemoteObjectCheckpoint second = new LocalRemoteObjectCheckpoint(tempDir.resolve("broker-two"));
+        SharedObjectMetadata low = object(100L, 100L, 110L, 444L);
+        SharedObjectMetadata high = object(999L, 100L, 110L, 444L);
+
+        first.add(high);
+        assertEquals(999L, first.find(PARTITION, 105L).orElseThrow().objectId());
+        first.add(low);
+        second.add(low);
+        second.add(high);
+
+        assertEquals(first.references(), second.references());
+        assertEquals(100L, first.find(PARTITION, 105L).orElseThrow().objectId());
+        assertEquals(
+            first.references(),
+            new LocalRemoteObjectCheckpoint(tempDir.resolve("broker-one")).references()
+        );
+        assertEquals(
+            second.references(),
+            new LocalRemoteObjectCheckpoint(tempDir.resolve("broker-two")).references()
+        );
+
+        RemoteObjectIndex recovered = new RemoteObjectIndex();
+        recovered.restore(first.references());
+        recovered.add(high);
+        assertEquals(100L, recovered.find(PARTITION, 105L).orElseThrow().objectId());
+        assertEquals(first.find(PARTITION, 105L), recovered.find(PARTITION, 105L));
+    }
+
+    @Test
     void conflictingLogicalRangeMustNotReplaceLastDurableSnapshot() throws Exception {
         LocalRemoteObjectCheckpoint checkpoint = new LocalRemoteObjectCheckpoint(tempDir);
         SharedObjectMetadata first = object(100, 100, 110, 444);

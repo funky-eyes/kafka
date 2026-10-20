@@ -101,6 +101,36 @@ class RemoteObjectIndexTest {
     }
 
     @Test
+    void physicalDuplicateReplayOrderConvergesAcrossReplicasWithoutGrantingGc() {
+        SharedObjectMetadata low = object(10L, 0L, 100L, 777L);
+        SharedObjectMetadata high = object(20L, 0L, 100L, 777L);
+        RemoteObjectIndex firstReplica = new RemoteObjectIndex();
+        RemoteObjectIndex secondReplica = new RemoteObjectIndex();
+
+        firstReplica.add(high);
+        assertEquals(20L, firstReplica.find(PARTITION, 50L).orElseThrow().objectId());
+        RemoteObjectIndex.PublicationResult canonical = firstReplica.add(low);
+        assertTrue(canonical.readViewChanged());
+        assertTrue(canonical.objectReferenced());
+        assertEquals(2L, firstReplica.revision(PARTITION));
+
+        secondReplica.add(low);
+        RemoteObjectIndex.PublicationResult duplicate = secondReplica.add(high);
+        assertFalse(duplicate.readViewChanged());
+        assertFalse(duplicate.objectReferenced());
+        assertEquals(1L, secondReplica.revision(PARTITION));
+
+        assertEquals(
+            firstReplica.find(PARTITION, 50L).orElseThrow(),
+            secondReplica.find(PARTITION, 50L).orElseThrow()
+        );
+        assertEquals(10L, firstReplica.find(PARTITION, 50L).orElseThrow().objectId());
+        assertFalse(firstReplica.referencesObject(20L));
+        // Local non-selection is deliberately NOT a physical DELETE grant.
+        assertFalse(secondReplica.referencesObject(20L));
+    }
+
+    @Test
     void publicationResultKeepsSamePhysicalObjectReplayReferenced() {
         RemoteObjectIndex index = new RemoteObjectIndex();
         index.add(object(10, 0, 100, 777));

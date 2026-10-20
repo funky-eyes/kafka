@@ -1953,3 +1953,38 @@ No physical COMMITTED delete, retirement CAS writer, or separate
 consensus/authentication protocol is enabled. PR #2 remains Draft;
 frozen MinIO GA `9a28c11b6d97ecacafe1b8566cde5cc34d604889`
 is unchanged.
+
+## Batches 256–259 — deterministic replica read selection after COMMITTED replay
+
+Base: `758bd78584bd1903c4d8aea7755cd417c2dc2880`,
+17/17 successful workflows. Keep Kafka's native Leader/Follower,
+ISR, HW and LeaderEpoch replication unchanged. The compacted metadata
+topic remains the COMMITTED-object source of truth.
+
+- **256:** For fully equivalent logical Kafka batch ranges (identical
+  offsets, leader epoch and content checksum), select the lower physical
+  object ID after both COMMITTED copies are replayed. Apply the same
+  deterministic, order-independent tie-break in `RemoteObjectIndex`
+  and in the fsynced `LocalRemoteObjectCheckpoint`. This matches
+  startup metadata-image object-ID ordering; it does NOT grant GC
+  ownership. Conflicting logical ranges or same-object descriptors
+  still fail closed.
+- **257:** JUnit regression: two replicas ingest equivalent copies in
+  reverse order, converge on the same read reference, and reflect a
+  lower-ID replacement in the index revision. Checkpoint regression:
+  fsync, reopen and source-metadata replay preserve the same descriptor.
+- **258:** In-memory and real MinIO cleanup tests first observe
+  divergent partial-replay copies, then the converged fully replayed
+  view. BOTH physical COMMITTED objects must remain present/readable:
+  a locally non-selected copy is not eligible for deletion.
+- **259:** Add the two focused storage regression methods to strict
+  JUnit execution evidence, from 616 to 618 required methods.
+  Keep the existing workflow graph and the Native Image gate disabled.
+
+This local read-reference tie-break is a project-specific recovery
+detail, NOT a claim that AutoMQ uses minimum IDs as a distributed
+ownership protocol. The transferable AutoMQ pattern is durable
+Controller/KRaft-owned object lifecycle; this project still needs
+authoritative retirement of all packed-range references and replica
+reader/upload fences before any COMMITTED physical DELETE.
+The Draft PR and frozen MinIO GA branch remain unchanged.

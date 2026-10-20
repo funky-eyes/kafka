@@ -182,16 +182,24 @@ class S3OrphanObjectCleanerIntegrationTest {
                 metadata.prepare(redundantId, 101L).get(10, TimeUnit.SECONDS);
                 metadata.commit(redundant).get(10, TimeUnit.SECONDS);
                 assertTrue(index.add(retained).objectReferenced());
-                assertFalse(index.add(redundant).objectReferenced());
                 assertTrue(peerIndex.add(redundant).objectReferenced());
-                assertFalse(peerIndex.add(retained).objectReferenced());
+                // Before full replay, replicas can read different copies.
+                assertTrue(index.referencesObject(retainedId));
+                assertTrue(peerIndex.referencesObject(redundantId));
+                assertEquals(0, cleaner.clean(1_000L).get(10, TimeUnit.SECONDS));
+                assertEquals(0, peerCleaner.clean(1_000L).get(10, TimeUnit.SECONDS));
 
+                assertFalse(index.add(redundant).objectReferenced());
+                assertTrue(peerIndex.add(retained).objectReferenced());
+                // Full COMMITTED replay produces a stable local read view.
+                assertTrue(index.referencesObject(retainedId));
+                assertTrue(peerIndex.referencesObject(retainedId));
+                assertFalse(index.referencesObject(redundantId));
+                assertFalse(peerIndex.referencesObject(redundantId));
                 assertEquals(0, cleaner.clean(1_000L).get(10, TimeUnit.SECONDS));
                 assertEquals(0, peerCleaner.clean(1_000L).get(10, TimeUnit.SECONDS));
                 assertTrue(metadata.isCommitted(retainedId));
                 assertTrue(metadata.isCommitted(redundantId));
-                assertTrue(index.referencesObject(retainedId));
-                assertTrue(peerIndex.referencesObject(redundantId));
                 assertPhysicalPresent(inspector, config, retainedId, contents.length);
                 assertPhysicalPresent(inspector, config, redundantId, contents.length);
 

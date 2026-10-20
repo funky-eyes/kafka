@@ -138,8 +138,11 @@ public final class RemoteObjectIndex {
 
     private static RangeReference mergeEquivalentReference(RangeReference existing, RangeReference incoming) {
         if (existing.objectId() != incoming.objectId()) {
-            // A physically duplicated object with identical logical content may keep the first durable reference.
-            return existing;
+            // Equal logical Kafka batches may have multiple COMMITTED physical
+            // copies. Select the same read reference after full replay,
+            // regardless of each Broker's observation order.
+            // This is NOT authority to retire the non-selected object.
+            return incoming.objectId() < existing.objectId() ? incoming : existing;
         }
         if (!existing.range().equals(incoming.range())) {
             throw conflict(existing, incoming);
@@ -185,8 +188,10 @@ public final class RemoteObjectIndex {
     /**
      * Returns whether any current logical remote range reads from the supplied physical object.
      *
-     * <p>Equivalent physical duplicates deliberately keep the first published read reference. A committed object may
-     * therefore be authoritative metadata while no logical range still needs its physical bytes.</p>
+     * <p>Equivalent COMMITTED physical copies choose the lowest object ID
+     * as a deterministic local read reference after full replay. A local
+     * reference is not a Controller GC authorization, even when all known
+     * replicas happen to agree on it.</p>
      */
     public synchronized boolean referencesObject(long objectId) {
         if (objectId <= 0) {

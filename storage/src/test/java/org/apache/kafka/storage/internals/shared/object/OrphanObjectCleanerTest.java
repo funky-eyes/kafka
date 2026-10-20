@@ -296,13 +296,11 @@ class OrphanObjectCleanerTest {
         objects.put(first.objectId(), ByteBuffer.wrap(new byte[] {1})).get();
         objects.put(second.objectId(), ByteBuffer.wrap(new byte[] {2})).get();
 
-        // First-seen equivalent reference ownership is not a distributed consensus.
+        // Different replay progress can temporarily select opposite copies.
         RemoteObjectIndex brokerOne = new RemoteObjectIndex();
         RemoteObjectIndex brokerTwo = new RemoteObjectIndex();
         brokerOne.add(first);
-        brokerOne.add(second);
         brokerTwo.add(second);
-        brokerTwo.add(first);
         assertTrue(brokerOne.referencesObject(first.objectId()));
         assertFalse(brokerOne.referencesObject(second.objectId()));
         assertFalse(brokerTwo.referencesObject(first.objectId()));
@@ -312,6 +310,16 @@ class OrphanObjectCleanerTest {
             new OrphanObjectCleaner(objects, metadata, new ActiveObjectUploads(), brokerOne);
         OrphanObjectCleaner secondCleaner =
             new OrphanObjectCleaner(objects, metadata, new ActiveObjectUploads(), brokerTwo);
+        assertEquals(0, firstCleaner.clean(1_000L).get());
+        assertEquals(0, secondCleaner.clean(1_000L).get());
+        // Fully replayed replicas converge; the unused COMMITTED copy
+        // must remain physically present and committed anyway.
+        brokerOne.add(second);
+        brokerTwo.add(first);
+        assertTrue(brokerOne.referencesObject(first.objectId()));
+        assertTrue(brokerTwo.referencesObject(first.objectId()));
+        assertFalse(brokerOne.referencesObject(second.objectId()));
+        assertFalse(brokerTwo.referencesObject(second.objectId()));
         assertEquals(0, firstCleaner.clean(1_000L).get());
         assertEquals(0, secondCleaner.clean(1_000L).get());
         assertTrue(objects.contains(first.objectId()));
