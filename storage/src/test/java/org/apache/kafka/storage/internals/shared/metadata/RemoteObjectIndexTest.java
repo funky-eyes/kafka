@@ -150,6 +150,47 @@ class RemoteObjectIndexTest {
     }
 
     @Test
+    void invalidPackedObjectCannotPublishAnAlternateBeforeLaterRangeConflict() {
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(object(10L, PARTITION, 0L, 100L, 777L));
+        index.add(object(30L, OTHER_PARTITION, 0L, 100L, 900L));
+        long before = index.revision(PARTITION);
+
+        SharedObjectMetadata conflicting = new SharedObjectMetadata(
+            20L, 200L, 999L,
+            List.of(
+                range(PARTITION, 0L, 100L, 777L),
+                range(OTHER_PARTITION, 0L, 100L, 901L)
+            )
+        );
+        assertThrows(RemoteMetadataConflictException.class, () -> index.add(conflicting));
+        RemoteObjectIndex.RangeReference primary = index.find(PARTITION, 50L).orElseThrow();
+        assertEquals(10L, primary.objectId());
+        assertTrue(index.findEquivalentAlternative(primary).isEmpty());
+        assertEquals(before, index.revision(PARTITION));
+        assertEquals(30L, index.find(OTHER_PARTITION, 50L).orElseThrow().objectId());
+    }
+
+    @Test
+    void immutableAlternateDescriptorCannotChangeOnSameObjectReplay() {
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(object(10L, 0L, 100L, 777L));
+        index.add(object(20L, 0L, 100L, 777L));
+        RemoteObjectIndex.RangeReference original = index.findEquivalentAlternative(
+            index.find(PARTITION, 50L).orElseThrow()
+        ).orElseThrow();
+        assertEquals(20L, original.objectId());
+
+        SharedObjectMetadata conflicting = new SharedObjectMetadata(
+            20L, 101L, 778L, List.of(range(PARTITION, 0L, 100L, 777L))
+        );
+        assertThrows(RemoteMetadataConflictException.class, () -> index.add(conflicting));
+        assertEquals(original, index.findEquivalentAlternative(
+            index.find(PARTITION, 50L).orElseThrow()
+        ).orElseThrow());
+    }
+
+    @Test
     void publicationResultKeepsSamePhysicalObjectReplayReferenced() {
         RemoteObjectIndex index = new RemoteObjectIndex();
         index.add(object(10, 0, 100, 777));

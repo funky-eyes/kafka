@@ -91,43 +91,7 @@ public final class RemoteObjectIndex {
         List<RangeReference> alternateUpdates = new ArrayList<>();
 
         for (RangeReference incoming : references) {
-            Objects.requireNonNull(incoming, "range reference");
-            SharedObjectRange range = incoming.range();
-            SharedPartitionId partition = range.partition();
-            NavigableMap<Long, RangeReference> staged = stagedByPartition.computeIfAbsent(
-                partition,
-                this::copyExistingRanges
-            );
-            RangeReference overlapping = overlappingReference(staged, range.offsets());
-            if (overlapping != null) {
-                if (!sameLogicalRange(overlapping.range(), range)) {
-                    throw conflict(overlapping, incoming);
-                }
-                RangeReference merged = mergeEquivalentReference(overlapping, incoming);
-                RangeReference other = merged.objectId() != overlapping.objectId()
-                    ? overlapping
-                    : (incoming.objectId() != overlapping.objectId() ? incoming : null);
-                if (other != null) {
-                    // Keep only one equivalent fallback to bound read-index memory.
-                    // The two smallest physical IDs survive any replay order.
-                    NavigableMap<Long, RangeReference> alternativeRanges =
-                        stagedAlternates.computeIfAbsent(partition, this::copyExistingAlternates);
-                    RangeReference old = alternativeRanges.get(range.offsets().startOffset());
-                    RangeReference replacement = old == null
-                        ? other : mergeEquivalentReference(old, other);
-                    if (replacement != old) {
-                        alternativeRanges.put(range.offsets().startOffset(), replacement);
-                        alternateUpdates.add(replacement);
-                    }
-                }
-                if (merged != overlapping) {
-                    staged.put(range.offsets().startOffset(), merged);
-                    updates.add(merged);
-                }
-                continue;
-            }
-            staged.put(range.offsets().startOffset(), incoming);
-            updates.add(incoming);
+            stageReference(incoming, stagedByPartition, stagedAlternates, updates, alternateUpdates);
         }
 
         // Both primary and alternate maps are published only after every
@@ -153,6 +117,61 @@ public final class RemoteObjectIndex {
             revisions.computeIfAbsent(partition, ignored -> new AtomicLong()).incrementAndGet();
         }
         return !changedPartitions.isEmpty();
+    }
+
+    private void stageReference(
+        RangeReference incoming,
+        Map<SharedPartitionId, NavigableMap<Long, RangeReference>> stagedByPartition,
+        Map<SharedPartitionId, NavigableMap<Long, RangeReference>> stagedAlternates,
+        List<RangeReference> updates,
+        List<RangeReference> alternateUpdates
+    ) {
+        Objects.requireNonNull(incoming, "range reference");
+        SharedObjectRange range = incoming.range();
+        SharedPartitionId partition = range.partition();
+        NavigableMap<Long, RangeReference> staged =
+            stagedByPartition.computeIfAbsent(partition, this::copyExistingRanges);
+        RangeReference overlapping = overlappingReference(staged, range.offsets());
+        if (overlapping == null) {
+            staged.put(range.offsets().startOffset(), incoming);
+            updates.add(incoming);
+            return;
+        }
+        if (!sameLogicalRange(overlapping.range(), range)) {
+            throw conflict(overlapping, incoming);
+        }
+        RangeReference merged = mergeEquivalentReference(overlapping, incoming);
+        stageAlternate(overlapping, incoming, merged, stagedAlternates, alternateUpdates);
+        if (merged != overlapping) {
+            staged.put(range.offsets().startOffset(), merged);
+            updates.add(merged);
+        }
+    }
+
+    private void stageAlternate(
+        RangeReference overlapping,
+        RangeReference incoming,
+        RangeReference merged,
+        Map<SharedPartitionId, NavigableMap<Long, RangeReference>> stagedAlternates,
+        List<RangeReference> alternateUpdates
+    ) {
+        RangeReference other = merged.objectId() != overlapping.objectId()
+            ? overlapping : (incoming.objectId() != overlapping.objectId() ? incoming : null);
+        if (other == null) {
+            return;
+        }
+        // Only one equivalent fallback per logical batch. Retain the two
+        // lowest object IDs after metadata replay, independent of order.
+        SharedObjectRange range = incoming.range();
+        NavigableMap<Long, RangeReference> alternatives = stagedAlternates.computeIfAbsent(
+            range.partition(), this::copyExistingAlternates
+        );
+        RangeReference previous = alternatives.get(range.offsets().startOffset());
+        RangeReference next = previous == null ? other : mergeEquivalentReference(previous, other);
+        if (next != previous) {
+            alternatives.put(range.offsets().startOffset(), next);
+            alternateUpdates.add(next);
+        }
     }
 
     private boolean isCurrentReference(RangeReference candidate) {

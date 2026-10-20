@@ -2030,3 +2030,27 @@ AutoMQ's transferable design remains KRaft-controlled immutable
 object lifecycle. COMMITTED physical DELETE stays disabled until a
 durable Controller retirement transition fences all packed-range
 references and active replica readers.
+
+## Batch 264 — staged immutable alternate publication; storage quality gate
+
+On prior HEAD `775f96095cfc08f33b66078081a4a034009aa129`,
+16/17 workflows passed. The remaining `Shared Storage` Java 25 job
+failed at `RemoteObjectIndex.java:87`, Checkstyle `NPathComplexity`
+1312 > 500. Storage compiled and the real MinIO three-broker
+workflow passed. **Do not lower Checkstyle or weaken validation.**
+
+Extract each packed reference's conflict checking and bounded-alternate
+selection into separate helpers, leaving `addReferences` to stage
+changes and publish only after full object validation. Preserve
+the two-lowest-object-ID read fallback, no more than one alternate,
+and no COMMITTED physical DELETE. Regression tests assert (a) a
+later packed-partition conflict cannot leak a first-range fallback
+into the live index; and (b) changing a previously admitted
+alternate's immutable physical descriptor is rejected without
+corrupting the previous reference. Enforce both new methods as
+required unskipped JUnit evidence (622 -> 624).
+
+Native Kafka replication (Leader/Follower, ISR, HW, epochs), PR Draft
+status and the frozen MinIO GA branch remain unchanged. A successful
+code commit is NOT a complete gate: final Java 25/Checkstyle, real
+MinIO and all active workflows must pass before sealing this batch.
