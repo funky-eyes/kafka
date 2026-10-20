@@ -2110,3 +2110,37 @@ strict JUnit manifest (626 -> 627).
 No COMMITTED deletion, new metadata writer, replication protocol
 or additional hosted CI workflow is enabled. The Draft PR and
 frozen MinIO GA release branch are unchanged.
+
+## Batches 268–269 — fail-fast KSO2 object-index GET and replicated fallback
+
+**Stable base:** Batch 267 at
+`39f02dfd9be8e30f4176765d808f4d79d9e91bb0`, 17/17
+GitHub Actions SUCCESS. Keep native Kafka Leader/Follower, ISR,
+HW, LeaderEpoch and BrokerEpoch replication unchanged.
+
+- **268 — prevent head-of-line blocking on a broken remote object.**
+  KSO2 cold reads issue Header and Footer Range GETs concurrently.
+  `CompletableFuture.thenCombine` can await both completions even when
+  one has failed and the other remains outstanding. That delays
+  physical-copy fallback indefinitely under an object-store partial
+  outage. Fail the combined future as soon as *either* GET fails;
+  preserve the existing two-GET parallel fast path and normal
+  successful stream index CRC/footer validation. In-flight GETs
+  remain owned by the storage transport and are not treated as
+  deletion evidence.
+- **269 — actual replica-read recovery proof.** A deterministic
+  index reader test covers both directions: failed Header with
+  pending Footer, and failed Footer with pending Header. A
+  `SharedObjectReader` test verifies that an unavailable canonical
+  Header still immediately falls back to a separate COMMITTED
+  physical copy even when the first object's Footer GET remains
+  pending. Neither case uses timers, retries, new consensus or
+  COMMITTED physical delete. Enforce the two Java regression
+  methods as required unskipped JUnit evidence (627 -> 629).
+
+This is a targeted reliability correction to the AutoMQ-style
+object-storage read path, not a claim that AutoMQ uses our exact
+future-combination implementation. The planned eventual
+Controller/KRaft `MARK_DESTROYED`-like object retirement remains
+separately blocked on Kafka replica, packed-object and reader fences.
+The frozen MinIO GA branch is untouched; PR #2 stays Draft.

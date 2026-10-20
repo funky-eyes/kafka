@@ -68,7 +68,7 @@ final class StreamObjectIndexReader {
             StreamObjectFormat.FOOTER_BYTES
         );
 
-        return header.thenCombine(footer, HeaderAndFooter::new).thenCompose(parts -> {
+        return failFastHeaderAndFooter(header, footer).thenCompose(parts -> {
             final long headerObjectId;
             try {
                 headerObjectId = StreamObjectFormat.readObjectId(parts.header());
@@ -105,6 +105,31 @@ final class StreamObjectIndexReader {
                 }
             });
         });
+    }
+
+    /**
+     * Both bounded range GETs run concurrently. The default thenCombine
+     * completion waits for the other input even if one GET already failed;
+     * that can indefinitely stall a read fallback when the peer GET hangs.
+     * Surface either failure immediately while preserving the normal
+     * successful Header/Footer validation path.
+     */
+    private static CompletableFuture<HeaderAndFooter> failFastHeaderAndFooter(
+        CompletableFuture<ByteBuffer> header,
+        CompletableFuture<ByteBuffer> footer
+    ) {
+        CompletableFuture<HeaderAndFooter> combined = header.thenCombine(footer, HeaderAndFooter::new);
+        header.whenComplete((ignored, error) -> {
+            if (error != null) {
+                combined.completeExceptionally(error);
+            }
+        });
+        footer.whenComplete((ignored, error) -> {
+            if (error != null) {
+                combined.completeExceptionally(error);
+            }
+        });
+        return combined;
     }
 
     /**

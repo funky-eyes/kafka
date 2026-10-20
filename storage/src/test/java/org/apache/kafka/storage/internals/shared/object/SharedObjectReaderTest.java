@@ -127,6 +127,53 @@ class SharedObjectReaderTest {
     }
 
     @Test
+    void failedCanonicalHeaderMustFallbackWhileItsFooterReadIsStillPending() throws Exception {
+        PackedObject canonical = packObject(972L);
+        PackedObject alternate = packObject(973L);
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(canonical.metadata());
+        index.add(alternate.metadata());
+        InMemoryObjectStore backingStore = new InMemoryObjectStore();
+        backingStore.put(alternate.metadata().objectId(), alternate.bytes())
+            .get(10L, TimeUnit.SECONDS);
+
+        CompletableFuture<ByteBuffer> pendingFooter = new CompletableFuture<>();
+        AtomicInteger alternateGets = new AtomicInteger();
+        ObjectStore store = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                if (objectId == canonical.metadata().objectId()) {
+                    if (position == 0L) {
+                        return CompletableFuture.failedFuture(new IOException("Canonical header unavailable"));
+                    }
+                    return pendingFooter;
+                }
+                if (objectId == alternate.metadata().objectId()) {
+                    alternateGets.incrementAndGet();
+                    return backingStore.rangeRead(objectId, position, length);
+                }
+                return CompletableFuture.failedFuture(new IOException("Unknown physical object"));
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+        };
+
+        ByteBuffer recovered = new SharedObjectReader(store, index, 4)
+            .read(PARTITION, 2L).get(2L, TimeUnit.SECONDS).orElseThrow();
+        assertArrayEquals(new byte[] {1, 2, 3, 4, 5}, toArray(recovered));
+        assertTrue(alternateGets.get() > 0, "An independently COMMITTED fallback must be used");
+        assertFalse(pendingFooter.isDone(), "Fallback must not await a stalled primary footer GET");
+    }
+
+    @Test
     void shouldVerifyEquivalentCommittedFallbackAfterCanonicalCopyCorruption() throws Exception {
         PackedObject canonical = packObject(962L);
         PackedObject alternative = packObject(963L);

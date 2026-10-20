@@ -31,12 +31,16 @@ REQUIRED_TESTS = {
     "org.apache.kafka.storage.internals.shared.metadata.LocalRemoteObjectCheckpointTest": (
         "physicalDuplicateCheckpointConvergesAcrossOppositeReplicaReplayOrder",
     ),
+    "org.apache.kafka.storage.internals.shared.object.StreamObjectIndexReaderTest": (
+        "eitherFailedKso2MetadataRangeMustNotWaitForOtherPendingRange",
+    ),
     "org.apache.kafka.storage.internals.shared.object.SharedObjectReaderTest": (
         "shouldReadEquivalentCommittedObjectWhenCanonicalPhysicalCopyIsMissing",
         "shouldVerifyEquivalentCommittedFallbackAfterCanonicalCopyCorruption",
         "shouldPreserveBothPhysicalFailuresWhenNeitherCommittedCopyIsAvailable",
         "sharedStoreFailureMustNotAccumulateSuppressedErrorsAcrossReaders",
         "cancelledPrimaryReadMustNotStartAnAlternatePhysicalRead",
+        "failedCanonicalHeaderMustFallbackWhileItsFooterReadIsStillPending",
     ),
     "org.apache.kafka.storage.internals.shared.object.OrphanObjectCleanerTest": (
         "committedMetadataDeleteWithoutControllerRetirementIsDenied",
