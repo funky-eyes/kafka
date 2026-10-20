@@ -18,7 +18,6 @@ package org.apache.kafka.storage.internals.shared.object;
 
 import org.apache.kafka.storage.internals.shared.metadata.ObjectMetadataStore;
 import org.apache.kafka.storage.internals.shared.metadata.RemoteObjectIndex;
-import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -37,16 +36,18 @@ import java.util.concurrent.CompletableFuture;
  * flight when a broker crashed may become visible after the first DELETE. Keeping the claim discoverable makes later
  * passes issue the idempotent DELETE again, so an arbitrarily late physical write cannot turn into a permanent orphan.</p>
  *
- * <p>Leader races may also leave multiple COMMITTED physical objects with identical logical ranges. The
- * {@link RemoteObjectIndex} keeps one deterministic read reference. A COMMITTED object that is not referenced by any
- * current logical range is deleted physically first and only then tombstoned from authoritative metadata. Failed
- * physical deletion therefore leaves the COMMIT discoverable for a later retry.</p>
+ * <p>With Kafka replication, each broker has its own {@link RemoteObjectIndex}.
+ * Equivalent COMMITTED copies can be published in different orders, and a
+ * locally unreferenced copy may still be actively read by another replica.
+ * A local reference lookup never authorizes COMMITTED physical deletion.
+ * That requires durable Controller-owned retirement and cross-replica reader
+ * and upload fencing. PREPARED orphan cleanup remains separately fenced by
+ * the authoritative metadata store.</p>
  */
 public final class OrphanObjectCleaner {
     private final ObjectStore objectStore;
     private final ObjectMetadataStore metadataStore;
     private final ActiveObjectUploads activeUploads;
-    private final RemoteObjectIndex remoteIndex;
 
     public OrphanObjectCleaner(ObjectStore objectStore, ObjectMetadataStore metadataStore) {
         this(objectStore, metadataStore, new ActiveObjectUploads(), null);
@@ -69,13 +70,15 @@ public final class OrphanObjectCleaner {
         this.objectStore = Objects.requireNonNull(objectStore, "objectStore");
         this.metadataStore = Objects.requireNonNull(metadataStore, "metadataStore");
         this.activeUploads = Objects.requireNonNull(activeUploads, "activeUploads");
-        this.remoteIndex = remoteIndex;
+        // Kept for source/binary compatibility. A broker-local read index
+        // cannot establish globally safe COMMITTED object retirement.
     }
 
     /**
-     * Cleans PREPARED objects created at or before {@code cutoffCreatedTimeMs}, all previously claimed cleanups, and
-     * fully redundant COMMITTED physical objects when a remote index is configured.
-     * The returned count is the number of physical DELETE operations completed by this pass.
+     * Cleans PREPARED objects created at or before {@code cutoffCreatedTimeMs}
+     * and retries previously claimed PREPARED cleanups. COMMITTED objects are
+     * never physically deleted based on one broker's local reference index.
+     * The returned count is the number of completed PREPARED physical deletes.
      */
     public CompletableFuture<Integer> clean(long cutoffCreatedTimeMs) {
         if (cutoffCreatedTimeMs < 0) {
@@ -90,7 +93,7 @@ public final class OrphanObjectCleaner {
         CompletableFuture<Integer> result = CompletableFuture.completedFuture(0);
         result = deleteAlreadyClaimed(result, alreadyClaimed);
         result = claimAndDeleteCandidates(result, candidates);
-        return deleteRedundantCommittedObjects(result);
+        return result;
     }
 
     private Map<Long, ObjectMetadataStore.PreparedObject> alreadyClaimedObjects() {
@@ -138,20 +141,6 @@ public final class OrphanObjectCleaner {
         return result;
     }
 
-    private CompletableFuture<Integer> deleteRedundantCommittedObjects(CompletableFuture<Integer> result) {
-        if (remoteIndex == null) {
-            return result;
-        }
-
-        for (SharedObjectMetadata committed : metadataStore.committedObjects()) {
-            if (!activeUploads.contains(committed.objectId()) && !remoteIndex.referencesObject(committed.objectId())) {
-                result = result.thenCompose(count ->
-                    deleteRedundantCommitted(committed.objectId()).thenApply(deleted -> count + (deleted ? 1 : 0)));
-            }
-        }
-        return result;
-    }
-
     private CompletableFuture<Boolean> claimAndDelete(ObjectMetadataStore.PreparedObject candidate) {
         return metadataStore.claimCleanup(candidate.objectId(), candidate.createdTimeMs())
             .thenCompose(claimed -> {
@@ -166,12 +155,4 @@ public final class OrphanObjectCleaner {
         return objectStore.delete(objectId);
     }
 
-    private CompletableFuture<Boolean> deleteRedundantCommitted(long objectId) {
-        if (activeUploads.contains(objectId) || remoteIndex.referencesObject(objectId)) {
-            return CompletableFuture.completedFuture(false);
-        }
-        return objectStore.delete(objectId)
-            .thenCompose(ignored -> metadataStore.delete(objectId))
-            .thenApply(ignored -> true);
-    }
 }

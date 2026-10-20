@@ -1869,3 +1869,45 @@ there is no source-WAL durability certificate, KRaft GC-authority
 emitter or physical COMMITTED delete. MinIO GA
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889`
 remains frozen and PR #2 remains Draft.
+
+## Batch 252 — replica-aware COMMITTED physical cleanup safety (AutoMQ-aligned)
+
+The target architecture is **AutoMQ-style shared object storage with native
+Kafka replication retained**: Kafka Leader/Follower, ISR, HW, LeaderEpoch and
+BrokerEpoch remain responsible for the existing replica protocol. Broker
+File/Ring WAL and S3 are storage tiers, not a substitute consensus engine.
+
+AutoMQ's `S3ObjectControlManager` and `StreamControlManager` illustrate
+Controller/KRaft-owned object lifecycle: persist MARK_DESTROYED after
+node/stream epoch and ownership checks, then asynchronously delete physical
+bytes after the retention period, then remove the metadata record. The
+implementations are a reference, not a direct replacement for Kafka's
+replicated partition and packed multi-partition object semantics.
+
+**Correctness finding:** `RemoteObjectIndex` chooses the first equivalent
+physical object published in its broker-local view. Different replicas can
+publish duplicated COMMITTED copies in opposite orders, choosing different
+physical read winners. Previously `OrphanObjectCleaner` could DELETE one
+copy solely because its own local index did not reference it, even though
+another replica's read path still used it. That is not safe COMMITTED GC.
+
+**Change:** Disable local-index-driven physical COMMITTED deletion and
+COMMITTED metadata tombstones. Preserve the four-argument constructor
+for compatibility, but its `RemoteObjectIndex` is never authority.
+PREPARED and durably CLAIMED PREPARED orphan cleanup continues to use its
+existing serialized claim-before-delete fence and idempotent late-PUT
+retry. Unit and real MinIO cases exercise two opposite replica read
+winners and assert BOTH COMMITTED copies remain physically readable.
+Extra object-storage consumption is deliberately preferred to
+irrecoverable cross-replica data loss.
+
+**Before enabling true COMMITTED reclamation:** persist Controller-owned
+object retirement after validating every packed TopicId/partition
+reference, current Kafka leader/partition/broker epochs, eligible
+replicated coverage and reader/upload quiescence. Only a durable,
+retryable retirement state, not a local index or broker WAL claim, may
+authorize eventual physical DELETE. Keep unsure cases.
+
+No new GC authority writer, COMMITTED DELETE, or broker authentication
+protocol is enabled. PR #2 remains Draft and the frozen MinIO GA branch
+at `9a28c11b6d97ecacafe1b8566cde5cc34d604889` is untouched.

@@ -156,7 +156,7 @@ class S3OrphanObjectCleanerIntegrationTest {
 
 
     @Test
-    void redundantCommittedPhysicalCopyIsReclaimedWithoutDeletingReadWinner() throws Exception {
+    void redundantCommittedPhysicalCopiesSurviveOppositeReplicaReadWinners() throws Exception {
         S3ObjectStoreConfig config = config();
         long retainedId = 9_104L;
         long redundantId = 9_105L;
@@ -167,8 +167,11 @@ class S3OrphanObjectCleanerIntegrationTest {
             ensureBucket(inspector, config);
             InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
             RemoteObjectIndex index = new RemoteObjectIndex();
+            RemoteObjectIndex peerIndex = new RemoteObjectIndex();
             OrphanObjectCleaner cleaner =
                 new OrphanObjectCleaner(objects, metadata, new ActiveObjectUploads(), index);
+            OrphanObjectCleaner peerCleaner =
+                new OrphanObjectCleaner(objects, metadata, new ActiveObjectUploads(), peerIndex);
             SharedObjectMetadata retained = committedMetadata(retainedId, contents.length);
             SharedObjectMetadata redundant = committedMetadata(redundantId, contents.length);
             try {
@@ -180,19 +183,27 @@ class S3OrphanObjectCleanerIntegrationTest {
                 metadata.commit(redundant).get(10, TimeUnit.SECONDS);
                 assertTrue(index.add(retained).objectReferenced());
                 assertFalse(index.add(redundant).objectReferenced());
+                assertTrue(peerIndex.add(redundant).objectReferenced());
+                assertFalse(peerIndex.add(retained).objectReferenced());
 
-                assertEquals(1, cleaner.clean(1_000L).get(10, TimeUnit.SECONDS));
+                assertEquals(0, cleaner.clean(1_000L).get(10, TimeUnit.SECONDS));
+                assertEquals(0, peerCleaner.clean(1_000L).get(10, TimeUnit.SECONDS));
                 assertTrue(metadata.isCommitted(retainedId));
-                assertFalse(metadata.isCommitted(redundantId));
+                assertTrue(metadata.isCommitted(redundantId));
                 assertTrue(index.referencesObject(retainedId));
-                assertFalse(index.referencesObject(redundantId));
+                assertTrue(peerIndex.referencesObject(redundantId));
                 assertPhysicalPresent(inspector, config, retainedId, contents.length);
-                assertPhysicalAbsent(inspector, config, redundantId);
+                assertPhysicalPresent(inspector, config, redundantId, contents.length);
 
                 ByteBuffer read = objects.rangeRead(retainedId, 0L, contents.length).get(10, TimeUnit.SECONDS);
                 byte[] actual = new byte[read.remaining()];
                 read.get(actual);
                 assertArrayEquals(contents, actual);
+                ByteBuffer peerRead = objects.rangeRead(redundantId, 0L, contents.length)
+                    .get(10, TimeUnit.SECONDS);
+                byte[] peerActual = new byte[peerRead.remaining()];
+                peerRead.get(peerActual);
+                assertArrayEquals(contents, peerActual);
                 assertEquals(0, cleaner.clean(1_000L).get(10, TimeUnit.SECONDS));
             } finally {
                 objects.delete(redundantId).get(10, TimeUnit.SECONDS);
