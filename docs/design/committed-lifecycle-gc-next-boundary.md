@@ -1911,3 +1911,45 @@ authorize eventual physical DELETE. Keep unsure cases.
 No new GC authority writer, COMMITTED DELETE, or broker authentication
 protocol is enabled. PR #2 remains Draft and the frozen MinIO GA branch
 at `9a28c11b6d97ecacafe1b8566cde5cc34d604889` is untouched.
+
+## Batches 253–255 — repair MinIO evidence and enforce Controller-owned COMMITTED tombstones
+
+**253 — Verified 16/17 CI, test-name evidence repair.** On commit
+`e8688b1af7f4b5dcabe7a7557085d22869595efe`, all Java 25 storage
+tests and the real MinIO S3 tests passed; the only failing workflow
+was the main `Shared Storage` MinIO XML evidence checker still requiring
+the prior redundant-COMMITTED-deletion test name. Require the
+replacement `redundantCommittedPhysicalCopiesSurviveOppositeReplicaReadWinners`
+instead, keeping the same strict executed/unskipped JUnit gate.
+
+**254 — Close the unfenced metadata-delete bypass.** The old
+`ObjectMetadataStore.delete(long)` operation is unsafe for Kafka's
+replicated AutoMQ-style object storage. `KafkaObjectMetadataStore`
+previously wrote a compacted object-key tombstone with no KRaft
+lifecycle authorization, while `InMemoryObjectMetadataStore`
+unconditionally removed metadata. Both now return a failed future with
+`UnsupportedOperationException`, without producing or removing
+metadata. Preserve the interface for source compatibility. PREPARED
+orphan cleanup keeps its atomic claim and late-PUT retry. Existing
+`SharedMetadataImage` replay continues accepting historic object
+tombstones from the frozen MinIO GA to avoid breaking upgrades.
+
+**255 — Prove the new boundary.** Add Java tests for rejected COMMITTED
+metadata deletion and preservation of the claimed PREPARED cleanup
+fence. Expand mandatory, unskipped XML evidence by five tests to
+**616** methods, including the two-replica opposite-winner regression.
+The GA consistency Python suite now asserts neither the orphan
+cleaner nor either metadata-store implementation can bypass the
+Controller-only COMMITTED retirement boundary.
+
+Reference: AutoMQ `S3ObjectControlManager` emits durable KRaft object
+state transitions (including MARK_DESTROYED), and its `ObjectCleaner`
+deletes physical storage only after the lifecycle delay. Our system
+retains native Kafka replication (ISR/HW/LeaderEpoch/BrokerEpoch), so
+a Broker-local read index or a compacted-topic tombstone cannot
+replace Controller-owned, replica-safe retirement evidence.
+
+No physical COMMITTED delete, retirement CAS writer, or separate
+consensus/authentication protocol is enabled. PR #2 remains Draft;
+frozen MinIO GA `9a28c11b6d97ecacafe1b8566cde5cc34d604889`
+is unchanged.

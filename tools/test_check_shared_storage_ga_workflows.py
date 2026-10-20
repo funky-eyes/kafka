@@ -32,6 +32,36 @@ from check_shared_storage_ga_workflows import (
 )
 
 
+
+class CommittedObjectDeletionSafetyContractTest(unittest.TestCase):
+    def test_replica_local_read_view_cannot_emit_committed_tombstone(self):
+        root = Path(__file__).resolve().parents[1]
+        cleaner = (root / "storage/src/main/java/org/apache/kafka/storage/internals/shared/object/"
+                   "OrphanObjectCleaner.java").read_text(encoding="utf-8")
+        self.assertNotIn("deleteRedundantCommitted(", cleaner)
+        self.assertNotIn("deleteRedundantCommittedObjects(", cleaner)
+        self.assertNotIn("metadataStore.delete(", cleaner)
+        self.assertIn("metadataStore.claimCleanup(", cleaner)
+
+        sources = (
+            "storage/src/main/java/org/apache/kafka/storage/internals/shared/metadata/"
+            "InMemoryObjectMetadataStore.java",
+            "storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/"
+            "shared/s3/KafkaObjectMetadataStore.java",
+        )
+        for path in sources:
+            with self.subTest(source=path):
+                source = (root / path).read_text(encoding="utf-8")
+                self.assertEqual(1, source.count("public CompletableFuture<Void> delete(long objectId) {"))
+                method = source.split(
+                    "public CompletableFuture<Void> delete(long objectId) {", 1
+                )[1].split("\n    }", 1)[0]
+                self.assertIn("CompletableFuture.failedFuture(", method)
+                self.assertIn("UnsupportedOperationException(", method)
+                self.assertNotIn("entries.remove(", method)
+                self.assertNotIn("writeRecord(", method)
+
+
 class BrokerSourceWalNonEmissionContractTest(unittest.TestCase):
     def test_production_broker_heartbeat_does_not_emit_unstable_gc_reports(self):
         # The broker's normal heartbeat must remain a stable request until

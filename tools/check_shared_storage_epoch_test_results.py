@@ -21,6 +21,13 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 REQUIRED_TESTS = {
+    "org.apache.kafka.storage.internals.shared.object.OrphanObjectCleanerTest": (
+        "committedMetadataDeleteWithoutControllerRetirementIsDenied",
+        "cleanupClaimTombstoneCannotBeErasedWithoutAuthority",
+        "twoReplicasWithOppositeLocalWinnersCannotDeleteEachOthersCommittedObjects",
+        "locallyRedundantCommittedCopyIsRetainedWithoutReplicatedRetirement",
+        "localRedundancyNeverInvokesPhysicalDeleteEvenWithRetry",
+    ),
     "org.apache.kafka.storage.internals.shared.metadata.PartitionLogStartAdvancePrecheckTest": (
         "compactedMetadataGapUsesReadCommittedConsumerPositionNotLastRecordOffset",
         "emptyReadCommittedMetadataTopicStillRequiresExplicitInitialZero",

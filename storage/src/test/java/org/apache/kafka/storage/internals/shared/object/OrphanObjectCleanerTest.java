@@ -54,6 +54,42 @@ class OrphanObjectCleanerTest {
         assertTrue(metadata.isCommitted(objectId));
     }
 
+
+    @Test
+    void committedMetadataDeleteWithoutControllerRetirementIsDenied() throws Exception {
+        InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
+        long objectId = 241L;
+        metadata.prepare(objectId, 100L).get();
+        metadata.commit(metadata(objectId)).get();
+
+        ExecutionException rejected = assertThrows(
+            ExecutionException.class, () -> metadata.delete(objectId).get()
+        );
+        assertTrue(rejected.getCause() instanceof UnsupportedOperationException);
+        assertTrue(metadata.isCommitted(objectId));
+        assertEquals(List.of(metadata(objectId)), metadata.committedObjects());
+    }
+
+    @Test
+    void cleanupClaimTombstoneCannotBeErasedWithoutAuthority() throws Exception {
+        InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
+        long objectId = 242L;
+        metadata.prepare(objectId, 100L).get();
+        assertTrue(metadata.claimCleanup(objectId, 100L).get());
+
+        ExecutionException rejected = assertThrows(
+            ExecutionException.class, () -> metadata.delete(objectId).get()
+        );
+        assertTrue(rejected.getCause() instanceof UnsupportedOperationException);
+        assertTrue(metadata.isCleanupClaimed(objectId));
+
+        // A delayed COMMIT must still lose after a failed attempt to erase
+        // the PREPARED cleanup fence.
+        assertThrows(ExecutionException.class, () -> metadata.commit(metadata(objectId)).get());
+        assertFalse(metadata.isCommitted(objectId));
+        assertTrue(metadata.isCleanupClaimed(objectId));
+    }
+
     @Test
     void cleanupClaimAndCommitRaceHasExactlyOneWinner() throws Exception {
         InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
