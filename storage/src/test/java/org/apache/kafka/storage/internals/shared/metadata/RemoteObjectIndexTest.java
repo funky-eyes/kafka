@@ -19,6 +19,13 @@ package org.apache.kafka.storage.internals.shared.metadata;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -147,6 +154,37 @@ class RemoteObjectIndexTest {
         RemoteObjectIndex.RangeReference unrelated =
             new RemoteObjectIndex.RangeReference(50L, range(PARTITION, 0L, 100L, 778L));
         assertTrue(index.findEquivalentAlternative(unrelated).isEmpty());
+    }
+
+    @Test
+    void fallbackSnapshotWaitsForAtomicMetadataPublication() throws Exception {
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(object(30L, 0L, 100L, 777L));
+        index.add(object(40L, 0L, 100L, 777L));
+        RemoteObjectIndex.RangeReference failed = index.find(PARTITION, 50L).orElseThrow();
+        CountDownLatch started = new CountDownLatch(1);
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<Long> fallback;
+            synchronized (index) {
+                fallback = executor.submit(() -> {
+                    started.countDown();
+                    return index.findEquivalentAlternative(failed).orElseThrow().objectId();
+                });
+                assertTrue(started.await(5L, TimeUnit.SECONDS));
+                assertThrows(TimeoutException.class,
+                    () -> fallback.get(30L, TimeUnit.MILLISECONDS),
+                    "The exceptional read path must not observe half-published object maps");
+                // New COMMITTED object changes both canonical and alternate.
+                index.add(object(10L, 0L, 100L, 777L));
+            }
+            assertEquals(10L, fallback.get(10L, TimeUnit.SECONDS));
+            assertEquals(30L, index.findEquivalentAlternative(
+                index.find(PARTITION, 50L).orElseThrow()
+            ).orElseThrow().objectId());
+        } finally {
+            executor.shutdownNow();
+        }
     }
 
     @Test

@@ -2054,3 +2054,36 @@ Native Kafka replication (Leader/Follower, ISR, HW, epochs), PR Draft
 status and the frozen MinIO GA branch remain unchanged. A successful
 code commit is NOT a complete gate: final Java 25/Checkstyle, real
 MinIO and all active workflows must pass before sealing this batch.
+
+## Batches 265–266 — asynchronous COMMITTED read fallback safety
+
+**Stable base:** Batch 264 at
+`bf7dd9bc26b49b6b0c856e9c201073303e8a3f8a`:
+17/17 GitHub Actions SUCCESS, including Java 25 Checkstyle,
+native Kafka replication HA, real MinIO and Ring WAL.
+
+- **265 — consistent read fallback snapshot.** Metadata COMMIT replay
+  can publish an alternate and canonical physical reference in two
+  distinct concurrent maps. Ordinary successful reads remain
+  lock-free; only exceptional fallback lookup now takes the same
+  short `RemoteObjectIndex` monitor as object publication to
+  observe both indexes together. A deterministic concurrent test
+  holds a metadata writer lock while a failed asynchronous read
+  selects a physical backup, then verifies it uses the newly
+  committed canonical object after publication.
+- **266 — isolate shared I/O failures.** Multiple readers can share
+  one failed `CompletableFuture` or cached transport exception.
+  When both physical copies fail, report a new request-specific
+  `IOException` with immutable primary cause and secondary
+  suppressed failure, rather than mutating the shared original
+  exception. Verify repeated calls do not accumulate suppressed
+  exceptions on a reused transport failure. The source of either
+  unreadable COMMITTED object remains discoverable; no reader
+  behavior ever triggers deletion. Enforce both additional
+  regression methods in the mandatory JUnit manifest (624 -> 626).
+
+The authoritative lifecycle follows Kafka's existing native replica
+semantics plus the AutoMQ-inspired Controller/KRaft object-state
+pattern. These read-path changes are NOT a Controller retirement
+certificate. COMMITTED physical DELETE stays disabled. PR remains
+Draft; frozen MinIO GA release branch remains untouched.

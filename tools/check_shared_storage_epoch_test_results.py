@@ -26,6 +26,7 @@ REQUIRED_TESTS = {
         "secondLowestCommittedCopyRemainsTheOnlyBoundedReadFallback",
         "invalidPackedObjectCannotPublishAnAlternateBeforeLaterRangeConflict",
         "immutableAlternateDescriptorCannotChangeOnSameObjectReplay",
+        "fallbackSnapshotWaitsForAtomicMetadataPublication",
     ),
     "org.apache.kafka.storage.internals.shared.metadata.LocalRemoteObjectCheckpointTest": (
         "physicalDuplicateCheckpointConvergesAcrossOppositeReplicaReplayOrder",
@@ -34,6 +35,7 @@ REQUIRED_TESTS = {
         "shouldReadEquivalentCommittedObjectWhenCanonicalPhysicalCopyIsMissing",
         "shouldVerifyEquivalentCommittedFallbackAfterCanonicalCopyCorruption",
         "shouldPreserveBothPhysicalFailuresWhenNeitherCommittedCopyIsAvailable",
+        "sharedStoreFailureMustNotAccumulateSuppressedErrorsAcrossReaders",
     ),
     "org.apache.kafka.storage.internals.shared.object.OrphanObjectCleanerTest": (
         "committedMetadataDeleteWithoutControllerRetirementIsDenied",

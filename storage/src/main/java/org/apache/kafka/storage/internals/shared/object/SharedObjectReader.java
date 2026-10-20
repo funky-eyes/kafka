@@ -83,18 +83,39 @@ public final class SharedObjectReader {
             if (fallback.isEmpty()) {
                 return CompletableFuture.failedFuture(firstFailure);
             }
-            return readReference(fallback.get()).handle((bytes, secondFailure) -> {
+            RemoteObjectIndex.RangeReference alternate = fallback.get();
+            return readReference(alternate).handle((bytes, secondFailure) -> {
                 if (secondFailure != null) {
-                    Throwable primary = unwrapCompletion(firstFailure);
-                    Throwable secondary = unwrapCompletion(secondFailure);
-                    if (primary != secondary) {
-                        primary.addSuppressed(secondary);
-                    }
-                    throw new CompletionException(primary);
+                    throw bothPhysicalCopiesFailed(ref, alternate, firstFailure, secondFailure);
                 }
                 return bytes;
             });
         });
+    }
+
+    private static CompletionException bothPhysicalCopiesFailed(
+        RemoteObjectIndex.RangeReference primaryReference,
+        RemoteObjectIndex.RangeReference alternateReference,
+        Throwable firstFailure,
+        Throwable secondFailure
+    ) {
+        Throwable primary = unwrapCompletion(firstFailure);
+        Throwable secondary = unwrapCompletion(secondFailure);
+        // A cached in-flight I/O failure can be shared by concurrent reads.
+        // Never add suppressed exceptions to that shared Throwable: doing so
+        // leaks diagnostic references across readers and failed attempts.
+        IOException combined = new IOException(
+            "Both COMMITTED physical copies unreadable for partition="
+                + primaryReference.range().partition() + ", offsets="
+                + primaryReference.range().offsets() + ", primaryObject="
+                + primaryReference.objectId() + ", alternateObject="
+                + alternateReference.objectId(),
+            primary
+        );
+        if (primary != secondary) {
+            combined.addSuppressed(secondary);
+        }
+        return new CompletionException(combined);
     }
 
     private static Throwable unwrapCompletion(Throwable error) {

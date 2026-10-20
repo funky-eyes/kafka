@@ -168,6 +168,41 @@ class SharedObjectReaderTest {
     }
 
     @Test
+    void sharedStoreFailureMustNotAccumulateSuppressedErrorsAcrossReaders() throws Exception {
+        PackedObject canonical = packObject(966L);
+        PackedObject alternative = packObject(967L);
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(canonical.metadata());
+        index.add(alternative.metadata());
+        IOException sharedFailure = new IOException("shared backend connection failed");
+        ObjectStore failing = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                return CompletableFuture.failedFuture(sharedFailure);
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+        };
+        SharedObjectReader reader = new SharedObjectReader(failing, index, 4);
+        for (int attempt = 0; attempt < 3; attempt++) {
+            ExecutionException error = assertThrows(ExecutionException.class,
+                () -> reader.read(PARTITION, 2L).get(10, TimeUnit.SECONDS));
+            assertTrue(error.getCause() instanceof IOException);
+            assertSame(sharedFailure, error.getCause().getCause());
+            assertEquals(0, sharedFailure.getSuppressed().length,
+                "Reusing a failed future must not mutate shared exception state");
+        }
+    }
+
+    @Test
     void shouldSurfaceIndexedDataBlockCorruption() throws Exception {
         PackedObject packed = packObject(952);
         SharedObjectMetadata metadata = packed.metadata();

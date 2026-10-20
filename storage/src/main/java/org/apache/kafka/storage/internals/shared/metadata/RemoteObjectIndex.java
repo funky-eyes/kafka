@@ -225,9 +225,12 @@ public final class RemoteObjectIndex {
      * failed remote read. Only COMMITTED metadata publication or durable local
      * checkpoint restore may populate these references. It is not a deletion
      * decision, and a returned alternative still requires normal checksum
-     * verification in the object reader.
+     * verification in the object reader. Synchronized with add/restore to
+     * snapshot the two independently published maps consistently when an
+     * asynchronous read fails during authoritative COMMIT replay.
+     * Successful primary reads remain lock-free.
      */
-    public Optional<RangeReference> findEquivalentAlternative(RangeReference failed) {
+    public synchronized Optional<RangeReference> findEquivalentAlternative(RangeReference failed) {
         Objects.requireNonNull(failed, "failed");
         SharedObjectRange range = failed.range();
         long startOffset = range.offsets().startOffset();
