@@ -26,6 +26,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CancellationException;
 import java.util.zip.CRC32C;
 
 public final class SharedObjectReader {
@@ -79,6 +80,11 @@ public final class SharedObjectReader {
 
         RemoteObjectIndex.RangeReference ref = reference.get();
         return readReference(ref).exceptionallyCompose(firstFailure -> {
+            if (unwrapCompletion(firstFailure) instanceof CancellationException) {
+                // Cancellation is a caller/lifecycle signal, not evidence of
+                // physical object loss. Never start a second S3 read.
+                return CompletableFuture.failedFuture(firstFailure);
+            }
             Optional<RemoteObjectIndex.RangeReference> fallback = remoteIndex.findEquivalentAlternative(ref);
             if (fallback.isEmpty()) {
                 return CompletableFuture.failedFuture(firstFailure);

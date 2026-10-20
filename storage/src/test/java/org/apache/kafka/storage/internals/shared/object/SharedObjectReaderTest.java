@@ -30,9 +30,11 @@ import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -200,6 +202,46 @@ class SharedObjectReaderTest {
             assertEquals(0, sharedFailure.getSuppressed().length,
                 "Reusing a failed future must not mutate shared exception state");
         }
+    }
+
+    @Test
+    void cancelledPrimaryReadMustNotStartAnAlternatePhysicalRead() throws Exception {
+        PackedObject canonical = packObject(970L);
+        PackedObject alternative = packObject(971L);
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(canonical.metadata());
+        index.add(alternative.metadata());
+
+        AtomicInteger physicalReads = new AtomicInteger();
+        CompletableFuture<ByteBuffer> cancelledRead = new CompletableFuture<>();
+        cancelledRead.cancel(false);
+        ObjectStore store = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                physicalReads.incrementAndGet();
+                return cancelledRead;
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+        };
+
+        SharedObjectReader reader = new SharedObjectReader(store, index, 4);
+        Throwable error = reader.read(PARTITION, 2L)
+            .handle((result, failure) -> failure).get(10L, TimeUnit.SECONDS);
+        assertTrue(hasCause(error, CancellationException.class));
+        assertEquals(1, physicalReads.get(),
+            "Cancelling one physical read cannot trigger redundant S3 I/O");
+        assertTrue(index.findEquivalentAlternative(
+            index.find(PARTITION, 2L).orElseThrow()).isPresent(),
+            "No fallback I/O must be caused by cancellation even if a COMMITTED copy exists");
     }
 
     @Test

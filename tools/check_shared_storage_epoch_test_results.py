@@ -36,6 +36,7 @@ REQUIRED_TESTS = {
         "shouldVerifyEquivalentCommittedFallbackAfterCanonicalCopyCorruption",
         "shouldPreserveBothPhysicalFailuresWhenNeitherCommittedCopyIsAvailable",
         "sharedStoreFailureMustNotAccumulateSuppressedErrorsAcrossReaders",
+        "cancelledPrimaryReadMustNotStartAnAlternatePhysicalRead",
     ),
     "org.apache.kafka.storage.internals.shared.object.OrphanObjectCleanerTest": (
         "committedMetadataDeleteWithoutControllerRetirementIsDenied",

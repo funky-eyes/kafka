@@ -2087,3 +2087,26 @@ semantics plus the AutoMQ-inspired Controller/KRaft object-state
 pattern. These read-path changes are NOT a Controller retirement
 certificate. COMMITTED physical DELETE stays disabled. PR remains
 Draft; frozen MinIO GA release branch remains untouched.
+
+## Batch 267 — cancellation is not a COMMITTED object read failure
+
+Base `deff997e5c91135edd2225358c4340d1ac60e085`
+had 16/17 successful CI workflows. The only failure was the
+`:storage:checkstyleTest` unused `ExecutionException`
+import in `RemoteObjectIndexTest`; remove that import without
+suppressing Checkstyle.
+
+The prior bounded read fallback retried a second COMMITTED physical
+S3 object for every exceptional completion, including a cancelled
+primary read. Cancellation is a caller or lifecycle signal, not a
+corruption/availability signal. Short-circuit on the original
+`CancellationException` before reading the alternate; retain
+normal fallback for actual remote-object errors and CRC mismatches.
+Add a regression with a cancelled primary future and a known
+equivalent COMMITTED alternate; assert exactly one physical range
+read and propagated cancellation. Enforce the new test in the
+strict JUnit manifest (626 -> 627).
+
+No COMMITTED deletion, new metadata writer, replication protocol
+or additional hosted CI workflow is enabled. The Draft PR and
+frozen MinIO GA release branch are unchanged.
