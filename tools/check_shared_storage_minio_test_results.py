@@ -61,6 +61,7 @@ REQUIRED_CASES = {
         "activePreparedUploadIsProtectedUntilUploadEnds",
         "redundantCommittedPhysicalCopiesSurviveOppositeReplicaReadWinners",
         "multiPartitionPhysicalObjectSurvivesWhenAnyRangeIsStillReferenced",
+        "missingCanonicalObjectCanReadEquivalentCommittedMinioCopy",
     },
 }
 

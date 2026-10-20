@@ -64,7 +64,12 @@ public final class SharedObjectReader {
         this.dataBlockCache = new StreamObjectDataBlockCache(dataBlockCacheBytes);
     }
 
-    /** Returns the complete Kafka RecordBatch containing {@code offset}, if it is remotely covered. */
+    /**
+     * Reads the complete Kafka RecordBatch containing {@code offset}.
+     * A failed physical COMMITTED copy can be retried from one equivalent
+     * copy, with independent index and CRC validation. This does not
+     * promote a physical copy, affect Kafka ISR/HW, or permit object GC.
+     */
     public CompletableFuture<Optional<ByteBuffer>> read(SharedPartitionId partition, long offset) {
         Objects.requireNonNull(partition, "partition");
         Optional<RemoteObjectIndex.RangeReference> reference = remoteIndex.find(partition, offset);
@@ -73,7 +78,34 @@ public final class SharedObjectReader {
         }
 
         RemoteObjectIndex.RangeReference ref = reference.get();
-        return ref.hasObjectDescriptor() ? readIndexed(ref) : readDirect(ref);
+        return readReference(ref).exceptionallyCompose(firstFailure -> {
+            Optional<RemoteObjectIndex.RangeReference> fallback = remoteIndex.findEquivalentAlternative(ref);
+            if (fallback.isEmpty()) {
+                return CompletableFuture.failedFuture(firstFailure);
+            }
+            return readReference(fallback.get()).handle((bytes, secondFailure) -> {
+                if (secondFailure != null) {
+                    Throwable primary = unwrapCompletion(firstFailure);
+                    Throwable secondary = unwrapCompletion(secondFailure);
+                    if (primary != secondary) {
+                        primary.addSuppressed(secondary);
+                    }
+                    throw new CompletionException(primary);
+                }
+                return bytes;
+            });
+        });
+    }
+
+    private static Throwable unwrapCompletion(Throwable error) {
+        return error instanceof CompletionException && error.getCause() != null
+            ? error.getCause() : error;
+    }
+
+    private CompletableFuture<Optional<ByteBuffer>> readReference(
+        RemoteObjectIndex.RangeReference reference
+    ) {
+        return reference.hasObjectDescriptor() ? readIndexed(reference) : readDirect(reference);
     }
 
     private CompletableFuture<Optional<ByteBuffer>> readIndexed(RemoteObjectIndex.RangeReference reference) {

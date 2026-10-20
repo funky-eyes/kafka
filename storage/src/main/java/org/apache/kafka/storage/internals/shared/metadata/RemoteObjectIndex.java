@@ -37,10 +37,14 @@ import java.util.concurrent.atomic.AtomicLong;
  * are identical.
  *
  * <p>Uploaders are expected to emit metadata at Kafka RecordBatch boundaries. This makes conflict detection
- * deterministic even when multiple partitions are packed into different physical S3 objects.</p>
+ * deterministic even when multiple partitions are packed into different physical S3 objects.
+ * Each logical batch retains at most one alternative physical reference for
+ * verified read fallback; neither reference is authority for COMMITTED GC.</p>
  */
 public final class RemoteObjectIndex {
     private final ConcurrentHashMap<SharedPartitionId, ConcurrentNavigableMap<Long, RangeReference>> byPartition =
+        new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<SharedPartitionId, ConcurrentNavigableMap<Long, RangeReference>> alternates =
         new ConcurrentHashMap<>();
     private final ConcurrentHashMap<SharedPartitionId, PartitionRemoteCoverage> coverage = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<SharedPartitionId, AtomicLong> revisions = new ConcurrentHashMap<>();
@@ -82,7 +86,9 @@ public final class RemoteObjectIndex {
 
     private boolean addReferences(List<RangeReference> references) {
         Map<SharedPartitionId, NavigableMap<Long, RangeReference>> stagedByPartition = new HashMap<>();
+        Map<SharedPartitionId, NavigableMap<Long, RangeReference>> stagedAlternates = new HashMap<>();
         List<RangeReference> updates = new ArrayList<>();
+        List<RangeReference> alternateUpdates = new ArrayList<>();
 
         for (RangeReference incoming : references) {
             Objects.requireNonNull(incoming, "range reference");
@@ -98,6 +104,22 @@ public final class RemoteObjectIndex {
                     throw conflict(overlapping, incoming);
                 }
                 RangeReference merged = mergeEquivalentReference(overlapping, incoming);
+                RangeReference other = merged.objectId() != overlapping.objectId()
+                    ? overlapping
+                    : (incoming.objectId() != overlapping.objectId() ? incoming : null);
+                if (other != null) {
+                    // Keep only one equivalent fallback to bound read-index memory.
+                    // The two smallest physical IDs survive any replay order.
+                    NavigableMap<Long, RangeReference> alternativeRanges =
+                        stagedAlternates.computeIfAbsent(partition, this::copyExistingAlternates);
+                    RangeReference old = alternativeRanges.get(range.offsets().startOffset());
+                    RangeReference replacement = old == null
+                        ? other : mergeEquivalentReference(old, other);
+                    if (replacement != old) {
+                        alternativeRanges.put(range.offsets().startOffset(), replacement);
+                        alternateUpdates.add(replacement);
+                    }
+                }
                 if (merged != overlapping) {
                     staged.put(range.offsets().startOffset(), merged);
                     updates.add(merged);
@@ -108,7 +130,13 @@ public final class RemoteObjectIndex {
             updates.add(incoming);
         }
 
-        // No validation below this point can fail for ordinary metadata. Publish only after the whole batch validates.
+        // Both primary and alternate maps are published only after every
+        // packed range has passed conflict and immutable-descriptor validation.
+        for (RangeReference alternate : alternateUpdates) {
+            alternates.computeIfAbsent(
+                alternate.range().partition(), ignored -> new ConcurrentSkipListMap<>()
+            ).put(alternate.range().offsets().startOffset(), alternate);
+        }
         Set<SharedPartitionId> changedPartitions = new HashSet<>();
         for (RangeReference reference : updates) {
             SharedObjectRange range = reference.range();
@@ -173,6 +201,39 @@ public final class RemoteObjectIndex {
         return Optional.empty();
     }
 
+    /**
+     * Finds one already indexed, logically equivalent physical copy for a
+     * failed remote read. Only COMMITTED metadata publication or durable local
+     * checkpoint restore may populate these references. It is not a deletion
+     * decision, and a returned alternative still requires normal checksum
+     * verification in the object reader.
+     */
+    public Optional<RangeReference> findEquivalentAlternative(RangeReference failed) {
+        Objects.requireNonNull(failed, "failed");
+        SharedObjectRange range = failed.range();
+        long startOffset = range.offsets().startOffset();
+        NavigableMap<Long, RangeReference> primaryRanges = byPartition.get(range.partition());
+        if (primaryRanges != null) {
+            RangeReference primary = primaryRanges.get(startOffset);
+            if (isEquivalentDifferentObject(failed, primary)) {
+                return Optional.of(primary);
+            }
+        }
+        NavigableMap<Long, RangeReference> alternateRanges = alternates.get(range.partition());
+        if (alternateRanges != null) {
+            RangeReference alternate = alternateRanges.get(startOffset);
+            if (isEquivalentDifferentObject(failed, alternate)) {
+                return Optional.of(alternate);
+            }
+        }
+        return Optional.empty();
+    }
+
+    private static boolean isEquivalentDifferentObject(RangeReference failed, RangeReference candidate) {
+        return candidate != null && candidate.objectId() != failed.objectId()
+            && sameLogicalRange(candidate.range(), failed.range());
+    }
+
     public PartitionRemoteCoverage coverage(SharedPartitionId partition) {
         return coverage.computeIfAbsent(partition, ignored -> new PartitionRemoteCoverage());
     }
@@ -221,8 +282,17 @@ public final class RemoteObjectIndex {
     }
 
     private NavigableMap<Long, RangeReference> copyExistingRanges(SharedPartitionId partition) {
+        return copyExisting(byPartition.get(partition));
+    }
+
+    private NavigableMap<Long, RangeReference> copyExistingAlternates(SharedPartitionId partition) {
+        return copyExisting(alternates.get(partition));
+    }
+
+    private static NavigableMap<Long, RangeReference> copyExisting(
+        NavigableMap<Long, RangeReference> existing
+    ) {
         NavigableMap<Long, RangeReference> staged = new TreeMap<>();
-        NavigableMap<Long, RangeReference> existing = byPartition.get(partition);
         if (existing != null) {
             staged.putAll(existing);
         }

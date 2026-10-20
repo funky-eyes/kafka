@@ -108,6 +108,66 @@ class SharedObjectReaderTest {
     }
 
     @Test
+    void shouldReadEquivalentCommittedObjectWhenCanonicalPhysicalCopyIsMissing() throws Exception {
+        PackedObject canonical = packObject(960L);
+        PackedObject alternative = packObject(961L);
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(alternative.metadata());
+        index.add(canonical.metadata());
+        InMemoryObjectStore store = new InMemoryObjectStore();
+        store.put(alternative.metadata().objectId(), alternative.bytes()).get(10, TimeUnit.SECONDS);
+
+        SharedObjectReader reader = new SharedObjectReader(store, index, 4);
+        assertEquals(canonical.metadata().objectId(),
+            index.find(PARTITION, 2L).orElseThrow().objectId());
+        assertArrayEquals(new byte[] {1, 2, 3, 4, 5},
+            toArray(reader.read(PARTITION, 2L).get(10, TimeUnit.SECONDS).orElseThrow()));
+    }
+
+    @Test
+    void shouldVerifyEquivalentCommittedFallbackAfterCanonicalCopyCorruption() throws Exception {
+        PackedObject canonical = packObject(962L);
+        PackedObject alternative = packObject(963L);
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(canonical.metadata());
+        index.add(alternative.metadata());
+        ByteBuffer corrupted = writableCopy(canonical.bytes());
+        StreamObjectFormat.Footer footer = StreamObjectFormat.readFooter(corrupted);
+        StreamObjectFormat.DataBlockIndexEntry block =
+            StreamObjectFormat.readIndex(corrupted, footer).get(0);
+        int payloadPosition = Math.toIntExact(
+            block.blockPosition() + StreamObjectFormat.DATA_BLOCK_HEADER_BYTES
+                + StreamObjectFormat.BATCH_ENTRY_HEADER_BYTES
+        );
+        corrupted.put(payloadPosition, (byte) (corrupted.get(payloadPosition) ^ 0x44));
+
+        InMemoryObjectStore store = new InMemoryObjectStore();
+        store.put(canonical.metadata().objectId(), corrupted).get(10, TimeUnit.SECONDS);
+        store.put(alternative.metadata().objectId(), alternative.bytes()).get(10, TimeUnit.SECONDS);
+        SharedObjectReader reader = new SharedObjectReader(store, index, 4);
+
+        assertArrayEquals(new byte[] {1, 2, 3, 4, 5},
+            toArray(reader.read(PARTITION, 2L).get(10, TimeUnit.SECONDS).orElseThrow()));
+        assertTrue(store.contains(canonical.metadata().objectId()),
+            "A corrupted object must not be deleted by read fallback");
+    }
+
+    @Test
+    void shouldPreserveBothPhysicalFailuresWhenNeitherCommittedCopyIsAvailable() throws Exception {
+        PackedObject canonical = packObject(964L);
+        PackedObject alternative = packObject(965L);
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(canonical.metadata());
+        index.add(alternative.metadata());
+        SharedObjectReader reader = new SharedObjectReader(new InMemoryObjectStore(), index, 4);
+
+        ExecutionException error = assertThrows(ExecutionException.class,
+            () -> reader.read(PARTITION, 2L).get(10, TimeUnit.SECONDS));
+        assertTrue(error.getCause().getSuppressed().length > 0,
+            "Both failures must remain diagnosable; fallback cannot manufacture data");
+    }
+
+    @Test
     void shouldSurfaceIndexedDataBlockCorruption() throws Exception {
         PackedObject packed = packObject(952);
         SharedObjectMetadata metadata = packed.metadata();

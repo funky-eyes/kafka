@@ -131,6 +131,25 @@ class RemoteObjectIndexTest {
     }
 
     @Test
+    void secondLowestCommittedCopyRemainsTheOnlyBoundedReadFallback() {
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(object(40L, 0L, 100L, 777L));
+        index.add(object(30L, 0L, 100L, 777L));
+        index.add(object(10L, 0L, 100L, 777L));
+        index.add(object(20L, 0L, 100L, 777L));
+
+        RemoteObjectIndex.RangeReference selected = index.find(PARTITION, 50L).orElseThrow();
+        assertEquals(10L, selected.objectId());
+        assertEquals(20L, index.findEquivalentAlternative(selected).orElseThrow().objectId());
+        RemoteObjectIndex.RangeReference failedSecond =
+            new RemoteObjectIndex.RangeReference(20L, range(PARTITION, 0L, 100L, 777L));
+        assertEquals(10L, index.findEquivalentAlternative(failedSecond).orElseThrow().objectId());
+        RemoteObjectIndex.RangeReference unrelated =
+            new RemoteObjectIndex.RangeReference(50L, range(PARTITION, 0L, 100L, 778L));
+        assertTrue(index.findEquivalentAlternative(unrelated).isEmpty());
+    }
+
+    @Test
     void publicationResultKeepsSamePhysicalObjectReplayReferenced() {
         RemoteObjectIndex index = new RemoteObjectIndex();
         index.add(object(10, 0, 100, 777));

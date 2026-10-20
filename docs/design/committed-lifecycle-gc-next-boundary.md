@@ -1988,3 +1988,45 @@ Controller/KRaft-owned object lifecycle; this project still needs
 authoritative retirement of all packed-range references and replica
 reader/upload fences before any COMMITTED physical DELETE.
 The Draft PR and frozen MinIO GA branch remain unchanged.
+
+## Batches 260–263 — bounded COMMITTED physical-read fallback with native Kafka replication
+
+Base: `9ed86168715ff826f9720c0310965bcbc1e3e204`,
+17/17 workflow SUCCESS. The target remains AutoMQ-style immutable
+remote objects **with native Kafka Leader/Follower, ISR and HW**,
+not a new replicated WAL consensus algorithm.
+
+- **260 — bounded replica-read alternatives.** `RemoteObjectIndex`
+  validates every packed range and retains the two smallest known
+  physical IDs per identical logical Kafka batch: one canonical
+  local read target and at most one alternative. Index publication
+  never treats a PREPARED upload as an alternative: its inputs are
+  authoritative COMMITTED metadata replay or a post-COMMIT durable
+  local checkpoint. Conflicting leader epochs, offsets or batch CRCs
+  cannot enter the same fallback set.
+- **261 — bounded recovery.** If the selected physical copy is
+  missing, corrupt or suffers an object-store I/O failure,
+  `SharedObjectReader` attempts one equivalent committed copy.
+  The fallback is fully re-validated through the existing stream
+  object index, DataBlock CRC and batch checksum (or the legacy
+  direct-range CRC). Both failures remain visible when neither
+  object can be read. Retry does not mutate Kafka ISR, HW,
+  partition leadership or object metadata.
+- **262 — real proof.** Unit tests cover missing primary,
+  corrupted primary, both copies missing, deterministic alternate
+  choice, and rejecting non-equivalent copies. A real MinIO test
+  confirms that an absent primary can fall back to a separately
+  COMMITTED physical object using the legacy checkpoint/direct CRC
+  format, without deleting either COMMITTED metadata record.
+- **263 — CI evidence.** Add four Java methods to strict
+  unskipped JUnit enforcement (618 to 622 required methods), and
+  require the new MinIO fallback test in the existing S3 XML gate.
+  No additional CI workflow or Native Image build.
+
+**Safety boundary:** the alternative is retained only in each broker's
+local read index. This is a read-availability optimization, not a
+cross-replica liveness, durability or garbage-collection certificate.
+AutoMQ's transferable design remains KRaft-controlled immutable
+object lifecycle. COMMITTED physical DELETE stays disabled until a
+durable Controller retirement transition fences all packed-range
+references and active replica readers.

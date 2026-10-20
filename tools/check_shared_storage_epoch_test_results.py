@@ -23,9 +23,15 @@ from xml.etree import ElementTree as ET
 REQUIRED_TESTS = {
     "org.apache.kafka.storage.internals.shared.metadata.RemoteObjectIndexTest": (
         "physicalDuplicateReplayOrderConvergesAcrossReplicasWithoutGrantingGc",
+        "secondLowestCommittedCopyRemainsTheOnlyBoundedReadFallback",
     ),
     "org.apache.kafka.storage.internals.shared.metadata.LocalRemoteObjectCheckpointTest": (
         "physicalDuplicateCheckpointConvergesAcrossOppositeReplicaReplayOrder",
+    ),
+    "org.apache.kafka.storage.internals.shared.object.SharedObjectReaderTest": (
+        "shouldReadEquivalentCommittedObjectWhenCanonicalPhysicalCopyIsMissing",
+        "shouldVerifyEquivalentCommittedFallbackAfterCanonicalCopyCorruption",
+        "shouldPreserveBothPhysicalFailuresWhenNeitherCommittedCopyIsAvailable",
     ),
     "org.apache.kafka.storage.internals.shared.object.OrphanObjectCleanerTest": (
         "committedMetadataDeleteWithoutControllerRetirementIsDenied",
