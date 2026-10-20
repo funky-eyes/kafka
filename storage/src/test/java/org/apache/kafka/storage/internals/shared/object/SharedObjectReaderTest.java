@@ -212,7 +212,8 @@ class SharedObjectReaderTest {
         index.add(canonical.metadata());
         index.add(alternative.metadata());
 
-        AtomicInteger physicalReads = new AtomicInteger();
+        AtomicInteger primaryReads = new AtomicInteger();
+        AtomicInteger alternativeReads = new AtomicInteger();
         CompletableFuture<ByteBuffer> cancelledRead = new CompletableFuture<>();
         cancelledRead.cancel(false);
         ObjectStore store = new ObjectStore() {
@@ -223,7 +224,13 @@ class SharedObjectReaderTest {
 
             @Override
             public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
-                physicalReads.incrementAndGet();
+                if (objectId == canonical.metadata().objectId()) {
+                    primaryReads.incrementAndGet();
+                } else if (objectId == alternative.metadata().objectId()) {
+                    alternativeReads.incrementAndGet();
+                } else {
+                    throw new IllegalArgumentException("Unexpected object " + objectId);
+                }
                 return cancelledRead;
             }
 
@@ -237,8 +244,11 @@ class SharedObjectReaderTest {
         Throwable error = reader.read(PARTITION, 2L)
             .handle((result, failure) -> failure).get(10L, TimeUnit.SECONDS);
         assertTrue(hasCause(error, CancellationException.class));
-        assertEquals(1, physicalReads.get(),
-            "Cancelling one physical read cannot trigger redundant S3 I/O");
+        // A KSO2 index load issues Header and Footer range GETs
+        // concurrently. Cancellation must never start fallback object I/O.
+        assertEquals(2, primaryReads.get());
+        assertEquals(0, alternativeReads.get(),
+            "Cancellation must not trigger an alternate COMMITTED object GET");
         assertTrue(index.findEquivalentAlternative(
             index.find(PARTITION, 2L).orElseThrow()).isPresent(),
             "No fallback I/O must be caused by cancellation even if a COMMITTED copy exists");
