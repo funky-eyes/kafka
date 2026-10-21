@@ -28,6 +28,12 @@ REQUIRED_TESTS = {
         "immutableAlternateDescriptorCannotChangeOnSameObjectReplay",
         "fallbackSnapshotWaitsForAtomicMetadataPublication",
     ),
+    "org.apache.kafka.storage.internals.shared.metadata.CommittedObjectRetirementPrecheckTest": (
+        "absentOrPreparedObjectCannotBeDeclaredRetiredUsingOldWatermarks",
+        "forgedDescriptorCannotBorrowAnotherCommittedPackedObjectsWatermarks",
+        "historicalObjectTombstoneInvalidatesPreviouslyExpiredCommittedObject",
+        "targetedCommittedEvidenceIsImmutableAndLimitedToPackedPartitions",
+    ),
     "org.apache.kafka.storage.internals.shared.metadata.LocalRemoteObjectCheckpointTest": (
         "physicalDuplicateCheckpointConvergesAcrossOppositeReplicaReplayOrder",
     ),

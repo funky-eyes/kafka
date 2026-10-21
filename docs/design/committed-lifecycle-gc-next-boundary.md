@@ -2144,3 +2144,45 @@ future-combination implementation. The planned eventual
 Controller/KRaft `MARK_DESTROYED`-like object retirement remains
 separately blocked on Kafka replica, packed-object and reader fences.
 The frozen MinIO GA branch is untouched; PR #2 stays Draft.
+
+## Batch 270 — COMMITTED inventory identity gate before object retirement
+
+**Stable base:** Batch 268–269 at
+`aff3959dc68e4ebac4e976962f7bdcb19e8191fc` passed all
+17 GitHub Actions workflows, including native Kafka replicas,
+Java 25, real MinIO and controller failover.
+
+AutoMQ's `S3ObjectControlManager.markDestroyObjects` consults its
+Controller-owned object metadata before creating a durable
+`MARK_DESTROYED` transition. The equivalent safety invariant
+here is not established merely by old partition LogStart values:
+the exact immutable physical descriptor must still exist in the
+COMMITTED metadata inventory. Otherwise a PREPARED object, a
+compacted tombstone, or a forged/incomplete multi-partition object
+could borrow old LogStarts and be misclassified as expired.
+
+`CommittedObjectRetirementPrecheck.assess(object, image)` now
+performs **one atomic image snapshot** of the requested
+COMMITTED object ID, full immutable packed-object descriptor and
+the *explicit* log-start watermarks for only its ranges. It rejects
+missing/PREPARED/tombstoned objects with `OBJECT_NOT_COMMITTED`,
+and mismatched descriptors with
+`COMMITTED_DESCRIPTOR_MISMATCH`. The targeted snapshot avoids
+copying the entire COMMITTED-object inventory and all unrelated
+partition watermarks for each single-object assessment.
+
+Existing positive precheck regressions now first replay an actual
+COMMITTED metadata record. New negative tests cover an absent
+or merely PREPARED object, a forged truncated packed descriptor,
+a historical tombstone after an initially expired COMMIT, and an
+immutable per-object snapshot across later watermark replay.
+Enforce all four methods via strict storage JUnit evidence
+(629 -> 633). The whole-inventory diagnostic classification
+remains advisory as before.
+
+**Still blocked:** Kafka leader/follower and ISR/HW remain
+authoritative for replica semantics. A replayed metadata snapshot
+is not a Controller/KRaft durable retirement record, replica
+reader-drain certificate, latest read-committed horizon or
+physical S3 DELETE authorization. The Draft PR remains Draft;
+the frozen MinIO GA branch remains unchanged.
