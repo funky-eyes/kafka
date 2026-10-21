@@ -2225,3 +2225,22 @@ new ad-hoc Broker authentication or override Kafka's existing
 replication protocol. COMMITTED physical DELETE is still
 disabled, PR #2 remains Draft, and the frozen MinIO GA branch
 is untouched.
+
+## Batch 272 — retain replica-reassignment fence without weakening Checkstyle
+
+The first Batch 271 CI at
+`cfbfc44f16d1769390860ea928518494b27a8184`
+finished 16/17 workflow SUCCESS. The only failure occurred in
+`:metadata:checkstyleMain`: `PartitionRetirementControllerPrecheck`
+`assessRegistration` NPath Complexity 864 exceeded 500.
+Java compilation, MinIO three-broker E2E and all other workflows
+completed successfully. Do not change the Checkstyle threshold.
+
+Extract the already validated leader/recovery/epoch checks and
+native replica-topology checks into separate small methods,
+preserving existing diagnostic `Finding` precedence and the
+`REPLICA_REASSIGNMENT_IN_PROGRESS` fail-closed result.
+This is a structural repair only: it must not make a matching
+KRaft leader registration a retirement grant. The four Batch 271
+regressions remain required unskipped JUnit evidence (637 total);
+there is no physical COMMITTED delete or new source-auth scheme.

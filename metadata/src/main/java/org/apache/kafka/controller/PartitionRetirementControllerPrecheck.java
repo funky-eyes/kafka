@@ -75,6 +75,18 @@ final class PartitionRetirementControllerPrecheck {
         if (registration == null) {
             return Finding.PARTITION_NOT_PRESENT;
         }
+        Finding leader = assessLeader(registration, brokerId, sourceLeaderEpoch);
+        if (leader != Finding.CONTROLLER_IMAGE_MATCH) {
+            return leader;
+        }
+        return assessReplicaTopology(registration, brokerId);
+    }
+
+    private static Finding assessLeader(
+        PartitionRegistration registration,
+        int brokerId,
+        int sourceLeaderEpoch
+    ) {
         if (registration.leader < 0) {
             return Finding.NO_ACTIVE_LEADER;
         }
@@ -87,6 +99,10 @@ final class PartitionRetirementControllerPrecheck {
         if (registration.leaderRecoveryState != LeaderRecoveryState.RECOVERED) {
             return Finding.LEADER_STILL_RECOVERING;
         }
+        return Finding.CONTROLLER_IMAGE_MATCH;
+    }
+
+    private static Finding assessReplicaTopology(PartitionRegistration registration, int brokerId) {
         if (!Replicas.contains(registration.replicas, brokerId)
             || !Replicas.contains(registration.isr, brokerId)) {
             return Finding.LEADER_NOT_IN_ISR;
@@ -94,8 +110,6 @@ final class PartitionRetirementControllerPrecheck {
         // Kafka PartitionChangeRecord can change replica membership without
         // incrementing leaderEpoch. Until all adding/removing replicas have
         // finished, source ownership and reader coverage are not stationary.
-        // This read-only preflight must not classify a retirement candidate
-        // as stable during native Kafka partition reassignment.
         if (registration.addingReplicas.length != 0 || registration.removingReplicas.length != 0) {
             return Finding.REPLICA_REASSIGNMENT_IN_PROGRESS;
         }
