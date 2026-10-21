@@ -120,6 +120,7 @@ class PartitionRetirementControllerPrecheckTest {
         );
         PartitionRegistration changing = before.merge(new PartitionChangeRecord()
             .setReplicas(List.of(1, 2, 3, 4))
+            .setDirectories(Uuid.toList(DirectoryId.unassignedArray(4)))
             .setAddingReplicas(List.of(4)));
         assertEquals(before.leaderEpoch, changing.leaderEpoch);
         assertEquals(before.partitionEpoch + 1, changing.partitionEpoch);
@@ -145,6 +146,7 @@ class PartitionRetirementControllerPrecheckTest {
         );
         PartitionRegistration reassigning = initial.merge(new PartitionChangeRecord()
             .setReplicas(List.of(1, 2, 3, 4))
+            .setDirectories(Uuid.toList(DirectoryId.unassignedArray(4)))
             .setAddingReplicas(List.of(4)));
         assertEquals(Finding.REPLICA_REASSIGNMENT_IN_PROGRESS, assess(reassigning, 1, 20));
 

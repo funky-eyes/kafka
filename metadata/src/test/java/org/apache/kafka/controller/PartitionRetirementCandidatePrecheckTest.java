@@ -101,6 +101,7 @@ class PartitionRetirementCandidatePrecheckTest {
         Fixture f = fixture();
         PartitionRegistration changing = partition(1, 7).merge(new PartitionChangeRecord()
             .setReplicas(List.of(1, 2, 3, 4))
+            .setDirectories(Uuid.toList(DirectoryId.unassignedArray(4)))
             .setAddingReplicas(List.of(4)));
         // Kafka retains the same leaderEpoch for this topology change.
         assertEquals(7, changing.leaderEpoch);
