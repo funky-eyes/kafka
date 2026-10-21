@@ -247,6 +247,7 @@ jobs:
               'productionControllerHeartbeatRemainsAtVersionTwo',
               'legacyRequestVersionsNeverCarrySourceWalReport',
               'unstableReportRoundTripsWithExactBrokerSourceCoordinates',
+              'unstableVThreePreservesPartitionEpochForReportAndChallenge',
               'unstableControllerChallengeRoundTripsAndLegacyReplyStaysEmpty',
               'legacyRequestCannotSilentlyDowngradeNonemptyReport',
               'legacyResponseCannotSilentlyDowngradeNonemptyChallenge',

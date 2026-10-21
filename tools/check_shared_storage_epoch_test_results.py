@@ -21,9 +21,6 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 REQUIRED_TESTS = {
-    "org.apache.kafka.common.requests.BrokerHeartbeatSourceWalProbeProtocolTest": (
-        "unstableVThreePreservesPartitionEpochForReportAndChallenge",
-    ),
     "org.apache.kafka.storage.internals.shared.metadata.RemoteObjectIndexTest": (
         "physicalDuplicateReplayOrderConvergesAcrossReplicasWithoutGrantingGc",
         "secondLowestCommittedCopyRemainsTheOnlyBoundedReadFallback",

@@ -2281,8 +2281,10 @@ New negative tests cover ISR shrink without leaderEpoch bump,
 stale candidate rejection and fresh epoch re-preflight, one-use
 nonce equality changes under the same LeaderEpoch, mandatory
 typed Request validation, and v3 serialization of both sides.
-All five new JUnit methods are strict executed evidence
-(637 -> 642).
+Four new metadata JUnit methods are strict retirement
+evidence (637 -> 641); the fifth, Java 11 BrokerHeartbeat
+v3 protocol test, is enforced by the existing clients:test
+XML evidence check in shared-storage.yml.
 
 **Still blocked:** this remains read-only. The eventual
 Controller/KRaft writer must revalidate partitionEpoch and
