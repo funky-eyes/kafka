@@ -120,7 +120,7 @@ class PartitionRetirementSourceProbeValueTest {
                 INCARNATION, 8, 8, -1L, 20L, 0L));
         assertThrows(IllegalArgumentException.class, () ->
             new Request(NONCE, "cluster-a", TOPIC_ID, 0, 3, 54L,
-                INCARNATION, 8, 20L, 20L, 1L));
+                INCARNATION, 8, 8, 20L, 20L, 1L));
         // KRaft authority positions and Kafka data offsets belong to
         // separate logs. A Kafka LogStart > next KRaft CAS offset is not
         // an invalid relationship between these unrelated coordinates.
