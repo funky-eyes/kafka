@@ -87,7 +87,7 @@ class ControllerApisTest {
   private def diagnosticReply(): BrokerHeartbeatReply = {
     val challenge = new PartitionRetirementSourceProbe.Request(
       new Uuid(1L, 2L), "cluster-a", new Uuid(3L, 4L), 0,
-      3, 54L, new Uuid(5L, 6L), 8, -1L, 100L, 0L
+      3, 54L, new Uuid(5L, 6L), 8, 8, -1L, 100L, 0L
     )
     new BrokerHeartbeatReply(true, false, false, false, challenge)
   }
