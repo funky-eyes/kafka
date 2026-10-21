@@ -114,6 +114,23 @@ class PartitionRetirementControllerPrecheckTest {
     }
 
     @Test
+    void isrOnlyChangeMustRejectOldPartitionEpochWithoutBumpingLeaderEpoch() {
+        PartitionRegistration before = registration(
+            1, 20, LeaderRecoveryState.RECOVERED, new int[] {1, 2}
+        );
+        PartitionRegistration changed = before.merge(new PartitionChangeRecord()
+            .setIsr(List.of(1)));
+        assertEquals(before.leaderEpoch, changed.leaderEpoch);
+        assertEquals(before.partitionEpoch + 1, changed.partitionEpoch);
+        assertEquals(Finding.KAFKA_PARTITION_EPOCH_MISMATCH,
+            PartitionRetirementControllerPrecheck.assessRegistration(changed, 1, 20, before.partitionEpoch));
+        assertEquals(Finding.CONTROLLER_IMAGE_MATCH,
+            PartitionRetirementControllerPrecheck.assessRegistration(changed, 1, 20, changed.partitionEpoch));
+        assertThrows(IllegalArgumentException.class, () ->
+            PartitionRetirementControllerPrecheck.assessRegistration(changed, 1, 20, -1));
+    }
+
+    @Test
     void addingReplicaWithoutLeaderChangeBlocksRetirementPrecheck() {
         PartitionRegistration before = registration(
             1, 20, LeaderRecoveryState.RECOVERED, new int[] {1, 2}

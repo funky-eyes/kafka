@@ -150,7 +150,7 @@ class BrokerSourceWalProbeAdapterTest {
   private def challenge(): PartitionRetirementSourceProbe.Request = {
     new PartitionRetirementSourceProbe.Request(
       new Uuid(1L, 2L), "cluster-a", topicId, 0,
-      3, 54L, new Uuid(5L, 6L), 8, -1L, 100L, 0L
+      3, 54L, new Uuid(5L, 6L), 8, 8, -1L, 100L, 0L
     )
   }
 }

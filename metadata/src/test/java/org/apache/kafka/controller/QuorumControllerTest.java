@@ -283,7 +283,7 @@ public class QuorumControllerTest {
                 new Uuid(21L, 22L), clientEnv.clusterId(), candidate.key().topicId(),
                 candidate.key().partitionId(), candidate.brokerId(), candidate.brokerEpoch(),
                 candidate.brokerIncarnationId(), candidate.sourceLeaderEpoch(),
-                candidate.expectedPreviousAuthorityOffset(), candidate.nextAuthorityOffset(),
+                candidate.sourcePartitionEpoch(), candidate.expectedPreviousAuthorityOffset(), candidate.nextAuthorityOffset(),
                 candidate.claimedLogStartOffset()
             );
             var report = new PartitionRetirementSourceProbe.Report(
@@ -623,6 +623,7 @@ public class QuorumControllerTest {
                 .setPartitionId(0)
                 .setBrokerIncarnationId(new Uuid(5L, 6L))
                 .setSourceLeaderEpoch(8)
+                .setSourcePartitionEpoch(8)
                 .setExpectedPreviousAuthorityOffset(-1L)
                 .setNextAuthorityOffset(100L)
                 .setLocalLeadershipGeneration(2L)
@@ -642,7 +643,7 @@ public class QuorumControllerTest {
     private static PartitionRetirementCandidatePrecheck.Candidate untrustedRetirementCandidate() {
         return new PartitionRetirementCandidatePrecheck.Candidate(
             new org.apache.kafka.metadata.PartitionRetirementAuthorityState.Key(Uuid.randomUuid(), 0),
-            3, 54L, new Uuid(10L, 11L), 8, -1L, 100L, 0L
+            3, 54L, new Uuid(10L, 11L), 8, 8, -1L, 100L, 0L
         );
     }
 

@@ -191,6 +191,7 @@ class PartitionRetirementHeartbeatReportGateTest {
         assertEquals(3, decoded.request().brokerId());
         assertEquals(54L, decoded.request().brokerEpoch());
         assertEquals(8, decoded.request().sourceLeaderEpoch());
+        assertEquals(8, decoded.request().sourcePartitionEpoch());
         assertEquals(-1L, decoded.request().expectedPreviousAuthorityOffset());
         assertEquals(100L, decoded.request().nextAuthorityOffset());
         assertEquals(0L, decoded.nativeLogStartOffset());
@@ -286,6 +287,7 @@ class PartitionRetirementHeartbeatReportGateTest {
                 .setPartitionId(0)
                 .setBrokerIncarnationId(new Uuid(5L, 6L))
                 .setSourceLeaderEpoch(8)
+                .setSourcePartitionEpoch(8)
                 .setExpectedPreviousAuthorityOffset(-1L)
                 .setNextAuthorityOffset(100L)
                 .setLocalLeadershipGeneration(2L)

@@ -38,6 +38,7 @@ public final class PartitionRetirementSourceProbe {
         private final long brokerEpoch;
         private final Uuid brokerIncarnationId;
         private final int sourceLeaderEpoch;
+        private final int sourcePartitionEpoch;
         private final long expectedPreviousAuthorityOffset;
         private final long nextAuthorityOffset;
         private final long claimedLogStartOffset;
@@ -51,6 +52,7 @@ public final class PartitionRetirementSourceProbe {
             long brokerEpoch,
             Uuid brokerIncarnationId,
             int sourceLeaderEpoch,
+            int sourcePartitionEpoch,
             long expectedPreviousAuthorityOffset,
             long nextAuthorityOffset,
             long claimedLogStartOffset
@@ -66,6 +68,9 @@ public final class PartitionRetirementSourceProbe {
             if (partitionId < 0 || brokerId < 0 || brokerEpoch < 0L || sourceLeaderEpoch < 0) {
                 throw new IllegalArgumentException("Probe requires a valid registered source leader");
             }
+            if (sourcePartitionEpoch < 0) {
+                throw new IllegalArgumentException("Probe requires a non-negative KRaft partition epoch");
+            }
             if (expectedPreviousAuthorityOffset < -1L || nextAuthorityOffset <= expectedPreviousAuthorityOffset
                 || nextAuthorityOffset < 0L || claimedLogStartOffset < 0L) {
                 throw new IllegalArgumentException("Probe requires a valid authority CAS and log start");
@@ -78,6 +83,7 @@ public final class PartitionRetirementSourceProbe {
             this.brokerEpoch = brokerEpoch;
             this.brokerIncarnationId = brokerIncarnationId;
             this.sourceLeaderEpoch = sourceLeaderEpoch;
+            this.sourcePartitionEpoch = sourcePartitionEpoch;
             this.expectedPreviousAuthorityOffset = expectedPreviousAuthorityOffset;
             this.nextAuthorityOffset = nextAuthorityOffset;
             this.claimedLogStartOffset = claimedLogStartOffset;
@@ -113,6 +119,10 @@ public final class PartitionRetirementSourceProbe {
 
         public int sourceLeaderEpoch() {
             return sourceLeaderEpoch;
+        }
+
+        public int sourcePartitionEpoch() {
+            return sourcePartitionEpoch;
         }
 
         public long expectedPreviousAuthorityOffset() {
@@ -153,6 +163,7 @@ public final class PartitionRetirementSourceProbe {
         private boolean sameAuthority(Request that) {
             return brokerIncarnationId.equals(that.brokerIncarnationId)
                 && sourceLeaderEpoch == that.sourceLeaderEpoch
+                && sourcePartitionEpoch == that.sourcePartitionEpoch
                 && expectedPreviousAuthorityOffset == that.expectedPreviousAuthorityOffset;
         }
 
@@ -172,6 +183,7 @@ public final class PartitionRetirementSourceProbe {
                 brokerEpoch,
                 brokerIncarnationId,
                 sourceLeaderEpoch,
+                sourcePartitionEpoch,
                 expectedPreviousAuthorityOffset,
                 nextAuthorityOffset,
                 claimedLogStartOffset

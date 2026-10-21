@@ -45,6 +45,7 @@ final class PartitionRetirementCandidatePrecheck {
         long brokerEpoch,
         Uuid brokerIncarnationId,
         int sourceLeaderEpoch,
+        int sourcePartitionEpoch,
         long expectedPreviousAuthorityOffset,
         long nextAuthorityOffset,
         long claimedLogStartOffset
@@ -60,6 +61,9 @@ final class PartitionRetirementCandidatePrecheck {
             }
             if (brokerId < 0 || brokerEpoch < 0 || Uuid.ZERO_UUID.equals(brokerIncarnationId)) {
                 throw new IllegalArgumentException("A candidate must bind a registered broker incarnation");
+            }
+            if (sourcePartitionEpoch < 0) {
+                throw new IllegalArgumentException("Retirement candidate requires a KRaft partition epoch");
             }
             if (sourceLeaderEpoch < 0 || expectedPreviousAuthorityOffset < -1L
                 || nextAuthorityOffset < 0L || claimedLogStartOffset < 0L) {
@@ -81,6 +85,7 @@ final class PartitionRetirementCandidatePrecheck {
         STALE_AUTHORITY_VERSION,
         TOPIC_TERMINALLY_DELETED,
         LEADER_REGISTRATION_MISMATCH,
+        PARTITION_EPOCH_MISMATCH,
         BROKER_NOT_REGISTERED,
         BROKER_ID_MISMATCH,
         BROKER_FENCED,
@@ -200,9 +205,15 @@ final class PartitionRetirementCandidatePrecheck {
         PartitionRegistration registration = replicationControl.getPartition(
             candidate.key().topicId(), candidate.key().partitionId()
         );
-        return PartitionRetirementControllerPrecheck.assessRegistration(
-            registration, candidate.brokerId(), candidate.sourceLeaderEpoch()
-        ) == PartitionRetirementControllerPrecheck.Finding.CONTROLLER_IMAGE_MATCH
+        PartitionRetirementControllerPrecheck.Finding check =
+            PartitionRetirementControllerPrecheck.assessRegistration(
+                registration, candidate.brokerId(), candidate.sourceLeaderEpoch(),
+                candidate.sourcePartitionEpoch()
+            );
+        if (check == PartitionRetirementControllerPrecheck.Finding.KAFKA_PARTITION_EPOCH_MISMATCH) {
+            return Finding.PARTITION_EPOCH_MISMATCH;
+        }
+        return check == PartitionRetirementControllerPrecheck.Finding.CONTROLLER_IMAGE_MATCH
             ? null : Finding.LEADER_REGISTRATION_MISMATCH;
     }
 

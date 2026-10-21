@@ -82,6 +82,28 @@ final class PartitionRetirementControllerPrecheck {
         return assessReplicaTopology(registration, brokerId);
     }
 
+    /**
+     * Strict KRaft partition-generation fence. Kafka can update ISR or
+     * replica assignments without changing leaderEpoch. The eventual
+     * retirement writer must revalidate this in its serialized event.
+     */
+    static Finding assessRegistration(
+        PartitionRegistration registration,
+        int brokerId,
+        int sourceLeaderEpoch,
+        int expectedPartitionEpoch
+    ) {
+        if (expectedPartitionEpoch < 0) {
+            throw new IllegalArgumentException("Partition epoch must be non-negative");
+        }
+        Finding leaderAndTopology = assessRegistration(registration, brokerId, sourceLeaderEpoch);
+        if (leaderAndTopology != Finding.CONTROLLER_IMAGE_MATCH) {
+            return leaderAndTopology;
+        }
+        return registration.partitionEpoch == expectedPartitionEpoch
+            ? Finding.CONTROLLER_IMAGE_MATCH : Finding.KAFKA_PARTITION_EPOCH_MISMATCH;
+    }
+
     private static Finding assessLeader(
         PartitionRegistration registration,
         int brokerId,
@@ -124,6 +146,7 @@ final class PartitionRetirementControllerPrecheck {
         LEADER_STILL_RECOVERING,
         LEADER_NOT_IN_ISR,
         REPLICA_REASSIGNMENT_IN_PROGRESS,
+        KAFKA_PARTITION_EPOCH_MISMATCH,
         CONTROLLER_IMAGE_MATCH
     }
 }

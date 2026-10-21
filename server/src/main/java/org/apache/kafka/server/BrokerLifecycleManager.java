@@ -1049,6 +1049,7 @@ public class BrokerLifecycleManager {
                 .setPartitionId(request.partitionId())
                 .setBrokerIncarnationId(request.brokerIncarnationId())
                 .setSourceLeaderEpoch(request.sourceLeaderEpoch())
+                .setSourcePartitionEpoch(request.sourcePartitionEpoch())
                 .setExpectedPreviousAuthorityOffset(request.expectedPreviousAuthorityOffset())
                 .setNextAuthorityOffset(request.nextAuthorityOffset())
                 .setLocalLeadershipGeneration(report.localLeadershipGeneration())
@@ -1183,7 +1184,8 @@ public class BrokerLifecycleManager {
             return Optional.of(new PartitionRetirementSourceProbe.Request(
                 wire.nonce(), wire.clusterId(), wire.topicId(), wire.partitionId(),
                 wire.brokerId(), wire.brokerEpoch(), wire.brokerIncarnationId(),
-                wire.sourceLeaderEpoch(), wire.expectedPreviousAuthorityOffset(),
+                wire.sourceLeaderEpoch(), wire.sourcePartitionEpoch(),
+                wire.expectedPreviousAuthorityOffset(),
                 wire.nextAuthorityOffset(), wire.claimedLogStartOffset()
             ));
         }
@@ -1210,7 +1212,7 @@ public class BrokerLifecycleManager {
                     challenge.nonce(), challenge.clusterId(), challenge.topicId(),
                     challenge.partitionId(), challenge.brokerId(), challenge.brokerEpoch(),
                     challenge.brokerIncarnationId(), challenge.sourceLeaderEpoch(),
-                    challenge.expectedPreviousAuthorityOffset(), challenge.nextAuthorityOffset(),
+                    challenge.sourcePartitionEpoch(), challenge.expectedPreviousAuthorityOffset(), challenge.nextAuthorityOffset(),
                     challenge.claimedLogStartOffset()
                 );
                 return true;

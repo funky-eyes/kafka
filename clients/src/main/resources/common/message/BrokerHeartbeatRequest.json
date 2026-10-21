@@ -50,6 +50,7 @@
         { "name": "PartitionId", "type": "int32", "versions": "3+" },
         { "name": "BrokerIncarnationId", "type": "uuid", "versions": "3+" },
         { "name": "SourceLeaderEpoch", "type": "int32", "versions": "3+" },
+        { "name": "SourcePartitionEpoch", "type": "int32", "versions": "3+" },
         { "name": "ExpectedPreviousAuthorityOffset", "type": "int64", "versions": "3+" },
         { "name": "NextAuthorityOffset", "type": "int64", "versions": "3+" },
         { "name": "LocalLeadershipGeneration", "type": "int64", "versions": "3+" },

@@ -119,7 +119,8 @@ final class PartitionRetirementHeartbeatReportGate {
             new PartitionRetirementSourceProbe.Request(
                 wire.nonce(), wire.clusterId(), wire.topicId(), wire.partitionId(),
                 heartbeat.brokerId(), heartbeat.brokerEpoch(), wire.brokerIncarnationId(),
-                wire.sourceLeaderEpoch(), wire.expectedPreviousAuthorityOffset(),
+                wire.sourceLeaderEpoch(), wire.sourcePartitionEpoch(),
+                wire.expectedPreviousAuthorityOffset(),
                 wire.nextAuthorityOffset(), wire.nativeLogStartOffset()
             );
         return Optional.of(new PartitionRetirementSourceProbe.Report(

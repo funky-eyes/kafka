@@ -2244,3 +2244,50 @@ This is a structural repair only: it must not make a matching
 KRaft leader registration a retirement grant. The four Batch 271
 regressions remain required unskipped JUnit evidence (637 total);
 there is no physical COMMITTED delete or new source-auth scheme.
+
+## Batch 273 — native Kafka partitionEpoch-bound retirement candidates
+
+**Baseline:** Batch 272 at
+`3ed5132208f13717ccfe88aa16af392c6c0c6d49`
+finished 17/17 workflow SUCCESS. This is an AutoMQ-style
+storage-disaggregated system with **native replicated Kafka**:
+Leader/Follower, ISR, HW and LeaderEpoch semantics are unchanged.
+
+Kafka `PartitionRegistration.merge(PartitionChangeRecord)`
+increments `partitionEpoch` for partition changes even when
+`leaderEpoch` does not change. ISR-only shrink, replica directory
+changes and post-reassignment topology are therefore not fenced by
+leaderEpoch alone.
+
+Add a required non-negative `sourcePartitionEpoch` to the
+NON-EMITTING `PartitionRetirementCandidatePrecheck.Candidate`,
+checked against the Controller's *current KRaft
+PartitionRegistration.partitionEpoch* inside the serialized
+Controller preflight. A stale value yields a distinct
+`PARTITION_EPOCH_MISMATCH`; a perfect match still yields
+`SOURCE_LOG_START_NOT_VERIFIED` because no trustworthy
+cross-replica WAL/LogStart attestation is connected.
+
+Carry that epoch through the existing Java 11 transport-neutral
+`PartitionRetirementSourceProbe.Request` identity, equality
+and hashCode, plus both unstable BrokerHeartbeat v3 tagged
+Challenge and Report structures. Controller-issued one-time nonce
+payloads, Broker decode/capture/echo and Controller report decode
+must preserve the same epoch. Stable versions v0-v2 remain
+unchanged and the v3 fields remain disabled for production
+listeners.
+
+New negative tests cover ISR shrink without leaderEpoch bump,
+stale candidate rejection and fresh epoch re-preflight, one-use
+nonce equality changes under the same LeaderEpoch, mandatory
+typed Request validation, and v3 serialization of both sides.
+All five new JUnit methods are strict executed evidence
+(637 -> 642).
+
+**Still blocked:** this remains read-only. The eventual
+Controller/KRaft writer must revalidate partitionEpoch and
+all replica ownership before atomically committing a durable
+retirement transition. All packed object references, reader
+quiescence, in-flight uploads and crash-safe physical deletion
+must be handled separately. COMMITTED DELETE is disabled,
+PR #2 stays Draft, and the frozen MinIO GA branch is unchanged.

@@ -83,7 +83,8 @@ class BrokerHeartbeatSourceProbeCaptureStateTest {
         assertNull(state.begin(new Request(
             request.nonce(), "cluster-b", request.topicId(), request.partitionId(),
             request.brokerId(), request.brokerEpoch(), request.brokerIncarnationId(),
-            request.sourceLeaderEpoch(), request.expectedPreviousAuthorityOffset(),
+            request.sourceLeaderEpoch(), request.sourcePartitionEpoch(),
+            request.expectedPreviousAuthorityOffset(),
             request.nextAuthorityOffset(), request.claimedLogStartOffset()
         ), 102L));
         assertTrue(complete(state, started, Optional.of(report(request)), null, 103L));
@@ -298,6 +299,7 @@ class BrokerHeartbeatSourceProbeCaptureStateTest {
         assertEquals(request.partitionId(), wire.partitionId());
         assertEquals(request.brokerIncarnationId(), wire.brokerIncarnationId());
         assertEquals(request.sourceLeaderEpoch(), wire.sourceLeaderEpoch());
+        assertEquals(request.sourcePartitionEpoch(), wire.sourcePartitionEpoch());
         assertEquals(request.expectedPreviousAuthorityOffset(), wire.expectedPreviousAuthorityOffset());
         assertEquals(request.nextAuthorityOffset(), wire.nextAuthorityOffset());
         assertEquals(2L, wire.localLeadershipGeneration());
@@ -662,7 +664,7 @@ class BrokerHeartbeatSourceProbeCaptureStateTest {
     private static Request challenge(long nonceLo) {
         return new PartitionRetirementSourceProbe.Request(
             new Uuid(1L, nonceLo), "cluster-a", new Uuid(3L, 4L), 0,
-            3, 54L, INCARNATION, 8, -1L, 100L, 0L
+            3, 54L, INCARNATION, 8, 8, -1L, 100L, 0L
         );
     }
 

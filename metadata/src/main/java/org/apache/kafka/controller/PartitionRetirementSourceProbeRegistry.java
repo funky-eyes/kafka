@@ -60,7 +60,8 @@ final class PartitionRetirementSourceProbeRegistry {
             return new PartitionRetirementSourceProbe.Request(
                 nonce, clusterId, candidate.key().topicId(), candidate.key().partitionId(),
                 candidate.brokerId(), candidate.brokerEpoch(), candidate.brokerIncarnationId(),
-                candidate.sourceLeaderEpoch(), candidate.expectedPreviousAuthorityOffset(),
+                candidate.sourceLeaderEpoch(), candidate.sourcePartitionEpoch(),
+                candidate.expectedPreviousAuthorityOffset(),
                 candidate.nextAuthorityOffset(), candidate.claimedLogStartOffset()
             );
         }
@@ -70,7 +71,8 @@ final class PartitionRetirementSourceProbeRegistry {
             Candidate candidate = new Candidate(
                 new Key(request.topicId(), request.partitionId()),
                 request.brokerId(), request.brokerEpoch(), request.brokerIncarnationId(),
-                request.sourceLeaderEpoch(), request.expectedPreviousAuthorityOffset(),
+                request.sourceLeaderEpoch(), request.sourcePartitionEpoch(),
+                request.expectedPreviousAuthorityOffset(),
                 request.nextAuthorityOffset(), request.claimedLogStartOffset()
             );
             return new Challenge(request.nonce(), request.clusterId(), candidate);
@@ -90,6 +92,7 @@ final class PartitionRetirementSourceProbeRegistry {
                 .setBrokerEpoch(candidate.brokerEpoch())
                 .setBrokerIncarnationId(candidate.brokerIncarnationId())
                 .setSourceLeaderEpoch(candidate.sourceLeaderEpoch())
+                .setSourcePartitionEpoch(candidate.sourcePartitionEpoch())
                 .setExpectedPreviousAuthorityOffset(candidate.expectedPreviousAuthorityOffset())
                 .setNextAuthorityOffset(candidate.nextAuthorityOffset())
                 .setClaimedLogStartOffset(candidate.claimedLogStartOffset());
@@ -108,7 +111,8 @@ final class PartitionRetirementSourceProbeRegistry {
             PartitionRetirementSourceProbe.Request request = new PartitionRetirementSourceProbe.Request(
                 wire.nonce(), wire.clusterId(), wire.topicId(), wire.partitionId(),
                 wire.brokerId(), wire.brokerEpoch(), wire.brokerIncarnationId(),
-                wire.sourceLeaderEpoch(), wire.expectedPreviousAuthorityOffset(),
+                wire.sourceLeaderEpoch(), wire.sourcePartitionEpoch(),
+                wire.expectedPreviousAuthorityOffset(),
                 wire.nextAuthorityOffset(), wire.claimedLogStartOffset()
             );
             return fromProtocolRequest(request);

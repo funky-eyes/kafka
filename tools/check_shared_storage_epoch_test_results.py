@@ -21,6 +21,9 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 REQUIRED_TESTS = {
+    "org.apache.kafka.common.requests.BrokerHeartbeatSourceWalProbeProtocolTest": (
+        "unstableVThreePreservesPartitionEpochForReportAndChallenge",
+    ),
     "org.apache.kafka.storage.internals.shared.metadata.RemoteObjectIndexTest": (
         "physicalDuplicateReplayOrderConvergesAcrossReplicasWithoutGrantingGc",
         "secondLowestCommittedCopyRemainsTheOnlyBoundedReadFallback",
@@ -436,6 +439,7 @@ REQUIRED_TESTS = {
         "reportEqualityTracksSourceAndWalRevisionCoordinates",
         "requestRejectsZeroIdentitiesBlankClusterAndInvalidCasBounds",
         "requestRejectsNegativeBrokerOrUnknownSourceLeader",
+        "partitionEpochIsMandatoryAndAChangedEpochCannotReuseProbeIdentity",
         "reportRejectsEmptySourceMissingWalAndInconsistentLogEnd",
     ),
     "org.apache.kafka.controller.PartitionRetirementSourceProbeRegistryTest": (
@@ -497,6 +501,7 @@ REQUIRED_TESTS = {
         "unstableChallengeNeverDowngradesIntoStableHeartbeatReply",
         "sourceProbeWithRecreatedTopicIdCannotMatchOriginalChallenge",
         "claimedAuthorityGenerationCannotBeChangedAcrossWireConversion",
+        "changedPartitionEpochInvalidatesOneTimeChallengeWithoutLeaderChange",
     ),
     "org.apache.kafka.controller.PartitionRetirementControllerPrecheckTest": (
         "currentRecoveredLeaderInIsrMatchesButIsNotWriteAuthorization",
@@ -511,6 +516,7 @@ REQUIRED_TESTS = {
         "addingReplicaWithoutLeaderChangeBlocksRetirementPrecheck",
         "removingReplicaWithoutLeaderChangeBlocksRetirementPrecheck",
         "reassignmentCompletionRestoresOnlyReadOnlyLeaderFinding",
+        "isrOnlyChangeMustRejectOldPartitionEpochWithoutBumpingLeaderEpoch",
         "invalidBrokerAndEpochInputsFailFast",
         "controllerLookupRevalidatesCurrentLeaderAfterEpochTransition",
         "deletedTopicIdCannotBorrowRecreatedTopicRegistration",
@@ -525,6 +531,7 @@ REQUIRED_TESTS = {
         "recreatedOrMissingTopicRegistrationFailsClosed",
         "staleSourceLeaderEpochFailsDespiteCurrentBroker",
         "controllerCandidateCannotUseStableLeaderEpochDuringReplicaReassignment",
+        "isrShrinkWithoutLeaderChangeInvalidatesPriorPartitionEpochCandidate",
         "missingBrokerRegistrationFailsClosed",
         "registrationPayloadWithWrongBrokerIdCannotSatisfyCas",
         "fencedBrokerCannotSatisfyPrecommitCas",

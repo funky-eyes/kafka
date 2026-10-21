@@ -110,6 +110,7 @@ class BrokerHeartbeatSourceProbeChallengeGateTest {
         assertEquals(new Uuid(1L, 2L), diagnostic.nonce());
         assertEquals(new Uuid(3L, 4L), diagnostic.topicId());
         assertEquals(8, diagnostic.sourceLeaderEpoch());
+        assertEquals(8, diagnostic.sourcePartitionEpoch());
         assertEquals(100L, diagnostic.nextAuthorityOffset());
         assertEquals(0L, diagnostic.claimedLogStartOffset());
     }
@@ -154,6 +155,7 @@ class BrokerHeartbeatSourceProbeChallengeGateTest {
                 .setBrokerEpoch(54L)
                 .setBrokerIncarnationId(INCARNATION)
                 .setSourceLeaderEpoch(8)
+                .setSourcePartitionEpoch(8)
                 .setExpectedPreviousAuthorityOffset(-1L)
                 .setNextAuthorityOffset(100L)
                 .setClaimedLogStartOffset(0L));

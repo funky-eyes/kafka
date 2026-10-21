@@ -129,6 +129,24 @@ public class BrokerHeartbeatSourceWalProbeProtocolTest {
     }
 
     @Test
+    public void unstableVThreePreservesPartitionEpochForReportAndChallenge() {
+        short version = 3;
+        var reportData = new BrokerHeartbeatRequestData()
+            .setSourceWalProbeReport(report().setSourcePartitionEpoch(11));
+        var decodedReport = new BrokerHeartbeatRequestData(
+            MessageUtil.toByteBufferAccessor(reportData, version), version
+        );
+        assertEquals(11, decodedReport.sourceWalProbeReport().sourcePartitionEpoch());
+
+        var challengeData = new BrokerHeartbeatResponseData()
+            .setSourceWalProbeChallenge(challenge().setSourcePartitionEpoch(12));
+        var decodedChallenge = new BrokerHeartbeatResponseData(
+            MessageUtil.toByteBufferAccessor(challengeData, version), version
+        );
+        assertEquals(12, decodedChallenge.sourceWalProbeChallenge().sourcePartitionEpoch());
+    }
+
+    @Test
     public void unstableControllerChallengeRoundTripsAndLegacyReplyStaysEmpty() {
         short version = 3;
         BrokerHeartbeatResponseData response = new BrokerHeartbeatResponseData()
@@ -178,6 +196,7 @@ public class BrokerHeartbeatSourceWalProbeProtocolTest {
             .setPartitionId(0)
             .setBrokerIncarnationId(new Uuid(5L, 6L))
             .setSourceLeaderEpoch(8)
+            .setSourcePartitionEpoch(8)
             .setExpectedPreviousAuthorityOffset(-1L)
             .setNextAuthorityOffset(100L)
             .setLocalLeadershipGeneration(2L)
@@ -198,6 +217,7 @@ public class BrokerHeartbeatSourceWalProbeProtocolTest {
             .setBrokerEpoch(54L)
             .setBrokerIncarnationId(new Uuid(5L, 6L))
             .setSourceLeaderEpoch(8)
+            .setSourcePartitionEpoch(8)
             .setExpectedPreviousAuthorityOffset(-1L)
             .setNextAuthorityOffset(100L)
             .setClaimedLogStartOffset(0L);

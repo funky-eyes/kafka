@@ -112,6 +112,22 @@ class PartitionRetirementCandidatePrecheckTest {
     }
 
     @Test
+    void isrShrinkWithoutLeaderChangeInvalidatesPriorPartitionEpochCandidate() {
+        Fixture f = fixture();
+        Candidate stale = candidate();
+        PartitionRegistration changed = partition(1, 7).merge(
+            new PartitionChangeRecord().setIsr(List.of(1))
+        );
+        assertEquals(7, changed.leaderEpoch);
+        assertEquals(8, changed.partitionEpoch);
+        when(f.replicas.getPartition(KEY.topicId(), 0)).thenReturn(changed);
+        assertEquals(Finding.PARTITION_EPOCH_MISMATCH, evaluate(f, stale));
+        Candidate refreshed = new Candidate(KEY, 1, 300L, INCARNATION, 7, 8, -1L, 20L, 50L);
+        assertEquals(Finding.SOURCE_LOG_START_NOT_VERIFIED, evaluate(f, refreshed));
+        assertNull(f.authority.get(KEY));
+    }
+
+    @Test
     void missingBrokerRegistrationFailsClosed() {
         Fixture f = fixture();
         when(f.cluster.registration(1)).thenReturn(null);
@@ -208,7 +224,7 @@ class PartitionRetirementCandidatePrecheckTest {
     void zeroTopicIdCannotBeUsedAsRetirementCasIdentity() {
         assertThrows(IllegalArgumentException.class, () ->
             new Candidate(new Key(Uuid.ZERO_UUID, 0),
-                1, 300L, INCARNATION, 7, -1L, 20L, 50L));
+                1, 300L, INCARNATION, 7, 7, -1L, 20L, 50L));
     }
 
     @Test
@@ -463,7 +479,7 @@ class PartitionRetirementCandidatePrecheckTest {
         long priorAuthorityOffset, long nextAuthorityOffset, long logStart
     ) {
         return new PartitionRetirementCandidatePrecheck.Candidate(
-            KEY, brokerId, brokerEpoch, incarnation, leaderEpoch,
+            KEY, brokerId, brokerEpoch, incarnation, leaderEpoch, leaderEpoch,
             priorAuthorityOffset, nextAuthorityOffset, logStart
         );
     }

@@ -869,6 +869,7 @@ class PartitionRetirementSourceProbeRegistryTest {
         assertEquals(CANDIDATE.brokerEpoch(), request.brokerEpoch());
         assertEquals(CANDIDATE.brokerIncarnationId(), request.brokerIncarnationId());
         assertEquals(CANDIDATE.sourceLeaderEpoch(), request.sourceLeaderEpoch());
+        assertEquals(CANDIDATE.sourcePartitionEpoch(), request.sourcePartitionEpoch());
         assertEquals(CANDIDATE.expectedPreviousAuthorityOffset(),
             request.expectedPreviousAuthorityOffset());
         assertEquals(CANDIDATE.nextAuthorityOffset(), request.nextAuthorityOffset());
@@ -901,6 +902,8 @@ class PartitionRetirementSourceProbeRegistryTest {
         assertThrows(IllegalArgumentException.class, () -> Challenge.fromHeartbeatChallenge(noTopic));
         var badEpoch = issued.toHeartbeatChallenge().setBrokerEpoch(-1L);
         assertThrows(IllegalArgumentException.class, () -> Challenge.fromHeartbeatChallenge(badEpoch));
+        var badPartitionEpoch = issued.toHeartbeatChallenge().setSourcePartitionEpoch(-1);
+        assertThrows(IllegalArgumentException.class, () -> Challenge.fromHeartbeatChallenge(badPartitionEpoch));
         var badCas = issued.toHeartbeatChallenge().setNextAuthorityOffset(-1L);
         assertThrows(IllegalArgumentException.class, () -> Challenge.fromHeartbeatChallenge(badCas));
     }
@@ -934,13 +937,30 @@ class PartitionRetirementSourceProbeRegistryTest {
         var foreign = new org.apache.kafka.common.replica.PartitionRetirementSourceProbe.Request(
             request.nonce(), request.clusterId(), new Uuid(7L, 8L), request.partitionId(),
             request.brokerId(), request.brokerEpoch(), request.brokerIncarnationId(),
-            request.sourceLeaderEpoch(), request.expectedPreviousAuthorityOffset(),
+            request.sourceLeaderEpoch(), request.sourcePartitionEpoch(),
+            request.expectedPreviousAuthorityOffset(),
             request.nextAuthorityOffset(), request.claimedLogStartOffset()
         );
         assertEquals(Finding.ENVELOPE_MISMATCH, registry.consume(
             Challenge.fromProtocolRequest(foreign), CANDIDATE, BROKER_THREE, 101L));
         assertEquals(Finding.UNKNOWN_OR_ALREADY_USED, registry.consume(
             issued, CANDIDATE, BROKER_THREE, 102L));
+    }
+
+    @Test
+    void changedPartitionEpochInvalidatesOneTimeChallengeWithoutLeaderChange() {
+        var registry = registry();
+        Challenge issued = issue(registry, 100L);
+        Candidate stale = CANDIDATE;
+        Candidate changed = new Candidate(
+            stale.key(), stale.brokerId(), stale.brokerEpoch(), stale.brokerIncarnationId(),
+            stale.sourceLeaderEpoch(), stale.sourcePartitionEpoch() + 1,
+            stale.expectedPreviousAuthorityOffset(), stale.nextAuthorityOffset(), stale.claimedLogStartOffset()
+        );
+        assertEquals(Finding.CANDIDATE_CHANGED,
+            registry.consume(issued, changed, BROKER_THREE, 101L));
+        assertEquals(Finding.UNKNOWN_OR_ALREADY_USED,
+            registry.consume(issued, stale, BROKER_THREE, 102L));
     }
 
     @Test
@@ -951,7 +971,8 @@ class PartitionRetirementSourceProbeRegistryTest {
         var forged = new org.apache.kafka.common.replica.PartitionRetirementSourceProbe.Request(
             request.nonce(), request.clusterId(), request.topicId(), request.partitionId(),
             request.brokerId(), request.brokerEpoch(), request.brokerIncarnationId(),
-            request.sourceLeaderEpoch(), request.expectedPreviousAuthorityOffset(),
+            request.sourceLeaderEpoch(), request.sourcePartitionEpoch(),
+            request.expectedPreviousAuthorityOffset(),
             request.nextAuthorityOffset() + 1L, request.claimedLogStartOffset()
         );
         assertEquals(Finding.ENVELOPE_MISMATCH, registry.consume(
@@ -969,7 +990,7 @@ class PartitionRetirementSourceProbeRegistryTest {
     private static Candidate candidate(int brokerId, long brokerEpoch, Uuid incarnation, int leaderEpoch,
                                         long writePosition) {
         return new Candidate(new Key(new Uuid(1L, 2L), 0), brokerId, brokerEpoch, incarnation,
-            leaderEpoch, -1L, writePosition, 0L);
+            leaderEpoch, leaderEpoch, -1L, writePosition, 0L);
     }
 
     private static Candidate candidate(
@@ -982,7 +1003,7 @@ class PartitionRetirementSourceProbeRegistryTest {
         long writePosition
     ) {
         return new Candidate(new Key(topicId, partitionId), brokerId, brokerEpoch, incarnation,
-            leaderEpoch, -1L, writePosition, 0L);
+            leaderEpoch, leaderEpoch, -1L, writePosition, 0L);
     }
 
     private static KafkaPrincipal broker(String name) {

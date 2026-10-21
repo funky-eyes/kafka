@@ -65,6 +65,23 @@ class PartitionRetirementSourceProbeValueTest {
     }
 
     @Test
+    void partitionEpochIsMandatoryAndAChangedEpochCannotReuseProbeIdentity() {
+        Request original = request(NONCE, TOPIC_ID, 3, 54L, INCARNATION, 8, 20L, 0L);
+        Request changed = new Request(
+            NONCE, "cluster-a", TOPIC_ID, 0, 3, 54L, INCARNATION,
+            8, 9, -1L, 20L, 0L
+        );
+        assertNotEquals(original, changed);
+        assertNotEquals(original.hashCode(), changed.hashCode());
+        assertEquals(8, original.sourcePartitionEpoch());
+        assertEquals(9, changed.sourcePartitionEpoch());
+        assertThrows(IllegalArgumentException.class, () -> new Request(
+            NONCE, "cluster-a", TOPIC_ID, 0, 3, 54L, INCARNATION,
+            8, -1, -1L, 20L, 0L
+        ));
+    }
+
+    @Test
     void changedKRaftWritePositionOrKafkaLogStartIsNotEqual() {
         Request current = request(NONCE, TOPIC_ID, 3, 54L, INCARNATION, 8, 20L, 0L);
         assertNotEquals(current, request(NONCE, TOPIC_ID, 3, 54L, INCARNATION, 8, 21L, 0L));
@@ -100,7 +117,7 @@ class PartitionRetirementSourceProbeValueTest {
             request(NONCE, TOPIC_ID, 3, 54L, Uuid.ZERO_UUID, 8, 20L, 0L));
         assertThrows(IllegalArgumentException.class, () ->
             new Request(NONCE, "", TOPIC_ID, 0, 3, 54L,
-                INCARNATION, 8, -1L, 20L, 0L));
+                INCARNATION, 8, 8, -1L, 20L, 0L));
         assertThrows(IllegalArgumentException.class, () ->
             new Request(NONCE, "cluster-a", TOPIC_ID, 0, 3, 54L,
                 INCARNATION, 8, 20L, 20L, 1L));
@@ -121,7 +138,7 @@ class PartitionRetirementSourceProbeValueTest {
             request(NONCE, TOPIC_ID, 3, 54L, INCARNATION, -1, 20L, 0L));
         assertThrows(NullPointerException.class, () ->
             new Request(null, "cluster-a", TOPIC_ID, 0, 3, 54L,
-                INCARNATION, 8, -1L, 20L, 0L));
+                INCARNATION, 8, 8, -1L, 20L, 0L));
     }
 
     @Test
@@ -154,7 +171,7 @@ class PartitionRetirementSourceProbeValueTest {
     ) {
         return new Request(
             nonce, "cluster-a", topicId, 0, brokerId, brokerEpoch, incarnation,
-            leaderEpoch, -1L, nextWriteOffset, logStartOffset
+            leaderEpoch, leaderEpoch, -1L, nextWriteOffset, logStartOffset
         );
     }
 }
