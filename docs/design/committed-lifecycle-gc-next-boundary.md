@@ -2293,3 +2293,28 @@ retirement transition. All packed object references, reader
 quiescence, in-flight uploads and crash-safe physical deletion
 must be handled separately. COMMITTED DELETE is disabled,
 PR #2 stays Draft, and the frozen MinIO GA branch is unchanged.
+
+## Batch 274 — repair storage test fixture after required partitionEpoch v3 migration
+
+**Inherited HEAD** `2ebd05992dd0d1772abbfe800e9fceef42403d7c`
+completed 12/17 GitHub Actions SUCCESS. The five other workflows
+were blocked by the same `:storage:compileTestJava` errors in
+`BrokerLocalStartupReplayPrecheckTest`: two callers still supplied
+11 arguments to the new 12-argument
+`PartitionRetirementSourceProbe.Request` constructor.
+
+Update the explicit malformed-nonce fixture and its shared positive
+probe helper to supply a concrete non-negative Kafka
+`sourcePartitionEpoch` in the correct position. The test fixture
+uses the existing source leader epoch 8 as its matching partition
+generation. Also assert that a *valid* nonce/broker identity combined
+with an unknown negative partition epoch is rejected. Do not
+restore an old constructor or waive the required epoch field.
+
+Only the test fixtures and release-design evidence change. The
+actual v3 heartbeat, Controller/KRaft read-only CAS fencing, native
+Kafka ISR/HW replication and all storage production code remain
+untouched. No extra workflow is introduced. The complete 17/17
+existing CI gate must run before considering Batch 274 verified.
+COMMITTED physical DELETE stays disabled; PR #2 remains Draft,
+and the frozen MinIO GA branch is unchanged.

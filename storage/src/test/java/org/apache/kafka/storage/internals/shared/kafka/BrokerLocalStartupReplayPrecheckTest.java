@@ -682,7 +682,14 @@ class BrokerLocalStartupReplayPrecheckTest {
         assertThrows(IllegalArgumentException.class, () ->
             new PartitionRetirementSourceProbe.Request(
                 Uuid.ZERO_UUID, "cluster-a", TOPIC_ID, 0, 3, 54L,
-                new Uuid(10L, 11L), 8, -1L, 20L, 0L
+                new Uuid(10L, 11L), 8, 8, -1L, 20L, 0L
+            ));
+        // A real nonce and broker identity cannot make an unknown KRaft
+        // partition epoch acceptable to the v3 source/WAL protocol.
+        assertThrows(IllegalArgumentException.class, () ->
+            new PartitionRetirementSourceProbe.Request(
+                new Uuid(21L, 22L), "cluster-a", TOPIC_ID, 0, 3, 54L,
+                new Uuid(10L, 11L), 8, -1, -1L, 20L, 0L
             ));
         assertThrows(IllegalArgumentException.class, () ->
             new PartitionRetirementSourceProbe.Report(probe(), 1L, 0L, 0L, 0L, 0L, 0L));
@@ -915,7 +922,7 @@ class BrokerLocalStartupReplayPrecheckTest {
     ) {
         return new PartitionRetirementSourceProbe.Request(
             new Uuid(21L, 22L), clusterId, topicId, partitionId, brokerId, brokerEpoch,
-            incarnation, leaderEpoch, -1L, 20L, logStart
+            incarnation, leaderEpoch, leaderEpoch, -1L, 20L, logStart
         );
     }
 
