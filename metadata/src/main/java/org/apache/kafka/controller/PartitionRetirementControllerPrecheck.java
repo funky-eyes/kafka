@@ -30,7 +30,10 @@ import java.util.Objects;
  * image. An affirmative result is NOT an authorization token, KRaft append, durable
  * generation claim, or proof of a current source log start. The registration can change
  * immediately after this method returns; a future writer must validate again atomically
- * with its authoritative controller commit. Nothing here emits retirement metadata.</p>
+ * with its authoritative controller commit. Native replica reassignment
+ * must be complete; even a matching leaderEpoch is insufficient to fence
+ * a changed ISR/replica topology because Kafka partitionEpoch advances
+ * independently. Nothing here emits retirement metadata.</p>
  */
 final class PartitionRetirementControllerPrecheck {
     private PartitionRetirementControllerPrecheck() {
@@ -88,6 +91,14 @@ final class PartitionRetirementControllerPrecheck {
             || !Replicas.contains(registration.isr, brokerId)) {
             return Finding.LEADER_NOT_IN_ISR;
         }
+        // Kafka PartitionChangeRecord can change replica membership without
+        // incrementing leaderEpoch. Until all adding/removing replicas have
+        // finished, source ownership and reader coverage are not stationary.
+        // This read-only preflight must not classify a retirement candidate
+        // as stable during native Kafka partition reassignment.
+        if (registration.addingReplicas.length != 0 || registration.removingReplicas.length != 0) {
+            return Finding.REPLICA_REASSIGNMENT_IN_PROGRESS;
+        }
         return Finding.CONTROLLER_IMAGE_MATCH;
     }
 
@@ -98,6 +109,7 @@ final class PartitionRetirementControllerPrecheck {
         BROKER_NOT_LEADER,
         LEADER_STILL_RECOVERING,
         LEADER_NOT_IN_ISR,
+        REPLICA_REASSIGNMENT_IN_PROGRESS,
         CONTROLLER_IMAGE_MATCH
     }
 }

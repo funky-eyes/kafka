@@ -18,6 +18,7 @@ package org.apache.kafka.controller;
 
 import org.apache.kafka.common.DirectoryId;
 import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.metadata.PartitionChangeRecord;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.metadata.BrokerRegistration;
 import org.apache.kafka.metadata.LeaderRecoveryState;
@@ -29,6 +30,8 @@ import org.apache.kafka.controller.PartitionRetirementCandidatePrecheck.Candidat
 import org.apache.kafka.timeline.SnapshotRegistry;
 
 import org.junit.jupiter.api.Test;
+
+import java.util.List;
 
 import static org.apache.kafka.controller.PartitionRetirementCandidatePrecheck.Finding;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -91,6 +94,20 @@ class PartitionRetirementCandidatePrecheckTest {
         Fixture f = fixture();
         when(f.replicas.getPartition(KEY.topicId(), 0)).thenReturn(partition(1, 8));
         assertEquals(Finding.LEADER_REGISTRATION_MISMATCH, evaluate(f, candidate()));
+    }
+
+    @Test
+    void controllerCandidateCannotUseStableLeaderEpochDuringReplicaReassignment() {
+        Fixture f = fixture();
+        PartitionRegistration changing = partition(1, 7).merge(new PartitionChangeRecord()
+            .setReplicas(List.of(1, 2, 3, 4))
+            .setAddingReplicas(List.of(4)));
+        // Kafka retains the same leaderEpoch for this topology change.
+        assertEquals(7, changing.leaderEpoch);
+        assertEquals(8, changing.partitionEpoch);
+        when(f.replicas.getPartition(KEY.topicId(), 0)).thenReturn(changing);
+        assertEquals(Finding.LEADER_REGISTRATION_MISMATCH, evaluate(f, candidate()));
+        assertNull(f.authority.get(KEY));
     }
 
     @Test

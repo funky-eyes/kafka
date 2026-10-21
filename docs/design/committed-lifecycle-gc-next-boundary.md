@@ -2186,3 +2186,42 @@ is not a Controller/KRaft durable retirement record, replica
 reader-drain certificate, latest read-committed horizon or
 physical S3 DELETE authorization. The Draft PR remains Draft;
 the frozen MinIO GA branch remains unchanged.
+
+## Batch 271 — Kafka native replica-reassignment fence in KRaft retirement preflight
+
+**Baseline:** Batch 270 at
+`87b9da0ab38375a1f8c662bb78e4b67f89fb8597` completed
+17/17 GitHub Actions SUCCESS, including real MinIO, native
+leader/follower semantics, controller HA and Java 25.
+
+Kafka's actual `PartitionRegistration.merge(PartitionChangeRecord)`
+increments `partitionEpoch` on any partition change while
+`leaderEpoch` only increments when the leader changes. In
+particular, adding/removing replicas can keep the same leader
+and ISR-visible source epoch. An AutoMQ-like shared object
+lifecycle adapted to *replicated Kafka* must not treat unchanged
+`leaderEpoch` as proof that the replica topology is stable.
+
+The existing read-only Controller-event-queue preflight now
+rejects any current KRaft partition registration with
+`addingReplicas` or `removingReplicas`, reporting
+`REPLICA_REASSIGNMENT_IN_PROGRESS`. This classification
+propagates to `PartitionRetirementCandidatePrecheck` as
+`LEADER_REGISTRATION_MISMATCH` without minting a durable
+retirement decision. Tests use the actual `PartitionChangeRecord`
+merge implementation to prove add/remove transitions increase
+`partitionEpoch` without changing `leaderEpoch`, the candidate
+is rejected, and completed reassignment only restores a
+*read-only* leadership match. Require all four new tests as
+unskipped JUnit evidence (633 -> 637).
+
+This conservative preflight is **not sufficient** for object
+GC authorization: a future trusted Controller writer also
+needs the expected `partitionEpoch` or equivalent immutable
+replica-configuration generation carried through issuance and
+commit revalidation; native ISR/HW/reader quiescence must be
+established for every packed object reference. Do not add
+new ad-hoc Broker authentication or override Kafka's existing
+replication protocol. COMMITTED physical DELETE is still
+disabled, PR #2 remains Draft, and the frozen MinIO GA branch
+is untouched.
