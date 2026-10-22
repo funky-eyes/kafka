@@ -2391,3 +2391,54 @@ COMMITTED deletion. Controller/KRaft retirement writer and
 cross-replica reader fences remain separate unfinished work.
 PR #2 remains Draft and the frozen MinIO GA release branch is
 unchanged.
+
+## Batch 277 — persist native Kafka partitionEpoch through KRaft authority replay
+
+**Stable base:** Batch 276 at
+`97ed93c815b6399abffe1cb7c93f7f542216eea6` passed
+17/17 GitHub Actions SUCCESS (Java 25, native Kafka replicas,
+real MinIO, Controller HA, WAL Crash and Ring WAL).
+
+Batch 273 bound the diagnostic Controller preflight and v3
+Source/WAL challenge to native Kafka `partitionEpoch`, but the
+future KRaft `PartitionRetirementAuthorityRecord` and its
+`PartitionRetirementAuthorityState.Value` omitted this version.
+A future authenticated writer could otherwise append a value
+that loses the generation when controller leadership or a KRaft
+snapshot is replayed, even if ISR or replica membership changed
+without advancing the source `leaderEpoch`.
+
+Add optional v0 **flexible tagged field 0**
+`SourcePartitionEpoch` (default -1) to the generated
+KRaft metadata schema. Existing v0 records deserialize with
+-1, which explicitly means no topology-generation proof;
+legacy 5- and 7-argument Java `Value` constructors keep this
+absence instead of inventing a version. Candidate proposals
+carry the actual nonnegative partition epoch into the new
+8-field authority value; no writer, external API or GC is
+enabled. KRaft record encoding/decoding and the Controller
+timeline retain the epoch on replay and snapshot rollback.
+
+`PartitionRetirementAuthorityState.validateAdvance` fails closed:
+once a nonnegative partition epoch has been durably established,
+no later active version may erase or regress it. A later leader
+epoch must also carry an advanced partition epoch. For unchanged
+leaders, monotonic ISR/reassignment generations may increase
+while the source LogStart watermark advances. A pre-existing
+legacy value can be upgraded to a first real topology proof.
+These replay defenses supplement, but never replace, actual
+Controller-event-queue commit-time partition-epoch revalidation.
+
+Eight new unskipped regression witnesses cover tagged v0 binary
+roundtrip, legacy v0 absence, partition epoch rollback/erasure,
+new-leader generation, ISR-only version advance, real KRaft
+replay rejection, SnapshotRegistry rollback, and candidate
+proposal roundtrip (645 -> 653 mandatory tests).
+
+**Still prohibited:** No controller authority writer or trust
+adapter is activated. A persisted KRaft partition epoch
+alone does not prove replica durability, COMMITTED object
+retirement safety, packed-object reader quiescence or
+permission to invoke physical DELETE. Keep native Kafka
+Leader/Follower, ISR and HW semantics. PR #2 stays Draft and
+the frozen MinIO GA release branch remains untouched.

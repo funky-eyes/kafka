@@ -80,6 +80,33 @@ class PartitionRetirementControlManagerTest {
     }
 
     @Test
+    void committedControllerReplayRejectsStaleIsrEpochWithoutReplacingState() {
+        PartitionRetirementControlManager manager = manager();
+        Uuid incarnation = Uuid.randomUuid();
+        Value first = new Value(40L, 7, 11, 1, 20L, false, 300L, incarnation);
+        manager.replayFromKRaft(record(PARTITION, first), Optional.empty(), 40L);
+        Value stale = new Value(41L, 7, 10, 1, 21L, false, 300L, incarnation);
+        assertThrows(IllegalStateException.class, () ->
+            manager.replayFromKRaft(record(PARTITION, stale), Optional.empty(), 41L));
+        assertEquals(first, manager.get(PARTITION));
+    }
+
+    @Test
+    void controllerSnapshotRollbackRestoresPartitionEpochWithAuthorityVersion() {
+        SnapshotRegistry registry = new SnapshotRegistry(new LogContext());
+        PartitionRetirementControlManager manager = new PartitionRetirementControlManager(registry);
+        Uuid incarnation = Uuid.randomUuid();
+        Value first = new Value(40L, 7, 11, 1, 20L, false, 300L, incarnation);
+        Value second = new Value(41L, 7, 12, 1, 21L, false, 300L, incarnation);
+        manager.replayFromKRaft(record(PARTITION, first), Optional.empty(), 40L);
+        registry.idempotentCreateSnapshot(40L);
+        manager.replayFromKRaft(record(PARTITION, second), Optional.empty(), 41L);
+        assertEquals(12, manager.get(PARTITION).sourcePartitionEpoch());
+        registry.revertToSnapshot(40L);
+        assertEquals(first, manager.get(PARTITION));
+    }
+
+    @Test
     void topicRecreationDoesNotReuseDeletedAuthority() {
         Key recreated = new Key(Uuid.randomUuid(), 0);
         PartitionRetirementControlManager manager = manager();

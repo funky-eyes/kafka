@@ -73,8 +73,8 @@ final class PartitionRetirementCandidatePrecheck {
 
         Value proposedValue() {
             return new Value(
-                nextAuthorityOffset, sourceLeaderEpoch, brokerId, claimedLogStartOffset,
-                false, brokerEpoch, brokerIncarnationId
+                nextAuthorityOffset, sourceLeaderEpoch, sourcePartitionEpoch, brokerId,
+                claimedLogStartOffset, false, brokerEpoch, brokerIncarnationId
             );
         }
     }

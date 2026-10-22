@@ -112,6 +112,16 @@ class PartitionRetirementCandidatePrecheckTest {
     }
 
     @Test
+    void sourcePartitionEpochIsCarriedIntoProposedKRaftAuthorityValue() {
+        Candidate issued = candidate();
+        assertEquals(issued.sourcePartitionEpoch(), issued.proposedValue().sourcePartitionEpoch());
+        assertEquals(issued.sourcePartitionEpoch(), PartitionRetirementAuthorityState.value(
+            PartitionRetirementAuthorityState.record(KEY, issued.proposedValue())
+        ).sourcePartitionEpoch());
+        assertEquals(true, issued.proposedValue().hasPartitionTopologyProof());
+    }
+
+    @Test
     void isrShrinkWithoutLeaderChangeInvalidatesPriorPartitionEpochCandidate() {
         Fixture f = fixture();
         Candidate stale = candidate();
