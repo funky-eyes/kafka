@@ -86,7 +86,10 @@ class PartitionRetirementAuthorityStateTest {
             PartitionRetirementAuthorityState.validateAdvance(original, regressed));
         assertThrows(IllegalStateException.class, () ->
             PartitionRetirementAuthorityState.validateAdvance(original, erased));
-        PartitionRetirementAuthorityState.validateAdvance(erased, original);
+        // Migration from an untagged legacy record is permitted only by
+        // a new KRaft authority offset; it cannot resurrect old positions.
+        Value upgraded = new Value(93L, 7, 12, 1, 50L, false, 300L, incarnation);
+        PartitionRetirementAuthorityState.validateAdvance(erased, upgraded);
     }
 
     @Test
