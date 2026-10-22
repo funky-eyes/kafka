@@ -17,6 +17,7 @@
 package org.apache.kafka.storage.internals.shared.object;
 
 import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
+import org.apache.kafka.storage.internals.shared.metadata.LocalRemoteObjectCheckpoint;
 import org.apache.kafka.storage.internals.shared.metadata.RemoteObjectIndex;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectRange;
@@ -45,6 +46,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SharedObjectReaderTest {
     private static final SharedPartitionId PARTITION = new SharedPartitionId(71, 81, 0);
+    private static final SharedPartitionId OTHER_PARTITION = new SharedPartitionId(71, 81, 1);
 
     @TempDir
     Path tempDir;
@@ -107,6 +109,73 @@ class SharedObjectReaderTest {
             reader.read(PARTITION, 7).get(10, TimeUnit.SECONDS).orElseThrow()
         ));
         assertEquals(List.of(new Read(target.objectPosition(), target.objectLength())), store.reads());
+    }
+
+    @Test
+    void differentlyPackedCommittedCopySurvivesCheckpointAndMetadataReplay() throws Exception {
+        PackedObject canonical;
+        PackedObject alternate;
+        try (SharedStorageEngine engine = new SharedStorageEngine(new FileSharedWal(
+            tempDir.resolve("different-packed-committed-copies"), 1024 * 1024, 4096
+        ))) {
+            append(engine, 0L, 4L, new byte[] {1, 2, 3, 4, 5});
+            append(engine, 5L, 9L, new byte[] {6, 7, 8, 9});
+            engine.appendData(OTHER_PARTITION, 8, 0L, 1L, ByteBuffer.wrap(new byte[] {10, 11, 12}))
+                .get(10L, TimeUnit.SECONDS);
+
+            List<SharedStorageEngine.UploadCandidate> canonicalBatches =
+                engine.uploadCandidates(PARTITION, 0L, 10L);
+            canonical = new SharedObjectPacker().pack(980L, canonicalBatches, engine);
+
+            // A second replica can pack an unrelated partition before the
+            // same immutable Kafka batches, shifting the physical KSO2
+            // block and batch positions without changing logical content.
+            List<SharedStorageEngine.UploadCandidate> differentlyPacked = new ArrayList<>();
+            differentlyPacked.addAll(engine.uploadCandidates(OTHER_PARTITION, 0L, 2L));
+            differentlyPacked.addAll(canonicalBatches);
+            alternate = new SharedObjectPacker().pack(981L, differentlyPacked, engine);
+        }
+
+        SharedObjectRange original = canonical.metadata().ranges().stream()
+            .filter(range -> range.partition().equals(PARTITION) && range.offsets().startOffset() == 0L)
+            .findFirst().orElseThrow();
+        SharedObjectRange relocated = alternate.metadata().ranges().stream()
+            .filter(range -> range.partition().equals(PARTITION) && range.offsets().startOffset() == 0L)
+            .findFirst().orElseThrow();
+        assertEquals(original.offsets(), relocated.offsets());
+        assertEquals(original.leaderEpoch(), relocated.leaderEpoch());
+        assertEquals(original.checksum(), relocated.checksum());
+        assertEquals(original.objectLength(), relocated.objectLength());
+        assertTrue(original.objectPosition() != relocated.objectPosition());
+        assertTrue(canonical.metadata().objectSize() < alternate.metadata().objectSize());
+
+        Path checkpointDir = tempDir.resolve("different-packing-checkpoint");
+        LocalRemoteObjectCheckpoint checkpoint = new LocalRemoteObjectCheckpoint(checkpointDir);
+        checkpoint.add(canonical.metadata());
+        checkpoint.add(alternate.metadata());
+
+        RemoteObjectIndex recovered = new RemoteObjectIndex();
+        recovered.restore(new LocalRemoteObjectCheckpoint(checkpointDir).references());
+        RemoteObjectIndex.RangeReference missingCanonical =
+            recovered.find(PARTITION, 2L).orElseThrow();
+        assertEquals(980L, missingCanonical.objectId());
+        assertTrue(recovered.findEquivalentAlternative(missingCanonical).isEmpty(),
+            "The local checkpoint persists only the canonical copy until authoritative metadata replay");
+        recovered.add(alternate.metadata());
+        assertEquals(981L, recovered.findEquivalentAlternative(missingCanonical)
+            .orElseThrow().objectId());
+
+        InMemoryObjectStore store = new InMemoryObjectStore();
+        store.put(981L, alternate.bytes()).get(10L, TimeUnit.SECONDS);
+        SharedObjectReader reader = new SharedObjectReader(store, recovered, 4);
+        assertArrayEquals(new byte[] {1, 2, 3, 4, 5},
+            toArray(reader.read(PARTITION, 2L).get(10L, TimeUnit.SECONDS).orElseThrow()));
+        assertArrayEquals(new byte[] {6, 7, 8, 9},
+            toArray(reader.read(PARTITION, 7L).get(10L, TimeUnit.SECONDS).orElseThrow()));
+        assertArrayEquals(new byte[] {10, 11, 12},
+            toArray(reader.read(OTHER_PARTITION, 0L).get(10L, TimeUnit.SECONDS).orElseThrow()));
+        assertFalse(store.contains(980L),
+            "Recovery used the independently packed COMMITTED copy without manufacturing canonical bytes");
     }
 
     @Test

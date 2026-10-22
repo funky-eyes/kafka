@@ -2354,3 +2354,40 @@ and non-emitting Controller preflight are unchanged.
 COMMITTED physical DELETE remains disabled, PR #2 stays Draft,
 and frozen MinIO GA release HEAD
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889` is untouched.
+
+## Batch 276 — actual KSO2 repacking and cross-partition failover after checkpoint restore
+
+**Stable base:** Batch 275 at
+`256f3cfdec965a4cd666d130f07ea45beb423ffd`
+completed 17/17 GitHub Actions SUCCESS including real MinIO,
+three-broker Kafka semantics, Controller HA and WAL crash.
+
+Two independently COMMITTED physical copies can pack identical
+Kafka RecordBatches with different additional partitions, DataBlock
+positions and total S3 object size/CRC. Equal logical offsets,
+LeaderEpoch, RecordBatch CRC and byte length must admit a read
+fallback without confusing the other partition's bytes with the
+requested Kafka range. The prior read-fallback tests packed two
+objects with otherwise identical layouts.
+
+Add a deterministic end-to-end Java test using the **real KSO2
+SharedObjectPacker**: serialize a canonical two-batch object for
+partition zero and a physically different backup that prepends a
+different partition's batch. Assert identical immutable Kafka
+logical identity but differing object positions and object sizes.
+Commit both into a fsynced `LocalRemoteObjectCheckpoint`, reopen
+it, then replay the alternative COMMITTED metadata into a restored
+`RemoteObjectIndex`. The canonical copy is absent from S3:
+verify that both Kafka batches and the unrelated partition are
+read exclusively from the independently packed alternative, with
+normal KSO2 index and CRC checks. The checkpoint-only stage
+correctly lacks a backup until COMMITTED metadata replay.
+
+Make this method required in the existing unskipped JUnit evidence
+manifest (644 -> 645); no extra workflow or Native Image build.
+Keep Kafka's native Leader/Follower, ISR, HW and epoch semantics;
+no local checkpoint or replica index may authorize physical
+COMMITTED deletion. Controller/KRaft retirement writer and
+cross-replica reader fences remain separate unfinished work.
+PR #2 remains Draft and the frozen MinIO GA release branch is
+unchanged.
