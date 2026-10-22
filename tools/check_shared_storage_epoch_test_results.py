@@ -635,6 +635,10 @@ REQUIRED_TESTS = {
         "brokerIncarnationProofSurvivesNegotiatedKRaftSnapshotAndReplay",
         "malformedBrokerIdentityCannotEnterBrokerMetadataImage",
         "changingIncarnationWithinSameLeaderEpochFailsDuringMetadataReplay",
+        "partitionEpochSurvivesFeatureGatedFullMetadataImageSnapshot",
+        "legacyMetadataSnapshotKeepsUnknownEpochUntilAnExplicitUpgrade",
+        "recoveredMetadataImageRejectsStaleIsrEpochAndKeepsLastValidValue",
+        "terminalTombstoneRetainsLastPartitionEpochThroughFullSnapshot",
         "negotiatedKRaftReplayRejectsReservedTopicIdWithoutPoisoningImage",
     ),
     "org.apache.kafka.server.common.PartitionRetirementAuthorityVersionTest": (

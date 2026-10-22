@@ -78,6 +78,12 @@ public final class PartitionRetirementAuthorityState {
             this(offset, leaderEpoch, -1, broker, watermark, deleted, brokerRegistrationEpoch, incarnationId);
         }
 
+        /**
+         * Only indicates that an immutable KRaft partition-epoch coordinate
+         * was recorded, not that the source Broker's WAL durability or remote
+         * object's replicas have been authenticated. Never use this flag
+         * alone to authorize COMMITTED object retirement or S3 deletion.
+         */
         public boolean hasPartitionTopologyProof() {
             return sourcePartitionEpoch >= 0;
         }

@@ -2442,3 +2442,40 @@ retirement safety, packed-object reader quiescence or
 permission to invoke physical DELETE. Keep native Kafka
 Leader/Follower, ISR and HW semantics. PR #2 stays Draft and
 the frozen MinIO GA release branch remains untouched.
+
+## Batch 278 — feature-gated full KRaft image snapshot preserves replica generation
+
+**Stable base:** Batch 277 at
+`350aaadf13eb1459a046676fdc426d24a598de72`
+completed 17/17 GitHub Actions SUCCESS, including Java 25,
+real MinIO three-broker E2E, Controller HA and WAL crash.
+
+A single `PartitionRetirementAuthorityRecord` v0 tagged
+`SourcePartitionEpoch` serialization test and Controller
+timeline replay are not the complete KRaft failure-recovery path.
+An actual `MetadataImage` snapshot also writes finalized
+features, all authority records and topic-ID tombstones; the
+new Controller constructs a fresh `MetadataDelta` and resumes
+ordinary replay against the recovered immutable image.
+
+Four deterministic feature-negotiated full-image regressions
+verify that (1) a nonnegative native Kafka `partitionEpoch`
+survives metadata snapshot writing/replay with broker incarnation,
+(2) a legacy untagged record remains explicitly unknown (-1)
+until a **later** KRaft authority offset upgrades it,
+(3) a stale ISR-only version is rejected after restoration
+despite unchanged LeaderEpoch and increased AuthorityOffset,
+without replacing the previous state, and (4) a terminal
+topic-ID tombstone retains its last generation and cannot be
+revived after a fresh snapshot. Run the complete
+`MetadataImage.write -> RecordListWriter -> MetadataDelta
+.finishSnapshot -> apply` path at experimental metadata 4.4.
+Require the four methods in the existing JUnit evidence contract
+(653 -> 657); no extra workflow and no Native Image build.
+
+The presence of a recorded `partitionEpoch` is **not**
+authenticated native source/WAL evidence, a cross-replica
+object-reference barrier or a GC certificate. Production
+KRaft emitter and physical COMMITTED DELETE remain disabled;
+Kafka Leader/Follower ISR/HW stays authoritative.
+PR #2 stays Draft; frozen MinIO GA is unchanged.
