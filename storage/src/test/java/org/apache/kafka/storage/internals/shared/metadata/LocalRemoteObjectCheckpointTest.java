@@ -148,6 +148,27 @@ class LocalRemoteObjectCheckpointTest {
     }
 
     @Test
+    void sameCrcDifferentKafkaByteLengthMustNotReplaceDurableCheckpoint() throws Exception {
+        LocalRemoteObjectCheckpoint checkpoint = new LocalRemoteObjectCheckpoint(tempDir);
+        SharedObjectMetadata committed = object(100L, 100L, 110L, 444L);
+        checkpoint.add(committed);
+        List<RemoteObjectIndex.RangeReference> durable = checkpoint.references();
+
+        SharedObjectRange original = committed.ranges().get(0);
+        SharedObjectRange incompatible = new SharedObjectRange(
+            PARTITION, original.offsets(), original.leaderEpoch(), 2000L,
+            original.objectLength() + 1, original.checksum()
+        );
+        SharedObjectMetadata conflicting = new SharedObjectMetadata(
+            90L, incompatible.objectPosition() + incompatible.objectLength(), 445L,
+            List.of(incompatible)
+        );
+        assertThrows(IOException.class, () -> checkpoint.add(conflicting));
+        assertEquals(durable, checkpoint.references());
+        assertEquals(durable, new LocalRemoteObjectCheckpoint(tempDir).references());
+    }
+
+    @Test
     void corruptedSnapshotMustFailClosedBecauseWalMayAlreadyBeGone() throws Exception {
         LocalRemoteObjectCheckpoint checkpoint = new LocalRemoteObjectCheckpoint(tempDir);
         checkpoint.add(object(100, 100, 110, 444));

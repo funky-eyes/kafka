@@ -2318,3 +2318,39 @@ untouched. No extra workflow is introduced. The complete 17/17
 existing CI gate must run before considering Batch 274 verified.
 COMMITTED physical DELETE stays disabled; PR #2 remains Draft,
 and the frozen MinIO GA branch is unchanged.
+
+## Batch 275 — immutable Kafka RecordBatch length parity across COMMITTED read and checkpoint
+
+**Stable base:** Batch 274 at
+`f72a2fc9ee094166b8fb81d77a8119765a8edb4b`
+passed 17/17 workflows including native Kafka replicas, real
+MinIO, Java 25, WAL crash and Controller HA.
+
+`LocalRemoteObjectCheckpoint.sameLogicalRange` requires equal
+Kafka offset range, LeaderEpoch, CRC and byte length.
+`RemoteObjectIndex.sameLogicalRange` previously omitted byte
+length. This could admit a different-size physical COMMITTED
+copy with the same declared CRC, or expose an unsafe bounded
+read fallback after checkpoint restore.
+
+Require the RecordBatch `objectLength` to agree in both
+paths. Do not compare whole-object length/checksum or physical
+`objectPosition`, because an identical Kafka batch can live
+in differently packed S3 objects; the actual bytes are still
+independently CRC-verified by the reader.
+
+Regression witnesses cover a same-range/same-CRC length
+mismatch, an object whose later packed partition conflicts
+after a lower-ID reference was staged, and durability-time
+checkpoint rejection of the same mismatch without changing
+the atomically persisted image. These three methods join the
+existing unskipped JUnit evidence contract (641 -> 644).
+No new hosted CI workflow or native build is added.
+
+This is an immutable data identity/read correctness rule,
+not a GC or cross-replica durability certificate.
+Kafka Leader/Follower, ISR, HW, LeaderEpoch, partitionEpoch,
+and non-emitting Controller preflight are unchanged.
+COMMITTED physical DELETE remains disabled, PR #2 stays Draft,
+and frozen MinIO GA release HEAD
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889` is untouched.

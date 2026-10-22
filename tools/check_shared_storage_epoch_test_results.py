@@ -27,6 +27,8 @@ REQUIRED_TESTS = {
         "invalidPackedObjectCannotPublishAnAlternateBeforeLaterRangeConflict",
         "immutableAlternateDescriptorCannotChangeOnSameObjectReplay",
         "fallbackSnapshotWaitsForAtomicMetadataPublication",
+        "shouldRejectDifferentKafkaByteLengthWithSameOffsetsEpochAndCrc",
+        "laterPackedLengthConflictCannotPublishAnEarlierLowerObjectId",
     ),
     "org.apache.kafka.storage.internals.shared.metadata.CommittedObjectRetirementPrecheckTest": (
         "absentOrPreparedObjectCannotBeDeclaredRetiredUsingOldWatermarks",
@@ -36,6 +38,7 @@ REQUIRED_TESTS = {
     ),
     "org.apache.kafka.storage.internals.shared.metadata.LocalRemoteObjectCheckpointTest": (
         "physicalDuplicateCheckpointConvergesAcrossOppositeReplicaReplayOrder",
+        "sameCrcDifferentKafkaByteLengthMustNotReplaceDurableCheckpoint",
     ),
     "org.apache.kafka.storage.internals.shared.object.StreamObjectIndexReaderTest": (
         "eitherFailedKso2MetadataRangeMustNotWaitForOtherPendingRange",

@@ -337,6 +337,53 @@ class RemoteObjectIndexTest {
     }
 
     @Test
+    void shouldRejectDifferentKafkaByteLengthWithSameOffsetsEpochAndCrc() {
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(object(10L, 0L, 100L, 777L));
+        RemoteObjectIndex.RangeReference primary = index.find(PARTITION, 50L).orElseThrow();
+        long priorRevision = index.revision(PARTITION);
+        SharedObjectRange incompatible = new SharedObjectRange(
+            PARTITION, new OffsetRange(0L, 100L), 3, 0L, 101, 777L
+        );
+        SharedObjectMetadata conflicting = new SharedObjectMetadata(
+            11L, 101L, 778L, List.of(incompatible)
+        );
+        assertThrows(RemoteMetadataConflictException.class, () -> index.add(conflicting));
+        assertEquals(primary, index.find(PARTITION, 50L).orElseThrow());
+        assertTrue(index.findEquivalentAlternative(primary).isEmpty());
+        assertEquals(priorRevision, index.revision(PARTITION));
+        assertEquals(1, index.ranges(PARTITION).size());
+    }
+
+    @Test
+    void laterPackedLengthConflictCannotPublishAnEarlierLowerObjectId() {
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(object(10L, PARTITION, 0L, 100L, 777L));
+        index.add(object(20L, OTHER_PARTITION, 0L, 100L, 888L));
+        long partitionRevision = index.revision(PARTITION);
+        long otherRevision = index.revision(OTHER_PARTITION);
+
+        SharedObjectMetadata conflicting = new SharedObjectMetadata(
+            5L, 201L, 1234L,
+            List.of(
+                range(PARTITION, 0L, 100L, 777L),
+                new SharedObjectRange(
+                    OTHER_PARTITION, new OffsetRange(0L, 100L), 3, 100L, 101, 888L
+                )
+            )
+        );
+        assertThrows(RemoteMetadataConflictException.class, () -> index.add(conflicting));
+        RemoteObjectIndex.RangeReference primary = index.find(PARTITION, 50L).orElseThrow();
+        RemoteObjectIndex.RangeReference other = index.find(OTHER_PARTITION, 50L).orElseThrow();
+        assertEquals(10L, primary.objectId());
+        assertEquals(20L, other.objectId());
+        assertTrue(index.findEquivalentAlternative(primary).isEmpty());
+        assertTrue(index.findEquivalentAlternative(other).isEmpty());
+        assertEquals(partitionRevision, index.revision(PARTITION));
+        assertEquals(otherRevision, index.revision(OTHER_PARTITION));
+    }
+
+    @Test
     void shouldRejectConflictingDuplicateContent() {
         RemoteObjectIndex index = new RemoteObjectIndex();
         index.add(object(10, 0, 100, 777));

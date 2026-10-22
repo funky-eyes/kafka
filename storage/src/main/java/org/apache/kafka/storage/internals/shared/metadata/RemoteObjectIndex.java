@@ -341,9 +341,14 @@ public final class RemoteObjectIndex {
     }
 
     private static boolean sameLogicalRange(SharedObjectRange left, SharedObjectRange right) {
+        // Kafka RecordBatch byte length is part of the logical identity.
+        // Equal offsets, epoch and checksum cannot make two differently
+        // sized payloads interchangeable. LocalRemoteObjectCheckpoint
+        // already applies this immutable range invariant.
         return left.offsets().equals(right.offsets()) &&
             left.leaderEpoch() == right.leaderEpoch() &&
-            left.checksum() == right.checksum();
+            left.checksum() == right.checksum() &&
+            left.objectLength() == right.objectLength();
     }
 
     private static RemoteMetadataConflictException conflict(RangeReference existing, RangeReference incoming) {
