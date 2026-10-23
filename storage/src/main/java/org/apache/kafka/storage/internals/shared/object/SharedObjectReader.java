@@ -210,27 +210,27 @@ public final class SharedObjectReader {
             return CompletableFuture.failedFuture(failure);
         }
         return bytesFuture.thenApply(bytes -> {
-                if (bytes.remaining() != range.objectLength()) {
-                    throw new CompletionException(corruption(
-                        reference,
-                        new IOException(
-                            "Remote batch length mismatch: expected=" + range.objectLength() +
-                                ", actual=" + bytes.remaining()
-                        )
-                    ));
-                }
-                long actualChecksum = crc32c(bytes);
-                if (actualChecksum != range.checksum()) {
-                    throw new CompletionException(corruption(
-                        reference,
-                        new IOException(
-                            "Remote batch checksum mismatch: expected=" + range.checksum() +
-                                ", actual=" + actualChecksum
-                        )
-                    ));
-                }
-                return Optional.of(bytes.asReadOnlyBuffer());
-            });
+            if (bytes.remaining() != range.objectLength()) {
+                throw new CompletionException(corruption(
+                    reference,
+                    new IOException(
+                        "Remote batch length mismatch: expected=" + range.objectLength() +
+                            ", actual=" + bytes.remaining()
+                    )
+                ));
+            }
+            long actualChecksum = crc32c(bytes);
+            if (actualChecksum != range.checksum()) {
+                throw new CompletionException(corruption(
+                    reference,
+                    new IOException(
+                        "Remote batch checksum mismatch: expected=" + range.checksum() +
+                            ", actual=" + actualChecksum
+                    )
+                ));
+            }
+            return Optional.of(bytes.asReadOnlyBuffer());
+        });
     }
 
     private static StreamObjectFormat.DataBlockIndexEntry findIndexedBlock(
