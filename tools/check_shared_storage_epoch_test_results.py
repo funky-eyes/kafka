@@ -43,6 +43,10 @@ REQUIRED_TESTS = {
     "org.apache.kafka.storage.internals.shared.object.StreamObjectIndexReaderTest": (
         "eitherFailedKso2MetadataRangeMustNotWaitForOtherPendingRange",
     ),
+    "org.apache.kafka.storage.internals.shared.object.StreamObjectDataBlockReaderTest": (
+        "forgedHugeBatchCountCannotAllocateBeyondDataBlockBytes",
+        "forgedSmallBatchCountAbovePayloadCapacityFailsClosed",
+    ),
     "org.apache.kafka.storage.internals.shared.object.SharedObjectReaderTest": (
         "shouldReadEquivalentCommittedObjectWhenCanonicalPhysicalCopyIsMissing",
         "differentlyPackedCommittedCopySurvivesCheckpointAndMetadataReplay",

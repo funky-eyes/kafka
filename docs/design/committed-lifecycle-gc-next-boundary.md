@@ -2509,3 +2509,38 @@ Native Kafka Leader/Follower, ISR, HW, epoch/partitionEpoch semantics and
 Controller ownership remain unchanged. PR #2 remains Draft, COMMITTED
 physical DELETE disabled and frozen MinIO GA HEAD
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889` untouched.
+
+## Batch 280 — bound corrupted KSO2 batch counts by physical DataBlock size
+
+**Stable base:** Batch 279 at
+`1acfe7a2cbe9076804e141db1909e76ce62fc37b`
+passed all 17 GitHub Actions, including Java 25, Kafka replicated
+acks=all and real MinIO.
+
+The immutable KSO2 decoder previously verified the DataBlock header
+against its index and validated payload CRC before allocating
+`new ArrayList<>(header.batchCount())`. A corrupted or malformed
+Header+Index pair with matching (but impossible) batch counts could
+request enormous allocation despite only a few bytes of block payload.
+Such input must fail as invalid object data rather than risk a Java
+out-of-memory failure.
+
+Each serialized Kafka batch requires its fixed 24-byte entry header
+and a nonempty payload. Validate
+`batchCount <= dataLength / (BATCH_ENTRY_HEADER_BYTES + 1)`
+after Header/Index checks and before list allocation. Division avoids
+multiplication overflow. This adds no allocations or remote requests on
+the normal read path.
+
+Two deterministic regression methods use a real KSO2 packed block,
+forge both its block header and expected index entry to claim
+`Integer.MAX_VALUE` or just three batches, retain the valid existing
+payload CRC, and require an early IOException, not allocation based on
+the forged count. Strict unskipped Java JUnit manifest grows 658 -> 660
+with unchanged hosted CI workflow and no Native Image gate.
+
+This is read-path robustness only. Kafka native replication, KRaft
+Controller authority, disabled COMMITTED physical DELETE, PR #2 Draft
+and frozen MinIO GA at
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`
+remain unchanged.
