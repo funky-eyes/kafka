@@ -2544,3 +2544,41 @@ Controller authority, disabled COMMITTED physical DELETE, PR #2 Draft
 and frozen MinIO GA at
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889`
 remain unchanged.
+
+
+## Batch 281 — isolate KSO2 index-cache publication from remote-object I/O
+
+**Stable base:** Batch 280 at
+`c6ecdff0f0f3ec322bd83d376cc90639c022b1cc` passed
+all 17 Java 25, real MinIO, Kafka replication and WAL/Controller
+workflow gates.
+
+The bounded `StreamObjectIndexCache` previously called
+`StreamObjectIndexReader.load` **inside** its shared LRU monitor.
+That loader invokes synchronous `ObjectStore.rangeRead` before it
+returns a Future. A stalled physical Header GET could therefore
+serialize unrelated cold reads from other objects/partitions and
+delay a Kafka replica's remote fallback even if an independent
+COMMITTED copy is healthy.
+
+Install the per-descriptor `CompletableFuture` while holding only
+the short LRU lock, then run the actual Header/Footer I/O outside
+the monitor. Concurrent readers for the same immutable object
+receive the same pending Future; distinct object keys can issue I/O
+independently. A synchronous exception or asynchronous failure
+completes the placeholder exceptionally and removes it using an
+identity-checked cache entry, preserving retry safety after eviction
+or replacement. Null loader results fail closed. Retain existing
+cache capacity/LRU limits.
+
+Two required deterministic regressions cover (1) a deliberately
+blocked Header GET, concurrent same-object coalescing and unrelated
+object progress, and (2) synchronous object-store failure followed
+by a successful retry with the same key. Enforce them as unskipped
+storage JUnit evidence (660 -> 662) in the existing workflow.
+
+This change does not alter native Kafka Leader/Follower, ISR, HW,
+S3 object identity, KRaft authority, Controller epoch fencing,
+the inactive COMMITTED physical DELETE path, or the frozen MinIO GA
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
+Keep PR #2 Draft; do not trigger additional Native Image CI.

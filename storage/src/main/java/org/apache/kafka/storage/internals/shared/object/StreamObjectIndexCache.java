@@ -25,7 +25,10 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
-/** Bounded LRU of immutable object-index loads. Failed loads are never retained. */
+/**
+ * Bounded LRU of immutable object-index loads. Failed loads are never retained.
+ * Slow physical object-store calls execute outside the per-cache publication monitor.
+ */
 final class StreamObjectIndexCache {
     private final int maxEntries;
     private final LinkedHashMap<Key, CompletableFuture<Optional<StreamObjectIndexReader.IndexSnapshot>>> entries =
@@ -49,26 +52,42 @@ final class StreamObjectIndexCache {
         }
 
         Key key = Key.from(reference);
-        CompletableFuture<Optional<StreamObjectIndexReader.IndexSnapshot>> result;
+        CompletableFuture<Optional<StreamObjectIndexReader.IndexSnapshot>> installed = new CompletableFuture<>();
         synchronized (this) {
-            result = entries.get(key);
-            if (result != null) {
-                return result;
+            CompletableFuture<Optional<StreamObjectIndexReader.IndexSnapshot>> existing = entries.get(key);
+            if (existing != null) {
+                return existing;
             }
-            result = loader.load(reference);
-            entries.put(key, result);
+            // Publish the coalescing Future while holding the short cache
+            // lock, but never invoke a potentially blocking Range GET here.
+            entries.put(key, installed);
             evictIfNeeded();
         }
 
-        CompletableFuture<Optional<StreamObjectIndexReader.IndexSnapshot>> installed = result;
-        result.whenComplete((ignored, error) -> {
+        installed.whenComplete((ignored, error) -> {
             if (error != null) {
                 synchronized (StreamObjectIndexCache.this) {
                     entries.remove(key, installed);
                 }
             }
         });
-        return result;
+        CompletableFuture<Optional<StreamObjectIndexReader.IndexSnapshot>> loaded;
+        try {
+            loaded = Objects.requireNonNull(loader.load(reference), "index loader returned null future");
+        } catch (Throwable error) {
+            installed.completeExceptionally(error);
+            return installed;
+        }
+        loaded.whenComplete((snapshot, error) -> {
+            if (error != null) {
+                installed.completeExceptionally(error);
+            } else if (snapshot == null) {
+                installed.completeExceptionally(new NullPointerException("index loader returned null snapshot"));
+            } else {
+                installed.complete(snapshot);
+            }
+        });
+        return installed;
     }
 
     synchronized int size() {
