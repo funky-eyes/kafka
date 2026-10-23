@@ -92,6 +92,12 @@ public final class SharedObjectReader {
             RemoteObjectIndex.RangeReference alternate = fallback.get();
             return readReference(alternate).handle((bytes, secondFailure) -> {
                 if (secondFailure != null) {
+                    // Cancellation of alternate I/O is a lifecycle signal,
+                    // not evidence that both COMMITTED copies are unreadable.
+                    Throwable cause = unwrapCompletion(secondFailure);
+                    if (cause instanceof CancellationException) {
+                        throw new CompletionException(cause);
+                    }
                     throw bothPhysicalCopiesFailed(ref, alternate, firstFailure, secondFailure);
                 }
                 return bytes;

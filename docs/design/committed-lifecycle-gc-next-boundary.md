@@ -2479,3 +2479,33 @@ object-reference barrier or a GC certificate. Production
 KRaft emitter and physical COMMITTED DELETE remain disabled;
 Kafka Leader/Follower ISR/HW stays authoritative.
 PR #2 stays Draft; frozen MinIO GA is unchanged.
+
+## Batch 279 — secondary COMMITTED read cancellation remains cancellation
+
+**Stable base:** Batch 278 at
+`409414458f9bd925f39350c21058afc3f345b5c2`
+passed 17/17 workflows, including Java 25, native Kafka replication and real MinIO.
+
+If a primary COMMITTED physical object fails, the asynchronous reader may
+fall back to one independently verified equivalent immutable copy. An
+outstanding alternate transport may then be cancelled as part of request
+or storage lifecycle. Previously the fallback's completion handler treated
+every alternate exception as an object-read failure and wrapped cancellation
+as "both COMMITTED physical copies unreadable" IOException.
+
+Propagate the alternate's actual `CancellationException` instead.
+The primary-cancel no-fallback behavior remains unchanged. True double
+transport/corruption failures still retain both diagnoses in a fresh,
+per-request IOException; no remote reference changes, third retry, metadata
+tombstone or physical deletion is introduced.
+
+A deterministic KSO2 regression injects primary physical I/O failure,
+then cancels the still-pending alternate Header/Footer requests. It
+requires the result to remain cancellation and forbids a spurious dual
+object-loss IOException. Raise strict unskipped JUnit evidence
+657 -> 658; retain existing CI and skip Native Image.
+
+Native Kafka Leader/Follower, ISR, HW, epoch/partitionEpoch semantics and
+Controller ownership remain unchanged. PR #2 remains Draft, COMMITTED
+physical DELETE disabled and frozen MinIO GA HEAD
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889` untouched.

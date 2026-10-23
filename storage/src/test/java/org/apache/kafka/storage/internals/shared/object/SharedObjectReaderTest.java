@@ -371,6 +371,50 @@ class SharedObjectReaderTest {
     }
 
     @Test
+    void cancelledAlternateReadAfterPrimaryFailureRemainsCancellation() throws Exception {
+        PackedObject canonical = packObject(972L);
+        PackedObject alternative = packObject(973L);
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(canonical.metadata());
+        index.add(alternative.metadata());
+
+        CompletableFuture<ByteBuffer> pendingAlternate = new CompletableFuture<>();
+        AtomicInteger alternateReads = new AtomicInteger();
+        ObjectStore store = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                if (objectId == canonical.metadata().objectId()) {
+                    return CompletableFuture.failedFuture(new IOException("canonical object unavailable"));
+                }
+                if (objectId == alternative.metadata().objectId()) {
+                    alternateReads.incrementAndGet();
+                    return pendingAlternate;
+                }
+                throw new IllegalArgumentException("Unexpected object " + objectId);
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+        };
+
+        var read = new SharedObjectReader(store, index, 4).read(PARTITION, 2L);
+        assertTrue(alternateReads.get() > 0, "Primary failure must attempt the COMMITTED alternate");
+        assertFalse(read.isDone(), "Pending alternate I/O is not a physical failure");
+        pendingAlternate.cancel(false);
+        Throwable failure = read.handle((ignored, error) -> error).get(10L, TimeUnit.SECONDS);
+        assertTrue(hasCause(failure, CancellationException.class));
+        assertFalse(hasCause(failure, IOException.class),
+            "Alternate cancellation must not report two unreadable COMMITTED copies");
+    }
+
+    @Test
     void shouldSurfaceIndexedDataBlockCorruption() throws Exception {
         PackedObject packed = packObject(952);
         SharedObjectMetadata metadata = packed.metadata();

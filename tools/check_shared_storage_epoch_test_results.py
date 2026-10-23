@@ -50,6 +50,7 @@ REQUIRED_TESTS = {
         "shouldPreserveBothPhysicalFailuresWhenNeitherCommittedCopyIsAvailable",
         "sharedStoreFailureMustNotAccumulateSuppressedErrorsAcrossReaders",
         "cancelledPrimaryReadMustNotStartAnAlternatePhysicalRead",
+        "cancelledAlternateReadAfterPrimaryFailureRemainsCancellation",
         "failedCanonicalHeaderMustFallbackWhileItsFooterReadIsStillPending",
     ),
     "org.apache.kafka.storage.internals.shared.object.OrphanObjectCleanerTest": (
