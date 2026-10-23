@@ -181,7 +181,9 @@ public final class LocalRemoteObjectCheckpoint {
         RemoteObjectIndex.RangeReference incoming
     ) throws IOException {
         if (existing.objectId() != incoming.objectId()) {
-            return existing;
+            // Mirror RemoteObjectIndex's replay-order-independent read
+            // selection. Kafka metadata remains the source of truth.
+            return incoming.objectId() < existing.objectId() ? incoming : existing;
         }
         if (!existing.range().equals(incoming.range())) {
             throw new IOException(

@@ -19,12 +19,15 @@ package org.apache.kafka.storage.internals.shared.metadata;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * Read-only logical retirement precheck for a committed physical object.
  *
- * <p>The precheck requires an explicitly replayed log-start watermark for
- * <em>every</em> range, including ranges packed from other partitions or topic IDs.
+ * <p>First verify the exact immutable physical object still exists in the
+ * replayed COMMITTED inventory. The check then requires an explicitly replayed
+ * log-start watermark for <em>every</em> range, including ranges packed from
+ * other partitions or topic IDs.
  * A range is entirely obsolete only when its exclusive end offset is at or below
  * the durable inclusive log start. Missing watermarks and partially intersecting
  * RecordBatch ranges fail closed.</p>
@@ -41,7 +44,16 @@ public final class CommittedObjectRetirementPrecheck {
     public static Finding assess(SharedObjectMetadata object, SharedMetadataImage image) {
         Objects.requireNonNull(object, "object");
         Objects.requireNonNull(image, "image");
-        return assessRanges(object, image.partitionLogStartsSnapshot());
+        Optional<SharedMetadataImage.CommittedObjectEvidence> evidence =
+            image.committedObjectRetirementEvidence(object.objectId());
+        if (evidence.isEmpty()) {
+            return Finding.OBJECT_NOT_COMMITTED;
+        }
+        SharedMetadataImage.CommittedObjectEvidence snapshot = evidence.get();
+        if (!snapshot.metadata().equals(object)) {
+            return Finding.COMMITTED_DESCRIPTOR_MISMATCH;
+        }
+        return assessRanges(snapshot.metadata(), snapshot.explicitLogStarts());
     }
 
     /**
@@ -90,6 +102,8 @@ public final class CommittedObjectRetirementPrecheck {
     }
 
     public enum Finding {
+        OBJECT_NOT_COMMITTED,
+        COMMITTED_DESCRIPTOR_MISMATCH,
         MISSING_WATERMARK,
         HAS_UNRETIRED_RANGE,
         ALL_RANGES_BELOW_LOG_START

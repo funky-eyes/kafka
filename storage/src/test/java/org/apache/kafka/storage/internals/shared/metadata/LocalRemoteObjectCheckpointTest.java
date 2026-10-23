@@ -103,6 +103,37 @@ class LocalRemoteObjectCheckpointTest {
     }
 
     @Test
+    void physicalDuplicateCheckpointConvergesAcrossOppositeReplicaReplayOrder() throws Exception {
+        LocalRemoteObjectCheckpoint first = new LocalRemoteObjectCheckpoint(tempDir.resolve("broker-one"));
+        LocalRemoteObjectCheckpoint second = new LocalRemoteObjectCheckpoint(tempDir.resolve("broker-two"));
+        SharedObjectMetadata low = object(100L, 100L, 110L, 444L);
+        SharedObjectMetadata high = object(999L, 100L, 110L, 444L);
+
+        first.add(high);
+        assertEquals(999L, first.find(PARTITION, 105L).orElseThrow().objectId());
+        first.add(low);
+        second.add(low);
+        second.add(high);
+
+        assertEquals(first.references(), second.references());
+        assertEquals(100L, first.find(PARTITION, 105L).orElseThrow().objectId());
+        assertEquals(
+            first.references(),
+            new LocalRemoteObjectCheckpoint(tempDir.resolve("broker-one")).references()
+        );
+        assertEquals(
+            second.references(),
+            new LocalRemoteObjectCheckpoint(tempDir.resolve("broker-two")).references()
+        );
+
+        RemoteObjectIndex recovered = new RemoteObjectIndex();
+        recovered.restore(first.references());
+        recovered.add(high);
+        assertEquals(100L, recovered.find(PARTITION, 105L).orElseThrow().objectId());
+        assertEquals(first.find(PARTITION, 105L), recovered.find(PARTITION, 105L));
+    }
+
+    @Test
     void conflictingLogicalRangeMustNotReplaceLastDurableSnapshot() throws Exception {
         LocalRemoteObjectCheckpoint checkpoint = new LocalRemoteObjectCheckpoint(tempDir);
         SharedObjectMetadata first = object(100, 100, 110, 444);
@@ -114,6 +145,27 @@ class LocalRemoteObjectCheckpointTest {
         assertEquals(1, checkpoint.references().size());
         assertEquals(100L, checkpoint.references().get(0).objectId());
         assertEquals(checkpoint.references(), new LocalRemoteObjectCheckpoint(tempDir).references());
+    }
+
+    @Test
+    void sameCrcDifferentKafkaByteLengthMustNotReplaceDurableCheckpoint() throws Exception {
+        LocalRemoteObjectCheckpoint checkpoint = new LocalRemoteObjectCheckpoint(tempDir);
+        SharedObjectMetadata committed = object(100L, 100L, 110L, 444L);
+        checkpoint.add(committed);
+        List<RemoteObjectIndex.RangeReference> durable = checkpoint.references();
+
+        SharedObjectRange original = committed.ranges().get(0);
+        SharedObjectRange incompatible = new SharedObjectRange(
+            PARTITION, original.offsets(), original.leaderEpoch(), 2000L,
+            original.objectLength() + 1, original.checksum()
+        );
+        SharedObjectMetadata conflicting = new SharedObjectMetadata(
+            90L, incompatible.objectPosition() + incompatible.objectLength(), 445L,
+            List.of(incompatible)
+        );
+        assertThrows(IOException.class, () -> checkpoint.add(conflicting));
+        assertEquals(durable, checkpoint.references());
+        assertEquals(durable, new LocalRemoteObjectCheckpoint(tempDir).references());
     }
 
     @Test

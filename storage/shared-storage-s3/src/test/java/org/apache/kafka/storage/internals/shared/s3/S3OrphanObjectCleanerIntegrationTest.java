@@ -24,6 +24,7 @@ import org.apache.kafka.storage.internals.shared.metadata.SharedObjectRange;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 import org.apache.kafka.storage.internals.shared.object.ActiveObjectUploads;
 import org.apache.kafka.storage.internals.shared.object.OrphanObjectCleaner;
+import org.apache.kafka.storage.internals.shared.object.SharedObjectReader;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -45,6 +46,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.zip.CRC32C;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -156,7 +158,7 @@ class S3OrphanObjectCleanerIntegrationTest {
 
 
     @Test
-    void redundantCommittedPhysicalCopyIsReclaimedWithoutDeletingReadWinner() throws Exception {
+    void redundantCommittedPhysicalCopiesSurviveOppositeReplicaReadWinners() throws Exception {
         S3ObjectStoreConfig config = config();
         long retainedId = 9_104L;
         long redundantId = 9_105L;
@@ -167,8 +169,11 @@ class S3OrphanObjectCleanerIntegrationTest {
             ensureBucket(inspector, config);
             InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
             RemoteObjectIndex index = new RemoteObjectIndex();
+            RemoteObjectIndex peerIndex = new RemoteObjectIndex();
             OrphanObjectCleaner cleaner =
                 new OrphanObjectCleaner(objects, metadata, new ActiveObjectUploads(), index);
+            OrphanObjectCleaner peerCleaner =
+                new OrphanObjectCleaner(objects, metadata, new ActiveObjectUploads(), peerIndex);
             SharedObjectMetadata retained = committedMetadata(retainedId, contents.length);
             SharedObjectMetadata redundant = committedMetadata(redundantId, contents.length);
             try {
@@ -179,20 +184,36 @@ class S3OrphanObjectCleanerIntegrationTest {
                 metadata.prepare(redundantId, 101L).get(10, TimeUnit.SECONDS);
                 metadata.commit(redundant).get(10, TimeUnit.SECONDS);
                 assertTrue(index.add(retained).objectReferenced());
-                assertFalse(index.add(redundant).objectReferenced());
-
-                assertEquals(1, cleaner.clean(1_000L).get(10, TimeUnit.SECONDS));
-                assertTrue(metadata.isCommitted(retainedId));
-                assertFalse(metadata.isCommitted(redundantId));
+                assertTrue(peerIndex.add(redundant).objectReferenced());
+                // Before full replay, replicas can read different copies.
                 assertTrue(index.referencesObject(retainedId));
+                assertTrue(peerIndex.referencesObject(redundantId));
+                assertEquals(0, cleaner.clean(1_000L).get(10, TimeUnit.SECONDS));
+                assertEquals(0, peerCleaner.clean(1_000L).get(10, TimeUnit.SECONDS));
+
+                assertFalse(index.add(redundant).objectReferenced());
+                assertTrue(peerIndex.add(retained).objectReferenced());
+                // Full COMMITTED replay produces a stable local read view.
+                assertTrue(index.referencesObject(retainedId));
+                assertTrue(peerIndex.referencesObject(retainedId));
                 assertFalse(index.referencesObject(redundantId));
+                assertFalse(peerIndex.referencesObject(redundantId));
+                assertEquals(0, cleaner.clean(1_000L).get(10, TimeUnit.SECONDS));
+                assertEquals(0, peerCleaner.clean(1_000L).get(10, TimeUnit.SECONDS));
+                assertTrue(metadata.isCommitted(retainedId));
+                assertTrue(metadata.isCommitted(redundantId));
                 assertPhysicalPresent(inspector, config, retainedId, contents.length);
-                assertPhysicalAbsent(inspector, config, redundantId);
+                assertPhysicalPresent(inspector, config, redundantId, contents.length);
 
                 ByteBuffer read = objects.rangeRead(retainedId, 0L, contents.length).get(10, TimeUnit.SECONDS);
                 byte[] actual = new byte[read.remaining()];
                 read.get(actual);
                 assertArrayEquals(contents, actual);
+                ByteBuffer peerRead = objects.rangeRead(redundantId, 0L, contents.length)
+                    .get(10, TimeUnit.SECONDS);
+                byte[] peerActual = new byte[peerRead.remaining()];
+                peerRead.get(peerActual);
+                assertArrayEquals(contents, peerActual);
                 assertEquals(0, cleaner.clean(1_000L).get(10, TimeUnit.SECONDS));
             } finally {
                 objects.delete(redundantId).get(10, TimeUnit.SECONDS);
@@ -251,6 +272,60 @@ class S3OrphanObjectCleanerIntegrationTest {
             } finally {
                 objects.delete(mixedId).get(10, TimeUnit.SECONDS);
                 objects.delete(retainedId).get(10, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    @Test
+    void missingCanonicalObjectCanReadEquivalentCommittedMinioCopy() throws Exception {
+        S3ObjectStoreConfig config = config();
+        long missingId = 9_108L;
+        long survivingId = 9_109L;
+        byte[] bytes = new byte[] {61, 62, 63, 64};
+        CRC32C checksum = new CRC32C();
+        checksum.update(bytes, 0, bytes.length);
+        SharedObjectRange range = new SharedObjectRange(
+            new SharedPartitionId(1L, 2L, 0), new OffsetRange(0L, 1L),
+            1, 0L, bytes.length, checksum.getValue()
+        );
+
+        try (S3ObjectStore objects = new S3ObjectStore(config);
+             S3Client inspector = testClient(config)) {
+            ensureBucket(inspector, config);
+            InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
+            SharedObjectMetadata first = new SharedObjectMetadata(
+                missingId, bytes.length, checksum.getValue(), List.of(range)
+            );
+            SharedObjectMetadata second = new SharedObjectMetadata(
+                survivingId, bytes.length, checksum.getValue(), List.of(range)
+            );
+            metadata.prepare(missingId, 100L).get(10, TimeUnit.SECONDS);
+            metadata.commit(first).get(10, TimeUnit.SECONDS);
+            metadata.prepare(survivingId, 101L).get(10, TimeUnit.SECONDS);
+            metadata.commit(second).get(10, TimeUnit.SECONDS);
+            // Models a durable legacy checkpoint restored after both COMMITs:
+            // each candidate still gets a verified CRC on its actual bytes.
+            RemoteObjectIndex index = new RemoteObjectIndex();
+            index.restore(List.of(
+                new RemoteObjectIndex.RangeReference(missingId, range),
+                new RemoteObjectIndex.RangeReference(survivingId, range)
+            ));
+            try {
+                objects.put(survivingId, ByteBuffer.wrap(bytes)).get(10, TimeUnit.SECONDS);
+                assertPhysicalAbsent(inspector, config, missingId);
+                assertPhysicalPresent(inspector, config, survivingId, bytes.length);
+                ByteBuffer read = new SharedObjectReader(objects, index)
+                    .read(range.partition(), 0L).get(10, TimeUnit.SECONDS).orElseThrow();
+                byte[] actual = new byte[read.remaining()];
+                read.get(actual);
+                assertArrayEquals(bytes, actual);
+                assertTrue(metadata.isCommitted(missingId));
+                assertTrue(metadata.isCommitted(survivingId));
+                assertPhysicalAbsent(inspector, config, missingId);
+                assertPhysicalPresent(inspector, config, survivingId, bytes.length);
+            } finally {
+                objects.delete(survivingId).get(10, TimeUnit.SECONDS);
+                objects.delete(missingId).get(10, TimeUnit.SECONDS);
             }
         }
     }

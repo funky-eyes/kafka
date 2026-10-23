@@ -52,6 +52,8 @@ import java.util.concurrent.ExecutionException;
 public final class SharedStorageEngine implements AutoCloseable {
     private final SharedWal wal;
     private final PartitionWalIndex walIndex = new PartitionWalIndex();
+    private final StartupWalReplayEvidence startupWalReplayEvidence;
+    private final LocalWalDurabilityObservation liveWalDurability = new LocalWalDurabilityObservation();
     private final RemoteObjectIndex remoteIndex = new RemoteObjectIndex();
     private final LocalRemoteObjectCheckpoint remoteCheckpoint;
     private final ConcurrentLinkedQueue<SharedObjectMetadata> pendingRemoteCheckpoints = new ConcurrentLinkedQueue<>();
@@ -73,7 +75,12 @@ public final class SharedStorageEngine implements AutoCloseable {
             if (remoteCheckpoint != null) {
                 remoteIndex.restore(remoteCheckpoint.references());
             }
-            wal.replay(walIndex::apply);
+            StartupWalReplayEvidence.Builder recovery = new StartupWalReplayEvidence.Builder();
+            wal.replay((record, location) -> {
+                walIndex.apply(record, location);
+                recovery.accept(record, location);
+            });
+            startupWalReplayEvidence = recovery.snapshot();
         } catch (IOException | RuntimeException failure) {
             // Construction has not returned an AutoCloseable owner. Release the
             // WAL backend on replay/restore failure without hiding the cause.
@@ -152,8 +159,12 @@ public final class SharedStorageEngine implements AutoCloseable {
         // Transfer an immutable group definition to the asynchronous WAL.
         // The backend cannot change the members while the future is pending.
         List<WalRecord> immutableRecords = List.copyOf(records);
-        return wal.appendBatch(immutableRecords).thenApply(results ->
-            walIndex.applyDataGroup(immutableRecords, List.copyOf(results)));
+        return walIndex.trackDurableWrite(walKey(partition), () ->
+            wal.appendBatch(immutableRecords).thenApply(results -> {
+                List<WalLocation> published = walIndex.applyDataGroup(immutableRecords, List.copyOf(results));
+                liveWalDurability.dataGroupCompleted(partition, published);
+                return published;
+            }));
     }
 
     private static WalLocation validatedLocation(WalRecord record, WalAppendResult result) {
@@ -185,11 +196,13 @@ public final class SharedStorageEngine implements AutoCloseable {
             : WalRecord.data(
                 partition.topicIdHigh(), partition.topicIdLow(), partition.partition(), leaderEpoch,
                 firstOffset, lastOffset, kafkaRecordBatch);
-        return wal.append(record).thenApply(result -> {
-            WalLocation location = validatedLocation(record, result);
-            walIndex.apply(record, result);
-            return location;
-        });
+        return walIndex.trackDurableWrite(walKey(partition), () ->
+            wal.append(record).thenApply(result -> {
+                WalLocation location = validatedLocation(record, result);
+                walIndex.apply(record, result);
+                liveWalDurability.dataCompleted(partition, location);
+                return location;
+            }));
     }
 
     public CompletableFuture<Void> truncate(
@@ -205,10 +218,12 @@ public final class SharedStorageEngine implements AutoCloseable {
             leaderEpoch,
             truncateOffset
         );
-        return wal.append(record).thenAccept(result -> {
-            validatedLocation(record, result);
-            walIndex.apply(record, result);
-        });
+        return walIndex.trackDurableWrite(walKey(partition), () ->
+            wal.append(record).thenAccept(result -> {
+                WalLocation location = validatedLocation(record, result);
+                walIndex.apply(record, result);
+                liveWalDurability.truncateCompleted(partition, location);
+            }));
     }
 
     public Optional<WalRecord> readLocal(SharedPartitionId partition, long offset) throws IOException {
@@ -342,6 +357,22 @@ public final class SharedStorageEngine implements AutoCloseable {
             }
             return List.copyOf(result);
         }
+    }
+
+    /**
+     * Current local-WAL Kafka batch coverage, including both startup replayed
+     * records and live successful WAL Future/index publications. Diagnostic
+     * only: no replicated WAL, source ownership or Controller CAS proof.
+     */
+    public CurrentLocalWalCoveragePrecheck.Finding localDurableWindowCoverage(
+        SharedPartitionId partition,
+        long sourceLogStart,
+        long sourceHighWatermark
+    ) {
+        return CurrentLocalWalCoveragePrecheck.assess(
+            localLocations(partition, sourceLogStart, sourceHighWatermark),
+            sourceLogStart, sourceHighWatermark
+        );
     }
 
     public List<WalRecord> readLocalLocations(List<WalLocation> locations) throws IOException {
@@ -485,6 +516,33 @@ public final class SharedStorageEngine implements AutoCloseable {
     public long walMutationRevision(SharedPartitionId partition) {
         Objects.requireNonNull(partition, "partition");
         return walIndex.mutationRevision(walKey(partition));
+    }
+
+    /**
+     * Frozen inventory from the backend WAL's startup replay, before live
+     * append traffic. Not live WAL coverage and never a GC authorization.
+     */
+    public StartupWalReplayEvidence startupWalReplayEvidence() {
+        return startupWalReplayEvidence;
+    }
+
+    /**
+     * Post-start successful backend WAL durability and index-publication
+     * completions. This is diagnostic only, NOT a replay/fsync certificate
+     * across broker restart or Controller retirement authority.
+     */
+    public LocalWalDurabilityObservation.Snapshot liveWalDurabilityObservation(SharedPartitionId partition) {
+        return liveWalDurability.snapshot(partition);
+    }
+
+    /**
+     * Local WAL admission/completion revision, including non-destructive tail
+     * appends. -1 means a pending write or a raced observation. A stable value
+     * is NOT durable WAL replay proof and cannot authorize COMMITTED GC.
+     */
+    public long walAdmissionRevision(SharedPartitionId partition) {
+        Objects.requireNonNull(partition, "partition");
+        return walIndex.walAdmissionRevision(walKey(partition));
     }
 
     public boolean isUploadCandidateCurrent(

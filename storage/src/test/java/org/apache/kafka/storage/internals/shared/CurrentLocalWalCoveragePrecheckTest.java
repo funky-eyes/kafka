@@ -1,0 +1,295 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.kafka.storage.internals.shared;
+
+import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
+import org.apache.kafka.storage.internals.shared.wal.FileSharedWal;
+import org.apache.kafka.storage.internals.shared.wal.RingSharedWal;
+import org.apache.kafka.storage.internals.shared.wal.SharedWal;
+import org.apache.kafka.storage.internals.shared.wal.WalAppendResult;
+import org.apache.kafka.storage.internals.shared.wal.WalLocation;
+import org.apache.kafka.storage.internals.shared.wal.WalRecord;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+
+import static org.apache.kafka.storage.internals.shared.CurrentLocalWalCoveragePrecheck.Finding;
+import static org.apache.kafka.storage.internals.shared.CurrentLocalWalCoveragePrecheck.assess;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+class CurrentLocalWalCoveragePrecheckTest {
+    private static final SharedPartitionId FIRST = new SharedPartitionId(1L, 2L, 0);
+    private static final SharedPartitionId SECOND = new SharedPartitionId(1L, 2L, 1);
+
+    @TempDir
+    Path tempDir;
+
+    @Test
+    void contiguousKafkaBatchesMayHaveInterleavedPhysicalWalAddresses() {
+        assertEquals(Finding.INDEXED_BATCH_WINDOW, assess(
+            List.of(location(1L, 0L, 9L), location(150L, 10L, 19L)), 0L, 20L));
+    }
+
+    @Test
+    void kafkaOffsetGapCannotBecomeALocalDurableWindow() {
+        assertEquals(Finding.KAFKA_BATCH_GAP_OR_OVERLAP, assess(
+            List.of(location(1L, 0L, 9L), location(62L, 20L, 29L)), 0L, 30L));
+    }
+
+    @Test
+    void overlappingKafkaBatchesCannotBecomeALocalDurableWindow() {
+        assertEquals(Finding.KAFKA_BATCH_GAP_OR_OVERLAP, assess(
+            List.of(location(1L, 0L, 9L), location(62L, 9L, 19L)), 0L, 20L));
+    }
+
+    @Test
+    void sourceLogStartInsideKafkaRecordBatchFailsClosed() {
+        assertEquals(Finding.KAFKA_BATCH_GAP_OR_OVERLAP, assess(
+            List.of(location(1L, 0L, 9L), location(62L, 10L, 19L)), 5L, 20L));
+    }
+
+    @Test
+    void sourceHighWatermarkInsideKafkaRecordBatchFailsClosed() {
+        assertEquals(Finding.SOURCE_END_SPLITS_BATCH, assess(
+            List.of(location(1L, 0L, 9L), location(62L, 10L, 19L)), 0L, 15L));
+    }
+
+    @Test
+    void missingTrailingKafkaRangeCannotBecomeACompleteWindow() {
+        assertEquals(Finding.SOURCE_WINDOW_NOT_INDEXED, assess(
+            List.of(location(1L, 0L, 9L)), 0L, 20L));
+    }
+
+    @Test
+    void noLocalDataAndEmptyNativeWindowHaveDistinctFindings() {
+        assertEquals(Finding.NO_INDEXED_DATA, assess(List.of(), 0L, 10L));
+        assertEquals(Finding.EMPTY_SOURCE_WINDOW, assess(List.of(), 10L, 10L));
+    }
+
+    @Test
+    void invalidKafkaSourceWindowAndNullLocationsAreRejected() {
+        assertThrows(IllegalArgumentException.class, () -> assess(List.of(), -1L, 10L));
+        assertThrows(IllegalArgumentException.class, () -> assess(List.of(), 10L, 9L));
+        assertThrows(NullPointerException.class, () -> assess(null, 0L, 1L));
+    }
+
+    @Test
+    void unfinishedWalFutureCannotPopulateCurrentIndexedCoverage() throws Exception {
+        CompletableFuture<WalAppendResult> backend = new CompletableFuture<>();
+        try (SharedStorageEngine engine = mockedEngine(backend)) {
+            CompletableFuture<WalLocation> append =
+                engine.appendData(FIRST, 8, 0L, 9L, ByteBuffer.wrap(new byte[]{1}));
+            assertEquals(Finding.NO_INDEXED_DATA, engine.localDurableWindowCoverage(FIRST, 0L, 10L));
+            backend.complete(new WalAppendResult(1L, 61));
+            append.join();
+            assertEquals(Finding.INDEXED_BATCH_WINDOW,
+                engine.localDurableWindowCoverage(FIRST, 0L, 10L));
+        }
+    }
+
+    @Test
+    void failedWalFutureCannotPopulateCurrentIndexedCoverage() throws Exception {
+        CompletableFuture<WalAppendResult> backend = new CompletableFuture<>();
+        try (SharedStorageEngine engine = mockedEngine(backend)) {
+            CompletableFuture<WalLocation> append =
+                engine.appendOwnedData(FIRST, 8, 0L, 9L, ByteBuffer.wrap(new byte[]{1}));
+            backend.completeExceptionally(new IOException("durability failed"));
+            assertThrows(CompletionException.class, append::join);
+            assertEquals(Finding.NO_INDEXED_DATA, engine.localDurableWindowCoverage(FIRST, 0L, 10L));
+        }
+    }
+
+    @Test
+    void recoveredAndNewDurableFileBatchesJointlyCoverTheKafkaWindow() throws Exception {
+        Path dir = tempDir.resolve("file-combined");
+        try (SharedStorageEngine engine = new SharedStorageEngine(new FileSharedWal(dir, 1024 * 1024, 4096))) {
+            engine.appendData(FIRST, 8, 0L, 9L, ByteBuffer.wrap(new byte[]{1})).join();
+        }
+        try (SharedStorageEngine restarted = new SharedStorageEngine(new FileSharedWal(dir, 1024 * 1024, 4096))) {
+            assertEquals(1L, restarted.startupWalReplayEvidence().replayedRecords());
+            assertEquals(Finding.SOURCE_WINDOW_NOT_INDEXED,
+                restarted.localDurableWindowCoverage(FIRST, 0L, 20L));
+            restarted.appendOwnedData(FIRST, 8, 10L, 19L, ByteBuffer.wrap(new byte[]{2})).join();
+            assertEquals(Finding.INDEXED_BATCH_WINDOW,
+                restarted.localDurableWindowCoverage(FIRST, 0L, 20L));
+            assertEquals(1L, restarted.startupWalReplayEvidence().replayedRecords());
+            assertEquals(1L, restarted.liveWalDurabilityObservation(FIRST).dataBatches());
+        }
+    }
+
+    @Test
+    void ringWalCurrentWindowDoesNotBorrowAnotherPartitionData() throws Exception {
+        Path path = tempDir.resolve("ring-mixed.wal");
+        try (SharedStorageEngine engine = new SharedStorageEngine(new RingSharedWal(path, 1024L * 1024L))) {
+            engine.appendData(FIRST, 8, 0L, 9L, ByteBuffer.wrap(new byte[]{1})).join();
+            engine.appendData(SECOND, 8, 10L, 19L, ByteBuffer.wrap(new byte[]{2})).join();
+            assertEquals(Finding.INDEXED_BATCH_WINDOW, engine.localDurableWindowCoverage(FIRST, 0L, 10L));
+            assertEquals(Finding.SOURCE_WINDOW_NOT_INDEXED,
+                engine.localDurableWindowCoverage(FIRST, 0L, 20L));
+            assertEquals(Finding.NO_INDEXED_DATA, engine.localDurableWindowCoverage(SECOND, 0L, 10L));
+        }
+    }
+
+    @Test
+    void durableTruncateRevokesCurrentIndexedDataCoverage() throws Exception {
+        Path dir = tempDir.resolve("file-truncated");
+        try (SharedStorageEngine engine = new SharedStorageEngine(new FileSharedWal(dir, 1024 * 1024, 4096))) {
+            engine.appendData(FIRST, 8, 0L, 9L, ByteBuffer.wrap(new byte[]{1})).join();
+            assertEquals(Finding.INDEXED_BATCH_WINDOW, engine.localDurableWindowCoverage(FIRST, 0L, 10L));
+            engine.truncate(FIRST, 9, 0L).join();
+            assertEquals(Finding.NO_INDEXED_DATA, engine.localDurableWindowCoverage(FIRST, 0L, 10L));
+        }
+    }
+
+    @Test
+    void independentReplicaFileWalReplaysNeverBorrowAPeersMissingKafkaBatch() throws Exception {
+        Path firstBrokerDir = tempDir.resolve("replica-a-wal");
+        Path secondBrokerDir = tempDir.resolve("replica-b-wal");
+        try (
+            SharedStorageEngine first = new SharedStorageEngine(
+                new FileSharedWal(firstBrokerDir, 1024 * 1024, 4096));
+            SharedStorageEngine second = new SharedStorageEngine(
+                new FileSharedWal(secondBrokerDir, 1024 * 1024, 4096))
+        ) {
+            first.appendData(FIRST, 8, 0L, 9L, ByteBuffer.wrap(new byte[]{1})).join();
+            first.appendData(FIRST, 8, 10L, 19L, ByteBuffer.wrap(new byte[]{2})).join();
+            second.appendData(FIRST, 8, 0L, 9L, ByteBuffer.wrap(new byte[]{1})).join();
+            assertEquals(Finding.INDEXED_BATCH_WINDOW, first.localDurableWindowCoverage(FIRST, 0L, 20L));
+            assertEquals(Finding.SOURCE_WINDOW_NOT_INDEXED,
+                second.localDurableWindowCoverage(FIRST, 0L, 20L));
+        }
+        try (
+            SharedStorageEngine firstRestarted = new SharedStorageEngine(
+                new FileSharedWal(firstBrokerDir, 1024 * 1024, 4096));
+            SharedStorageEngine secondRestarted = new SharedStorageEngine(
+                new FileSharedWal(secondBrokerDir, 1024 * 1024, 4096))
+        ) {
+            assertEquals(2L, firstRestarted.startupWalReplayEvidence().replayedRecords());
+            assertEquals(1L, secondRestarted.startupWalReplayEvidence().replayedRecords());
+            assertEquals(Finding.INDEXED_BATCH_WINDOW,
+                firstRestarted.localDurableWindowCoverage(FIRST, 0L, 20L));
+            assertEquals(Finding.SOURCE_WINDOW_NOT_INDEXED,
+                secondRestarted.localDurableWindowCoverage(FIRST, 0L, 20L));
+            assertEquals(0L, secondRestarted.liveWalDurabilityObservation(FIRST).dataBatches());
+        }
+    }
+
+    @Test
+    void ringWalTruncationRemainsRevokedAfterActualBackendReopen() throws Exception {
+        Path path = tempDir.resolve("ring-truncate-restart.wal");
+        try (SharedStorageEngine engine = new SharedStorageEngine(new RingSharedWal(path, 1024L * 1024L))) {
+            engine.appendData(FIRST, 8, 0L, 9L, ByteBuffer.wrap(new byte[]{1})).join();
+            assertEquals(Finding.INDEXED_BATCH_WINDOW,
+                engine.localDurableWindowCoverage(FIRST, 0L, 10L));
+            engine.truncate(FIRST, 9, 0L).join();
+            assertEquals(Finding.NO_INDEXED_DATA,
+                engine.localDurableWindowCoverage(FIRST, 0L, 10L));
+        }
+        try (SharedStorageEngine reopened = new SharedStorageEngine(new RingSharedWal(path, 1024L * 1024L))) {
+            assertEquals(Finding.NO_INDEXED_DATA,
+                reopened.localDurableWindowCoverage(FIRST, 0L, 10L));
+            assertEquals(1L,
+                reopened.startupWalReplayEvidence().partition(FIRST).orElseThrow().truncateRecords());
+            assertEquals(0L, reopened.liveWalDurabilityObservation(FIRST).dataBatches());
+        }
+    }
+
+    @Test
+    void independentReplicaRingWalReplaysCannotBorrowPeerOnlyKafkaBatches() throws Exception {
+        Path firstBrokerPath = tempDir.resolve("replica-a-ring.wal");
+        Path secondBrokerPath = tempDir.resolve("replica-b-ring.wal");
+        try (
+            SharedStorageEngine first = new SharedStorageEngine(
+                new RingSharedWal(firstBrokerPath, 1024L * 1024L));
+            SharedStorageEngine second = new SharedStorageEngine(
+                new RingSharedWal(secondBrokerPath, 1024L * 1024L))
+        ) {
+            first.appendData(FIRST, 8, 0L, 9L, ByteBuffer.wrap(new byte[]{1})).join();
+            first.appendData(FIRST, 8, 10L, 19L, ByteBuffer.wrap(new byte[]{2})).join();
+            second.appendData(FIRST, 8, 0L, 9L, ByteBuffer.wrap(new byte[]{1})).join();
+            assertEquals(Finding.INDEXED_BATCH_WINDOW,
+                first.localDurableWindowCoverage(FIRST, 0L, 20L));
+            assertEquals(Finding.SOURCE_WINDOW_NOT_INDEXED,
+                second.localDurableWindowCoverage(FIRST, 0L, 20L));
+        }
+        try (
+            SharedStorageEngine firstReopened = new SharedStorageEngine(
+                new RingSharedWal(firstBrokerPath, 1024L * 1024L));
+            SharedStorageEngine secondReopened = new SharedStorageEngine(
+                new RingSharedWal(secondBrokerPath, 1024L * 1024L))
+        ) {
+            assertEquals(Finding.INDEXED_BATCH_WINDOW,
+                firstReopened.localDurableWindowCoverage(FIRST, 0L, 20L));
+            assertEquals(Finding.SOURCE_WINDOW_NOT_INDEXED,
+                secondReopened.localDurableWindowCoverage(FIRST, 0L, 20L));
+            assertEquals(0L, secondReopened.liveWalDurabilityObservation(FIRST).dataBatches());
+        }
+    }
+
+    @Test
+    void independentReplicaRingWalTruncationCannotBorrowHealthyPeerOnReopen() throws Exception {
+        Path revokedPath = tempDir.resolve("replica-revoked-ring.wal");
+        Path healthyPath = tempDir.resolve("replica-healthy-ring.wal");
+        try (
+            SharedStorageEngine revoked = new SharedStorageEngine(
+                new RingSharedWal(revokedPath, 1024L * 1024L));
+            SharedStorageEngine healthy = new SharedStorageEngine(
+                new RingSharedWal(healthyPath, 1024L * 1024L))
+        ) {
+            revoked.appendData(FIRST, 8, 0L, 9L, ByteBuffer.wrap(new byte[]{1})).join();
+            healthy.appendData(FIRST, 8, 0L, 9L, ByteBuffer.wrap(new byte[]{1})).join();
+            revoked.truncate(FIRST, 9, 0L).join();
+            assertEquals(Finding.NO_INDEXED_DATA,
+                revoked.localDurableWindowCoverage(FIRST, 0L, 10L));
+            assertEquals(Finding.INDEXED_BATCH_WINDOW,
+                healthy.localDurableWindowCoverage(FIRST, 0L, 10L));
+        }
+        try (
+            SharedStorageEngine revokedReopened = new SharedStorageEngine(
+                new RingSharedWal(revokedPath, 1024L * 1024L));
+            SharedStorageEngine healthyReopened = new SharedStorageEngine(
+                new RingSharedWal(healthyPath, 1024L * 1024L))
+        ) {
+            assertEquals(Finding.NO_INDEXED_DATA,
+                revokedReopened.localDurableWindowCoverage(FIRST, 0L, 10L));
+            assertEquals(Finding.INDEXED_BATCH_WINDOW,
+                healthyReopened.localDurableWindowCoverage(FIRST, 0L, 10L));
+            assertEquals(0L, revokedReopened.liveWalDurabilityObservation(FIRST).dataBatches());
+        }
+    }
+
+    private static WalLocation location(long walPosition, long first, long last) {
+        return new WalLocation(walPosition, 61, 8, first, last);
+    }
+
+    private static SharedStorageEngine mockedEngine(CompletableFuture<WalAppendResult> backend) throws IOException {
+        SharedWal wal = mock(SharedWal.class);
+        when(wal.append(any(WalRecord.class))).thenReturn(backend);
+        return new SharedStorageEngine(wal);
+    }
+}

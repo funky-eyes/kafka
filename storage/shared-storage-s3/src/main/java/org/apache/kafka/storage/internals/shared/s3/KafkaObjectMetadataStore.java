@@ -496,7 +496,13 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
 
     @Override
     public CompletableFuture<Void> delete(long objectId) {
-        return writeRecord(SharedMetadataRecordCodec.objectKey(objectId), null);
+        // There is no Controller/KRaft authorization for COMMITTED reference
+        // retirement yet. An unfenced compacted-topic tombstone could hide an
+        // object still referenced by another Kafka replica. Preserve the
+        // historical replay decoder, but never produce a new tombstone here.
+        return CompletableFuture.failedFuture(new UnsupportedOperationException(
+            "Object metadata deletion requires durable KRaft retirement authority"
+        ));
     }
 
     @Override

@@ -27,7 +27,8 @@ import java.util.Objects;
  *
  * <p>These immutable values are NOT a grant of permission. In particular, a record may
  * only be emitted by a future controller event that validates broker identity, leader
- * epoch, source-log evidence and expected authority version at the KRaft commit boundary.
+ * epoch, KRaft partition epoch, source-log evidence and expected authority
+ * version at the KRaft commit boundary.
  * No such event or emitter is enabled by this class.</p>
  */
 public final class PartitionRetirementAuthorityState {
@@ -37,6 +38,9 @@ public final class PartitionRetirementAuthorityState {
     public record Key(Uuid topicId, int partitionId) {
         public Key {
             Objects.requireNonNull(topicId, "topicId");
+            if (Uuid.ZERO_UUID.equals(topicId)) {
+                throw new IllegalArgumentException("Partition retirement requires a non-reserved Topic ID");
+            }
             if (partitionId < 0) {
                 throw new IllegalArgumentException("Partition must be nonnegative");
             }
@@ -46,6 +50,7 @@ public final class PartitionRetirementAuthorityState {
     public record Value(
         long authorityOffset,
         int sourceLeaderEpoch,
+        int sourcePartitionEpoch,
         int brokerId,
         long logStartOffset,
         boolean terminallyDeleted,
@@ -53,11 +58,34 @@ public final class PartitionRetirementAuthorityState {
         Uuid brokerIncarnationId
     ) {
         /**
-         * Compatibility constructor for existing non-emitting reference models.
-         * Unbound broker IDs are not authorized for future KRaft writes.
+         * Compatibility constructor for legacy non-emitting reference models.
+         * Existing KRaft v0 records without the tagged partition epoch replay
+         * with -1 and are not a proof of a stable replica configuration.
          */
         public Value(long offset, int leaderEpoch, int broker, long watermark, boolean deleted) {
             this(offset, leaderEpoch, broker, watermark, deleted, -1L, Uuid.ZERO_UUID);
+        }
+
+        public Value(
+            long offset,
+            int leaderEpoch,
+            int broker,
+            long watermark,
+            boolean deleted,
+            long brokerRegistrationEpoch,
+            Uuid incarnationId
+        ) {
+            this(offset, leaderEpoch, -1, broker, watermark, deleted, brokerRegistrationEpoch, incarnationId);
+        }
+
+        /**
+         * Only indicates that an immutable KRaft partition-epoch coordinate
+         * was recorded, not that the source Broker's WAL durability or remote
+         * object's replicas have been authenticated. Never use this flag
+         * alone to authorize COMMITTED object retirement or S3 deletion.
+         */
+        public boolean hasPartitionTopologyProof() {
+            return sourcePartitionEpoch >= 0;
         }
 
         public boolean hasBrokerIdentityProof() {
@@ -67,6 +95,9 @@ public final class PartitionRetirementAuthorityState {
         public Value {
             Objects.requireNonNull(brokerIncarnationId, "brokerIncarnationId");
             validateCoordinates(authorityOffset, sourceLeaderEpoch, brokerId, logStartOffset);
+            if (sourcePartitionEpoch < -1) {
+                throw new IllegalArgumentException("Invalid KRaft source partition epoch");
+            }
             validateLeadership(sourceLeaderEpoch, brokerId, logStartOffset, terminallyDeleted);
             validateBrokerIdentity(brokerId, brokerEpoch, brokerIncarnationId);
         }
@@ -113,6 +144,7 @@ public final class PartitionRetirementAuthorityState {
         return new Value(
             record.authorityOffset(),
             record.sourceLeaderEpoch(),
+            record.sourcePartitionEpoch(),
             record.brokerId(),
             record.logStartOffset(),
             record.terminallyDeleted(),
@@ -129,6 +161,7 @@ public final class PartitionRetirementAuthorityState {
             .setPartitionId(key.partitionId())
             .setAuthorityOffset(value.authorityOffset())
             .setSourceLeaderEpoch(value.sourceLeaderEpoch())
+            .setSourcePartitionEpoch(value.sourcePartitionEpoch())
             .setBrokerId(value.brokerId())
             .setBrokerEpoch(value.brokerEpoch())
             .setBrokerIncarnationId(value.brokerIncarnationId())
@@ -159,6 +192,16 @@ public final class PartitionRetirementAuthorityState {
         }
         if (next.sourceLeaderEpoch() < previous.sourceLeaderEpoch()) {
             throw new IllegalStateException("Retirement source leader epoch regressed");
+        }
+        if (previous.hasPartitionTopologyProof()) {
+            if (!next.hasPartitionTopologyProof()
+                || next.sourcePartitionEpoch() < previous.sourcePartitionEpoch()) {
+                throw new IllegalStateException("Retirement KRaft partition epoch proof regressed or disappeared");
+            }
+            if (next.sourceLeaderEpoch() > previous.sourceLeaderEpoch()
+                && next.sourcePartitionEpoch() <= previous.sourcePartitionEpoch()) {
+                throw new IllegalStateException("Fresh Kafka leader requires an advanced partition epoch");
+            }
         }
         if (next.logStartOffset() < previous.logStartOffset()) {
             throw new IllegalStateException("Retirement log-start watermark regressed");

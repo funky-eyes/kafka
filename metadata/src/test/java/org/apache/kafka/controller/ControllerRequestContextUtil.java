@@ -21,6 +21,8 @@ import org.apache.kafka.common.errors.ThrottlingQuotaExceededException;
 import org.apache.kafka.common.message.RequestHeaderData;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.security.auth.KafkaPrincipal;
+import org.apache.kafka.common.security.auth.SecurityProtocol;
+import org.apache.kafka.metadata.authorizer.MockAuthorizableRequestContext;
 
 import java.util.OptionalLong;
 import java.util.function.Consumer;
@@ -32,6 +34,32 @@ public class ControllerRequestContextUtil {
             KafkaPrincipal.ANONYMOUS,
             OptionalLong.empty());
     public static final String QUOTA_EXCEEDED_IN_TEST_MSG = "Quota exceeded in test";
+
+    /**
+     * Test a Controller diagnostic using a constructed network context with
+     * the same API/transport fields as ControllerApis receives from Kafka.
+     */
+    public static ControllerRequestContext brokerDiagnosticContext(
+        short version,
+        KafkaPrincipal principal,
+        SecurityProtocol protocol,
+        boolean forwarded
+    ) {
+        try {
+            return new ControllerRequestContext(
+                new MockAuthorizableRequestContext.Builder()
+                    .setRequestType(ApiKeys.BROKER_HEARTBEAT)
+                    .setRequestVersion(version)
+                    .setPrincipal(principal)
+                    .setSecurityProtocol(protocol)
+                    .build(),
+                OptionalLong.empty(),
+                forwarded
+            );
+        } catch (Exception failure) {
+            throw new IllegalStateException("Unable to construct test Broker diagnostic context", failure);
+        }
+    }
 
     public static ControllerRequestContext anonymousContextFor(ApiKeys apiKeys) {
         return anonymousContextFor(apiKeys, apiKeys.latestVersion(), __ -> { });

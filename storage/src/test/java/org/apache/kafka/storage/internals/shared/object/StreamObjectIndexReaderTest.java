@@ -26,6 +26,7 @@ import org.apache.kafka.storage.internals.shared.wal.FileSharedWal;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -71,6 +72,45 @@ class StreamObjectIndexReaderTest {
             new Read(snapshot.footer().indexPosition(), snapshot.footer().indexLength())
         ), store.reads());
         assertFalse(store.reads().stream().anyMatch(read -> read.length() == metadata.objectSize()));
+    }
+
+    @Test
+    void eitherFailedKso2MetadataRangeMustNotWaitForOtherPendingRange() throws Exception {
+        for (boolean headerFails : new boolean[] {true, false}) {
+            PackedObject packed = packObject(headerFails ? 805L : 806L);
+            SharedObjectMetadata metadata = packed.metadata();
+            CompletableFuture<ByteBuffer> pending = new CompletableFuture<>();
+            IOException failure = new IOException(headerFails ? "header unavailable" : "footer unavailable");
+            ObjectStore store = new ObjectStore() {
+                @Override
+                public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                    return CompletableFuture.failedFuture(new UnsupportedOperationException());
+                }
+
+                @Override
+                public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                    if (position == 0L) {
+                        return headerFails ? CompletableFuture.failedFuture(failure) : pending;
+                    }
+                    if (position == metadata.objectSize() - StreamObjectFormat.FOOTER_BYTES) {
+                        return headerFails ? pending : CompletableFuture.failedFuture(failure);
+                    }
+                    return CompletableFuture.failedFuture(new IOException("Unexpected range GET"));
+                }
+
+                @Override
+                public CompletableFuture<Void> delete(long objectId) {
+                    return CompletableFuture.failedFuture(new UnsupportedOperationException());
+                }
+            };
+            RemoteObjectIndex.RangeReference reference = new RemoteObjectIndex.RangeReference(
+                metadata.objectId(), metadata.objectSize(), metadata.objectChecksum(), metadata.ranges().get(0)
+            );
+            ExecutionException error = assertThrows(ExecutionException.class,
+                () -> new StreamObjectIndexReader(store).load(reference).get(2L, TimeUnit.SECONDS));
+            assertEquals(failure, error.getCause());
+            assertFalse(pending.isDone(), "The other in-flight GET must not be needed to detect failure");
+        }
     }
 
     @Test

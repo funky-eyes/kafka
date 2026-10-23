@@ -37,6 +37,7 @@ class CommittedObjectRetirementPrecheckTest {
         SharedObjectMetadata committed = object(11L, range(PARTITION, 10L, 20L, 0L));
         RemoteObjectIndex index = new RemoteObjectIndex();
         index.add(committed);
+        replayCommit(image, committed);
 
         assertEquals(Finding.MISSING_WATERMARK, CommittedObjectRetirementPrecheck.assess(committed, image));
         assertTrue(index.referencesObject(11L), "Read-only precheck must not retire or delete live references");
@@ -51,6 +52,7 @@ class CommittedObjectRetirementPrecheckTest {
         SharedObjectMetadata committed = object(12L, range(PARTITION, 10L, 20L, 0L));
         RemoteObjectIndex index = new RemoteObjectIndex();
         index.add(committed);
+        replayCommit(image, committed);
 
         assertEquals(
             Finding.ALL_RANGES_BELOW_LOG_START,
@@ -64,14 +66,11 @@ class CommittedObjectRetirementPrecheckTest {
     void watermarkInsideRecordBatchMustNotTreatItsPhysicalBytesAsExpired() {
         SharedMetadataImage image = new SharedMetadataImage();
         replayLogStart(image, PARTITION, 15L);
+        SharedObjectMetadata committed = object(13L, range(PARTITION, 10L, 20L, 0L));
+        replayCommit(image, committed);
         image.markReady();
 
-        assertEquals(
-            Finding.HAS_UNRETIRED_RANGE,
-            CommittedObjectRetirementPrecheck.assess(
-                object(13L, range(PARTITION, 10L, 20L, 0L)), image
-            )
-        );
+        assertEquals(Finding.HAS_UNRETIRED_RANGE, CommittedObjectRetirementPrecheck.assess(committed, image));
     }
 
     @Test
@@ -84,6 +83,7 @@ class CommittedObjectRetirementPrecheckTest {
             range(PARTITION, 0L, 10L, 0L),
             range(OTHER, 20L, 40L, 10L)
         );
+        replayCommit(image, packed);
 
         assertEquals(Finding.MISSING_WATERMARK, CommittedObjectRetirementPrecheck.assess(packed, image));
         replayLogStart(image, OTHER, 30L);
@@ -96,38 +96,110 @@ class CommittedObjectRetirementPrecheckTest {
     void recreatedTopicIdDoesNotInheritOriginalTopicLogStart() {
         SharedMetadataImage image = new SharedMetadataImage();
         replayLogStart(image, PARTITION, 100L);
+        SharedObjectMetadata recreated = object(15L, range(RECREATED_TOPIC, 0L, 10L, 0L));
+        SharedObjectMetadata unrelated = object(16L, range(OTHER, 0L, 10L, 0L));
+        replayCommit(image, recreated);
+        replayCommit(image, unrelated);
         image.markReady();
-        assertEquals(
-            Finding.MISSING_WATERMARK,
-            CommittedObjectRetirementPrecheck.assess(
-                object(15L, range(RECREATED_TOPIC, 0L, 10L, 0L)), image
-            )
-        );
-        assertEquals(
-            Finding.MISSING_WATERMARK,
-            CommittedObjectRetirementPrecheck.assess(
-                object(16L, range(OTHER, 0L, 10L, 0L)), image
-            )
-        );
+        assertEquals(Finding.MISSING_WATERMARK, CommittedObjectRetirementPrecheck.assess(recreated, image));
+        assertEquals(Finding.MISSING_WATERMARK, CommittedObjectRetirementPrecheck.assess(unrelated, image));
     }
 
     @Test
     void explicitlyPersistedZeroOffsetIsDistinctFromMissingEvidence() {
         SharedMetadataImage image = new SharedMetadataImage();
         replayLogStart(image, PARTITION, 0L);
+        SharedObjectMetadata explicitZero = object(17L, range(PARTITION, 0L, 10L, 0L));
+        SharedObjectMetadata missing = object(18L, range(OTHER, 0L, 10L, 0L));
+        replayCommit(image, explicitZero);
+        replayCommit(image, missing);
+        image.markReady();
+
+        assertEquals(Finding.HAS_UNRETIRED_RANGE, CommittedObjectRetirementPrecheck.assess(explicitZero, image));
+        assertEquals(Finding.MISSING_WATERMARK, CommittedObjectRetirementPrecheck.assess(missing, image));
+    }
+
+    @Test
+    void absentOrPreparedObjectCannotBeDeclaredRetiredUsingOldWatermarks() {
+        SharedMetadataImage image = new SharedMetadataImage();
+        replayLogStart(image, PARTITION, 100L);
+        image.markReady();
+        SharedObjectMetadata unknown = object(20L, range(PARTITION, 10L, 20L, 0L));
+
+        assertEquals(Finding.OBJECT_NOT_COMMITTED, CommittedObjectRetirementPrecheck.assess(unknown, image));
+        image.apply(
+            SharedMetadataRecordCodec.objectKey(unknown.objectId()),
+            SharedMetadataRecordCodec.preparedObjectValue(1L)
+        );
+        assertEquals(Finding.OBJECT_NOT_COMMITTED, CommittedObjectRetirementPrecheck.assess(unknown, image));
+        assertTrue(image.committedObjectRetirementEvidence(unknown.objectId()).isEmpty());
+    }
+
+    @Test
+    void forgedDescriptorCannotBorrowAnotherCommittedPackedObjectsWatermarks() {
+        SharedMetadataImage image = new SharedMetadataImage();
+        replayLogStart(image, PARTITION, 100L);
+        replayLogStart(image, OTHER, 100L);
+        SharedObjectMetadata authoritative = object(
+            21L, range(PARTITION, 0L, 10L, 0L), range(OTHER, 20L, 40L, 10L)
+        );
+        replayCommit(image, authoritative);
+        image.markReady();
+
+        SharedObjectMetadata forged = object(21L, range(PARTITION, 0L, 10L, 0L));
+        assertEquals(
+            Finding.COMMITTED_DESCRIPTOR_MISMATCH,
+            CommittedObjectRetirementPrecheck.assess(forged, image)
+        );
+        assertEquals(
+            Finding.ALL_RANGES_BELOW_LOG_START,
+            CommittedObjectRetirementPrecheck.assess(authoritative, image)
+        );
+    }
+
+    @Test
+    void historicalObjectTombstoneInvalidatesPreviouslyExpiredCommittedObject() {
+        SharedMetadataImage image = new SharedMetadataImage();
+        SharedObjectMetadata committed = object(22L, range(PARTITION, 0L, 20L, 0L));
+        replayLogStart(image, PARTITION, 20L);
+        replayCommit(image, committed);
         image.markReady();
 
         assertEquals(
-            Finding.HAS_UNRETIRED_RANGE,
-            CommittedObjectRetirementPrecheck.assess(
-                object(17L, range(PARTITION, 0L, 10L, 0L)), image
-            )
+            Finding.ALL_RANGES_BELOW_LOG_START,
+            CommittedObjectRetirementPrecheck.assess(committed, image)
         );
+        image.apply(SharedMetadataRecordCodec.objectKey(committed.objectId()), null);
+        assertEquals(Finding.OBJECT_NOT_COMMITTED, CommittedObjectRetirementPrecheck.assess(committed, image));
+    }
+
+    @Test
+    void targetedCommittedEvidenceIsImmutableAndLimitedToPackedPartitions() {
+        SharedMetadataImage image = new SharedMetadataImage();
+        replayLogStart(image, PARTITION, 20L);
+        replayLogStart(image, OTHER, 30L);
+        replayLogStart(image, RECREATED_TOPIC, 1_000L);
+        SharedObjectMetadata packed = object(
+            23L, range(PARTITION, 0L, 20L, 0L), range(OTHER, 20L, 40L, 20L)
+        );
+        replayCommit(image, packed);
+        image.markReady();
+
+        SharedMetadataImage.CommittedObjectEvidence snapshot =
+            image.committedObjectRetirementEvidence(packed.objectId()).orElseThrow();
+        assertEquals(packed, snapshot.metadata());
+        assertEquals(2, snapshot.explicitLogStarts().size());
+        assertEquals(30L, snapshot.explicitLogStarts().get(OTHER).longValue());
+        assertThrows(
+            UnsupportedOperationException.class,
+            () -> snapshot.explicitLogStarts().put(OTHER, 900L)
+        );
+
+        replayLogStart(image, OTHER, 40L);
+        assertEquals(30L, snapshot.explicitLogStarts().get(OTHER).longValue());
         assertEquals(
-            Finding.MISSING_WATERMARK,
-            CommittedObjectRetirementPrecheck.assess(
-                object(18L, range(OTHER, 0L, 10L, 0L)), image
-            )
+            Finding.ALL_RANGES_BELOW_LOG_START,
+            CommittedObjectRetirementPrecheck.assess(packed, image)
         );
     }
 
@@ -167,6 +239,13 @@ class CommittedObjectRetirementPrecheckTest {
         SharedMetadataImage image = new SharedMetadataImage();
         image.markReady();
         return image;
+    }
+
+    private static void replayCommit(SharedMetadataImage image, SharedObjectMetadata object) {
+        image.apply(
+            SharedMetadataRecordCodec.objectKey(object.objectId()),
+            SharedMetadataRecordCodec.committedObjectValue(object)
+        );
     }
 
     private static void replayLogStart(SharedMetadataImage image, SharedPartitionId partition, long offset) {
