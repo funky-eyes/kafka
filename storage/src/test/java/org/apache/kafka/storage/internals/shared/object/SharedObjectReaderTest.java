@@ -415,6 +415,48 @@ class SharedObjectReaderTest {
     }
 
     @Test
+    void synchronousIndexedPrimaryFailureFallsBackWithIndexCacheDisabled() throws Exception {
+        PackedObject canonical = packObject(980L);
+        PackedObject alternative = packObject(981L);
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(canonical.metadata());
+        index.add(alternative.metadata());
+
+        InMemoryObjectStore backing = new InMemoryObjectStore();
+        backing.put(alternative.metadata().objectId(), alternative.bytes()).get(10L, TimeUnit.SECONDS);
+        AtomicInteger primaryAttempts = new AtomicInteger();
+        ObjectStore store = synchronouslyFailingPrimary(canonical.metadata().objectId(), backing, primaryAttempts);
+
+        SharedObjectReader reader = new SharedObjectReader(store, index, 0);
+        ByteBuffer restored = reader.read(PARTITION, 2L).get(10L, TimeUnit.SECONDS).orElseThrow();
+        assertArrayEquals(new byte[] {1, 2, 3, 4, 5}, toArray(restored));
+        assertEquals(1, primaryAttempts.get(), "A failed KSO2 Header GET must initiate one fallback");
+    }
+
+    @Test
+    void synchronousLegacyDirectPrimaryFailureFallsBackToCommittedCopy() throws Exception {
+        PackedObject canonical = packObject(982L);
+        PackedObject alternative = packObject(983L);
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.restore(List.of(
+            new RemoteObjectIndex.RangeReference(
+                canonical.metadata().objectId(), canonical.metadata().ranges().get(0)),
+            new RemoteObjectIndex.RangeReference(
+                alternative.metadata().objectId(), alternative.metadata().ranges().get(0))
+        ));
+
+        InMemoryObjectStore backing = new InMemoryObjectStore();
+        backing.put(alternative.metadata().objectId(), alternative.bytes()).get(10L, TimeUnit.SECONDS);
+        AtomicInteger primaryAttempts = new AtomicInteger();
+        ObjectStore store = synchronouslyFailingPrimary(canonical.metadata().objectId(), backing, primaryAttempts);
+
+        SharedObjectReader reader = new SharedObjectReader(store, index, 0);
+        ByteBuffer restored = reader.read(PARTITION, 2L).get(10L, TimeUnit.SECONDS).orElseThrow();
+        assertArrayEquals(new byte[] {1, 2, 3, 4, 5}, toArray(restored));
+        assertEquals(1, primaryAttempts.get(), "Legacy direct Range GET must use the alternate after failure");
+    }
+
+    @Test
     void shouldSurfaceIndexedDataBlockCorruption() throws Exception {
         PackedObject packed = packObject(952);
         SharedObjectMetadata metadata = packed.metadata();
@@ -467,6 +509,33 @@ class SharedObjectReaderTest {
             reader.read(PARTITION, 2).get(10, TimeUnit.SECONDS).orElseThrow()
         ));
         assertEquals(2, store.blockReadCount());
+    }
+
+    private static ObjectStore synchronouslyFailingPrimary(
+        long primaryObjectId,
+        InMemoryObjectStore backing,
+        AtomicInteger primaryAttempts
+    ) {
+        return new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                if (objectId == primaryObjectId) {
+                    primaryAttempts.incrementAndGet();
+                    throw new IllegalStateException("Synchronous primary object-store transport failure");
+                }
+                return backing.rangeRead(objectId, position, length);
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+        };
     }
 
     private PackedObject packObject(long objectId) throws Exception {

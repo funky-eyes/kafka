@@ -59,6 +59,8 @@ REQUIRED_TESTS = {
         "sharedStoreFailureMustNotAccumulateSuppressedErrorsAcrossReaders",
         "cancelledPrimaryReadMustNotStartAnAlternatePhysicalRead",
         "cancelledAlternateReadAfterPrimaryFailureRemainsCancellation",
+        "synchronousIndexedPrimaryFailureFallsBackWithIndexCacheDisabled",
+        "synchronousLegacyDirectPrimaryFailureFallsBackToCommittedCopy",
         "failedCanonicalHeaderMustFallbackWhileItsFooterReadIsStillPending",
     ),
     "org.apache.kafka.storage.internals.shared.object.OrphanObjectCleanerTest": (

@@ -48,7 +48,9 @@ final class StreamObjectIndexCache {
         Objects.requireNonNull(reference, "reference");
         Objects.requireNonNull(loader, "loader");
         if (maxEntries == 0 || !reference.hasObjectDescriptor()) {
-            return loader.load(reference);
+            // Cache bypass must still honor the asynchronous failure contract,
+            // otherwise synchronous transport errors skip COMMITTED fallback.
+            return loadOnce(reference, loader);
         }
 
         Key key = Key.from(reference);
@@ -71,13 +73,8 @@ final class StreamObjectIndexCache {
                 }
             }
         });
-        CompletableFuture<Optional<StreamObjectIndexReader.IndexSnapshot>> loaded;
-        try {
-            loaded = Objects.requireNonNull(loader.load(reference), "index loader returned null future");
-        } catch (Throwable error) {
-            installed.completeExceptionally(error);
-            return installed;
-        }
+        CompletableFuture<Optional<StreamObjectIndexReader.IndexSnapshot>> loaded =
+            loadOnce(reference, loader);
         loaded.whenComplete((snapshot, error) -> {
             if (error != null) {
                 installed.completeExceptionally(error);
@@ -88,6 +85,17 @@ final class StreamObjectIndexCache {
             }
         });
         return installed;
+    }
+
+    private static CompletableFuture<Optional<StreamObjectIndexReader.IndexSnapshot>> loadOnce(
+        RemoteObjectIndex.RangeReference reference,
+        StreamObjectIndexReader loader
+    ) {
+        try {
+            return Objects.requireNonNull(loader.load(reference), "index loader returned null future");
+        } catch (Throwable error) {
+            return CompletableFuture.failedFuture(error);
+        }
     }
 
     synchronized int size() {

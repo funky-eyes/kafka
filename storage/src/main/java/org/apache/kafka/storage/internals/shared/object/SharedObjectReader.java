@@ -198,8 +198,18 @@ public final class SharedObjectReader {
 
     private CompletableFuture<Optional<ByteBuffer>> readDirect(RemoteObjectIndex.RangeReference reference) {
         SharedObjectRange range = reference.range();
-        return objectStore.rangeRead(reference.objectId(), range.objectPosition(), range.objectLength())
-            .thenApply(bytes -> {
+        CompletableFuture<ByteBuffer> bytesFuture;
+        try {
+            bytesFuture = Objects.requireNonNull(
+                objectStore.rangeRead(reference.objectId(), range.objectPosition(), range.objectLength()),
+                "ObjectStore returned null range future"
+            );
+        } catch (RuntimeException failure) {
+            // Legacy/direct reads must not throw before the asynchronous
+            // failure handler can select the other COMMITTED physical copy.
+            return CompletableFuture.failedFuture(failure);
+        }
+        return bytesFuture.thenApply(bytes -> {
                 if (bytes.remaining() != range.objectLength()) {
                     throw new CompletionException(corruption(
                         reference,

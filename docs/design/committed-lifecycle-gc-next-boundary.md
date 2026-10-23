@@ -2582,3 +2582,40 @@ S3 object identity, KRaft authority, Controller epoch fencing,
 the inactive COMMITTED physical DELETE path, or the frozen MinIO GA
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
 Keep PR #2 Draft; do not trigger additional Native Image CI.
+
+
+## Batch 282 — preserve asynchronous COMMITTED read fallback under synchronous S3 transport failure
+
+**Stable base:** Batch 281 at
+`45acfb6f443e5cde6adce54fff829d95131fd458`
+passed 17/17 CI, including Java 25, real MinIO, native Kafka replication,
+Controller HA, Ring WAL and WAL crash.
+
+KSO2 indexed reads are normally Future-based. However, with
+`StreamObjectIndexCache(maxEntries=0)`, its no-cache branch invoked
+`StreamObjectIndexReader.load` without normalizing synchronous exceptions.
+Likewise, the legacy direct-range path called `ObjectStore.rangeRead`
+before producing the primary read Future. A storage adapter can reject
+a Range GET synchronously, bypassing `SharedObjectReader.read`'s
+exceptional fallback to the second independently COMMITTED copy.
+
+Normalize synchronous loader exceptions (and null futures) to failed
+Futures in both cache-enabled and bypass modes; keep slow Range GETs
+outside the cache monitor. In the legacy/direct reader, convert
+synchronous runtime transport errors to failed Futures before the
+existing exceptional-read handler runs. Successful bytes still receive
+their normal KSO2 index/CRC or legacy range CRC validation.
+
+Two deterministic end-to-end regressions inject a synchronously
+throwing canonical physical object for (1) KSO2 reads with disabled
+index cache and (2) restored legacy direct references. Both must
+recover the exact Kafka batch from a different COMMITTED object; no
+third retry or object delete occurs. Require both unskipped JUnit
+methods in the existing gate (662 -> 664), without new hosted CI
+workflows or Native Image build.
+
+This fixes availability/error-contract behavior, not durability or
+replica consensus. Kafka native Leader/Follower, ISR, HW, KRaft
+authority, PR #2 Draft and disabled physical COMMITTED DELETE
+remain unchanged. The MinIO GA branch stays frozen at
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
