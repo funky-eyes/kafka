@@ -32,7 +32,9 @@ public interface ObjectMetadataStore extends AutoCloseable {
      * <p>Current implementations must reject this operation without publishing
      * a compacted metadata tombstone. PREPARED orphan cleanup instead uses
      * {@link #claimCleanup(long, long)} and retains its durable cleanup fence.
-     * Historical object tombstones remain replayable for rolling upgrades.</p>
+     * Historical object tombstones remain replayable during initial recovery
+     * only. Live object tombstones without KRaft authority fail closed,
+     * preventing silent removal of cross-replica read references.</p>
      */
     CompletableFuture<Void> delete(long objectId);
 

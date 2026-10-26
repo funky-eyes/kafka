@@ -159,18 +159,25 @@ class CommittedObjectRetirementPrecheckTest {
 
     @Test
     void historicalObjectTombstoneInvalidatesPreviouslyExpiredCommittedObject() {
-        SharedMetadataImage image = new SharedMetadataImage();
         SharedObjectMetadata committed = object(22L, range(PARTITION, 0L, 20L, 0L));
-        replayLogStart(image, PARTITION, 20L);
-        replayCommit(image, committed);
-        image.markReady();
-
+        SharedMetadataImage beforeTombstone = new SharedMetadataImage();
+        replayLogStart(beforeTombstone, PARTITION, 20L);
+        replayCommit(beforeTombstone, committed);
+        beforeTombstone.markReady();
         assertEquals(
             Finding.ALL_RANGES_BELOW_LOG_START,
-            CommittedObjectRetirementPrecheck.assess(committed, image)
+            CommittedObjectRetirementPrecheck.assess(committed, beforeTombstone)
         );
-        image.apply(SharedMetadataRecordCodec.objectKey(committed.objectId()), null);
-        assertEquals(Finding.OBJECT_NOT_COMMITTED, CommittedObjectRetirementPrecheck.assess(committed, image));
+
+        SharedMetadataImage historicalReplay = new SharedMetadataImage();
+        replayLogStart(historicalReplay, PARTITION, 20L);
+        replayCommit(historicalReplay, committed);
+        historicalReplay.apply(SharedMetadataRecordCodec.objectKey(committed.objectId()), null);
+        historicalReplay.markReady();
+        assertEquals(
+            Finding.OBJECT_NOT_COMMITTED,
+            CommittedObjectRetirementPrecheck.assess(committed, historicalReplay)
+        );
     }
 
     @Test

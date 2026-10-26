@@ -40,7 +40,9 @@ import java.util.function.Consumer;
  * In-memory image rebuilt from the compacted shared-storage metadata topic.
  *
  * <p>The image is deliberately fail-closed. Authoritative getters are unavailable while the initial replay is still
- * recovering and after a live replay failure. Cleanup fences use a distinct compacted key from object metadata. The
+ * recovering and after a live replay failure. Initial replay publishes only final COMMITTED winners;
+ * live object tombstones without KRaft retirement authorization fail closed.
+ * Cleanup fences use a distinct compacted key from object metadata. The
  * single metadata partition therefore supplies the total order between COMMIT and cleanup while compaction preserves
  * both winners' evidence. A cleanup fence that precedes a delayed COMMIT wins; a cleanup record after a committed object
  * is a losing claim and is ignored.</p>
@@ -129,6 +131,13 @@ public final class SharedMetadataImage {
     }
 
     private void applyObjectTombstone(long objectId) {
+        if (state == State.READY) {
+            // Live object tombstones lack KRaft retirement authorization.
+            // Fail closed rather than diverging from other replica indexes.
+            throw corruption("Live object tombstone has no KRaft retirement authority: " + objectId);
+        }
+        // Initial recovery preserves historical compacted-topic tombstones.
+        // No transient COMMITTED reference is exposed before markReady().
         preparedObjects.remove(objectId);
         committedObjects.remove(objectId);
     }
@@ -165,7 +174,9 @@ public final class SharedMetadataImage {
             throw corruption("object " + objectId + " has conflicting COMMITTED metadata");
         }
         preparedObjects.remove(objectId);
-        if (existing == null) {
+        if (existing == null && state == State.READY) {
+            // Historical replay must finish before publishing its final
+            // COMMITTED winners into the broker's remote read index.
             committedObjectListener.accept(metadata);
         }
     }
@@ -254,7 +265,20 @@ public final class SharedMetadataImage {
         if (state == State.FAILED) {
             throw failedState();
         }
-        state = State.READY;
+        if (state == State.READY) {
+            return;
+        }
+        try {
+            // Replay only final COMMITTED winners, without allocating an
+            // additional object-sized snapshot on broker bootstrap.
+            for (SharedObjectMetadata committed : committedObjects.values()) {
+                committedObjectListener.accept(committed);
+            }
+            state = State.READY;
+        } catch (RuntimeException | Error publicationFailure) {
+            markFailed(publicationFailure);
+            throw publicationFailure;
+        }
     }
 
     public synchronized void markFailed(Throwable cause) {

@@ -36,6 +36,12 @@ REQUIRED_TESTS = {
         "historicalObjectTombstoneInvalidatesPreviouslyExpiredCommittedObject",
         "targetedCommittedEvidenceIsImmutableAndLimitedToPackedPartitions",
     ),
+    "org.apache.kafka.storage.internals.shared.metadata.SharedMetadataImageTest": (
+        "historicalCommittedTombstoneDoesNotLeakIntoRebuiltRemoteIndex",
+        "liveCommittedObjectTombstoneFailsClosedWithoutRevokingRemoteReference",
+        "unknownLiveObjectTombstoneAlsoFailsClosed",
+        "liveCommittedListenerFailurePermanentlyFailsImageClosed",
+    ),
     "org.apache.kafka.storage.internals.shared.metadata.LocalRemoteObjectCheckpointTest": (
         "physicalDuplicateCheckpointConvergesAcrossOppositeReplicaReplayOrder",
         "sameCrcDifferentKafkaByteLengthMustNotReplaceDurableCheckpoint",

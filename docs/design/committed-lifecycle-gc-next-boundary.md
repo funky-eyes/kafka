@@ -2619,3 +2619,45 @@ replica consensus. Kafka native Leader/Follower, ISR, HW, KRaft
 authority, PR #2 Draft and disabled physical COMMITTED DELETE
 remain unchanged. The MinIO GA branch stays frozen at
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
+
+
+## Batch 284 — publish only final recovered COMMITTED objects and fence live tombstones
+
+**Stable base:** Batch 283 at
+`df275211588e107e4fce9754d4328fd7edc8f813` passed
+17/17 Java 25, real MinIO, Kafka multi-replica, WAL crash,
+Controller HA and Ring WAL workflows.
+
+The initial `__shared_storage_metadata` replay previously invoked
+`SharedStorageEngine.commitRemoteObject` for each intermediate COMMIT.
+If a historical compacted-topic tombstone followed the COMMIT, the
+SharedMetadataImage removed the object while the remote read index
+still retained its physical reference. Brokers rebuilding from
+different compacted views could then diverge or read a retired copy.
+
+During RECOVERING, COMMITTED objects now remain staged in the image
+without triggering its remote-index listener. `markReady()` publishes
+only the final surviving COMMITTED objects, iterating the existing
+map without another O(number of objects) snapshot. It is idempotent
+and marks the image FAILED if any listener fails. After READY, new
+COMMIT records still publish immediately, at most once per object.
+
+Historical object tombstones remain replayable during initial
+recovery for rolling-upgrade compatibility. In READY state, any
+object-key tombstone, including one for an unknown object, fails
+closed: there is no durable KRaft Controller retirement protocol
+authorizing such a runtime mutation. The existing PREPARED orphan
+cleanup claims, which use a distinct durable key, remain unchanged.
+
+Four new mandatory unskipped JUnit tests witness replayed
+COMMIT/tombstone non-publication, live COMMITTED-tombstone rejection,
+unknown live-tombstone rejection, and live listener failure.
+Preexisting listener/replay and retirement tests now distinguish
+historical replay from live mutation. Required JUnit evidence
+grows from 664 to 668; no new hosted CI workflows or Native build.
+
+Native Kafka Leader/Follower, ISR/HW, partition epochs and
+KRaft Controller semantics remain authoritative. This change
+does not introduce remote GC, and the COMMITTED physical DELETE
+path remains disabled. PR #2 stays Draft; frozen MinIO GA base
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889` is unchanged.
