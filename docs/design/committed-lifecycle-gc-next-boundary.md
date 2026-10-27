@@ -2661,3 +2661,43 @@ KRaft Controller semantics remain authoritative. This change
 does not introduce remote GC, and the COMMITTED physical DELETE
 path remains disabled. PR #2 stays Draft; frozen MinIO GA base
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889` is unchanged.
+
+
+## Batch 285 — targeted, fail-closed PREPARED cleanup completion evidence
+
+**Stable base:** Batch 284 at
+`b8ae352c398854c70bfc703d8a5670665c982d26`
+has 17/17 GitHub Actions SUCCESS after rerunning only the
+`AFTER_COMMIT` upload-crash Job; its original staging failure was
+Maven Central returning HTTP 429, before the crash gate executed.
+
+`KafkaObjectMetadataStore.completeCleanup(objectId)` previously
+materialized and scanned the complete replayed CLAIMED inventory for
+each object. Completing N claimed orphans could thus require O(N^2)
+lookups and O(N) temporary allocations on every completion.
+Worse, if no matching CLAIMED entry existed it always reported a
+successful no-op, indistinguishable from a true durable DELETED fence,
+including when the target was still PREPARED, COMMITTED or unknown.
+
+Expose `SharedMetadataImage.cleanupCompletionEvidence(objectId)` as
+one O(1), synchronized targeted lookup. Its explicit states are
+`CLAIMED(timestamp)`, `DELETED(timestamp)` and `ABSENT`.
+Only CLAIMED may emit the existing idempotent cleanup-DELETED metadata
+record. DELETED permits a successful replay-backed no-op. ABSENT and
+invalid object IDs fail closed with no metadata write. The completion
+entrypoint still returns a failed Future for missing claims.
+
+Two unskipped storage JUnit regressions verify the status of claimed,
+deleted, prepared, committed and unknown objects, and that a
+RECOVERING/FAILED metadata image cannot yield completion evidence.
+A separate S3 metadata-store unit regression checks its actual
+completion decision including absent and invalid IDs. Required
+storage JUnit evidence grows 668 -> 670; unchanged workflows.
+
+This is PREPARED orphan cleanup evidence, *not* Controller permission
+to retire a COMMITTED physical copy. No existing callers are changed
+to execute physical GC, and no new S3 DELETE path is introduced.
+Kafka Leader/Follower, ISR/HW, KRaft authority, PR #2 Draft and
+frozen MinIO GA HEAD
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`
+remain unchanged.

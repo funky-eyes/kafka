@@ -382,6 +382,72 @@ class SharedMetadataImageTest {
     }
 
     @Test
+    void targetedCleanupCompletionDistinguishesClaimedDeletedAndAbsentObjects() {
+        SharedMetadataImage image = new SharedMetadataImage();
+        long claimed = BrokerObjectId.compose(7, 101L);
+        long deleted = BrokerObjectId.compose(7, 102L);
+        long prepared = BrokerObjectId.compose(7, 103L);
+        long committed = BrokerObjectId.compose(7, 104L);
+        long unknown = BrokerObjectId.compose(7, 105L);
+
+        image.apply(
+            SharedMetadataRecordCodec.objectCleanupKey(claimed),
+            SharedMetadataRecordCodec.cleanupClaimedValue(500L)
+        );
+        image.apply(
+            SharedMetadataRecordCodec.objectCleanupKey(deleted),
+            SharedMetadataRecordCodec.cleanupDeletedValue(600L)
+        );
+        image.apply(
+            SharedMetadataRecordCodec.objectKey(prepared),
+            SharedMetadataRecordCodec.preparedObjectValue(700L)
+        );
+        image.apply(
+            SharedMetadataRecordCodec.objectKey(committed),
+            SharedMetadataRecordCodec.committedObjectValue(metadata(committed, 804L))
+        );
+        image.markReady();
+
+        assertEquals(
+            new SharedMetadataImage.CleanupCompletionEvidence(
+                SharedMetadataImage.CleanupCompletionStatus.CLAIMED, 500L
+            ),
+            image.cleanupCompletionEvidence(claimed)
+        );
+        assertEquals(
+            new SharedMetadataImage.CleanupCompletionEvidence(
+                SharedMetadataImage.CleanupCompletionStatus.DELETED, 600L
+            ),
+            image.cleanupCompletionEvidence(deleted)
+        );
+        var absent = new SharedMetadataImage.CleanupCompletionEvidence(
+            SharedMetadataImage.CleanupCompletionStatus.ABSENT, -1L
+        );
+        assertEquals(absent, image.cleanupCompletionEvidence(prepared));
+        assertEquals(absent, image.cleanupCompletionEvidence(committed));
+        assertEquals(absent, image.cleanupCompletionEvidence(unknown));
+        assertThrows(IllegalArgumentException.class, () -> image.cleanupCompletionEvidence(0L));
+    }
+
+    @Test
+    void cleanupCompletionEvidenceRequiresReadyNonFailedMetadataReplay() {
+        SharedMetadataImage image = new SharedMetadataImage();
+        long objectId = BrokerObjectId.compose(7, 106L);
+        assertThrows(IllegalStateException.class, () -> image.cleanupCompletionEvidence(objectId));
+        image.apply(
+            SharedMetadataRecordCodec.objectCleanupKey(objectId),
+            SharedMetadataRecordCodec.cleanupClaimedValue(800L)
+        );
+        image.markReady();
+        assertEquals(
+            SharedMetadataImage.CleanupCompletionStatus.CLAIMED,
+            image.cleanupCompletionEvidence(objectId).status()
+        );
+        image.markFailed(new IllegalStateException("consumer stopped"));
+        assertThrows(IllegalStateException.class, () -> image.cleanupCompletionEvidence(objectId));
+    }
+
+    @Test
     void brokerSequenceWatermarkIsMonotonicAndNeverTombstoned() {
         byte[] key = SharedMetadataRecordCodec.brokerSequenceKey(7);
 

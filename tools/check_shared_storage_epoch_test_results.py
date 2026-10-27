@@ -37,6 +37,8 @@ REQUIRED_TESTS = {
         "targetedCommittedEvidenceIsImmutableAndLimitedToPackedPartitions",
     ),
     "org.apache.kafka.storage.internals.shared.metadata.SharedMetadataImageTest": (
+        "targetedCleanupCompletionDistinguishesClaimedDeletedAndAbsentObjects",
+        "cleanupCompletionEvidenceRequiresReadyNonFailedMetadataReplay",
         "historicalCommittedTombstoneDoesNotLeakIntoRebuiltRemoteIndex",
         "liveCommittedObjectTombstoneFailsClosedWithoutRevokingRemoteReference",
         "unknownLiveObjectTombstoneAlsoFailsClosed",

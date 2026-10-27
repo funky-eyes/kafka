@@ -346,6 +346,41 @@ public final class SharedMetadataImage {
         return cleanup != null && cleanup.createdTimeMs == createdTimeMs;
     }
 
+    /**
+     * Reads one object cleanup state in O(1), without copying the full claimed
+     * inventory. This is replay evidence, not authorization to delete S3 data.
+     * Only a CLAIMED state can be completed; DELETED is idempotently terminal.
+     */
+    public synchronized CleanupCompletionEvidence cleanupCompletionEvidence(long objectId) {
+        requireReady();
+        if (objectId <= 0L) {
+            throw new IllegalArgumentException("objectId must be positive");
+        }
+        CleanupObject cleanup = cleanupObjects.get(objectId);
+        if (cleanup == null) {
+            return new CleanupCompletionEvidence(CleanupCompletionStatus.ABSENT, -1L);
+        }
+        CleanupCompletionStatus status = cleanup.state == CleanupState.CLAIMED
+            ? CleanupCompletionStatus.CLAIMED : CleanupCompletionStatus.DELETED;
+        return new CleanupCompletionEvidence(status, cleanup.createdTimeMs);
+    }
+
+    public enum CleanupCompletionStatus {
+        ABSENT,
+        CLAIMED,
+        DELETED
+    }
+
+    public record CleanupCompletionEvidence(CleanupCompletionStatus status, long createdTimeMs) {
+        public CleanupCompletionEvidence {
+            Objects.requireNonNull(status, "status");
+            if ((status == CleanupCompletionStatus.ABSENT) != (createdTimeMs == -1L)
+                || createdTimeMs < -1L) {
+                throw new IllegalArgumentException("Invalid cleanup completion state or creation timestamp");
+            }
+        }
+    }
+
     public synchronized long brokerReservedExclusiveSequence(int brokerId) {
         requireReady();
         if (brokerId < 0 || brokerId > BrokerObjectId.MAX_BROKER_ID) {

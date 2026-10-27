@@ -47,7 +47,8 @@ public interface ObjectMetadataStore extends AutoCloseable {
 
     /**
      * Marks a successfully deleted cleanup claim complete. Implementations must retain a terminal fence so a delayed
-     * COMMIT can never resurrect an object that has already been physically deleted.
+     * COMMIT can never resurrect an object that has already been physically deleted. A previously DELETED claim is
+     * idempotent; absent, PREPARED or COMMITTED objects must not be reported as successfully completed.
      */
     CompletableFuture<Void> completeCleanup(long objectId);
 
