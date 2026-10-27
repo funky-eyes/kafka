@@ -2747,3 +2747,42 @@ retirement protocol. Native Kafka Leader/Follower, ISR/HW,
 KRaft epochs and existing COMMITTED DELETE disablement remain
 unchanged. PR #2 remains Draft and frozen MinIO GA HEAD remains
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
+
+
+## Batch 287 — orphan scheduler releases cleanup admission after synchronous failures
+
+**Stable base:** Batch 286 at
+`32213cd367ec02270c46fcc5e9f6a62af09b1c61` passed
+17/17 CI, including real MinIO, Java 25, Controller HA, Ring WAL,
+WAL crash and native Kafka multi-replica semantics.
+
+`OrphanCleanupScheduler.tryCleanOnce()` acquires a global non-overlap
+cleanup slot before sampling the broker clock. Only an
+`ArithmeticException` was previously handled in that first phase.
+An ordinary runtime failure from a clock supplier escaped while
+`cleanupInProgress` stayed true: subsequent cleanup passes returned
+BUSY forever and broker shutdown could hang while draining the
+in-flight scheduler. Synchronous metadata inventory failures in
+`cleaner.clean()` did release the slot, but did not consistently
+update the scheduler's `lastFailure` diagnostics.
+
+Catch all runtime clock failures before work starts, publish their
+failed `CompletableFuture`, record `lastFailure` and always release
+the cleanup admission. Apply the same diagnostic bookkeeping to
+synchronous cleaner failures. The existing asynchronous completion
+handler still releases the slot and clears `lastFailure` after a
+successful retry. Normal scheduling, cutoffs, orphan claims and
+physical-delete selection are unchanged.
+
+Two deterministic unskipped regressions inject a clock exception
+and a metadata inventory exception, verify the exact failures,
+then successfully delete the PREPARED orphan on the next pass
+and close the scheduler without a leaked cleanup slot. Strict
+JUnit evidence grows 674 -> 676 with the existing workflows.
+
+This is a broker shutdown and PREPARED orphan-maintenance liveness
+fix, NOT a COMMITTED object retirement authorization. Native Kafka
+Leader/Follower, ISR/HW and KRaft Controller ownership are unchanged;
+physical COMMITTED DELETE is still prohibited. PR #2 remains Draft,
+and frozen MinIO GA branch HEAD
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889` is untouched.

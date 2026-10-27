@@ -92,8 +92,12 @@ public final class OrphanCleanupScheduler implements AutoCloseable {
         final long cutoff;
         try {
             cutoff = Math.max(0L, Math.subtractExact(currentTimeMsSupplier.getAsLong(), orphanGraceMs));
-        } catch (ArithmeticException e) {
+        } catch (RuntimeException e) {
+            // A non-arithmetic clock failure must not retain the admission
+            // slot indefinitely or prevent broker shutdown from draining.
+            lastFailure.set(e);
             releaseCleanupSlot();
+            LOG.warn("Shared orphan cleanup failed while computing cutoff", e);
             return CompletableFuture.failedFuture(e);
         }
 
@@ -101,7 +105,9 @@ public final class OrphanCleanupScheduler implements AutoCloseable {
         try {
             result = cleaner.clean(cutoff);
         } catch (RuntimeException e) {
+            lastFailure.set(e);
             releaseCleanupSlot();
+            LOG.warn("Shared orphan cleanup failed before asynchronous delete", e);
             return CompletableFuture.failedFuture(e);
         }
         return result.whenComplete((deleted, error) -> {

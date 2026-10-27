@@ -17,15 +17,21 @@
 package org.apache.kafka.storage.internals.shared.object;
 
 import org.apache.kafka.storage.internals.shared.metadata.InMemoryObjectMetadataStore;
+import org.apache.kafka.storage.internals.shared.metadata.ObjectMetadataStore;
+import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
 import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -71,6 +77,108 @@ class OrphanCleanupSchedulerTest {
         blockedDelete.complete(null);
         closeFuture.get(10, TimeUnit.SECONDS);
         assertEquals(1, cleanup.get(10, TimeUnit.SECONDS));
+    }
+
+    @Test
+    void transientClockRuntimeFailureReleasesCleanupSlotAndAllowsGracefulClose() throws Exception {
+        InMemoryObjectStore objects = new InMemoryObjectStore();
+        InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
+        metadata.prepare(301L, 1L).get(10, TimeUnit.SECONDS);
+        objects.put(301L, ByteBuffer.wrap(new byte[] {1})).get(10, TimeUnit.SECONDS);
+        AtomicInteger samples = new AtomicInteger();
+        IllegalStateException clockFailure = new IllegalStateException("time source unavailable");
+
+        try (OrphanCleanupScheduler scheduler = new OrphanCleanupScheduler(
+            new OrphanObjectCleaner(objects, metadata),
+            () -> {
+                if (samples.getAndIncrement() == 0) {
+                    throw clockFailure;
+                }
+                return 10_000L;
+            },
+            1_000L
+        )) {
+            ExecutionException first = assertThrows(
+                ExecutionException.class,
+                () -> scheduler.tryCleanOnce().get(10, TimeUnit.SECONDS)
+            );
+            assertSame(clockFailure, first.getCause());
+            assertSame(clockFailure, scheduler.lastFailure().orElseThrow());
+            assertTrue(objects.contains(301L));
+            assertEquals(1, scheduler.tryCleanOnce().get(10, TimeUnit.SECONDS),
+                "The clock failure must not leave cleanup permanently BUSY");
+            assertFalse(objects.contains(301L));
+            assertTrue(scheduler.lastFailure().isEmpty());
+        }
+    }
+
+    @Test
+    void synchronousMetadataInventoryFailureReportsAndReleasesCleanupSlot() throws Exception {
+        InMemoryObjectStore objects = new InMemoryObjectStore();
+        InMemoryObjectMetadataStore delegate = new InMemoryObjectMetadataStore();
+        delegate.prepare(302L, 1L).get(10, TimeUnit.SECONDS);
+        objects.put(302L, ByteBuffer.wrap(new byte[] {2})).get(10, TimeUnit.SECONDS);
+        IllegalStateException metadataFailure = new IllegalStateException("metadata replay unavailable");
+        AtomicInteger scans = new AtomicInteger();
+        ObjectMetadataStore metadata = new ObjectMetadataStore() {
+            @Override
+            public CompletableFuture<Void> prepare(long objectId, long createdTimeMs) {
+                return delegate.prepare(objectId, createdTimeMs);
+            }
+
+            @Override
+            public CompletableFuture<Void> commit(SharedObjectMetadata object) {
+                return delegate.commit(object);
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return delegate.delete(objectId);
+            }
+
+            @Override
+            public CompletableFuture<Boolean> claimCleanup(long objectId, long createdTimeMs) {
+                return delegate.claimCleanup(objectId, createdTimeMs);
+            }
+
+            @Override
+            public CompletableFuture<Void> completeCleanup(long objectId) {
+                return delegate.completeCleanup(objectId);
+            }
+
+            @Override
+            public List<SharedObjectMetadata> committedObjects() {
+                return delegate.committedObjects();
+            }
+
+            @Override
+            public List<PreparedObject> preparedObjects() {
+                return delegate.preparedObjects();
+            }
+
+            @Override
+            public List<PreparedObject> cleanupClaimedObjects() {
+                if (scans.getAndIncrement() == 0) {
+                    throw metadataFailure;
+                }
+                return delegate.cleanupClaimedObjects();
+            }
+        };
+
+        try (OrphanCleanupScheduler scheduler = new OrphanCleanupScheduler(
+            new OrphanObjectCleaner(objects, metadata), () -> 10_000L, 1_000L
+        )) {
+            ExecutionException first = assertThrows(
+                ExecutionException.class,
+                () -> scheduler.tryCleanOnce().get(10, TimeUnit.SECONDS)
+            );
+            assertSame(metadataFailure, first.getCause());
+            assertSame(metadataFailure, scheduler.lastFailure().orElseThrow());
+            assertTrue(objects.contains(302L));
+            assertEquals(1, scheduler.tryCleanOnce().get(10, TimeUnit.SECONDS));
+            assertFalse(objects.contains(302L));
+            assertTrue(scheduler.lastFailure().isEmpty());
+        }
     }
 
     @Test

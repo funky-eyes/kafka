@@ -77,6 +77,10 @@ REQUIRED_TESTS = {
         "synchronousLegacyDirectPrimaryFailureFallsBackToCommittedCopy",
         "failedCanonicalHeaderMustFallbackWhileItsFooterReadIsStillPending",
     ),
+    "org.apache.kafka.storage.internals.shared.object.OrphanCleanupSchedulerTest": (
+        "transientClockRuntimeFailureReleasesCleanupSlotAndAllowsGracefulClose",
+        "synchronousMetadataInventoryFailureReportsAndReleasesCleanupSlot",
+    ),
     "org.apache.kafka.storage.internals.shared.object.OrphanObjectCleanerTest": (
         "committedMetadataDeleteWithoutControllerRetirementIsDenied",
         "cleanupClaimTombstoneCannotBeErasedWithoutAuthority",
