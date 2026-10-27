@@ -26,6 +26,7 @@ import org.apache.kafka.storage.internals.shared.wal.FileSharedWal;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.List;
@@ -37,6 +38,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SharedStorageEngineTest {
@@ -174,6 +176,27 @@ class SharedStorageEngineTest {
                 "cold remote ranges must be restored before live Kafka metadata replay");
             assertEquals(10L, restarted.remoteIndex().find(PARTITION, 105).orElseThrow().objectId());
             assertEquals(11L, restarted.remoteIndex().find(PARTITION, 115).orElseThrow().objectId());
+        }
+    }
+
+    @Test
+    void restoredEngineRefusesUnverifiedLocalCheckpointAfterMetadataReplay() throws Exception {
+        Path directory = tempDir.resolve("checkpoint-authority-barrier");
+        SharedObjectMetadata checkpointed = object(42L, 100L, 110L, 555L);
+        LocalRemoteObjectCheckpoint checkpoint = new LocalRemoteObjectCheckpoint(directory);
+        checkpoint.add(checkpointed);
+
+        try (SharedStorageEngine restored = new SharedStorageEngine(
+            new FileSharedWal(directory, 1024 * 1024, 4096),
+            new LocalRemoteObjectCheckpoint(directory)
+        )) {
+            assertEquals(42L, restored.remoteIndex().find(PARTITION, 105L).orElseThrow().objectId());
+            assertThrows(
+                IOException.class,
+                () -> restored.validateLocalCheckpointAgainstCommittedInventory(List.of())
+            );
+            restored.validateLocalCheckpointAgainstCommittedInventory(List.of(checkpointed));
+            assertEquals(42L, restored.remoteIndex().find(PARTITION, 105L).orElseThrow().objectId());
         }
     }
 

@@ -2701,3 +2701,49 @@ Kafka Leader/Follower, ISR/HW, KRaft authority, PR #2 Draft and
 frozen MinIO GA HEAD
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889`
 remain unchanged.
+
+
+## Batch 286 — reconcile durable local remote checkpoint with final COMMITTED metadata
+
+**Stable base:** Batch 285 at
+`ab8ce86efb4081c83e4347f44a449e6c57239f29` passed
+17/17 GitHub Actions, including real MinIO, native Kafka
+replication, Controller HA, WAL crash and local state recovery.
+
+A local `remote-object-ranges.checkpoint` is restored before
+`__shared_storage_metadata` finishes its authoritative replay.
+Batch 284 correctly deferred COMMITTED listener publication until
+`markReady()`, so historical object-key tombstones do not leak
+transient COMMITs into the remote read index. However, a previously
+persisted local checkpoint could still reference an object whose
+historical COMMIT was tombstoned after the checkpoint was written.
+
+Before remote-control-plane readiness, validate each durable local
+reference against the final replayed COMMITTED inventory. The physical
+Object ID must still be present; the exact packed `SharedObjectRange`
+must belong to that object; and a v2 descriptor must match immutable
+object size and checksum. Legacy v1 checkpoints do not carry the
+whole-object descriptor, but must still match Object ID and range.
+Different physical objects with equivalent logical Kafka batches
+must not borrow one another's COMMIT evidence.
+
+`S3SharedStorageExtension.initializeRemotePlane` performs the
+check immediately after metadata replay and before log reconciliation,
+allocator admission or starting upload/cleanup schedulers. Mismatch
+throws IOException and keeps the remote control plane unready:
+no silent checkpoint deletion, index eviction, WAL reclamation,
+or remote physical GC. Startup can be diagnosed/recovered rather
+than serving stale checkpointed physical references as authoritative.
+
+Three direct checkpoint regressions cover a historical COMMIT then
+tombstone, intact v2/v1 snapshots, and mismatched Object ID, range
+and descriptor. One engine-level regression checks its bootstrapped
+checkpoint barrier against final COMMITTED inventory. The strict
+unskipped JUnit evidence inventory grows 670 -> 674; no new hosted
+workflows and no Native Image build.
+
+This remains a conservative preflight, not a durable Controller
+retirement protocol. Native Kafka Leader/Follower, ISR/HW,
+KRaft epochs and existing COMMITTED DELETE disablement remain
+unchanged. PR #2 remains Draft and frozen MinIO GA HEAD remains
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`.

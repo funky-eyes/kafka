@@ -44,7 +44,13 @@ REQUIRED_TESTS = {
         "unknownLiveObjectTombstoneAlsoFailsClosed",
         "liveCommittedListenerFailurePermanentlyFailsImageClosed",
     ),
+    "org.apache.kafka.storage.internals.shared.SharedStorageEngineTest": (
+        "restoredEngineRefusesUnverifiedLocalCheckpointAfterMetadataReplay",
+    ),
     "org.apache.kafka.storage.internals.shared.metadata.LocalRemoteObjectCheckpointTest": (
+        "historicalObjectTombstoneRejectsPreviouslyCheckpointedPhysicalObject",
+        "legacyAndCurrentCheckpointsRequireExactCommittedPhysicalIdentity",
+        "checkpointCannotBorrowEquivalentObjectOrMutatedPackedDescriptor",
         "physicalDuplicateCheckpointConvergesAcrossOppositeReplicaReplayOrder",
         "sameCrcDifferentKafkaByteLengthMustNotReplaceDurableCheckpoint",
     ),

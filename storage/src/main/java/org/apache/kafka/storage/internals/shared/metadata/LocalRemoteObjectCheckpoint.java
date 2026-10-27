@@ -122,6 +122,50 @@ public final class LocalRemoteObjectCheckpoint {
         return flatten(byPartition);
     }
 
+    /**
+     * Verifies that a durable local recovery reference still belongs to the
+     * final, authoritative COMMITTED metadata image after its initial replay.
+     *
+     * <p>A local checkpoint may predate a historical object tombstone. WAL
+     * payloads may already have been reclaimed, so a mismatch must fail
+     * bootstrap rather than silently dropping a reference or serving
+     * unauthenticated S3 bytes. This check never authorizes physical GC.</p>
+     */
+    public void validateAgainstCommittedInventory(List<SharedObjectMetadata> authoritative) throws IOException {
+        Objects.requireNonNull(authoritative, "authoritative");
+        List<RemoteObjectIndex.RangeReference> local = references();
+        if (local.isEmpty()) {
+            return;
+        }
+        Map<Long, SharedObjectMetadata> committed = new HashMap<>();
+        for (SharedObjectMetadata object : authoritative) {
+            Objects.requireNonNull(object, "committed object");
+            if (committed.putIfAbsent(object.objectId(), object) != null) {
+                throw new IOException("Duplicate COMMITTED object ID in authoritative replay: " + object.objectId());
+            }
+        }
+        for (RemoteObjectIndex.RangeReference reference : local) {
+            SharedObjectMetadata object = committed.get(reference.objectId());
+            if (object == null) {
+                throw new IOException(
+                    "Local remote checkpoint object not COMMITTED after authoritative replay: " + reference.objectId()
+                );
+            }
+            if (!object.ranges().contains(reference.range())) {
+                throw new IOException(
+                    "Local remote checkpoint range differs from authoritative COMMIT: " + reference.objectId()
+                );
+            }
+            if (reference.hasObjectDescriptor()
+                && (reference.objectSize() != object.objectSize()
+                    || reference.objectChecksum() != object.objectChecksum())) {
+                throw new IOException(
+                    "Local remote checkpoint descriptor differs from authoritative COMMIT: " + reference.objectId()
+                );
+            }
+        }
+    }
+
     /** Atomically merges one authoritative committed object into the local durable snapshot. */
     public void add(SharedObjectMetadata object) throws IOException {
         addAll(List.of(Objects.requireNonNull(object, "object")));

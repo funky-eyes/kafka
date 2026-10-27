@@ -169,6 +169,76 @@ class LocalRemoteObjectCheckpointTest {
     }
 
     @Test
+    void historicalObjectTombstoneRejectsPreviouslyCheckpointedPhysicalObject() throws Exception {
+        SharedObjectMetadata oldCommit = object(130L, 100L, 110L, 444L);
+        LocalRemoteObjectCheckpoint checkpoint = new LocalRemoteObjectCheckpoint(tempDir);
+        checkpoint.add(oldCommit);
+
+        SharedMetadataImage image = new SharedMetadataImage();
+        byte[] key = SharedMetadataRecordCodec.objectKey(oldCommit.objectId());
+        image.apply(key, SharedMetadataRecordCodec.committedObjectValue(oldCommit));
+        image.apply(key, null);
+        image.markReady();
+
+        assertTrue(image.committedObjects().isEmpty());
+        IOException mismatch = assertThrows(
+            IOException.class,
+            () -> checkpoint.validateAgainstCommittedInventory(image.committedObjects())
+        );
+        assertTrue(mismatch.getMessage().contains("not COMMITTED"));
+        assertEquals(1, new LocalRemoteObjectCheckpoint(tempDir).references().size(),
+            "Mismatch must not silently discard a durable WAL-recovery checkpoint");
+    }
+
+    @Test
+    void legacyAndCurrentCheckpointsRequireExactCommittedPhysicalIdentity() throws Exception {
+        SharedObjectMetadata committed = object(131L, 100L, 110L, 444L);
+        LocalRemoteObjectCheckpoint current = new LocalRemoteObjectCheckpoint(tempDir.resolve("current"));
+        current.add(committed);
+        current.validateAgainstCommittedInventory(List.of(committed));
+
+        Path legacyDir = tempDir.resolve("legacy");
+        Files.createDirectories(legacyDir);
+        writeLegacyCheckpoint(legacyDir, committed);
+        LocalRemoteObjectCheckpoint legacy = new LocalRemoteObjectCheckpoint(legacyDir);
+        assertFalse(legacy.find(PARTITION, 105L).orElseThrow().hasObjectDescriptor());
+        legacy.validateAgainstCommittedInventory(List.of(committed));
+        assertEquals(1, legacy.references().size());
+    }
+
+    @Test
+    void checkpointCannotBorrowEquivalentObjectOrMutatedPackedDescriptor() throws Exception {
+        SharedObjectMetadata committed = object(132L, 100L, 110L, 444L);
+        LocalRemoteObjectCheckpoint checkpoint = new LocalRemoteObjectCheckpoint(tempDir);
+        checkpoint.add(committed);
+
+        SharedObjectMetadata differentObject = object(133L, 100L, 110L, 444L);
+        IOException absent = assertThrows(
+            IOException.class,
+            () -> checkpoint.validateAgainstCommittedInventory(List.of(differentObject))
+        );
+        assertTrue(absent.getMessage().contains("not COMMITTED"));
+
+        SharedObjectMetadata changedRange = object(132L, 100L, 111L, 444L);
+        IOException changed = assertThrows(
+            IOException.class,
+            () -> checkpoint.validateAgainstCommittedInventory(List.of(changedRange))
+        );
+        assertTrue(changed.getMessage().contains("range differs"));
+
+        SharedObjectMetadata changedDescriptor = new SharedObjectMetadata(
+            committed.objectId(), committed.objectSize() + 1L,
+            committed.objectChecksum() + 1L, committed.ranges()
+        );
+        IOException descriptor = assertThrows(
+            IOException.class,
+            () -> checkpoint.validateAgainstCommittedInventory(List.of(changedDescriptor))
+        );
+        assertTrue(descriptor.getMessage().contains("descriptor differs"));
+        assertEquals(1, checkpoint.references().size());
+    }
+
+    @Test
     void corruptedSnapshotMustFailClosedBecauseWalMayAlreadyBeGone() throws Exception {
         LocalRemoteObjectCheckpoint checkpoint = new LocalRemoteObjectCheckpoint(tempDir);
         checkpoint.add(object(100, 100, 110, 444));

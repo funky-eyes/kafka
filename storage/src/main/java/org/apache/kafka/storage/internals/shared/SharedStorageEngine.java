@@ -644,6 +644,19 @@ public final class SharedStorageEngine implements AutoCloseable {
         }
     }
 
+    /**
+     * Fail-closed bootstrap barrier for a local checkpoint restored before
+     * authoritative metadata replay. It must be called after the complete
+     * COMMITTED image is ready and before remote-control-plane admission.
+     */
+    public void validateLocalCheckpointAgainstCommittedInventory(List<SharedObjectMetadata> authoritative)
+        throws IOException {
+        Objects.requireNonNull(authoritative, "authoritative");
+        if (remoteCheckpoint != null) {
+            remoteCheckpoint.validateAgainstCommittedInventory(authoritative);
+        }
+    }
+
     public synchronized void commitRemoteObject(SharedObjectMetadata object) {
         SharedObjectMetadata committed = Objects.requireNonNull(object, "object");
         List<PartitionRevision> revisionsBefore = committed.ranges().stream()
