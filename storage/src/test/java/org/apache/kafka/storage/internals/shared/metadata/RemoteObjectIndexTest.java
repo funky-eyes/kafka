@@ -19,6 +19,12 @@ package org.apache.kafka.storage.internals.shared.metadata;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -98,6 +104,127 @@ class RemoteObjectIndexTest {
         assertFalse(duplicate.readViewChanged());
         assertFalse(duplicate.objectReferenced());
         assertEquals(10, index.find(PARTITION, 50).orElseThrow().objectId());
+    }
+
+    @Test
+    void physicalDuplicateReplayOrderConvergesAcrossReplicasWithoutGrantingGc() {
+        SharedObjectMetadata low = object(10L, 0L, 100L, 777L);
+        SharedObjectMetadata high = object(20L, 0L, 100L, 777L);
+        RemoteObjectIndex firstReplica = new RemoteObjectIndex();
+        RemoteObjectIndex secondReplica = new RemoteObjectIndex();
+
+        firstReplica.add(high);
+        assertEquals(20L, firstReplica.find(PARTITION, 50L).orElseThrow().objectId());
+        RemoteObjectIndex.PublicationResult canonical = firstReplica.add(low);
+        assertTrue(canonical.readViewChanged());
+        assertTrue(canonical.objectReferenced());
+        assertEquals(2L, firstReplica.revision(PARTITION));
+
+        secondReplica.add(low);
+        RemoteObjectIndex.PublicationResult duplicate = secondReplica.add(high);
+        assertFalse(duplicate.readViewChanged());
+        assertFalse(duplicate.objectReferenced());
+        assertEquals(1L, secondReplica.revision(PARTITION));
+
+        assertEquals(
+            firstReplica.find(PARTITION, 50L).orElseThrow(),
+            secondReplica.find(PARTITION, 50L).orElseThrow()
+        );
+        assertEquals(10L, firstReplica.find(PARTITION, 50L).orElseThrow().objectId());
+        assertFalse(firstReplica.referencesObject(20L));
+        // Local non-selection is deliberately NOT a physical DELETE grant.
+        assertFalse(secondReplica.referencesObject(20L));
+    }
+
+    @Test
+    void secondLowestCommittedCopyRemainsTheOnlyBoundedReadFallback() {
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(object(40L, 0L, 100L, 777L));
+        index.add(object(30L, 0L, 100L, 777L));
+        index.add(object(10L, 0L, 100L, 777L));
+        index.add(object(20L, 0L, 100L, 777L));
+
+        RemoteObjectIndex.RangeReference selected = index.find(PARTITION, 50L).orElseThrow();
+        assertEquals(10L, selected.objectId());
+        assertEquals(20L, index.findEquivalentAlternative(selected).orElseThrow().objectId());
+        RemoteObjectIndex.RangeReference failedSecond =
+            new RemoteObjectIndex.RangeReference(20L, range(PARTITION, 0L, 100L, 777L));
+        assertEquals(10L, index.findEquivalentAlternative(failedSecond).orElseThrow().objectId());
+        RemoteObjectIndex.RangeReference unrelated =
+            new RemoteObjectIndex.RangeReference(50L, range(PARTITION, 0L, 100L, 778L));
+        assertTrue(index.findEquivalentAlternative(unrelated).isEmpty());
+    }
+
+    @Test
+    void fallbackSnapshotWaitsForAtomicMetadataPublication() throws Exception {
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(object(30L, 0L, 100L, 777L));
+        index.add(object(40L, 0L, 100L, 777L));
+        RemoteObjectIndex.RangeReference failed = index.find(PARTITION, 50L).orElseThrow();
+        CountDownLatch started = new CountDownLatch(1);
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<Long> fallback;
+            synchronized (index) {
+                fallback = executor.submit(() -> {
+                    started.countDown();
+                    return index.findEquivalentAlternative(failed).orElseThrow().objectId();
+                });
+                assertTrue(started.await(5L, TimeUnit.SECONDS));
+                assertThrows(TimeoutException.class,
+                    () -> fallback.get(30L, TimeUnit.MILLISECONDS),
+                    "The exceptional read path must not observe half-published object maps");
+                // New COMMITTED object changes both canonical and alternate.
+                index.add(object(10L, 0L, 100L, 777L));
+            }
+            assertEquals(10L, fallback.get(10L, TimeUnit.SECONDS));
+            assertEquals(30L, index.findEquivalentAlternative(
+                index.find(PARTITION, 50L).orElseThrow()
+            ).orElseThrow().objectId());
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void invalidPackedObjectCannotPublishAnAlternateBeforeLaterRangeConflict() {
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(object(10L, PARTITION, 0L, 100L, 777L));
+        index.add(object(30L, OTHER_PARTITION, 0L, 100L, 900L));
+        long before = index.revision(PARTITION);
+
+        SharedObjectMetadata conflicting = new SharedObjectMetadata(
+            20L, 200L, 999L,
+            List.of(
+                range(PARTITION, 0L, 100L, 777L),
+                range(OTHER_PARTITION, 0L, 100L, 901L)
+            )
+        );
+        assertThrows(RemoteMetadataConflictException.class, () -> index.add(conflicting));
+        RemoteObjectIndex.RangeReference primary = index.find(PARTITION, 50L).orElseThrow();
+        assertEquals(10L, primary.objectId());
+        assertTrue(index.findEquivalentAlternative(primary).isEmpty());
+        assertEquals(before, index.revision(PARTITION));
+        assertEquals(30L, index.find(OTHER_PARTITION, 50L).orElseThrow().objectId());
+    }
+
+    @Test
+    void immutableAlternateDescriptorCannotChangeOnSameObjectReplay() {
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(object(10L, 0L, 100L, 777L));
+        index.add(object(20L, 0L, 100L, 777L));
+        RemoteObjectIndex.RangeReference original = index.findEquivalentAlternative(
+            index.find(PARTITION, 50L).orElseThrow()
+        ).orElseThrow();
+        assertEquals(20L, original.objectId());
+
+        SharedObjectMetadata conflicting = new SharedObjectMetadata(
+            20L, 101L, 778L, List.of(range(PARTITION, 0L, 100L, 777L))
+        );
+        assertThrows(RemoteMetadataConflictException.class, () -> index.add(conflicting));
+        assertEquals(original, index.findEquivalentAlternative(
+            index.find(PARTITION, 50L).orElseThrow()
+        ).orElseThrow());
     }
 
     @Test
@@ -207,6 +334,53 @@ class RemoteObjectIndexTest {
             List.of(range(PARTITION, 0, 100, 777))
         );
         assertThrows(RemoteMetadataConflictException.class, () -> index.add(conflicting));
+    }
+
+    @Test
+    void shouldRejectDifferentKafkaByteLengthWithSameOffsetsEpochAndCrc() {
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(object(10L, 0L, 100L, 777L));
+        RemoteObjectIndex.RangeReference primary = index.find(PARTITION, 50L).orElseThrow();
+        long priorRevision = index.revision(PARTITION);
+        SharedObjectRange incompatible = new SharedObjectRange(
+            PARTITION, new OffsetRange(0L, 100L), 3, 0L, 101, 777L
+        );
+        SharedObjectMetadata conflicting = new SharedObjectMetadata(
+            11L, 101L, 778L, List.of(incompatible)
+        );
+        assertThrows(RemoteMetadataConflictException.class, () -> index.add(conflicting));
+        assertEquals(primary, index.find(PARTITION, 50L).orElseThrow());
+        assertTrue(index.findEquivalentAlternative(primary).isEmpty());
+        assertEquals(priorRevision, index.revision(PARTITION));
+        assertEquals(1, index.ranges(PARTITION).size());
+    }
+
+    @Test
+    void laterPackedLengthConflictCannotPublishAnEarlierLowerObjectId() {
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(object(10L, PARTITION, 0L, 100L, 777L));
+        index.add(object(20L, OTHER_PARTITION, 0L, 100L, 888L));
+        long partitionRevision = index.revision(PARTITION);
+        long otherRevision = index.revision(OTHER_PARTITION);
+
+        SharedObjectMetadata conflicting = new SharedObjectMetadata(
+            5L, 201L, 1234L,
+            List.of(
+                range(PARTITION, 0L, 100L, 777L),
+                new SharedObjectRange(
+                    OTHER_PARTITION, new OffsetRange(0L, 100L), 3, 100L, 101, 888L
+                )
+            )
+        );
+        assertThrows(RemoteMetadataConflictException.class, () -> index.add(conflicting));
+        RemoteObjectIndex.RangeReference primary = index.find(PARTITION, 50L).orElseThrow();
+        RemoteObjectIndex.RangeReference other = index.find(OTHER_PARTITION, 50L).orElseThrow();
+        assertEquals(10L, primary.objectId());
+        assertEquals(20L, other.objectId());
+        assertTrue(index.findEquivalentAlternative(primary).isEmpty());
+        assertTrue(index.findEquivalentAlternative(other).isEmpty());
+        assertEquals(partitionRevision, index.revision(PARTITION));
+        assertEquals(otherRevision, index.revision(OTHER_PARTITION));
     }
 
     @Test

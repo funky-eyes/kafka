@@ -35,7 +35,9 @@ import java.util.Map;
 import java.util.NavigableMap;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.TreeMap;
+import java.util.function.LongFunction;
 import java.util.zip.CRC32C;
 
 /**
@@ -122,6 +124,104 @@ public final class LocalRemoteObjectCheckpoint {
         return flatten(byPartition);
     }
 
+    /**
+     * Verifies that a durable local recovery reference still belongs to the
+     * final, authoritative COMMITTED metadata image after its initial replay.
+     *
+     * <p>A local checkpoint may predate a historical object tombstone. WAL
+     * payloads may already have been reclaimed, so a mismatch must fail
+     * bootstrap rather than silently dropping a reference or serving
+     * unauthenticated S3 bytes. This check never authorizes physical GC.</p>
+     */
+    public void validateAgainstCommittedInventory(List<SharedObjectMetadata> authoritative) throws IOException {
+        Objects.requireNonNull(authoritative, "authoritative");
+        List<RemoteObjectIndex.RangeReference> local = references();
+        if (local.isEmpty()) {
+            return;
+        }
+        Map<Long, SharedObjectMetadata> committed = new HashMap<>();
+        for (SharedObjectMetadata object : authoritative) {
+            Objects.requireNonNull(object, "committed object");
+            if (committed.putIfAbsent(object.objectId(), object) != null) {
+                throw new IOException("Duplicate COMMITTED object ID in authoritative replay: " + object.objectId());
+            }
+        }
+        for (RemoteObjectIndex.RangeReference reference : local) {
+            SharedObjectMetadata object = committed.get(reference.objectId());
+            if (object == null) {
+                throw new IOException(
+                    "Local remote checkpoint object not COMMITTED after authoritative replay: " + reference.objectId()
+                );
+            }
+            if (!object.ranges().contains(reference.range())) {
+                throw new IOException(
+                    "Local remote checkpoint range differs from authoritative COMMIT: " + reference.objectId()
+                );
+            }
+            if (reference.hasObjectDescriptor()
+                && (reference.objectSize() != object.objectSize()
+                    || reference.objectChecksum() != object.objectChecksum())) {
+                throw new IOException(
+                    "Local remote checkpoint descriptor differs from authoritative COMMIT: " + reference.objectId()
+                );
+            }
+        }
+    }
+
+    /**
+     * Verify local durable references from the authoritative metadata image
+     * without copying the cluster-wide COMMITTED inventory. Resolve each
+     * packed object ID once and index its immutable batch ranges only once.
+     * This is not authority for remote GC or local WAL reclamation.
+     */
+    public void validateAgainstCommittedLookup(
+        LongFunction<Optional<SharedObjectMetadata>> lookup
+    ) throws IOException {
+        Objects.requireNonNull(lookup, "lookup");
+        Map<Long, SharedObjectMetadata> objects = new HashMap<>();
+        Map<Long, Set<SharedObjectRange>> indexedRanges = new HashMap<>();
+        Map<SharedPartitionId, NavigableMap<Long, RemoteObjectIndex.RangeReference>> snapshot = byPartition;
+        for (NavigableMap<Long, RemoteObjectIndex.RangeReference> ranges : snapshot.values()) {
+            for (RemoteObjectIndex.RangeReference reference : ranges.values()) {
+                long objectId = reference.objectId();
+                if (!objects.containsKey(objectId)) {
+                    Optional<SharedObjectMetadata> found;
+                    try {
+                        found = Objects.requireNonNull(
+                            lookup.apply(objectId), "COMMITTED lookup returned null"
+                        );
+                    } catch (RuntimeException failure) {
+                        throw new IOException("Unable to check local checkpoint object " + objectId, failure);
+                    }
+                    if (found.isEmpty()) {
+                        throw new IOException(
+                            "Local remote checkpoint object not COMMITTED after authoritative replay: " + objectId
+                        );
+                    }
+                    SharedObjectMetadata committed = found.get();
+                    if (committed.objectId() != objectId) {
+                        throw new IOException("Authoritative lookup returned incorrect physical object " + objectId);
+                    }
+                    objects.put(objectId, committed);
+                    indexedRanges.put(objectId, Set.copyOf(committed.ranges()));
+                }
+                if (!indexedRanges.get(objectId).contains(reference.range())) {
+                    throw new IOException(
+                        "Local remote checkpoint range differs from authoritative COMMIT: " + objectId
+                    );
+                }
+                SharedObjectMetadata committed = objects.get(objectId);
+                if (reference.hasObjectDescriptor()
+                    && (reference.objectSize() != committed.objectSize()
+                        || reference.objectChecksum() != committed.objectChecksum())) {
+                    throw new IOException(
+                        "Local remote checkpoint descriptor differs from authoritative COMMIT: " + objectId
+                    );
+                }
+            }
+        }
+    }
+
     /** Atomically merges one authoritative committed object into the local durable snapshot. */
     public void add(SharedObjectMetadata object) throws IOException {
         addAll(List.of(Objects.requireNonNull(object, "object")));
@@ -181,7 +281,9 @@ public final class LocalRemoteObjectCheckpoint {
         RemoteObjectIndex.RangeReference incoming
     ) throws IOException {
         if (existing.objectId() != incoming.objectId()) {
-            return existing;
+            // Mirror RemoteObjectIndex's replay-order-independent read
+            // selection. Kafka metadata remains the source of truth.
+            return incoming.objectId() < existing.objectId() ? incoming : existing;
         }
         if (!existing.range().equals(incoming.range())) {
             throw new IOException(

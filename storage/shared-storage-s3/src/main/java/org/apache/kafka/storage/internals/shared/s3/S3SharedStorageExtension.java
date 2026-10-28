@@ -293,6 +293,11 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
                 SharedMetadataClientConfiguration.from(context);
             // open() does not return until the initial authoritative image has been replayed into the engine.
             newMetadataStore = openMetadataStoreWithRetry(metadataConfiguration, engine);
+            // The remote read index already contains durable local checkpoint
+            // references. A historical metadata tombstone may have removed
+            // one of those objects from the final authoritative replay.
+            // Refuse remote-plane readiness instead of serving a stale copy.
+            engine.validateLocalCheckpointAgainstCommittedLookup(newMetadataStore::committedObject);
             reconcileLoadedLogsAfterMetadataReplay(engine);
 
             KafkaObjectMetadataStore.SequenceBlock initialBlock =

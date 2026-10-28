@@ -54,6 +54,42 @@ class OrphanObjectCleanerTest {
         assertTrue(metadata.isCommitted(objectId));
     }
 
+
+    @Test
+    void committedMetadataDeleteWithoutControllerRetirementIsDenied() throws Exception {
+        InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
+        long objectId = 241L;
+        metadata.prepare(objectId, 100L).get();
+        metadata.commit(metadata(objectId)).get();
+
+        ExecutionException rejected = assertThrows(
+            ExecutionException.class, () -> metadata.delete(objectId).get()
+        );
+        assertTrue(rejected.getCause() instanceof UnsupportedOperationException);
+        assertTrue(metadata.isCommitted(objectId));
+        assertEquals(List.of(metadata(objectId)), metadata.committedObjects());
+    }
+
+    @Test
+    void cleanupClaimTombstoneCannotBeErasedWithoutAuthority() throws Exception {
+        InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
+        long objectId = 242L;
+        metadata.prepare(objectId, 100L).get();
+        assertTrue(metadata.claimCleanup(objectId, 100L).get());
+
+        ExecutionException rejected = assertThrows(
+            ExecutionException.class, () -> metadata.delete(objectId).get()
+        );
+        assertTrue(rejected.getCause() instanceof UnsupportedOperationException);
+        assertTrue(metadata.isCleanupClaimed(objectId));
+
+        // A delayed COMMIT must still lose after a failed attempt to erase
+        // the PREPARED cleanup fence.
+        assertThrows(ExecutionException.class, () -> metadata.commit(metadata(objectId)).get());
+        assertFalse(metadata.isCommitted(objectId));
+        assertTrue(metadata.isCleanupClaimed(objectId));
+    }
+
     @Test
     void cleanupClaimAndCommitRaceHasExactlyOneWinner() throws Exception {
         InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
@@ -168,7 +204,7 @@ class OrphanObjectCleanerTest {
     }
 
     @Test
-    void fullyRedundantCommittedObjectIsDeletedThenTombstoned() throws Exception {
+    void locallyRedundantCommittedCopyIsRetainedWithoutReplicatedRetirement() throws Exception {
         InMemoryObjectStore objects = new InMemoryObjectStore();
         InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
         ActiveObjectUploads activeUploads = new ActiveObjectUploads();
@@ -188,18 +224,18 @@ class OrphanObjectCleanerTest {
         assertFalse(duplicate.objectReferenced());
 
         OrphanObjectCleaner cleaner = new OrphanObjectCleaner(objects, metadata, activeUploads, index);
-        assertEquals(1, cleaner.clean(1_000L).get());
+        assertEquals(0, cleaner.clean(1_000L).get());
 
         assertTrue(objects.contains(retained.objectId()));
         assertTrue(metadata.isCommitted(retained.objectId()));
-        assertFalse(objects.contains(redundant.objectId()));
-        assertFalse(metadata.isCommitted(redundant.objectId()));
+        assertTrue(objects.contains(redundant.objectId()));
+        assertTrue(metadata.isCommitted(redundant.objectId()));
         assertTrue(index.referencesObject(retained.objectId()));
         assertFalse(index.referencesObject(redundant.objectId()));
     }
 
     @Test
-    void failedRedundantCommittedDeleteRetainsCommitForRetry() throws Exception {
+    void localRedundancyNeverInvokesPhysicalDeleteEvenWithRetry() throws Exception {
         InMemoryObjectStore delegate = new InMemoryObjectStore();
         AtomicBoolean failFirstDelete = new AtomicBoolean(true);
         ObjectStore flakyObjects = new ObjectStore() {
@@ -237,14 +273,59 @@ class OrphanObjectCleanerTest {
         OrphanObjectCleaner cleaner =
             new OrphanObjectCleaner(flakyObjects, metadata, new ActiveObjectUploads(), index);
 
-        ExecutionException failure = assertThrows(ExecutionException.class, () -> cleaner.clean(1_000L).get());
-        assertTrue(failure.getCause().getMessage().contains("redundant delete failure"));
+        assertEquals(0, cleaner.clean(1_000L).get());
+        assertEquals(0, cleaner.clean(1_000L).get());
+        assertTrue(failFirstDelete.get(), "No COMMITTED physical DELETE must be attempted");
+        assertTrue(metadata.isCommitted(retained.objectId()));
         assertTrue(metadata.isCommitted(redundant.objectId()));
+        assertTrue(delegate.contains(retained.objectId()));
         assertTrue(delegate.contains(redundant.objectId()));
+    }
 
-        assertEquals(1, cleaner.clean(1_000L).get());
-        assertFalse(metadata.isCommitted(redundant.objectId()));
-        assertFalse(delegate.contains(redundant.objectId()));
+
+    @Test
+    void twoReplicasWithOppositeLocalWinnersCannotDeleteEachOthersCommittedObjects() throws Exception {
+        InMemoryObjectStore objects = new InMemoryObjectStore();
+        InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
+        SharedObjectMetadata first = metadata(231L);
+        SharedObjectMetadata second = metadata(232L);
+        metadata.prepare(first.objectId(), 100L).get();
+        metadata.commit(first).get();
+        metadata.prepare(second.objectId(), 101L).get();
+        metadata.commit(second).get();
+        objects.put(first.objectId(), ByteBuffer.wrap(new byte[] {1})).get();
+        objects.put(second.objectId(), ByteBuffer.wrap(new byte[] {2})).get();
+
+        // Different replay progress can temporarily select opposite copies.
+        RemoteObjectIndex brokerOne = new RemoteObjectIndex();
+        RemoteObjectIndex brokerTwo = new RemoteObjectIndex();
+        brokerOne.add(first);
+        brokerTwo.add(second);
+        assertTrue(brokerOne.referencesObject(first.objectId()));
+        assertFalse(brokerOne.referencesObject(second.objectId()));
+        assertFalse(brokerTwo.referencesObject(first.objectId()));
+        assertTrue(brokerTwo.referencesObject(second.objectId()));
+
+        OrphanObjectCleaner firstCleaner =
+            new OrphanObjectCleaner(objects, metadata, new ActiveObjectUploads(), brokerOne);
+        OrphanObjectCleaner secondCleaner =
+            new OrphanObjectCleaner(objects, metadata, new ActiveObjectUploads(), brokerTwo);
+        assertEquals(0, firstCleaner.clean(1_000L).get());
+        assertEquals(0, secondCleaner.clean(1_000L).get());
+        // Fully replayed replicas converge; the unused COMMITTED copy
+        // must remain physically present and committed anyway.
+        brokerOne.add(second);
+        brokerTwo.add(first);
+        assertTrue(brokerOne.referencesObject(first.objectId()));
+        assertTrue(brokerTwo.referencesObject(first.objectId()));
+        assertFalse(brokerOne.referencesObject(second.objectId()));
+        assertFalse(brokerTwo.referencesObject(second.objectId()));
+        assertEquals(0, firstCleaner.clean(1_000L).get());
+        assertEquals(0, secondCleaner.clean(1_000L).get());
+        assertTrue(objects.contains(first.objectId()));
+        assertTrue(objects.contains(second.objectId()));
+        assertTrue(metadata.isCommitted(first.objectId()));
+        assertTrue(metadata.isCommitted(second.objectId()));
     }
 
     @Test

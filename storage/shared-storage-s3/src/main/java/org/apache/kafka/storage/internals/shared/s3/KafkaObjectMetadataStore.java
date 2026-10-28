@@ -49,6 +49,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.NavigableMap;
 import java.util.Objects;
+import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.CompletableFuture;
@@ -496,7 +498,13 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
 
     @Override
     public CompletableFuture<Void> delete(long objectId) {
-        return writeRecord(SharedMetadataRecordCodec.objectKey(objectId), null);
+        // There is no Controller/KRaft authorization for COMMITTED reference
+        // retirement yet. An unfenced compacted-topic tombstone could hide an
+        // object still referenced by another Kafka replica. Preserve the
+        // historical replay decoder, but never produce a new tombstone here.
+        return CompletableFuture.failedFuture(new UnsupportedOperationException(
+            "Object metadata deletion requires durable KRaft retirement authority"
+        ));
     }
 
     @Override
@@ -512,23 +520,48 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
 
     @Override
     public CompletableFuture<Void> completeCleanup(long objectId) {
-        ObjectMetadataStore.PreparedObject claimed = image.cleanupClaimedObjects().stream()
-            .filter(object -> object.objectId() == objectId)
-            .findFirst()
-            .orElse(null);
-        if (claimed == null) {
-            // Already DELETED is an idempotent success. Callers only complete a cleanup after a successful claim.
+        final OptionalLong claimedTimestamp;
+        try {
+            claimedTimestamp = completionTarget(image, objectId);
+        } catch (RuntimeException failure) {
+            return CompletableFuture.failedFuture(failure);
+        }
+        if (claimedTimestamp.isEmpty()) {
+            // A durable DELETED fence is the only valid idempotent no-op.
             return CompletableFuture.completedFuture(null);
         }
         return writeRecord(
             SharedMetadataRecordCodec.objectCleanupKey(objectId),
-            SharedMetadataRecordCodec.cleanupDeletedValue(claimed.createdTimeMs())
+            SharedMetadataRecordCodec.cleanupDeletedValue(claimedTimestamp.getAsLong())
         );
+    }
+
+    /**
+     * Decides completion from one replayed object-key lookup, not from the
+     * full CLAIMED inventory. No source other than a durable cleanup claim
+     * may initiate the CLAIMED -> DELETED metadata transition.
+     */
+    static OptionalLong completionTarget(SharedMetadataImage image, long objectId) {
+        SharedMetadataImage.CleanupCompletionEvidence evidence =
+            Objects.requireNonNull(image, "image").cleanupCompletionEvidence(objectId);
+        return switch (evidence.status()) {
+            case CLAIMED -> OptionalLong.of(evidence.createdTimeMs());
+            case DELETED -> OptionalLong.empty();
+            case ABSENT -> throw new IllegalStateException(
+                "Object cleanup was not claimed: " + objectId
+            );
+        };
     }
 
     @Override
     public List<SharedObjectMetadata> committedObjects() {
         return image.committedObjects();
+    }
+
+    /** Resolve one COMMITTED object from the ready, authoritative image. */
+    public Optional<SharedObjectMetadata> committedObject(long objectId) {
+        requireReady();
+        return image.committedObject(objectId);
     }
 
     @Override

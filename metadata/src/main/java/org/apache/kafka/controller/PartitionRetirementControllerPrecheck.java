@@ -30,7 +30,10 @@ import java.util.Objects;
  * image. An affirmative result is NOT an authorization token, KRaft append, durable
  * generation claim, or proof of a current source log start. The registration can change
  * immediately after this method returns; a future writer must validate again atomically
- * with its authoritative controller commit. Nothing here emits retirement metadata.</p>
+ * with its authoritative controller commit. Native replica reassignment
+ * must be complete; even a matching leaderEpoch is insufficient to fence
+ * a changed ISR/replica topology because Kafka partitionEpoch advances
+ * independently. Nothing here emits retirement metadata.</p>
  */
 final class PartitionRetirementControllerPrecheck {
     private PartitionRetirementControllerPrecheck() {
@@ -72,6 +75,40 @@ final class PartitionRetirementControllerPrecheck {
         if (registration == null) {
             return Finding.PARTITION_NOT_PRESENT;
         }
+        Finding leader = assessLeader(registration, brokerId, sourceLeaderEpoch);
+        if (leader != Finding.CONTROLLER_IMAGE_MATCH) {
+            return leader;
+        }
+        return assessReplicaTopology(registration, brokerId);
+    }
+
+    /**
+     * Strict KRaft partition-generation fence. Kafka can update ISR or
+     * replica assignments without changing leaderEpoch. The eventual
+     * retirement writer must revalidate this in its serialized event.
+     */
+    static Finding assessRegistration(
+        PartitionRegistration registration,
+        int brokerId,
+        int sourceLeaderEpoch,
+        int expectedPartitionEpoch
+    ) {
+        if (expectedPartitionEpoch < 0) {
+            throw new IllegalArgumentException("Partition epoch must be non-negative");
+        }
+        Finding leaderAndTopology = assessRegistration(registration, brokerId, sourceLeaderEpoch);
+        if (leaderAndTopology != Finding.CONTROLLER_IMAGE_MATCH) {
+            return leaderAndTopology;
+        }
+        return registration.partitionEpoch == expectedPartitionEpoch
+            ? Finding.CONTROLLER_IMAGE_MATCH : Finding.KAFKA_PARTITION_EPOCH_MISMATCH;
+    }
+
+    private static Finding assessLeader(
+        PartitionRegistration registration,
+        int brokerId,
+        int sourceLeaderEpoch
+    ) {
         if (registration.leader < 0) {
             return Finding.NO_ACTIVE_LEADER;
         }
@@ -84,9 +121,19 @@ final class PartitionRetirementControllerPrecheck {
         if (registration.leaderRecoveryState != LeaderRecoveryState.RECOVERED) {
             return Finding.LEADER_STILL_RECOVERING;
         }
+        return Finding.CONTROLLER_IMAGE_MATCH;
+    }
+
+    private static Finding assessReplicaTopology(PartitionRegistration registration, int brokerId) {
         if (!Replicas.contains(registration.replicas, brokerId)
             || !Replicas.contains(registration.isr, brokerId)) {
             return Finding.LEADER_NOT_IN_ISR;
+        }
+        // Kafka PartitionChangeRecord can change replica membership without
+        // incrementing leaderEpoch. Until all adding/removing replicas have
+        // finished, source ownership and reader coverage are not stationary.
+        if (registration.addingReplicas.length != 0 || registration.removingReplicas.length != 0) {
+            return Finding.REPLICA_REASSIGNMENT_IN_PROGRESS;
         }
         return Finding.CONTROLLER_IMAGE_MATCH;
     }
@@ -98,6 +145,8 @@ final class PartitionRetirementControllerPrecheck {
         BROKER_NOT_LEADER,
         LEADER_STILL_RECOVERING,
         LEADER_NOT_IN_ISR,
+        REPLICA_REASSIGNMENT_IN_PROGRESS,
+        KAFKA_PARTITION_EPOCH_MISMATCH,
         CONTROLLER_IMAGE_MATCH
     }
 }

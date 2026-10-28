@@ -28,11 +28,21 @@ import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class StreamObjectIndexCacheTest {
     private static final SharedPartitionId PARTITION = new SharedPartitionId(51, 61, 0);
@@ -115,6 +125,121 @@ class StreamObjectIndexCacheTest {
 
         assertEquals(0, store.readCount());
         assertEquals(0, cache.size());
+    }
+
+    @Test
+    void blockingRangeGetCannotHoldTheSharedIndexCacheMonitor() throws Exception {
+        PackedObject slow = packObject(925L);
+        PackedObject fast = packObject(926L);
+        CountingObjectStore slowDelegate = new CountingObjectStore();
+        slowDelegate.install(slow.metadata().objectId(), slow.bytes());
+        CountingObjectStore fastStore = new CountingObjectStore();
+        fastStore.install(fast.metadata().objectId(), fast.bytes());
+
+        CountDownLatch firstHeaderEntered = new CountDownLatch(1);
+        CountDownLatch releaseFirstHeader = new CountDownLatch(1);
+        AtomicInteger slowHeaderCalls = new AtomicInteger();
+        ObjectStore blockingStore = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                if (position == 0L) {
+                    slowHeaderCalls.incrementAndGet();
+                    firstHeaderEntered.countDown();
+                    try {
+                        if (!releaseFirstHeader.await(10L, TimeUnit.SECONDS)) {
+                            return CompletableFuture.failedFuture(
+                                new IllegalStateException("Timed out releasing first Header GET"));
+                        }
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        return CompletableFuture.failedFuture(interrupted);
+                    }
+                }
+                return slowDelegate.rangeRead(objectId, position, length);
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+        };
+        StreamObjectIndexCache cache = new StreamObjectIndexCache(4);
+        StreamObjectIndexReader slowLoader = new StreamObjectIndexReader(blockingStore);
+        StreamObjectIndexReader fastLoader = new StreamObjectIndexReader(fastStore);
+        RemoteObjectIndex.RangeReference slowRef = reference(slow.metadata());
+        RemoteObjectIndex.RangeReference fastRef = reference(fast.metadata());
+        ExecutorService workers = Executors.newFixedThreadPool(3);
+        try {
+            Future<CompletableFuture<Optional<StreamObjectIndexReader.IndexSnapshot>>> first =
+                workers.submit(() -> cache.get(slowRef, slowLoader));
+            assertTrue(firstHeaderEntered.await(5L, TimeUnit.SECONDS));
+            Future<CompletableFuture<Optional<StreamObjectIndexReader.IndexSnapshot>>> duplicate =
+                workers.submit(() -> cache.get(slowRef, slowLoader));
+            CompletableFuture<Optional<StreamObjectIndexReader.IndexSnapshot>> same =
+                duplicate.get(5L, TimeUnit.SECONDS);
+            assertFalse(same.isDone(), "Concurrent same-object load must share its pending Future");
+
+            Future<Optional<StreamObjectIndexReader.IndexSnapshot>> other =
+                workers.submit(() -> cache.get(fastRef, fastLoader).get(5L, TimeUnit.SECONDS));
+            assertTrue(other.get(5L, TimeUnit.SECONDS).isPresent(),
+                "Independent object must not block behind another object's Range GET");
+            assertEquals(3, fastStore.readCount());
+            assertEquals(1, slowHeaderCalls.get(), "Same object must initiate only one Header GET");
+            assertFalse(same.isDone());
+
+            releaseFirstHeader.countDown();
+            assertSame(same, first.get(5L, TimeUnit.SECONDS));
+            assertTrue(same.get(5L, TimeUnit.SECONDS).isPresent());
+            assertEquals(3, slowDelegate.readCount());
+            assertEquals(2, cache.size());
+        } finally {
+            releaseFirstHeader.countDown();
+            workers.shutdownNow();
+        }
+    }
+
+    @Test
+    void synchronouslyThrowingObjectStoreDoesNotPoisonIndexCache() throws Exception {
+        PackedObject packed = packObject(927L);
+        CountingObjectStore delegate = new CountingObjectStore();
+        delegate.install(packed.metadata().objectId(), packed.bytes());
+        AtomicInteger requests = new AtomicInteger();
+        IllegalStateException injected = new IllegalStateException("synchronous Range GET rejected");
+        ObjectStore store = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                if (requests.getAndIncrement() == 0) {
+                    throw injected;
+                }
+                return delegate.rangeRead(objectId, position, length);
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+        };
+        StreamObjectIndexCache cache = new StreamObjectIndexCache(4);
+        StreamObjectIndexReader loader = new StreamObjectIndexReader(store);
+        RemoteObjectIndex.RangeReference ref = reference(packed.metadata());
+
+        ExecutionException first = assertThrows(ExecutionException.class,
+            () -> cache.get(ref, loader).get(5L, TimeUnit.SECONDS));
+        assertSame(injected, first.getCause());
+        assertEquals(0, cache.size(), "A failed synchronous load must not remain cached");
+        assertTrue(cache.get(ref, loader).get(5L, TimeUnit.SECONDS).isPresent());
+        assertEquals(3, delegate.readCount());
+        assertEquals(1, cache.size());
     }
 
     private PackedObject packObject(long objectId) throws Exception {

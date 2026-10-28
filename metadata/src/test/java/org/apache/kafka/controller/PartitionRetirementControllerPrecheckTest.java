@@ -18,10 +18,13 @@ package org.apache.kafka.controller;
 
 import org.apache.kafka.common.DirectoryId;
 import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.metadata.PartitionChangeRecord;
 import org.apache.kafka.metadata.LeaderRecoveryState;
 import org.apache.kafka.metadata.PartitionRegistration;
 
 import org.junit.jupiter.api.Test;
+
+import java.util.List;
 
 import static org.apache.kafka.controller.PartitionRetirementControllerPrecheck.Finding;
 import static org.apache.kafka.metadata.LeaderConstants.NO_LEADER;
@@ -108,6 +111,70 @@ class PartitionRetirementControllerPrecheckTest {
             .build();
 
         assertEquals(Finding.LEADER_NOT_IN_ISR, assess(invalid, 1, 20));
+    }
+
+    @Test
+    void isrOnlyChangeMustRejectOldPartitionEpochWithoutBumpingLeaderEpoch() {
+        PartitionRegistration before = registration(
+            1, 20, LeaderRecoveryState.RECOVERED, new int[] {1, 2}
+        );
+        PartitionRegistration changed = before.merge(new PartitionChangeRecord()
+            .setIsr(List.of(1)));
+        assertEquals(before.leaderEpoch, changed.leaderEpoch);
+        assertEquals(before.partitionEpoch + 1, changed.partitionEpoch);
+        assertEquals(Finding.KAFKA_PARTITION_EPOCH_MISMATCH,
+            PartitionRetirementControllerPrecheck.assessRegistration(changed, 1, 20, before.partitionEpoch));
+        assertEquals(Finding.CONTROLLER_IMAGE_MATCH,
+            PartitionRetirementControllerPrecheck.assessRegistration(changed, 1, 20, changed.partitionEpoch));
+        assertThrows(IllegalArgumentException.class, () ->
+            PartitionRetirementControllerPrecheck.assessRegistration(changed, 1, 20, -1));
+    }
+
+    @Test
+    void addingReplicaWithoutLeaderChangeBlocksRetirementPrecheck() {
+        PartitionRegistration before = registration(
+            1, 20, LeaderRecoveryState.RECOVERED, new int[] {1, 2}
+        );
+        PartitionRegistration changing = before.merge(new PartitionChangeRecord()
+            .setReplicas(List.of(1, 2, 3, 4))
+            .setDirectories(Uuid.toList(DirectoryId.unassignedArray(4)))
+            .setAddingReplicas(List.of(4)));
+        assertEquals(before.leaderEpoch, changing.leaderEpoch);
+        assertEquals(before.partitionEpoch + 1, changing.partitionEpoch);
+        assertEquals(Finding.REPLICA_REASSIGNMENT_IN_PROGRESS, assess(changing, 1, 20));
+    }
+
+    @Test
+    void removingReplicaWithoutLeaderChangeBlocksRetirementPrecheck() {
+        PartitionRegistration before = registration(
+            1, 20, LeaderRecoveryState.RECOVERED, new int[] {1, 2}
+        );
+        PartitionRegistration changing = before.merge(new PartitionChangeRecord()
+            .setRemovingReplicas(List.of(3)));
+        assertEquals(before.leaderEpoch, changing.leaderEpoch);
+        assertEquals(before.partitionEpoch + 1, changing.partitionEpoch);
+        assertEquals(Finding.REPLICA_REASSIGNMENT_IN_PROGRESS, assess(changing, 1, 20));
+    }
+
+    @Test
+    void reassignmentCompletionRestoresOnlyReadOnlyLeaderFinding() {
+        PartitionRegistration initial = registration(
+            1, 20, LeaderRecoveryState.RECOVERED, new int[] {1, 2}
+        );
+        PartitionRegistration reassigning = initial.merge(new PartitionChangeRecord()
+            .setReplicas(List.of(1, 2, 3, 4))
+            .setDirectories(Uuid.toList(DirectoryId.unassignedArray(4)))
+            .setAddingReplicas(List.of(4)));
+        assertEquals(Finding.REPLICA_REASSIGNMENT_IN_PROGRESS, assess(reassigning, 1, 20));
+
+        PartitionRegistration completed = reassigning.merge(new PartitionChangeRecord()
+            .setIsr(List.of(1, 2, 4))
+            .setAddingReplicas(List.of())
+            .setRemovingReplicas(List.of()));
+        assertEquals(initial.leaderEpoch, completed.leaderEpoch);
+        assertEquals(initial.partitionEpoch + 2, completed.partitionEpoch);
+        assertEquals(Finding.CONTROLLER_IMAGE_MATCH, assess(completed, 1, 20));
+        // CONTROLLER_IMAGE_MATCH is a diagnostic, not a GC authorization.
     }
 
     @Test

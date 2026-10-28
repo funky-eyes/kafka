@@ -128,6 +128,8 @@ REAL_S3_EVIDENCE_BRANCH_SUFFIX = "-real-s3"
 
 JAVA_PRODUCTION_PREFIXES = (
     "storage/src/main/java/org/apache/kafka/storage/internals/shared/",
+    "metadata/src/main/java/org/apache/kafka/controller/PartitionRetirement",
+    "metadata/src/main/java/org/apache/kafka/image/PartitionRetirementAuthority",
 )
 
 PRODUCTION_PREFIXES = (
@@ -135,6 +137,15 @@ PRODUCTION_PREFIXES = (
 )
 
 PRODUCTION_PATHS = {
+    "metadata/src/main/java/org/apache/kafka/controller/QuorumController.java",
+    "metadata/src/main/java/org/apache/kafka/controller/ControllerRequestContext.java",
+    "core/src/main/scala/kafka/server/ControllerApis.scala",
+    "metadata/src/main/java/org/apache/kafka/metadata/BrokerHeartbeatReply.java",
+    "metadata/src/main/java/org/apache/kafka/metadata/PartitionRetirementAuthorityState.java",
+    "clients/src/main/java/org/apache/kafka/common/replica/PartitionRetirementSourceProbe.java",
+    "clients/src/main/java/org/apache/kafka/common/requests/BrokerHeartbeatRequest.java",
+    "clients/src/main/resources/common/message/BrokerHeartbeatRequest.json",
+    "clients/src/main/resources/common/message/BrokerHeartbeatResponse.json",
     "build.gradle",
     "settings.gradle",
     "gradle.properties",
@@ -158,6 +169,8 @@ PRODUCTION_PATHS = {
     "core/src/main/java/kafka/server/builders/LogManagerBuilder.java",
     "core/src/main/scala/kafka/server/BrokerServer.scala",
     "server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java",
+    "server/src/main/java/org/apache/kafka/server/BrokerHeartbeatSourceWalReportDispatch.java",
+    "server-common/src/main/java/org/apache/kafka/server/common/NodeToControllerChannelManager.java",
     "core/src/main/scala/kafka/server/ControllerServer.scala",
     "core/src/main/scala/kafka/server/ReplicaManager.scala",
     "core/src/main/scala/kafka/server/ReplicaFetcherManager.scala",

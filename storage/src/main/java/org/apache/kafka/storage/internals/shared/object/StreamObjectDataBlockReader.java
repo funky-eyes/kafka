@@ -106,6 +106,13 @@ final class StreamObjectDataBlockReader {
             expectedLength != expected.blockLength()) {
             throw new IOException("Stream data block header does not match index entry");
         }
+        // Every batch needs its fixed entry header and at least one byte
+        // of payload. A checksum-valid but forged count must never drive
+        // the ArrayList preallocation below.
+        int minimumBatchBytes = StreamObjectFormat.BATCH_ENTRY_HEADER_BYTES + 1;
+        if (header.batchCount() > header.dataLength() / minimumBatchBytes) {
+            throw new IOException("Stream data block batch count exceeds available payload bytes");
+        }
     }
 
     private static List<BatchEntry> readBatches(ByteBuffer block, int dataEnd, Header header) throws IOException {

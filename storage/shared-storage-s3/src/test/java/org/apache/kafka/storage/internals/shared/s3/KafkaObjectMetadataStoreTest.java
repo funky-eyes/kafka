@@ -27,6 +27,7 @@ import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -63,6 +64,43 @@ class KafkaObjectMetadataStoreTest {
         );
         KafkaObjectMetadataStore.rejectUnfencedRetirementWrite(
             org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.brokerSequenceKey(1)
+        );
+    }
+
+    @Test
+    void cleanupCompletionOnlyAcknowledgesClaimedOrDurablyDeletedObjects() {
+        SharedMetadataImage image = new SharedMetadataImage();
+        long claimed = 301L;
+        long deleted = 302L;
+        long prepared = 303L;
+        long unknown = 304L;
+        image.apply(
+            SharedMetadataRecordCodec.objectCleanupKey(claimed),
+            SharedMetadataRecordCodec.cleanupClaimedValue(1_000L)
+        );
+        image.apply(
+            SharedMetadataRecordCodec.objectCleanupKey(deleted),
+            SharedMetadataRecordCodec.cleanupDeletedValue(2_000L)
+        );
+        image.apply(
+            SharedMetadataRecordCodec.objectKey(prepared),
+            SharedMetadataRecordCodec.preparedObjectValue(3_000L)
+        );
+        image.markReady();
+
+        assertEquals(OptionalLong.of(1_000L), KafkaObjectMetadataStore.completionTarget(image, claimed));
+        assertEquals(OptionalLong.empty(), KafkaObjectMetadataStore.completionTarget(image, deleted));
+        assertThrows(
+            IllegalStateException.class,
+            () -> KafkaObjectMetadataStore.completionTarget(image, prepared)
+        );
+        assertThrows(
+            IllegalStateException.class,
+            () -> KafkaObjectMetadataStore.completionTarget(image, unknown)
+        );
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> KafkaObjectMetadataStore.completionTarget(image, 0L)
         );
     }
 

@@ -40,7 +40,9 @@ import java.util.function.Consumer;
  * In-memory image rebuilt from the compacted shared-storage metadata topic.
  *
  * <p>The image is deliberately fail-closed. Authoritative getters are unavailable while the initial replay is still
- * recovering and after a live replay failure. Cleanup fences use a distinct compacted key from object metadata. The
+ * recovering and after a live replay failure. Initial replay publishes only final COMMITTED winners;
+ * live object tombstones without KRaft retirement authorization fail closed.
+ * Cleanup fences use a distinct compacted key from object metadata. The
  * single metadata partition therefore supplies the total order between COMMIT and cleanup while compaction preserves
  * both winners' evidence. A cleanup fence that precedes a delayed COMMIT wins; a cleanup record after a committed object
  * is a losing claim and is ignored.</p>
@@ -129,6 +131,13 @@ public final class SharedMetadataImage {
     }
 
     private void applyObjectTombstone(long objectId) {
+        if (state == State.READY) {
+            // Live object tombstones lack KRaft retirement authorization.
+            // Fail closed rather than diverging from other replica indexes.
+            throw corruption("Live object tombstone has no KRaft retirement authority: " + objectId);
+        }
+        // Initial recovery preserves historical compacted-topic tombstones.
+        // No transient COMMITTED reference is exposed before markReady().
         preparedObjects.remove(objectId);
         committedObjects.remove(objectId);
     }
@@ -165,7 +174,9 @@ public final class SharedMetadataImage {
             throw corruption("object " + objectId + " has conflicting COMMITTED metadata");
         }
         preparedObjects.remove(objectId);
-        if (existing == null) {
+        if (existing == null && state == State.READY) {
+            // Historical replay must finish before publishing its final
+            // COMMITTED winners into the broker's remote read index.
             committedObjectListener.accept(metadata);
         }
     }
@@ -254,7 +265,20 @@ public final class SharedMetadataImage {
         if (state == State.FAILED) {
             throw failedState();
         }
-        state = State.READY;
+        if (state == State.READY) {
+            return;
+        }
+        try {
+            // Replay only final COMMITTED winners, without allocating an
+            // additional object-sized snapshot on broker bootstrap.
+            for (SharedObjectMetadata committed : committedObjects.values()) {
+                committedObjectListener.accept(committed);
+            }
+            state = State.READY;
+        } catch (RuntimeException | Error publicationFailure) {
+            markFailed(publicationFailure);
+            throw publicationFailure;
+        }
     }
 
     public synchronized void markFailed(Throwable cause) {
@@ -322,6 +346,41 @@ public final class SharedMetadataImage {
         return cleanup != null && cleanup.createdTimeMs == createdTimeMs;
     }
 
+    /**
+     * Reads one object cleanup state in O(1), without copying the full claimed
+     * inventory. This is replay evidence, not authorization to delete S3 data.
+     * Only a CLAIMED state can be completed; DELETED is idempotently terminal.
+     */
+    public synchronized CleanupCompletionEvidence cleanupCompletionEvidence(long objectId) {
+        requireReady();
+        if (objectId <= 0L) {
+            throw new IllegalArgumentException("objectId must be positive");
+        }
+        CleanupObject cleanup = cleanupObjects.get(objectId);
+        if (cleanup == null) {
+            return new CleanupCompletionEvidence(CleanupCompletionStatus.ABSENT, -1L);
+        }
+        CleanupCompletionStatus status = cleanup.state == CleanupState.CLAIMED
+            ? CleanupCompletionStatus.CLAIMED : CleanupCompletionStatus.DELETED;
+        return new CleanupCompletionEvidence(status, cleanup.createdTimeMs);
+    }
+
+    public enum CleanupCompletionStatus {
+        ABSENT,
+        CLAIMED,
+        DELETED
+    }
+
+    public record CleanupCompletionEvidence(CleanupCompletionStatus status, long createdTimeMs) {
+        public CleanupCompletionEvidence {
+            Objects.requireNonNull(status, "status");
+            if ((status == CleanupCompletionStatus.ABSENT) != (createdTimeMs == -1L)
+                || createdTimeMs < -1L) {
+                throw new IllegalArgumentException("Invalid cleanup completion state or creation timestamp");
+            }
+        }
+    }
+
     public synchronized long brokerReservedExclusiveSequence(int brokerId) {
         requireReady();
         if (brokerId < 0 || brokerId > BrokerObjectId.MAX_BROKER_ID) {
@@ -376,6 +435,51 @@ public final class SharedMetadataImage {
                 throw new IllegalArgumentException("lastConsumedMetadataOffset must be >= -1");
             }
             Objects.requireNonNull(explicitLogStart, "explicitLogStart");
+        }
+    }
+
+    /**
+     * Atomically captures one physically COMMITTED object's immutable identity
+     * and only the explicitly persisted log-starts for its packed ranges.
+     *
+     * <p>Unlike a global retirement inventory, this targeted lookup does not
+     * copy every COMMITTED object or unrelated partition watermark. Both
+     * object existence and watermark values come from the same replay point.
+     * Missing COMMITTED metadata is different from a logically expired object.
+     * This is advisory evidence, never permission to DELETE physical bytes.</p>
+     */
+    public synchronized Optional<CommittedObjectEvidence> committedObjectRetirementEvidence(long objectId) {
+        requireReady();
+        if (objectId <= 0L) {
+            throw new IllegalArgumentException("objectId must be positive");
+        }
+        SharedObjectMetadata committed = committedObjects.get(objectId);
+        if (committed == null) {
+            return Optional.empty();
+        }
+        Map<SharedPartitionId, Long> relevantWatermarks = new HashMap<>();
+        for (SharedObjectRange range : committed.ranges()) {
+            Long explicit = partitionLogStarts.get(range.partition());
+            if (explicit != null) {
+                relevantWatermarks.put(range.partition(), explicit);
+            }
+        }
+        return Optional.of(new CommittedObjectEvidence(
+            committed, relevantWatermarks, lastConsumedMetadataOffset
+        ));
+    }
+
+    public record CommittedObjectEvidence(
+        SharedObjectMetadata metadata,
+        Map<SharedPartitionId, Long> explicitLogStarts,
+        long lastConsumedMetadataOffset
+    ) {
+        public CommittedObjectEvidence {
+            Objects.requireNonNull(metadata, "metadata");
+            explicitLogStarts = Map.copyOf(Objects.requireNonNull(explicitLogStarts, "explicitLogStarts"));
+            if (lastConsumedMetadataOffset < -1L) {
+                throw new IllegalArgumentException("lastConsumedMetadataOffset must be >= -1");
+            }
         }
     }
 

@@ -68,8 +68,12 @@ public final class InMemoryObjectMetadataStore implements ObjectMetadataStore {
 
     @Override
     public CompletableFuture<Void> delete(long objectId) {
-        entries.remove(objectId);
-        return CompletableFuture.completedFuture(null);
+        // A local test store must not be more permissive than the real
+        // replicated metadata store: deleting COMMITTED or CLAIMED state
+        // would bypass the Controller retirement and orphan replay fences.
+        return CompletableFuture.failedFuture(new UnsupportedOperationException(
+            "Object metadata deletion requires durable KRaft retirement authority"
+        ));
     }
 
     @Override

@@ -26,6 +26,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CancellationException;
 import java.util.zip.CRC32C;
 
 public final class SharedObjectReader {
@@ -64,7 +65,12 @@ public final class SharedObjectReader {
         this.dataBlockCache = new StreamObjectDataBlockCache(dataBlockCacheBytes);
     }
 
-    /** Returns the complete Kafka RecordBatch containing {@code offset}, if it is remotely covered. */
+    /**
+     * Reads the complete Kafka RecordBatch containing {@code offset}.
+     * A failed physical COMMITTED copy can be retried from one equivalent
+     * copy, with independent index and CRC validation. This does not
+     * promote a physical copy, affect Kafka ISR/HW, or permit object GC.
+     */
     public CompletableFuture<Optional<ByteBuffer>> read(SharedPartitionId partition, long offset) {
         Objects.requireNonNull(partition, "partition");
         Optional<RemoteObjectIndex.RangeReference> reference = remoteIndex.find(partition, offset);
@@ -73,7 +79,66 @@ public final class SharedObjectReader {
         }
 
         RemoteObjectIndex.RangeReference ref = reference.get();
-        return ref.hasObjectDescriptor() ? readIndexed(ref) : readDirect(ref);
+        return readReference(ref).exceptionallyCompose(firstFailure -> {
+            if (unwrapCompletion(firstFailure) instanceof CancellationException) {
+                // Cancellation is a caller/lifecycle signal, not evidence of
+                // physical object loss. Never start a second S3 read.
+                return CompletableFuture.failedFuture(firstFailure);
+            }
+            Optional<RemoteObjectIndex.RangeReference> fallback = remoteIndex.findEquivalentAlternative(ref);
+            if (fallback.isEmpty()) {
+                return CompletableFuture.failedFuture(firstFailure);
+            }
+            RemoteObjectIndex.RangeReference alternate = fallback.get();
+            return readReference(alternate).handle((bytes, secondFailure) -> {
+                if (secondFailure != null) {
+                    // Cancellation of alternate I/O is a lifecycle signal,
+                    // not evidence that both COMMITTED copies are unreadable.
+                    Throwable cause = unwrapCompletion(secondFailure);
+                    if (cause instanceof CancellationException) {
+                        throw new CompletionException(cause);
+                    }
+                    throw bothPhysicalCopiesFailed(ref, alternate, firstFailure, secondFailure);
+                }
+                return bytes;
+            });
+        });
+    }
+
+    private static CompletionException bothPhysicalCopiesFailed(
+        RemoteObjectIndex.RangeReference primaryReference,
+        RemoteObjectIndex.RangeReference alternateReference,
+        Throwable firstFailure,
+        Throwable secondFailure
+    ) {
+        Throwable primary = unwrapCompletion(firstFailure);
+        Throwable secondary = unwrapCompletion(secondFailure);
+        // A cached in-flight I/O failure can be shared by concurrent reads.
+        // Never add suppressed exceptions to that shared Throwable: doing so
+        // leaks diagnostic references across readers and failed attempts.
+        IOException combined = new IOException(
+            "Both COMMITTED physical copies unreadable for partition="
+                + primaryReference.range().partition() + ", offsets="
+                + primaryReference.range().offsets() + ", primaryObject="
+                + primaryReference.objectId() + ", alternateObject="
+                + alternateReference.objectId(),
+            primary
+        );
+        if (primary != secondary) {
+            combined.addSuppressed(secondary);
+        }
+        return new CompletionException(combined);
+    }
+
+    private static Throwable unwrapCompletion(Throwable error) {
+        return error instanceof CompletionException && error.getCause() != null
+            ? error.getCause() : error;
+    }
+
+    private CompletableFuture<Optional<ByteBuffer>> readReference(
+        RemoteObjectIndex.RangeReference reference
+    ) {
+        return reference.hasObjectDescriptor() ? readIndexed(reference) : readDirect(reference);
     }
 
     private CompletableFuture<Optional<ByteBuffer>> readIndexed(RemoteObjectIndex.RangeReference reference) {
@@ -133,29 +198,39 @@ public final class SharedObjectReader {
 
     private CompletableFuture<Optional<ByteBuffer>> readDirect(RemoteObjectIndex.RangeReference reference) {
         SharedObjectRange range = reference.range();
-        return objectStore.rangeRead(reference.objectId(), range.objectPosition(), range.objectLength())
-            .thenApply(bytes -> {
-                if (bytes.remaining() != range.objectLength()) {
-                    throw new CompletionException(corruption(
-                        reference,
-                        new IOException(
-                            "Remote batch length mismatch: expected=" + range.objectLength() +
-                                ", actual=" + bytes.remaining()
-                        )
-                    ));
-                }
-                long actualChecksum = crc32c(bytes);
-                if (actualChecksum != range.checksum()) {
-                    throw new CompletionException(corruption(
-                        reference,
-                        new IOException(
-                            "Remote batch checksum mismatch: expected=" + range.checksum() +
-                                ", actual=" + actualChecksum
-                        )
-                    ));
-                }
-                return Optional.of(bytes.asReadOnlyBuffer());
-            });
+        CompletableFuture<ByteBuffer> bytesFuture;
+        try {
+            bytesFuture = Objects.requireNonNull(
+                objectStore.rangeRead(reference.objectId(), range.objectPosition(), range.objectLength()),
+                "ObjectStore returned null range future"
+            );
+        } catch (RuntimeException failure) {
+            // Legacy/direct reads must not throw before the asynchronous
+            // failure handler can select the other COMMITTED physical copy.
+            return CompletableFuture.failedFuture(failure);
+        }
+        return bytesFuture.thenApply(bytes -> {
+            if (bytes.remaining() != range.objectLength()) {
+                throw new CompletionException(corruption(
+                    reference,
+                    new IOException(
+                        "Remote batch length mismatch: expected=" + range.objectLength() +
+                            ", actual=" + bytes.remaining()
+                    )
+                ));
+            }
+            long actualChecksum = crc32c(bytes);
+            if (actualChecksum != range.checksum()) {
+                throw new CompletionException(corruption(
+                    reference,
+                    new IOException(
+                        "Remote batch checksum mismatch: expected=" + range.checksum() +
+                            ", actual=" + actualChecksum
+                    )
+                ));
+            }
+            return Optional.of(bytes.asReadOnlyBuffer());
+        });
     }
 
     private static StreamObjectFormat.DataBlockIndexEntry findIndexedBlock(
