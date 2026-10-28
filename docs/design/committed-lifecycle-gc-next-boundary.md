@@ -2786,3 +2786,45 @@ Leader/Follower, ISR/HW and KRaft Controller ownership are unchanged;
 physical COMMITTED DELETE is still prohibited. PR #2 remains Draft,
 and frozen MinIO GA branch HEAD
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889` is untouched.
+
+
+## Batch 288 — targeted authoritative checkpoint validation for large AutoMQ-style object inventories
+
+**Stable base:** Batch 287 at
+`b150da80b366d9d288d78d30c3781a4de0b5d604` passed all 17
+Java 25, real MinIO, Kafka multi-replica, Controller HA and WAL
+failure/recovery gates.
+
+Batch 286 added a fail-closed bootstrap barrier that compares
+broker-local `remote-object-ranges.checkpoint` entries against
+the final authoritative COMMITTED image. Its original implementation
+materialized and mapped the *entire cluster-wide* committed inventory
+on each Broker startup, then called `List.contains` on each packed
+object's batch ranges for every local checkpoint entry. With large
+shared-storage inventories, the temporary heap and repeated O(k)
+range scans could materially delay recovery.
+
+The production S3 extension now uses a ready-image,
+single-physical-object lookup via `KafkaObjectMetadataStore` and
+`SharedStorageEngine`. `LocalRemoteObjectCheckpoint` fetches each
+locally recorded Object ID once, hashes that object's immutable
+packed-range collection once, and checks all checkpoint references
+against that targeted evidence. The existing inventory-based
+interface remains available for compatible callers and tests.
+
+This preserves exact physical identity, immutable range/descriptor
+comparison, legacy v1 checkpoints and early fail-closed startup on
+missing/changed/tombstoned COMMITs. No ObjectStore DELETE, WAL
+reclamation, new network protocol, retirement emission or Native
+build is enabled.
+
+Four deterministic required JUnit tests exercise one lookup per
+multi-range object, v1/v2 matching and wrong-id/range/checksum
+rejection, the engine bootstrap bridge including absent checkpoints,
+and the metadata image's ready/failure/tombstone barrier. Mandatory
+storage JUnit evidence increases 676 -> 680 in unchanged CI.
+
+Kafka Leader/Follower, ISR/HW and KRaft remain authoritative;
+COMMITTED physical GC stays disabled, PR #2 remains Draft, and
+the frozen MinIO GA branch remains at
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`.

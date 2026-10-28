@@ -37,6 +37,7 @@ REQUIRED_TESTS = {
         "targetedCommittedEvidenceIsImmutableAndLimitedToPackedPartitions",
     ),
     "org.apache.kafka.storage.internals.shared.metadata.SharedMetadataImageTest": (
+        "targetedCommittedObjectLookupRequiresReadyAndRejectsHistoricalTombstones",
         "targetedCleanupCompletionDistinguishesClaimedDeletedAndAbsentObjects",
         "cleanupCompletionEvidenceRequiresReadyNonFailedMetadataReplay",
         "historicalCommittedTombstoneDoesNotLeakIntoRebuiltRemoteIndex",
@@ -45,9 +46,12 @@ REQUIRED_TESTS = {
         "liveCommittedListenerFailurePermanentlyFailsImageClosed",
     ),
     "org.apache.kafka.storage.internals.shared.SharedStorageEngineTest": (
+        "restoredEngineTargetedAuthorityBarrierUsesOnlyCheckpointObjects",
         "restoredEngineRefusesUnverifiedLocalCheckpointAfterMetadataReplay",
     ),
     "org.apache.kafka.storage.internals.shared.metadata.LocalRemoteObjectCheckpointTest": (
+        "targetedCheckpointLookupResolvesEachPackedPhysicalObjectOnlyOnce",
+        "targetedCheckpointLookupRejectsWrongObjectRangeAndDescriptorButAcceptsLegacy",
         "historicalObjectTombstoneRejectsPreviouslyCheckpointedPhysicalObject",
         "legacyAndCurrentCheckpointsRequireExactCommittedPhysicalIdentity",
         "checkpointCannotBorrowEquivalentObjectOrMutatedPackedDescriptor",

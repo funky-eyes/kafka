@@ -41,6 +41,7 @@ import java.util.TreeMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
+import java.util.function.LongFunction;
 
 /**
  * Kafka-independent core of the shared storage data plane.
@@ -654,6 +655,16 @@ public final class SharedStorageEngine implements AutoCloseable {
         Objects.requireNonNull(authoritative, "authoritative");
         if (remoteCheckpoint != null) {
             remoteCheckpoint.validateAgainstCommittedInventory(authoritative);
+        }
+    }
+
+    /** Validate only locally checkpointed COMMITTED references at bootstrap. */
+    public void validateLocalCheckpointAgainstCommittedLookup(
+        LongFunction<Optional<SharedObjectMetadata>> lookup
+    ) throws IOException {
+        Objects.requireNonNull(lookup, "lookup");
+        if (remoteCheckpoint != null) {
+            remoteCheckpoint.validateAgainstCommittedLookup(lookup);
         }
     }
 

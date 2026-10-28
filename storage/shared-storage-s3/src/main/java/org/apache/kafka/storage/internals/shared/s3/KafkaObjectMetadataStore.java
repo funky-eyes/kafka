@@ -49,6 +49,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.NavigableMap;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.TreeMap;
@@ -555,6 +556,12 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
     @Override
     public List<SharedObjectMetadata> committedObjects() {
         return image.committedObjects();
+    }
+
+    /** Resolve one COMMITTED object from the ready, authoritative image. */
+    public Optional<SharedObjectMetadata> committedObject(long objectId) {
+        requireReady();
+        return image.committedObject(objectId);
     }
 
     @Override

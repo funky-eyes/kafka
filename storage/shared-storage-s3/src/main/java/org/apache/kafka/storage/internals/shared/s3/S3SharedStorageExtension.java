@@ -297,7 +297,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             // references. A historical metadata tombstone may have removed
             // one of those objects from the final authoritative replay.
             // Refuse remote-plane readiness instead of serving a stale copy.
-            engine.validateLocalCheckpointAgainstCommittedInventory(newMetadataStore.committedObjects());
+            engine.validateLocalCheckpointAgainstCommittedLookup(newMetadataStore::committedObject);
             reconcileLoadedLogsAfterMetadataReplay(engine);
 
             KafkaObjectMetadataStore.SequenceBlock initialBlock =

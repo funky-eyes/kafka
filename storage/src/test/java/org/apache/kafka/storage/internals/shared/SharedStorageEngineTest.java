@@ -30,11 +30,13 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -46,6 +48,40 @@ class SharedStorageEngineTest {
 
     @TempDir
     Path tempDir;
+
+    @Test
+    void restoredEngineTargetedAuthorityBarrierUsesOnlyCheckpointObjects() throws Exception {
+        Path directory = tempDir.resolve("targeted-checkpoint-barrier");
+        SharedObjectMetadata checkpointed = object(142L, 100L, 110L, 555L);
+        LocalRemoteObjectCheckpoint checkpoint = new LocalRemoteObjectCheckpoint(directory);
+        checkpoint.add(checkpointed);
+        AtomicInteger queries = new AtomicInteger();
+
+        try (SharedStorageEngine restored = new SharedStorageEngine(
+            new FileSharedWal(directory, 1024 * 1024, 4096),
+            new LocalRemoteObjectCheckpoint(directory)
+        )) {
+            restored.validateLocalCheckpointAgainstCommittedLookup(id -> {
+                queries.incrementAndGet();
+                assertEquals(checkpointed.objectId(), id);
+                return Optional.of(checkpointed);
+            });
+            assertEquals(1, queries.get());
+            IOException absent = assertThrows(
+                IOException.class,
+                () -> restored.validateLocalCheckpointAgainstCommittedLookup(id -> Optional.empty())
+            );
+            assertTrue(absent.getMessage().contains("not COMMITTED"));
+            assertEquals(checkpointed.objectId(),
+                restored.remoteIndex().find(PARTITION, 105L).orElseThrow().objectId());
+        }
+
+        try (SharedStorageEngine withoutCheckpoint = engine("targeted-without-checkpoint")) {
+            withoutCheckpoint.validateLocalCheckpointAgainstCommittedLookup(id -> {
+                throw new AssertionError("An absent checkpoint must not query cluster-wide metadata");
+            });
+        }
+    }
 
     @Test
     void newLeaderShouldUploadOnlyCommittedRangesMissingFromRemoteStorage() throws Exception {

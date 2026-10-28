@@ -26,6 +26,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.zip.CRC32C;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -42,6 +44,69 @@ class LocalRemoteObjectCheckpointTest {
 
     @TempDir
     Path tempDir;
+
+    @Test
+    void targetedCheckpointLookupResolvesEachPackedPhysicalObjectOnlyOnce() throws Exception {
+        SharedObjectRange first = object(140L, 100L, 110L, 444L).ranges().get(0);
+        SharedObjectRange second = new SharedObjectRange(
+            PARTITION, new OffsetRange(110L, 120L), 7, 2000L, 74, 555L
+        );
+        SharedObjectMetadata packed = new SharedObjectMetadata(
+            140L, 2074L, 777L, List.of(first, second)
+        );
+        LocalRemoteObjectCheckpoint checkpoint = new LocalRemoteObjectCheckpoint(tempDir);
+        checkpoint.add(packed);
+        AtomicInteger lookups = new AtomicInteger();
+
+        checkpoint.validateAgainstCommittedLookup(id -> {
+            lookups.incrementAndGet();
+            assertEquals(packed.objectId(), id);
+            return Optional.of(packed);
+        });
+        assertEquals(1, lookups.get(), "One packed object needs one authoritative lookup");
+        assertEquals(2, checkpoint.references().size());
+        assertEquals(checkpoint.references(), new LocalRemoteObjectCheckpoint(tempDir).references());
+    }
+
+    @Test
+    void targetedCheckpointLookupRejectsWrongObjectRangeAndDescriptorButAcceptsLegacy() throws Exception {
+        SharedObjectMetadata expected = object(141L, 100L, 110L, 444L);
+        LocalRemoteObjectCheckpoint checkpoint = new LocalRemoteObjectCheckpoint(tempDir);
+        checkpoint.add(expected);
+        checkpoint.validateAgainstCommittedLookup(id -> Optional.of(expected));
+
+        IOException absent = assertThrows(
+            IOException.class, () -> checkpoint.validateAgainstCommittedLookup(id -> Optional.empty())
+        );
+        assertTrue(absent.getMessage().contains("not COMMITTED"));
+        IOException wrongId = assertThrows(
+            IOException.class,
+            () -> checkpoint.validateAgainstCommittedLookup(id -> Optional.of(object(142L, 100L, 110L, 444L)))
+        );
+        assertTrue(wrongId.getMessage().contains("incorrect physical object"));
+        IOException wrongRange = assertThrows(
+            IOException.class,
+            () -> checkpoint.validateAgainstCommittedLookup(id -> Optional.of(object(141L, 100L, 111L, 444L)))
+        );
+        assertTrue(wrongRange.getMessage().contains("range differs"));
+
+        SharedObjectMetadata modified = new SharedObjectMetadata(
+            expected.objectId(), expected.objectSize() + 1L,
+            expected.objectChecksum() + 1L, expected.ranges()
+        );
+        IOException wrongDescriptor = assertThrows(
+            IOException.class, () -> checkpoint.validateAgainstCommittedLookup(id -> Optional.of(modified))
+        );
+        assertTrue(wrongDescriptor.getMessage().contains("descriptor differs"));
+        assertEquals(1, new LocalRemoteObjectCheckpoint(tempDir).references().size());
+
+        Path legacyDir = tempDir.resolve("legacy-targeted-lookup");
+        Files.createDirectories(legacyDir);
+        writeLegacyCheckpoint(legacyDir, expected);
+        LocalRemoteObjectCheckpoint legacy = new LocalRemoteObjectCheckpoint(legacyDir);
+        legacy.validateAgainstCommittedLookup(id -> Optional.of(expected));
+        assertFalse(legacy.find(PARTITION, 105L).orElseThrow().hasObjectDescriptor());
+    }
 
     @Test
     void shouldPersistAndReloadAuthoritativeRemoteRanges() throws Exception {

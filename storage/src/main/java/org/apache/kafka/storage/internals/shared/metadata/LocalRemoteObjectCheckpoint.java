@@ -35,7 +35,9 @@ import java.util.Map;
 import java.util.NavigableMap;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.TreeMap;
+import java.util.function.LongFunction;
 import java.util.zip.CRC32C;
 
 /**
@@ -162,6 +164,60 @@ public final class LocalRemoteObjectCheckpoint {
                 throw new IOException(
                     "Local remote checkpoint descriptor differs from authoritative COMMIT: " + reference.objectId()
                 );
+            }
+        }
+    }
+
+    /**
+     * Verify local durable references from the authoritative metadata image
+     * without copying the cluster-wide COMMITTED inventory. Resolve each
+     * packed object ID once and index its immutable batch ranges only once.
+     * This is not authority for remote GC or local WAL reclamation.
+     */
+    public void validateAgainstCommittedLookup(
+        LongFunction<Optional<SharedObjectMetadata>> lookup
+    ) throws IOException {
+        Objects.requireNonNull(lookup, "lookup");
+        Map<Long, SharedObjectMetadata> objects = new HashMap<>();
+        Map<Long, Set<SharedObjectRange>> indexedRanges = new HashMap<>();
+        Map<SharedPartitionId, NavigableMap<Long, RemoteObjectIndex.RangeReference>> snapshot = byPartition;
+        for (NavigableMap<Long, RemoteObjectIndex.RangeReference> ranges : snapshot.values()) {
+            for (RemoteObjectIndex.RangeReference reference : ranges.values()) {
+                long objectId = reference.objectId();
+                if (!objects.containsKey(objectId)) {
+                    Optional<SharedObjectMetadata> found;
+                    try {
+                        found = Objects.requireNonNull(
+                            lookup.apply(objectId), "COMMITTED lookup returned null"
+                        );
+                    } catch (RuntimeException failure) {
+                        throw new IOException("Unable to check local checkpoint object " + objectId, failure);
+                    }
+                    if (found.isEmpty()) {
+                        throw new IOException(
+                            "Local remote checkpoint object not COMMITTED after authoritative replay: " + objectId
+                        );
+                    }
+                    SharedObjectMetadata committed = found.get();
+                    if (committed.objectId() != objectId) {
+                        throw new IOException("Authoritative lookup returned incorrect physical object " + objectId);
+                    }
+                    objects.put(objectId, committed);
+                    indexedRanges.put(objectId, Set.copyOf(committed.ranges()));
+                }
+                if (!indexedRanges.get(objectId).contains(reference.range())) {
+                    throw new IOException(
+                        "Local remote checkpoint range differs from authoritative COMMIT: " + objectId
+                    );
+                }
+                SharedObjectMetadata committed = objects.get(objectId);
+                if (reference.hasObjectDescriptor()
+                    && (reference.objectSize() != committed.objectSize()
+                        || reference.objectChecksum() != committed.objectChecksum())) {
+                    throw new IOException(
+                        "Local remote checkpoint descriptor differs from authoritative COMMIT: " + objectId
+                    );
+                }
             }
         }
     }

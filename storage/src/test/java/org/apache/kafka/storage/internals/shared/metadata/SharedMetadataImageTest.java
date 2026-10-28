@@ -30,6 +30,29 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SharedMetadataImageTest {
     @Test
+    void targetedCommittedObjectLookupRequiresReadyAndRejectsHistoricalTombstones() {
+        SharedMetadataImage image = new SharedMetadataImage();
+        long oldId = BrokerObjectId.compose(1, 131L);
+        SharedObjectMetadata old = metadata(oldId, 1_131L);
+        byte[] key = SharedMetadataRecordCodec.objectKey(oldId);
+        image.apply(key, SharedMetadataRecordCodec.committedObjectValue(old));
+        assertThrows(IllegalStateException.class, () -> image.committedObject(oldId));
+        image.apply(key, null);
+        image.markReady();
+        assertTrue(image.committedObject(oldId).isEmpty());
+
+        long liveId = BrokerObjectId.compose(1, 132L);
+        SharedObjectMetadata live = metadata(liveId, 1_132L);
+        image.apply(
+            SharedMetadataRecordCodec.objectKey(liveId),
+            SharedMetadataRecordCodec.committedObjectValue(live)
+        );
+        assertEquals(live, image.committedObject(liveId).orElseThrow());
+        image.markFailed(new IllegalStateException("metadata replay stopped"));
+        assertThrows(IllegalStateException.class, () -> image.committedObject(liveId));
+    }
+
+    @Test
     void staysFailClosedUntilInitialReplayIsMarkedReady() {
         SharedMetadataImage image = new SharedMetadataImage();
         long objectId = BrokerObjectId.compose(1, 1L);
