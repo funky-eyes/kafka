@@ -82,6 +82,9 @@ REQUIRED_TESTS = {
         "failedCanonicalHeaderMustFallbackWhileItsFooterReadIsStillPending",
     ),
     "org.apache.kafka.storage.internals.shared.object.OrphanCleanupSchedulerTest": (
+        "clockBeforeGraceCannotDeletePreparedAtEpochZero",
+        "beforeGraceStillRetriesDurableClaimWithoutClaimingPreparedObjects",
+        "negativeClockFailsClosedAndReleasesAdmissionForRetry",
         "transientClockRuntimeFailureReleasesCleanupSlotAndAllowsGracefulClose",
         "synchronousMetadataInventoryFailureReportsAndReleasesCleanupSlot",
     ),

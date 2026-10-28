@@ -96,6 +96,17 @@ public final class OrphanObjectCleaner {
         return result;
     }
 
+    /**
+     * Retry durable PREPARED cleanup claims even if a clock has not yet
+     * advanced through the grace interval. A past CLAIMED fence has already
+     * won the COMMIT race, so the idempotent S3 DELETE still must be retried
+     * after delayed in-flight PUTs; do not admit fresh PREPARED candidates.
+     */
+    CompletableFuture<Integer> cleanClaimedOnly() {
+        Map<Long, ObjectMetadataStore.PreparedObject> alreadyClaimed = alreadyClaimedObjects();
+        return deleteAlreadyClaimed(CompletableFuture.completedFuture(0), alreadyClaimed);
+    }
+
     private Map<Long, ObjectMetadataStore.PreparedObject> alreadyClaimedObjects() {
         Map<Long, ObjectMetadataStore.PreparedObject> alreadyClaimed = new LinkedHashMap<>();
         for (ObjectMetadataStore.PreparedObject object : metadataStore.cleanupClaimedObjects()) {

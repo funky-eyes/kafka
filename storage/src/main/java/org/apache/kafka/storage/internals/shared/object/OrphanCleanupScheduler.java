@@ -91,7 +91,15 @@ public final class OrphanCleanupScheduler implements AutoCloseable {
 
         final long cutoff;
         try {
-            cutoff = Math.max(0L, Math.subtractExact(currentTimeMsSupplier.getAsLong(), orphanGraceMs));
+            long nowMs = currentTimeMsSupplier.getAsLong();
+            if (nowMs < 0L) {
+                throw new IllegalStateException("Orphan cleanup clock must be non-negative");
+            }
+            // A zero cutoff would incorrectly include PREPARED objects
+            // created at epoch zero before their full grace has elapsed.
+            // Use -1 only as a local signal to retry existing CLAIMED
+            // deletes without admitting any new PREPARED cleanup.
+            cutoff = nowMs < orphanGraceMs ? -1L : Math.subtractExact(nowMs, orphanGraceMs);
         } catch (RuntimeException e) {
             // A non-arithmetic clock failure must not retain the admission
             // slot indefinitely or prevent broker shutdown from draining.
@@ -103,7 +111,7 @@ public final class OrphanCleanupScheduler implements AutoCloseable {
 
         final CompletableFuture<Integer> result;
         try {
-            result = cleaner.clean(cutoff);
+            result = cutoff < 0L ? cleaner.cleanClaimedOnly() : cleaner.clean(cutoff);
         } catch (RuntimeException e) {
             lastFailure.set(e);
             releaseCleanupSlot();

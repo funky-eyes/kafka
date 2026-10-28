@@ -182,6 +182,83 @@ class OrphanCleanupSchedulerTest {
     }
 
     @Test
+    void clockBeforeGraceCannotDeletePreparedAtEpochZero() throws Exception {
+        InMemoryObjectStore objects = new InMemoryObjectStore();
+        InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
+        metadata.prepare(401L, 0L).get(10, TimeUnit.SECONDS);
+        objects.put(401L, ByteBuffer.wrap(new byte[] {1})).get(10, TimeUnit.SECONDS);
+        AtomicLong clock = new AtomicLong(999L);
+
+        try (OrphanCleanupScheduler scheduler = new OrphanCleanupScheduler(
+            new OrphanObjectCleaner(objects, metadata), clock::get, 1_000L
+        )) {
+            assertEquals(0, scheduler.tryCleanOnce().get(10, TimeUnit.SECONDS));
+            assertTrue(objects.contains(401L), "PREPARED at zero must receive the full grace");
+            assertTrue(metadata.isPrepared(401L));
+            assertFalse(metadata.isCleanupClaimed(401L));
+
+            clock.set(1_000L);
+            assertEquals(1, scheduler.tryCleanOnce().get(10, TimeUnit.SECONDS));
+            assertFalse(objects.contains(401L));
+            assertTrue(metadata.isCleanupClaimed(401L));
+        }
+    }
+
+    @Test
+    void beforeGraceStillRetriesDurableClaimWithoutClaimingPreparedObjects() throws Exception {
+        InMemoryObjectStore objects = new InMemoryObjectStore();
+        InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
+        metadata.prepare(402L, 0L).get(10, TimeUnit.SECONDS);
+        metadata.prepare(403L, 0L).get(10, TimeUnit.SECONDS);
+        objects.put(402L, ByteBuffer.wrap(new byte[] {2})).get(10, TimeUnit.SECONDS);
+        objects.put(403L, ByteBuffer.wrap(new byte[] {3})).get(10, TimeUnit.SECONDS);
+        assertTrue(metadata.claimCleanup(402L, 0L).get(10, TimeUnit.SECONDS));
+
+        try (OrphanCleanupScheduler scheduler = new OrphanCleanupScheduler(
+            new OrphanObjectCleaner(objects, metadata), () -> 500L, 1_000L
+        )) {
+            assertEquals(1, scheduler.tryCleanOnce().get(10, TimeUnit.SECONDS));
+            assertFalse(objects.contains(402L));
+            assertTrue(objects.contains(403L));
+            assertTrue(metadata.isPrepared(403L));
+
+            // A delayed PUT after the first DELETE must be deleted again
+            // under the same persisted CLAIMED fence, even before grace.
+            objects.put(402L, ByteBuffer.wrap(new byte[] {4})).get(10, TimeUnit.SECONDS);
+            assertEquals(1, scheduler.tryCleanOnce().get(10, TimeUnit.SECONDS));
+            assertFalse(objects.contains(402L));
+            assertTrue(objects.contains(403L));
+            assertFalse(metadata.isCleanupClaimed(403L));
+        }
+    }
+
+    @Test
+    void negativeClockFailsClosedAndReleasesAdmissionForRetry() throws Exception {
+        InMemoryObjectStore objects = new InMemoryObjectStore();
+        InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
+        metadata.prepare(404L, 0L).get(10, TimeUnit.SECONDS);
+        objects.put(404L, ByteBuffer.wrap(new byte[] {5})).get(10, TimeUnit.SECONDS);
+        AtomicLong clock = new AtomicLong(-1L);
+
+        try (OrphanCleanupScheduler scheduler = new OrphanCleanupScheduler(
+            new OrphanObjectCleaner(objects, metadata), clock::get, 1_000L
+        )) {
+            ExecutionException failure = assertThrows(
+                ExecutionException.class, () -> scheduler.tryCleanOnce().get(10, TimeUnit.SECONDS)
+            );
+            assertTrue(failure.getCause().getMessage().contains("non-negative"));
+            assertTrue(scheduler.lastFailure().isPresent());
+            assertTrue(objects.contains(404L));
+            assertFalse(metadata.isCleanupClaimed(404L));
+
+            clock.set(1_000L);
+            assertEquals(1, scheduler.tryCleanOnce().get(10, TimeUnit.SECONDS));
+            assertFalse(objects.contains(404L));
+            assertTrue(scheduler.lastFailure().isEmpty());
+        }
+    }
+
+    @Test
     void appliesGraceCutoffBeforeClaimingPreparedObjects() throws Exception {
         InMemoryObjectStore objects = new InMemoryObjectStore();
         InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();

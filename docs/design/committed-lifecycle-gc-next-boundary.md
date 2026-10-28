@@ -2828,3 +2828,42 @@ Kafka Leader/Follower, ISR/HW and KRaft remain authoritative;
 COMMITTED physical GC stays disabled, PR #2 remains Draft, and
 the frozen MinIO GA branch remains at
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
+
+
+## Batch 289 — enforce full PREPARED orphan grace without disabling CLAIMED re-delete
+
+**Stable base:** Batch 288 at
+`7a0fb18d841e7088eff0dfd0b38efc75c8d62033` passed
+17/17 hosted workflows, including Java 25, real MinIO,
+KRaft Controller HA, native Kafka replica correctness,
+Ring WAL and crash recovery.
+
+`OrphanCleanupScheduler.tryCleanOnce()` previously computed
+`max(0, nowMs - graceMs)`. When `0 <= nowMs < graceMs`,
+this admitted PREPARED objects with `createdTimeMs == 0`
+for cleanup *before the full grace interval elapsed*.
+Because PREPARED cleanup claims fence later COMMITs and permit
+physical object deletion, clamping the cutoff to zero violated
+the promised grace safety boundary.
+
+For an otherwise valid wall-clock sample before the grace
+interval, the scheduler now uses `OrphanObjectCleaner.cleanClaimedOnly()`.
+No unclaimed PREPARED object can be selected. Existing durable CLAIMED
+orphan fences still trigger idempotent S3 DELETE retries, including
+after a delayed PUT arrives. At `nowMs == graceMs`, epoch-zero
+PREPARED objects first become eligible. Negative wall-clock samples
+fail closed and release the cleanup slot rather than being clamped
+to zero or used to trigger new claims.
+
+Three mandatory unskipped JUnit regressions cover the exact
+before/equal-grace boundary, re-deletion of a late PUT while
+younger PREPARED objects remain untouched, and negative-clock
+failure followed by successful retry. Strict storage evidence
+increases 680 -> 683 without new CI or Native Image jobs.
+
+This changes PREPARED orphan cleanup timing only. Native
+Leader/Follower, ISR/HW, KRaft authority, Kafka epoch fencing,
+COMMITTED object physical DELETE (still disabled), PR #2 Draft,
+and the frozen MinIO GA branch at
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`
+remain unchanged.
