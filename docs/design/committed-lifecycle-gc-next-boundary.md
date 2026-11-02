@@ -2950,3 +2950,47 @@ Native Image build, or CI workflow is enabled by this patch.
 Native Kafka Leader/Follower, ISR, HW and replica epochs remain
 authoritative. PR #2 stays Draft, and the MinIO GA parent stays
 frozen at `9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
+
+
+## Batch 292 — preserve synchronous Range GET failure after physical read fencing
+
+**Parent:** Batch 291
+`aeea739758e076e4e17b39efedfd8f2ae3b51d63`.
+15/17 workflows succeeded. The two failed workflows,
+`Shared Storage` and `Shared Storage Object Format Correctness`,
+both stopped on the same existing Java 25 regression:
+`SharedObjectReaderTest.synchronousIndexedPrimaryFailureFallsBackWithIndexCacheDisabled`
+expected one synchronous primary Range GET attempt but counted two.
+
+The new process-local `ActiveCommittedObjectReads.trackingReaderStore`
+wrapper had converted a **synchronous** underlying ObjectStore
+exception into a failed Future. KSO2's index reader consequently
+started its second Footer GET even after the Header GET had thrown
+before any transport Future existed. That changed the cold-read
+request behavior; it did not expose a data-integrity failure.
+
+Restore the original synchronous RuntimeException/Error propagation,
+**after** releasing the acquired per-object read lease.
+`StreamObjectIndexCache.loadOnce` and the legacy direct-read
+boundary already convert these exceptions into failed read Futures,
+so fallback to another independently COMMITTED physical object still
+works. KSO2 no longer starts a needless Footer GET after an
+immediate primary Header throw. Asynchronous transport failures
+remain tracked until their underlying GET Future settles; caller
+cancellation still cannot release an in-flight physical read lease.
+
+Update the existing synchronous-adapter test to assert the original
+exception identity directly and add one required unskipped regression
+for an ObjectStore that returns a null Range GET Future. The null
+case also releases its lease and fails synchronously without
+creating a false local drain certificate. The existing indexed
+fallback regression is intentionally unchanged, so CI must prove
+the original one-request behavior is restored. Mandatory storage
+JUnit evidence grows 688 -> 689, with no new hosted workflows
+and no Native Image build.
+
+This does **not** implement a KRaft Controller retirement emitter,
+global reader quiescence, writer fencing or COMMITTED S3 deletion.
+Kafka Leader/Follower, ISR/HW and partition epochs remain native;
+PR #2 remains Draft and the frozen MinIO GA parent remains
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`.

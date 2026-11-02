@@ -59,6 +59,36 @@ class ActiveCommittedObjectReadsTest {
     }
 
     @Test
+    void nullTransportFutureReleasesLeaseAndPreservesSynchronousFailure() {
+        ObjectStore returnsNull = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                return null;
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+        };
+        ActiveCommittedObjectReads pins = new ActiveCommittedObjectReads();
+        ObjectStore tracked = pins.trackingReaderStore(returnsNull);
+        NullPointerException failure = assertThrows(
+            NullPointerException.class, () -> tracked.rangeRead(104L, 0L, 1)
+        );
+        assertTrue(failure.getMessage().contains("null Range GET future"));
+        assertEquals(0L, pins.inFlightRangeGets(104L));
+        assertFalse(pins.locallyDrainedAfterFence(104L));
+        pins.fence(104L);
+        assertTrue(pins.locallyDrainedAfterFence(104L));
+    }
+
+    @Test
     void synchronouslyThrowingRangeGetCannotLeakLocalLease() {
         IllegalStateException injected = new IllegalStateException("range adapter rejected request");
         ObjectStore throwing = new ObjectStore() {
@@ -79,10 +109,10 @@ class ActiveCommittedObjectReadsTest {
         };
         ActiveCommittedObjectReads pins = new ActiveCommittedObjectReads();
         ObjectStore tracked = pins.trackingReaderStore(throwing);
-        CompletionException failure = assertThrows(
-            CompletionException.class, () -> tracked.rangeRead(103L, 0L, 1).join()
+        IllegalStateException failure = assertThrows(
+            IllegalStateException.class, () -> tracked.rangeRead(103L, 0L, 1)
         );
-        assertSame(injected, failure.getCause());
+        assertSame(injected, failure);
         assertEquals(0L, pins.inFlightRangeGets(103L));
 
         pins.fence(103L);

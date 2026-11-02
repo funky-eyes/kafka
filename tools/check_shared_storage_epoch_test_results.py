@@ -72,6 +72,7 @@ REQUIRED_TESTS = {
     "org.apache.kafka.storage.internals.shared.object.ActiveCommittedObjectReadsTest": (
         "localDrainRequiresFenceAndAllPhysicalGetLeases",
         "synchronouslyThrowingRangeGetCannotLeakLocalLease",
+        "nullTransportFutureReleasesLeaseAndPreservesSynchronousFailure",
     ),
     "org.apache.kafka.storage.internals.shared.object.SharedObjectReaderTest": (
         "pendingHeaderFailureKeepsActualFooterTransportPinned",

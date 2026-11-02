@@ -95,9 +95,13 @@ final class ActiveCommittedObjectReads {
                         delegate.rangeRead(objectId, position, length),
                         "ObjectStore returned null Range GET future"
                     );
-                } catch (Throwable failure) {
+                } catch (RuntimeException | Error failure) {
+                    // Preserve the ObjectStore's synchronous failure contract.
+                    // The index/cache loader converts it to a failed Future
+                    // for COMMITTED fallback, without issuing a needless
+                    // concurrent KSO2 Footer GET after a failed Header.
                     lease.close();
-                    return CompletableFuture.failedFuture(failure);
+                    throw failure;
                 }
                 // Release only when the underlying physical GET settles, NOT
                 // when a caller cancels a dependent reader Future or another
