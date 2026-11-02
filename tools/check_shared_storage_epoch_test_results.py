@@ -69,7 +69,14 @@ REQUIRED_TESTS = {
         "forgedHugeBatchCountCannotAllocateBeyondDataBlockBytes",
         "forgedSmallBatchCountAbovePayloadCapacityFailsClosed",
     ),
+    "org.apache.kafka.storage.internals.shared.object.ActiveCommittedObjectReadsTest": (
+        "localDrainRequiresFenceAndAllPhysicalGetLeases",
+        "synchronouslyThrowingRangeGetCannotLeakLocalLease",
+    ),
     "org.apache.kafka.storage.internals.shared.object.SharedObjectReaderTest": (
+        "pendingHeaderFailureKeepsActualFooterTransportPinned",
+        "locallyFencedPrimaryFallsBackWithoutIssuingAnotherGet",
+        "cancelledCallerFutureCannotUnpinPendingTransportGet",
         "shouldReadEquivalentCommittedObjectWhenCanonicalPhysicalCopyIsMissing",
         "differentlyPackedCommittedCopySurvivesCheckpointAndMetadataReplay",
         "shouldVerifyEquivalentCommittedFallbackAfterCanonicalCopyCorruption",

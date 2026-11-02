@@ -2897,3 +2897,56 @@ Native Kafka Leader/Follower, ISR/HW, KRaft authority and
 the disabled COMMITTED physical DELETE path are unchanged.
 PR #2 remains Draft; frozen MinIO GA base remains
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
+
+
+## Batch 291 — track true physical Range GET lifetimes for future Reader fencing
+
+**Verified base:** Batch 290
+`f6ee36dccfdfbc824337887a57882649e2202b9e` passed
+17/17 Java 25, real MinIO, acks=all/acks=1, KRaft Controller
+HA, WAL crash and native multi-replica semantics gates.
+
+A KSO2 remote read can issue concurrent Header and Footer Range
+GETs. When the Header fails, the higher-level read can promptly
+recover from the second independently COMMITTED physical copy
+while the *first object's Footer GET is still running*. Therefore,
+the completion of a logical `SharedObjectReader.read` Future is
+NOT evidence that the underlying physical object's S3 reads
+have drained. It would be unsafe to use that Future's completion
+for eventual Controller-driven physical retirement.
+
+Introduce the **process-local, non-authorizing**
+`ActiveCommittedObjectReads` fence. The Reader wraps only its
+`ObjectStore.rangeRead` transport boundary; every actual physical
+GET obtains an Object ID-scoped read lease before invoking the
+ObjectStore and holds it until the underlying transport Future
+completes. A higher-level cancellation receives an isolated
+dependent Future and cannot prematurely release the lease.
+Synchronous transport exceptions also release their lease.
+Fencing is irreversible for the life of the local registry and
+prevents new physical GETs; a locally drained state is reported
+only after an explicit local fence AND all admitted physical
+GET Futures finish.
+
+The production Reader uses a fresh non-fenced registry by
+default, preserving normal reads. The package-private injected
+constructor supports deterministic tests and future coordination.
+A fenced primary object can still fail over to an unfenced
+equivalent COMMITTED physical copy, but neither cache selection
+nor that fallback is permission to delete an object.
+
+Five mandatory unskipped JUnit regressions verify duplicate lease
+accounting and idempotent release, synchronous GET exceptions,
+a failed Header with still-running Footer, alternate physical
+copy fallback under a local fence, and caller cancellation not
+unpinning a pending transport. Strict storage JUnit evidence
+increases from 683 to 688 using the current CI workflows.
+
+**Hard boundary:** This registry is NOT durable across restart,
+does not fence writers, does not observe other Brokers' readers,
+does not capture Controller epochs, and cannot attest to global
+quiescence. No KRaft retirement emitter, S3 COMMITTED DELETE,
+Native Image build, or CI workflow is enabled by this patch.
+Native Kafka Leader/Follower, ISR, HW and replica epochs remain
+authoritative. PR #2 stays Draft, and the MinIO GA parent stays
+frozen at `9a28c11b6d97ecacafe1b8566cde5cc34d604889`.

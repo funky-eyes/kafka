@@ -58,9 +58,20 @@ public final class SharedObjectReader {
         int indexCacheEntries,
         long dataBlockCacheBytes
     ) {
-        this.objectStore = Objects.requireNonNull(objectStore, "objectStore");
+        this(objectStore, remoteIndex, indexCacheEntries, dataBlockCacheBytes, new ActiveCommittedObjectReads());
+    }
+
+    SharedObjectReader(
+        ObjectStore objectStore,
+        RemoteObjectIndex remoteIndex,
+        int indexCacheEntries,
+        long dataBlockCacheBytes,
+        ActiveCommittedObjectReads physicalReads
+    ) {
+        this.objectStore = Objects.requireNonNull(physicalReads, "physicalReads")
+            .trackingReaderStore(Objects.requireNonNull(objectStore, "objectStore"));
         this.remoteIndex = Objects.requireNonNull(remoteIndex, "remoteIndex");
-        this.indexReader = new StreamObjectIndexReader(objectStore);
+        this.indexReader = new StreamObjectIndexReader(this.objectStore);
         this.indexCache = new StreamObjectIndexCache(indexCacheEntries);
         this.dataBlockCache = new StreamObjectDataBlockCache(dataBlockCacheBytes);
     }

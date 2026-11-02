@@ -31,6 +31,7 @@ import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -454,6 +455,141 @@ class SharedObjectReaderTest {
         ByteBuffer restored = reader.read(PARTITION, 2L).get(10L, TimeUnit.SECONDS).orElseThrow();
         assertArrayEquals(new byte[] {1, 2, 3, 4, 5}, toArray(restored));
         assertEquals(1, primaryAttempts.get(), "Legacy direct Range GET must use the alternate after failure");
+    }
+
+    @Test
+    void pendingHeaderFailureKeepsActualFooterTransportPinned() throws Exception {
+        PackedObject primary = packObject(991L);
+        PackedObject secondary = packObject(992L);
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(primary.metadata());
+        index.add(secondary.metadata());
+
+        InMemoryObjectStore backing = new InMemoryObjectStore();
+        backing.put(secondary.metadata().objectId(), secondary.bytes()).get(10L, TimeUnit.SECONDS);
+        CompletableFuture<ByteBuffer> pendingFooter = new CompletableFuture<>();
+        ObjectStore store = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                if (objectId == primary.metadata().objectId()) {
+                    return position == 0L
+                        ? CompletableFuture.failedFuture(new IOException("Primary KSO2 header unavailable"))
+                        : pendingFooter;
+                }
+                return backing.rangeRead(objectId, position, length);
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+        };
+
+        ActiveCommittedObjectReads pins = new ActiveCommittedObjectReads();
+        SharedObjectReader reader = new SharedObjectReader(store, index, 4, 0L, pins);
+        assertArrayEquals(new byte[] {1, 2, 3, 4, 5},
+            toArray(reader.read(PARTITION, 2L).get(10L, TimeUnit.SECONDS).orElseThrow()));
+        assertFalse(pendingFooter.isDone(), "The failed header must not wait for its still-running footer GET");
+        assertEquals(1L, pins.inFlightRangeGets(primary.metadata().objectId()),
+            "The actual footer GET must stay pinned even though the fallback read has completed");
+
+        pins.fence(primary.metadata().objectId());
+        assertFalse(pins.locallyDrainedAfterFence(primary.metadata().objectId()));
+        pendingFooter.completeExceptionally(new IOException("Original footer GET finally terminated"));
+        assertEquals(0L, pins.inFlightRangeGets(primary.metadata().objectId()));
+        assertTrue(pins.locallyDrainedAfterFence(primary.metadata().objectId()));
+    }
+
+    @Test
+    void locallyFencedPrimaryFallsBackWithoutIssuingAnotherGet() throws Exception {
+        PackedObject primary = packObject(993L);
+        PackedObject secondary = packObject(994L);
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.restore(List.of(
+            new RemoteObjectIndex.RangeReference(
+                primary.metadata().objectId(), primary.metadata().ranges().get(0)),
+            new RemoteObjectIndex.RangeReference(
+                secondary.metadata().objectId(), secondary.metadata().ranges().get(0))
+        ));
+        InMemoryObjectStore backing = new InMemoryObjectStore();
+        backing.put(secondary.metadata().objectId(), secondary.bytes()).get(10L, TimeUnit.SECONDS);
+        AtomicInteger primaryGets = new AtomicInteger();
+        ObjectStore store = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                if (objectId == primary.metadata().objectId()) {
+                    primaryGets.incrementAndGet();
+                    return CompletableFuture.failedFuture(new IOException("Forbidden primary Range GET"));
+                }
+                return backing.rangeRead(objectId, position, length);
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+        };
+
+        ActiveCommittedObjectReads pins = new ActiveCommittedObjectReads();
+        pins.fence(primary.metadata().objectId());
+        SharedObjectReader reader = new SharedObjectReader(store, index, 0, 0L, pins);
+        assertArrayEquals(new byte[] {1, 2, 3, 4, 5},
+            toArray(reader.read(PARTITION, 2L).get(10L, TimeUnit.SECONDS).orElseThrow()));
+        assertEquals(0, primaryGets.get(), "Locally fenced physical objects must never issue another Range GET");
+        assertTrue(pins.locallyDrainedAfterFence(primary.metadata().objectId()));
+        assertFalse(pins.locallyDrainedAfterFence(secondary.metadata().objectId()),
+            "An unfenced physical object cannot claim a retirement certificate");
+    }
+
+    @Test
+    void cancelledCallerFutureCannotUnpinPendingTransportGet() throws Exception {
+        PackedObject packed = packObject(995L);
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.restore(List.of(new RemoteObjectIndex.RangeReference(
+            packed.metadata().objectId(), packed.metadata().ranges().get(0)
+        )));
+        CompletableFuture<ByteBuffer> pendingGet = new CompletableFuture<>();
+        ObjectStore store = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                return pendingGet;
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+        };
+
+        ActiveCommittedObjectReads pins = new ActiveCommittedObjectReads();
+        SharedObjectReader reader = new SharedObjectReader(store, index, 0, 0L, pins);
+        CompletableFuture<Optional<ByteBuffer>> cancelled = reader.read(PARTITION, 2L);
+        assertEquals(1L, pins.inFlightRangeGets(packed.metadata().objectId()));
+        assertTrue(cancelled.cancel(true));
+        assertFalse(pendingGet.isDone(), "Caller cancellation must not complete the S3 transport Future");
+        assertEquals(1L, pins.inFlightRangeGets(packed.metadata().objectId()));
+
+        pins.fence(packed.metadata().objectId());
+        assertFalse(pins.locallyDrainedAfterFence(packed.metadata().objectId()));
+        pendingGet.complete(ByteBuffer.wrap(new byte[] {1, 2, 3, 4, 5}));
+        assertEquals(0L, pins.inFlightRangeGets(packed.metadata().objectId()));
+        assertTrue(pins.locallyDrainedAfterFence(packed.metadata().objectId()));
+        assertTrue(cancelled.isCancelled());
     }
 
     @Test
