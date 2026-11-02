@@ -2867,3 +2867,33 @@ COMMITTED object physical DELETE (still disabled), PR #2 Draft,
 and the frozen MinIO GA branch at
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889`
 remain unchanged.
+
+
+## Batch 290 — fix orphan-grace Checkstyle NPath without changing cleanup semantics
+
+**Parent:** Batch 289 HEAD
+`2e82c553bb86cb97655793ab4073d139b3d75e9a`.
+The `Shared Storage` Java 25 job failed at
+`:storage:checkstyleMain` with
+`OrphanCleanupScheduler.java:83 NPath Complexity 1,080 (max 500)`.
+All other 16 CI workflows succeeded, but the failing job had not
+yet completed the storage JUnit gate.
+
+Extract the existing negative-clock validation and pre-grace
+CLAIMED-only cutoff into a small `cleanupCutoff()` helper.
+`tryCleanOnce()` still acquires/releases the same cleanup slot,
+reports synchronous/asynchronous failures identically, and
+drains pending cleanup on close. No Checkstyle suppression or
+configuration relaxation is made.
+
+The three mandatory Batch 289 boundary regressions are kept
+unchanged in the strict 683-method gate: before grace, a PREPARED
+object created at zero cannot be claimed; at the exact boundary
+it becomes eligible; and durable CLAIMED objects must still
+receive idempotent DELETE retries if a late PUT completes.
+Negative clocks continue to fail closed.
+
+Native Kafka Leader/Follower, ISR/HW, KRaft authority and
+the disabled COMMITTED physical DELETE path are unchanged.
+PR #2 remains Draft; frozen MinIO GA base remains
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
