@@ -2994,3 +2994,54 @@ global reader quiescence, writer fencing or COMMITTED S3 deletion.
 Kafka Leader/Follower, ISR/HW and partition epochs remain native;
 PR #2 remains Draft and the frozen MinIO GA parent remains
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
+
+
+## Batch 293 — fence logical cache hits as well as actual S3 GETs
+
+**Parent:** Batch 292 at
+`e82559831d1c63d47e9fd0776c45edc7ca200323`.
+All 17 workflows were triggered; Java 25 storage and real MinIO
+validation were still running at the time this batch was prepared.
+Do not claim the parent green until the workflow conclusions are verified.
+
+Batch 291's `ActiveCommittedObjectReads` tracked real physical
+GETs through underlying transport Futures, including KSO2's
+concurrent Header/Footer requests. That prevents a stale local
+physical reader from being declared drained while S3 transport
+is still in flight. However, if a physical object already had
+both its KSO2 index and DataBlock cached, a NEW logical
+`SharedObjectReader.read()` call could complete entirely from
+cache **without making any Range GET**. An explicitly fenced
+primary could therefore keep serving fresh logical reads.
+
+Every physical-copy logical read now obtains a second,
+Object-ID-scoped admission lease *before consulting either cache*.
+The lease is released after the internal read Future completes,
+including failures and asynchronous fallback; callers' cancelled
+outer Futures cannot erase in-flight transport or logical work.
+`locallyDrainedAfterFence` requires BOTH the existing transport
+GET count and the new logical-read count to reach zero.
+A fenced primary fails admission even if its cached bytes
+are hot, allowing bounded fallback to the other independently
+COMMITTED physical copy without silently reusing the fenced one.
+
+The reader's wrapped ObjectStore view also explicitly rejects
+PUT and DELETE, so no accidental use of this read-only view
+can mutate immutable S3 objects or bypass the disabled
+COMMITTED physical-delete policy. This does not affect the
+real upload/cleanup ObjectStore clients.
+
+Three new required unskipped JUnit regressions check hot-cache
+fence bypass with fallback, physical-and-logical drain accounting,
+and read-only view write/delete rejection. The existing caller
+cancellation regression additionally verifies logical-read
+accounting. The mandatory storage JUnit inventory increases
+689 -> 692; no new hosted workflows or Native Image compilation.
+
+**Still not a global GC certificate:** process-local reader admission
+is not durable across broker restart, does not witness other
+replicas' readers, does not fence producers or authorize S3
+COMMITTED deletes. Native Kafka Leader/Follower, ISR, HW, broker
+and partition epochs and KRaft remain unchanged; PR #2 stays
+Draft and frozen MinIO GA base is
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`.

@@ -70,11 +70,14 @@ REQUIRED_TESTS = {
         "forgedSmallBatchCountAbovePayloadCapacityFailsClosed",
     ),
     "org.apache.kafka.storage.internals.shared.object.ActiveCommittedObjectReadsTest": (
+        "cachedLogicalReadLeaseMustDrainAlongsidePhysicalRangeGets",
+        "readerTrackingViewCannotPublishOrDeletePhysicalObjects",
         "localDrainRequiresFenceAndAllPhysicalGetLeases",
         "synchronouslyThrowingRangeGetCannotLeakLocalLease",
         "nullTransportFutureReleasesLeaseAndPreservesSynchronousFailure",
     ),
     "org.apache.kafka.storage.internals.shared.object.SharedObjectReaderTest": (
+        "warmCachedObjectCannotBypassLocalFenceAndMustUseAnotherCommittedCopy",
         "pendingHeaderFailureKeepsActualFooterTransportPinned",
         "locallyFencedPrimaryFallsBackWithoutIssuingAnotherGet",
         "cancelledCallerFutureCannotUnpinPendingTransportGet",

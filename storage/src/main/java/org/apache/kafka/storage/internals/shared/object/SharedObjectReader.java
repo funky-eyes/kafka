@@ -34,6 +34,7 @@ public final class SharedObjectReader {
     static final long DEFAULT_DATA_BLOCK_CACHE_BYTES = 64L * 1024 * 1024;
 
     private final ObjectStore objectStore;
+    private final ActiveCommittedObjectReads physicalReads;
     private final RemoteObjectIndex remoteIndex;
     private final StreamObjectIndexReader indexReader;
     private final StreamObjectIndexCache indexCache;
@@ -68,8 +69,10 @@ public final class SharedObjectReader {
         long dataBlockCacheBytes,
         ActiveCommittedObjectReads physicalReads
     ) {
-        this.objectStore = Objects.requireNonNull(physicalReads, "physicalReads")
-            .trackingReaderStore(Objects.requireNonNull(objectStore, "objectStore"));
+        this.physicalReads = Objects.requireNonNull(physicalReads, "physicalReads");
+        this.objectStore = physicalReads.trackingReaderStore(
+            Objects.requireNonNull(objectStore, "objectStore")
+        );
         this.remoteIndex = Objects.requireNonNull(remoteIndex, "remoteIndex");
         this.indexReader = new StreamObjectIndexReader(this.objectStore);
         this.indexCache = new StreamObjectIndexCache(indexCacheEntries);
@@ -149,7 +152,27 @@ public final class SharedObjectReader {
     private CompletableFuture<Optional<ByteBuffer>> readReference(
         RemoteObjectIndex.RangeReference reference
     ) {
-        return reference.hasObjectDescriptor() ? readIndexed(reference) : readDirect(reference);
+        Optional<ActiveCommittedObjectReads.ReadLease> admitted =
+            physicalReads.tryAcquireLogicalRead(reference.objectId());
+        if (admitted.isEmpty()) {
+            return CompletableFuture.failedFuture(new IllegalStateException(
+                "COMMITTED physical object read is locally fenced: " + reference.objectId()
+            ));
+        }
+        ActiveCommittedObjectReads.ReadLease lease = admitted.get();
+        final CompletableFuture<Optional<ByteBuffer>> result;
+        try {
+            result = Objects.requireNonNull(
+                reference.hasObjectDescriptor() ? readIndexed(reference) : readDirect(reference),
+                "remote read returned null future"
+            );
+        } catch (Throwable failure) {
+            lease.close();
+            return CompletableFuture.failedFuture(failure);
+        }
+        // Complete the logical read only after the lease is released. An
+        // enclosing cancellation does not cancel the underlying physical GET.
+        return result.whenComplete((ignored, failure) -> lease.close());
     }
 
     private CompletableFuture<Optional<ByteBuffer>> readIndexed(RemoteObjectIndex.RangeReference reference) {

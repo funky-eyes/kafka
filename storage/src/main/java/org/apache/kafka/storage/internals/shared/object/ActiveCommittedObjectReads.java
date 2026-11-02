@@ -31,7 +31,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * requests. A fast failing header may trigger a second COMMITTED physical copy
  * while the original footer request remains in flight. Counting the enclosing
  * reader Future would incorrectly report the first physical object quiescent.
- * Count the actual ObjectStore Range GET Futures instead.</p>
+ * Count the actual ObjectStore Range GET Futures and logical reads
+ * (including hot cache hits) instead.</p>
  *
  * <p>Fencing an object is irreversible for this registry instance. A drained
  * local fence is NOT a Controller grant, proof of other brokers' readers,
@@ -47,7 +48,21 @@ final class ActiveCommittedObjectReads {
             return Optional.empty();
         }
         state.inFlight = Math.addExact(state.inFlight, 1L);
-        return Optional.of(new ReadLease(this, objectId));
+        return Optional.of(new ReadLease(this, objectId, false));
+    }
+
+    /**
+     * Admit a logical batch read before consulting either index or DataBlock
+     * cache. Otherwise a warm cache can bypass a physical Range GET fence.
+     */
+    synchronized Optional<ReadLease> tryAcquireLogicalRead(long objectId) {
+        requireObjectId(objectId);
+        State state = objects.computeIfAbsent(objectId, ignored -> new State());
+        if (state.fenced) {
+            return Optional.empty();
+        }
+        state.logicalReads = Math.addExact(state.logicalReads, 1L);
+        return Optional.of(new ReadLease(this, objectId, true));
     }
 
     synchronized void fence(long objectId) {
@@ -58,13 +73,19 @@ final class ActiveCommittedObjectReads {
     synchronized boolean locallyDrainedAfterFence(long objectId) {
         requireObjectId(objectId);
         State state = objects.get(objectId);
-        return state != null && state.fenced && state.inFlight == 0L;
+        return state != null && state.fenced && state.inFlight == 0L && state.logicalReads == 0L;
     }
 
     synchronized long inFlightRangeGets(long objectId) {
         requireObjectId(objectId);
         State state = objects.get(objectId);
         return state == null ? 0L : state.inFlight;
+    }
+
+    synchronized long inFlightLogicalReads(long objectId) {
+        requireObjectId(objectId);
+        State state = objects.get(objectId);
+        return state == null ? 0L : state.logicalReads;
     }
 
     /**
@@ -77,7 +98,9 @@ final class ActiveCommittedObjectReads {
         return new ObjectStore() {
             @Override
             public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
-                return delegate.put(objectId, data);
+                return CompletableFuture.failedFuture(
+                    new UnsupportedOperationException("Remote read-only view cannot publish an object")
+                );
             }
 
             @Override
@@ -114,18 +137,30 @@ final class ActiveCommittedObjectReads {
 
             @Override
             public CompletableFuture<Void> delete(long objectId) {
-                return delegate.delete(objectId);
+                return CompletableFuture.failedFuture(
+                    new UnsupportedOperationException("Remote read-only view cannot physically delete an object")
+                );
             }
         };
     }
 
-    private synchronized void release(long objectId) {
+    private synchronized void release(long objectId, boolean logical) {
         State state = objects.get(objectId);
-        if (state == null || state.inFlight <= 0L) {
-            throw new IllegalStateException("Physical read lease released without admission: " + objectId);
+        if (state == null) {
+            throw new IllegalStateException("Read lease released without admission: " + objectId);
         }
-        state.inFlight--;
-        if (!state.fenced && state.inFlight == 0L) {
+        if (logical) {
+            if (state.logicalReads <= 0L) {
+                throw new IllegalStateException("Logical read lease released without admission: " + objectId);
+            }
+            state.logicalReads--;
+        } else {
+            if (state.inFlight <= 0L) {
+                throw new IllegalStateException("Physical read lease released without admission: " + objectId);
+            }
+            state.inFlight--;
+        }
+        if (!state.fenced && state.inFlight == 0L && state.logicalReads == 0L) {
             objects.remove(objectId);
         }
     }
@@ -138,23 +173,26 @@ final class ActiveCommittedObjectReads {
 
     private static final class State {
         private long inFlight;
+        private long logicalReads;
         private boolean fenced;
     }
 
     static final class ReadLease implements AutoCloseable {
         private final ActiveCommittedObjectReads owner;
         private final long objectId;
+        private final boolean logical;
         private final AtomicBoolean released = new AtomicBoolean();
 
-        private ReadLease(ActiveCommittedObjectReads owner, long objectId) {
+        private ReadLease(ActiveCommittedObjectReads owner, long objectId, boolean logical) {
             this.owner = owner;
             this.objectId = objectId;
+            this.logical = logical;
         }
 
         @Override
         public void close() {
             if (released.compareAndSet(false, true)) {
-                owner.release(objectId);
+                owner.release(objectId, logical);
             }
         }
     }

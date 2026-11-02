@@ -21,6 +21,7 @@ import org.junit.jupiter.api.Test;
 import java.nio.ByteBuffer;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -86,6 +87,66 @@ class ActiveCommittedObjectReadsTest {
         assertFalse(pins.locallyDrainedAfterFence(104L));
         pins.fence(104L);
         assertTrue(pins.locallyDrainedAfterFence(104L));
+    }
+
+    @Test
+    void cachedLogicalReadLeaseMustDrainAlongsidePhysicalRangeGets() {
+        ActiveCommittedObjectReads pins = new ActiveCommittedObjectReads();
+        ActiveCommittedObjectReads.ReadLease cached = pins.tryAcquireLogicalRead(105L).orElseThrow();
+        ActiveCommittedObjectReads.ReadLease physical = pins.tryAcquire(105L).orElseThrow();
+        assertEquals(1L, pins.inFlightLogicalReads(105L));
+        assertEquals(1L, pins.inFlightRangeGets(105L));
+
+        pins.fence(105L);
+        assertTrue(pins.tryAcquireLogicalRead(105L).isEmpty(),
+            "A newly admitted cached read must not bypass the physical object fence");
+        assertFalse(pins.locallyDrainedAfterFence(105L));
+        physical.close();
+        assertEquals(0L, pins.inFlightRangeGets(105L));
+        assertEquals(1L, pins.inFlightLogicalReads(105L));
+        assertFalse(pins.locallyDrainedAfterFence(105L),
+            "Completion of the last GET cannot erase a pending logical read");
+        cached.close();
+        cached.close();
+        assertEquals(0L, pins.inFlightLogicalReads(105L));
+        assertTrue(pins.locallyDrainedAfterFence(105L));
+    }
+
+    @Test
+    void readerTrackingViewCannotPublishOrDeletePhysicalObjects() {
+        AtomicInteger writes = new AtomicInteger();
+        AtomicInteger deletes = new AtomicInteger();
+        ObjectStore backing = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                writes.incrementAndGet();
+                return CompletableFuture.completedFuture(null);
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                return CompletableFuture.completedFuture(ByteBuffer.allocate(length));
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                deletes.incrementAndGet();
+                return CompletableFuture.completedFuture(null);
+            }
+        };
+        ActiveCommittedObjectReads pins = new ActiveCommittedObjectReads();
+        ObjectStore reader = pins.trackingReaderStore(backing);
+        CompletionException putFailure = assertThrows(
+            CompletionException.class, () -> reader.put(106L, ByteBuffer.wrap(new byte[] {1})).join()
+        );
+        CompletionException deleteFailure = assertThrows(
+            CompletionException.class, () -> reader.delete(106L).join()
+        );
+        assertTrue(putFailure.getCause() instanceof UnsupportedOperationException);
+        assertTrue(deleteFailure.getCause() instanceof UnsupportedOperationException);
+        assertEquals(0, writes.get());
+        assertEquals(0, deletes.get());
+        assertEquals(0L, pins.inFlightRangeGets(106L));
     }
 
     @Test

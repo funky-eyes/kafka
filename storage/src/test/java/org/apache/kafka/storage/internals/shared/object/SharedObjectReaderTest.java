@@ -580,16 +580,71 @@ class SharedObjectReaderTest {
         SharedObjectReader reader = new SharedObjectReader(store, index, 0, 0L, pins);
         CompletableFuture<Optional<ByteBuffer>> cancelled = reader.read(PARTITION, 2L);
         assertEquals(1L, pins.inFlightRangeGets(packed.metadata().objectId()));
+        assertEquals(1L, pins.inFlightLogicalReads(packed.metadata().objectId()));
         assertTrue(cancelled.cancel(true));
         assertFalse(pendingGet.isDone(), "Caller cancellation must not complete the S3 transport Future");
         assertEquals(1L, pins.inFlightRangeGets(packed.metadata().objectId()));
+        assertEquals(1L, pins.inFlightLogicalReads(packed.metadata().objectId()));
 
         pins.fence(packed.metadata().objectId());
         assertFalse(pins.locallyDrainedAfterFence(packed.metadata().objectId()));
         pendingGet.complete(ByteBuffer.wrap(new byte[] {1, 2, 3, 4, 5}));
         assertEquals(0L, pins.inFlightRangeGets(packed.metadata().objectId()));
+        assertEquals(0L, pins.inFlightLogicalReads(packed.metadata().objectId()));
         assertTrue(pins.locallyDrainedAfterFence(packed.metadata().objectId()));
         assertTrue(cancelled.isCancelled());
+    }
+
+    @Test
+    void warmCachedObjectCannotBypassLocalFenceAndMustUseAnotherCommittedCopy() throws Exception {
+        PackedObject primary = packObject(996L);
+        PackedObject alternative = packObject(997L);
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(primary.metadata());
+        index.add(alternative.metadata());
+        InMemoryObjectStore backing = new InMemoryObjectStore();
+        backing.put(primary.metadata().objectId(), primary.bytes()).get(10L, TimeUnit.SECONDS);
+        backing.put(alternative.metadata().objectId(), alternative.bytes()).get(10L, TimeUnit.SECONDS);
+        AtomicInteger primaryGets = new AtomicInteger();
+        AtomicInteger alternateGets = new AtomicInteger();
+        ObjectStore counting = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                if (objectId == primary.metadata().objectId()) {
+                    primaryGets.incrementAndGet();
+                } else if (objectId == alternative.metadata().objectId()) {
+                    alternateGets.incrementAndGet();
+                }
+                return backing.rangeRead(objectId, position, length);
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+        };
+        ActiveCommittedObjectReads pins = new ActiveCommittedObjectReads();
+        SharedObjectReader reader = new SharedObjectReader(counting, index, 4, 1024 * 1024L, pins);
+        assertArrayEquals(new byte[] {1, 2, 3, 4, 5},
+            toArray(reader.read(PARTITION, 2L).get(10L, TimeUnit.SECONDS).orElseThrow()));
+        assertTrue(primaryGets.get() > 0);
+        assertEquals(0, alternateGets.get());
+        assertEquals(0L, pins.inFlightLogicalReads(primary.metadata().objectId()));
+        int physicalBeforeFence = primaryGets.get();
+        pins.fence(primary.metadata().objectId());
+        assertTrue(pins.locallyDrainedAfterFence(primary.metadata().objectId()));
+
+        assertArrayEquals(new byte[] {1, 2, 3, 4, 5},
+            toArray(reader.read(PARTITION, 2L).get(10L, TimeUnit.SECONDS).orElseThrow()));
+        assertEquals(physicalBeforeFence, primaryGets.get(),
+            "A fully cached, fenced physical object must not serve another logical read");
+        assertTrue(alternateGets.get() > 0, "Fallback must read an independently COMMITTED physical object");
+        assertTrue(pins.locallyDrainedAfterFence(primary.metadata().objectId()));
     }
 
     @Test
