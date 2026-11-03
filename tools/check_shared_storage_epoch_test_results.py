@@ -76,6 +76,10 @@ REQUIRED_TESTS = {
         "forgedHugeBatchCountCannotAllocateBeyondDataBlockBytes",
         "forgedSmallBatchCountAbovePayloadCapacityFailsClosed",
     ),
+    "org.apache.kafka.storage.internals.shared.object.LocalCommittedObjectIoFenceTest": (
+        "drainWaitsForPhysicalGetLogicalCacheReadAndWriter",
+        "bothRegistriesMustBeFencedAndOtherObjectsRemainIndependent",
+    ),
     "org.apache.kafka.storage.internals.shared.object.ActiveObjectUploadsTest": (
         "localUploadFenceWaitsForLeaseAndBlocksReentry",
         "oldLeaseAndLegacyEndCannotReleaseCurrentUpload",
@@ -83,6 +87,8 @@ REQUIRED_TESTS = {
     ),
     "org.apache.kafka.storage.internals.shared.object.SharedObjectUploaderTest": (
         "cancelledCallerCannotUnpinPendingUploadOrBypassLocalFence",
+        "fencedUploadRejectsBeforeEvenInvalidPackingPlanIsInspected",
+        "failedPackingPlanReleasesIdentityLeaseForValidRetry",
     ),
     "org.apache.kafka.storage.internals.shared.object.ActiveCommittedObjectReadsTest": (
         "readOnlyViewRejectsMultipartSourcesBeforeAnyMaterializationOrClose",

@@ -87,14 +87,22 @@ public final class SharedObjectUploader {
         long createdTimeMs,
         List<SharedStorageEngine.UploadCandidate> candidates
     ) {
+        final ActiveObjectUploads.UploadLease uploadLease;
+        try {
+            // Fence admission precedes any planning or WAL descriptor scan.
+            // A rejected object never consumes remote metadata/PUT resources.
+            uploadLease = activeUploads.beginLease(objectId);
+        } catch (RuntimeException e) {
+            return CompletableFuture.failedFuture(e);
+        }
+
         final UploadPlan plan;
         final UploadContext plannedContext;
-        final ActiveObjectUploads.UploadLease uploadLease;
         try {
             plan = packer.plan(objectId, candidates, engine);
             plannedContext = UploadContext.planned(objectId, createdTimeMs, plan.objectSize());
-            uploadLease = activeUploads.beginLease(objectId);
         } catch (RuntimeException e) {
+            uploadLease.close();
             return CompletableFuture.failedFuture(e);
         }
 

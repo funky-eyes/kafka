@@ -236,6 +236,56 @@ class SharedObjectUploaderTest {
         }
     }
 
+    @Test
+    void fencedUploadRejectsBeforeEvenInvalidPackingPlanIsInspected() throws Exception {
+        InMemoryObjectStore objectStore = new InMemoryObjectStore();
+        InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
+        ActiveObjectUploads uploads = new ActiveObjectUploads();
+        uploads.fence(452L);
+
+        try (SharedStorageEngine engine = engine("fenced-before-planning")) {
+            SharedObjectUploader uploader = new SharedObjectUploader(
+                objectStore, metadataStore, new SharedObjectPacker(), engine, uploads);
+            // Empty candidates would normally be rejected by the packer. The
+            // upload fence must win before any planning or metadata mutation.
+            ExecutionException rejected = assertThrows(ExecutionException.class, () ->
+                uploader.upload(452L, 4_520L, List.of()).get(10, TimeUnit.SECONDS));
+            assertTrue(rejected.getCause() instanceof IllegalStateException);
+            assertTrue(rejected.getCause().getMessage().contains("locally fenced"));
+            assertTrue(uploads.locallyDrainedAfterFence(452L));
+            assertFalse(metadataStore.isPrepared(452L));
+            assertFalse(metadataStore.isCommitted(452L));
+            assertFalse(objectStore.contains(452L));
+        }
+    }
+
+    @Test
+    void failedPackingPlanReleasesIdentityLeaseForValidRetry() throws Exception {
+        InMemoryObjectStore objectStore = new InMemoryObjectStore();
+        InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
+        ActiveObjectUploads uploads = new ActiveObjectUploads();
+
+        try (SharedStorageEngine engine = engine("plan-failure-retry")) {
+            append(engine, P0, 10, 19, new byte[] {2, 4, 6});
+            SharedObjectUploader uploader = new SharedObjectUploader(
+                objectStore, metadataStore, new SharedObjectPacker(), engine, uploads);
+            ExecutionException rejected = assertThrows(ExecutionException.class, () ->
+                uploader.upload(453L, 4_530L, List.of()).get(10, TimeUnit.SECONDS));
+            assertTrue(rejected.getCause() instanceof IllegalArgumentException);
+            assertFalse(uploads.contains(453L),
+                "Plan failure must release the upload lease before another attempt");
+            assertFalse(metadataStore.isPrepared(453L));
+
+            SharedObjectMetadata metadata = uploader.upload(
+                453L, 4_530L, engine.uploadCandidates(P0, 10, 20)
+            ).get(10, TimeUnit.SECONDS);
+            assertEquals(453L, metadata.objectId());
+            assertTrue(objectStore.contains(453L));
+            assertTrue(metadataStore.isCommitted(453L));
+            assertFalse(uploads.contains(453L));
+        }
+    }
+
     private SharedStorageEngine engine(String name) throws Exception {
         return new SharedStorageEngine(new FileSharedWal(tempDir.resolve(name), 1024 * 1024, 4096));
     }

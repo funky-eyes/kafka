@@ -3216,3 +3216,63 @@ Leader/Follower, ISR/HW, and partition epochs are unchanged.
 COMMITTED physical deletion remains OFF, PR #2 stays Draft, and
 the MinIO GA baseline remains frozen at
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
+
+
+## Batch 298 — repair mandatory JUnit count and join local reader/writer fences
+
+**Parent:** Batch 297 at
+`5fdd278947b969b44137dc963e048ad73db538fc`
+completed 16/17 GitHub Actions successfully. The sole failed workflow
+was the main `Shared Storage` job, at `Require leadership and epoch
+JUnit evidence`. The Java 25 storage tests, KRaft Controller tests,
+real MinIO three-broker E2E and object-format tests completed. Four
+Python checker unit assertions still expected **700** mandatory methods,
+even though Batch 297 correctly enrolled **704**. The actual failure
+was `AssertionError: 700 != 704`; no data-loss / replication
+regression was established by that failure.
+
+Correct the checker tests and retain a fixed explicit expected count.
+Batch 298 adds four more required unskipped methods for a **708**
+method inventory, rather than reverting any required test enrollment.
+
+Introduce package-private `LocalCommittedObjectIoFence`: it combines
+the *existing* `ActiveCommittedObjectReads` (actual transport Range
+GET and logical cache-hit lease accounting) and `ActiveObjectUploads`
+(identity-owned upload lease and irreversible object-ID admission).
+The join returns locally drained only after BOTH independently fenced
+registries have actually drained. The two admission fences are
+irreversible; any admission between those fence calls remains counted
+until the corresponding lease is closed. Cancellation of an outer
+Range GET Future cannot release the underlying S3 transport lease.
+
+Move `SharedObjectUploader` admission to BEFORE packer planning. A
+locally fenced object must not pay for batch layout work or access
+metadata before rejecting a new upload. A synchronous planning
+validation failure releases its identity-owned lease, so a later
+legitimate attempt for the same still-unfenced object can succeed.
+The successful PREPARE, PUT, COMMIT, hook, and remote index publication
+order is unchanged.
+
+Four new mandatory JUnit methods verify (1) simultaneous physical,
+logical and writer drain after cancellation, (2) partial fence and
+independent Object IDs, (3) denial ahead of even an invalid packing
+plan, and (4) planning failure cleanup and successful retry. The
+strict inventory is now **704 -> 708**, and both the manifest and its
+Python checker assertions are synchronized.
+
+**Non-authorizing boundary:** the helper is NOT installed on any
+production Broker, and callers must explicitly inject the same real
+registry instances into all relevant local Readers and Uploaders.
+Default constructors can use independent registries, so even this
+joined local result must never be treated as proof of whole-broker,
+multi-broker or cross-incarnation quiescence. There is no KRaft
+Controller authorization writer, durable per-replica acknowledgement
+or global reference retirement. COMMITTED physical object DELETE
+remains disabled. Kafka Leader/Follower, ISR/HW, Partition Epoch and
+replica durability semantics remain native. PR #2 stays Draft and the
+frozen MinIO GA parent remains
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
+
+Batch 298 CI for its exact source SHA must complete before this batch
+can be called stable. No Native Image build is added to the development
+workflow.
