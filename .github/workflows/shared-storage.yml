@@ -445,6 +445,7 @@ jobs:
             --tests 'org.apache.kafka.controller.PartitionRetirementSourceProbeRegistryTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementSourceProbeValueTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementControllerPrecheckTest' \
+            --tests 'org.apache.kafka.controller.PartitionRetirementReplicaQuiescencePrecheckTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementControlManagerTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementCandidatePrecheckTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementFeatureGateTest' \

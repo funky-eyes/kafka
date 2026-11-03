@@ -3276,3 +3276,63 @@ frozen MinIO GA parent remains
 Batch 298 CI for its exact source SHA must complete before this batch
 can be called stable. No Native Image build is added to the development
 workflow.
+
+
+## Batch 299 — full-assigned-replica read/write drain precheck (non-authorizing)
+
+**Verified parent:** Batch 298 at
+`af9a1acd699d20789737849e97c0bcc710286757` completed
+**17/17** GitHub Actions SUCCESS, including the initially failed
+Object Format workflow's dependency-resolution rerun. Java 25, real
+MinIO, Ring WAL, KRaft Controller HA, WAL Crash and native multi-replica
+semantics remained green.
+
+A broker-local `LocalCommittedObjectIoFence` is not enough to
+retire a COMMITTED physical object. The Kafka Controller must regard
+**every assigned replica**, not merely the current ISR, as a
+potentially active reader or uploader. An out-of-ISR replica can still
+hold a Range GET, stale physical reference, or in-flight remote PUT.
+
+Introduce package-private, **read-only**
+`PartitionRetirementReplicaQuiescencePrecheck` in the KRaft controller
+module. It resolves the candidate's immutable Topic ID and partition
+against the live controller registration; requires the recovered
+current source leader, unchanged source leader/partition epochs and
+no in-progress reassignment; and demands exactly one observation for
+every member of `PartitionRegistration.replicas`. Missing, foreign,
+duplicate, fenced, shutdown or unregistered brokers fail closed,
+including an assigned broker outside ISR. Each observation must
+match the exact physical Object ID, Topic ID, partition, expected and
+next authority CAS offsets, Kafka source leader/partition epochs,
+and current registered Broker Epoch + incarnation UUID. Either a
+pending logical/physical reader or an unfinished uploader denies
+the local drain classification.
+
+Every report remains caller-supplied and **UNAUTHENTICATED**.
+The most positive finding is deliberately named `MATCHED_UNTRUSTED`.
+It does NOT establish proof of a real local fence, a current authenticated
+communication channel, a durable per-replica acknowledgement, Controller
+CAS, global quiescence or safe physical deletion. In particular, a
+packed KSO2 physical object may contain ranges from several partitions
+or Topic IDs, each with its own assigned replica set. Checking one
+partition must never be substituted for checking every range.
+No listener, authentication bridge, KRaft retirement emitter, S3
+COMMITTED DELETE or reference eviction is wired to this diagnostic.
+
+Eight new required unskipped JUnit methods validate all-assigned vs
+ISR, duplicate/foreign responses, ISR-only topology advancement,
+leader/reassignment transitions, offline/fenced/shutdown brokers,
+restarted Broker Epoch/incarnation ABA, reader/writer pending states,
+cross-object/topic/CAS/epoch replay and malformed input. Mandatory
+JUnit evidence grows **708 -> 716**, with the explicit Python count
+checker updated and the new suite enrolled in the existing Java 25
+Controller test workflow. No new hosted workflow or development
+Native Image compilation is added.
+
+Kafka native Leader/Follower, ISR/HW and partition epoch logic is
+not modified. PR #2 remains Draft, frozen MinIO GA remains
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`, and
+**COMMITTED physical GC remains DISABLED**. This batch is only a
+negative-first precondition for a future authenticated and persistent
+Controller-controlled retirement protocol; CI of the exact Batch 299
+commit is required before treating it as stable.

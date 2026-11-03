@@ -575,6 +575,16 @@ REQUIRED_TESTS = {
         "claimedAuthorityGenerationCannotBeChangedAcrossWireConversion",
         "changedPartitionEpochInvalidatesOneTimeChallengeWithoutLeaderChange",
     ),
+    "org.apache.kafka.controller.PartitionRetirementReplicaQuiescencePrecheckTest": (
+        "allAssignedReplicasIncludingOutOfIsrAreRequired",
+        "duplicatedOrForeignBrokerCannotCompleteReplicaSet",
+        "isrChangeLeaderElectionAndReassignmentInvalidateEpochBoundReports",
+        "missingFencedOrShuttingDownBrokerFailsClosed",
+        "reusedBrokerIdCannotBorrowOlderEpochOrIncarnationReport",
+        "pendingLogicalReadOrPhysicalUploadBlocksLocalDrain",
+        "physicalObjectTopicAndAuthorityCasCannotCrossBorrowEvidence",
+        "missingMalformedOrNullReportNeverPassesPrecheck",
+    ),
     "org.apache.kafka.controller.PartitionRetirementControllerPrecheckTest": (
         "currentRecoveredLeaderInIsrMatchesButIsNotWriteAuthorization",
         "missingPartitionOrDeletedTopicIsNotAnAuthoritySource",
