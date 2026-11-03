@@ -201,6 +201,41 @@ class SharedObjectUploaderTest {
         }
     }
 
+    @Test
+    void cancelledCallerCannotUnpinPendingUploadOrBypassLocalFence() throws Exception {
+        InMemoryObjectStore objectStore = new InMemoryObjectStore();
+        InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
+        ActiveObjectUploads uploads = new ActiveObjectUploads();
+        CompletableFuture<Void> releasePut = new CompletableFuture<>();
+        SharedObjectUploadHook hook = (phase, context) ->
+            phase == Phase.AFTER_PREPARE ? releasePut : CompletableFuture.completedFuture(null);
+
+        try (SharedStorageEngine engine = engine("cancelled-upload-lease")) {
+            append(engine, P0, 10, 19, new byte[] {5, 6, 7});
+            SharedObjectUploader uploader = new SharedObjectUploader(
+                objectStore, metadataStore, new SharedObjectPacker(), engine, uploads, hook);
+            CompletableFuture<SharedObjectMetadata> caller =
+                uploader.upload(351L, 3_510L, engine.uploadCandidates(P0, 10, 20));
+
+            assertTrue(uploads.contains(351L));
+            assertTrue(caller.cancel(true));
+            assertFalse(releasePut.isDone(), "Caller cancellation must not complete the upload gate");
+            uploads.fence(351L);
+            assertFalse(uploads.locallyDrainedAfterFence(351L),
+                "A cancelled caller cannot retire the underlying pending upload");
+            assertThrows(IllegalStateException.class, () -> uploads.beginLease(351L));
+
+            releasePut.complete(null);
+            // CompletableFuture completion runs these synchronous test hooks
+            // and the internal publication chain before complete() returns.
+            assertFalse(uploads.contains(351L));
+            assertTrue(uploads.locallyDrainedAfterFence(351L));
+            assertTrue(metadataStore.isCommitted(351L));
+            assertTrue(objectStore.contains(351L));
+            assertTrue(caller.isCancelled());
+        }
+    }
+
     private SharedStorageEngine engine(String name) throws Exception {
         return new SharedStorageEngine(new FileSharedWal(tempDir.resolve(name), 1024 * 1024, 4096));
     }

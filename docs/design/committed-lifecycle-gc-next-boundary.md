@@ -3168,3 +3168,51 @@ ISR/HW semantics, KRaft metadata, transport read leases and
 the disabled COMMITTED S3 physical DELETE boundary are untouched.
 PR #2 remains Draft; frozen MinIO GA base remains
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
+
+
+## Batch 297 — process-local writer leases and irreversible admission fence
+
+**Verified base:** Batch 296 at
+`66092bcd0faf3474ce5284d2856f1d48058c780d` passed
+17/17 exact-SHA GitHub Actions, including the Java 25, real MinIO,
+KRaft Controller HA, Ring WAL, crash windows, and native replica gates.
+
+The previous read-side `ActiveCommittedObjectReads` counts logical
+cache hits and actual Range GET transport Futures, but had no matching
+physical PUT admission/drain fence. `ActiveObjectUploads` previously
+tracked only an Object-ID keyed active Set. An ID-only `end` could not
+distinguish a stale callback from a later upload using the same ID,
+and the registry had no irreversible `fence` operation.
+
+Add an identity-scoped, idempotently closable `UploadLease` and an
+atomic synchronized `beginLease/fence` boundary. Fencing rejects
+future admission, including the legacy `begin` entry point. Local
+drain requires an explicit prior fence AND completion of the actual
+admitted upload. A previously closed lease cannot release a new
+upload sharing its Object ID. Legacy `begin/end` remain available to
+existing callers; an ID-only `end` cannot release leased uploads.
+
+`SharedObjectUploader` now acquires a lease before PREPARE and
+holds it across PUT, metadata COMMIT, post-COMMIT hook, and remote
+index publication. The returned caller Future is a dependent view:
+cancelling it does not cancel or unpin the underlying upload.
+Synchronous construction failure and asynchronous completion
+release the owning lease. This maintains the existing successful
+PUT+COMMIT durability boundary.
+
+Four mandatory unskipped JUnit regressions cover local fence/drain,
+stale lease and legacy-end ownership, 32 deterministic admission/fence
+races, and cancellation of the public uploader Future while the
+internal PREPARE-to-PUT continuation is still pending. The strict
+storage/metadata Java/Scala test inventory grows 700 -> 704; normal
+CI workflows and Java 25 baseline remain in force.
+
+**Limitations:** This registry is still process-local and volatile,
+not persistent after broker restart, not distributed, and does not
+establish other Brokers' reader or writer quiescence. It is not a
+Controller-certified KRaft CAS, multi-replica durable reference
+retirement, or COMMITTED S3 DELETE permit. Native Kafka
+Leader/Follower, ISR/HW, and partition epochs are unchanged.
+COMMITTED physical deletion remains OFF, PR #2 stays Draft, and
+the MinIO GA baseline remains frozen at
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
