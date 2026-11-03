@@ -18,6 +18,7 @@ package org.apache.kafka.storage.internals.shared.object;
 
 import java.nio.ByteBuffer;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -98,9 +99,22 @@ final class ActiveCommittedObjectReads {
         return new ObjectStore() {
             @Override
             public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
-                return CompletableFuture.failedFuture(
-                    new UnsupportedOperationException("Remote read-only view cannot publish an object")
-                );
+                return rejectReaderUpload();
+            }
+
+            @Override
+            public CompletableFuture<Void> put(long objectId, List<ByteBuffer> parts) {
+                return rejectReaderUpload();
+            }
+
+            @Override
+            public CompletableFuture<Void> put(long objectId, ObjectStore.PartSource source) {
+                return rejectReaderUpload();
+            }
+
+            @Override
+            public CompletableFuture<Void> put(long objectId, long objectSize, ObjectStore.PartSource source) {
+                return rejectReaderUpload();
             }
 
             @Override
@@ -142,6 +156,16 @@ final class ActiveCommittedObjectReads {
                 );
             }
         };
+    }
+
+    /**
+     * Reject all upload overloads before default ObjectStore adapters can
+     * drain a PartSource or materialize an entire multipart object in heap.
+     */
+    private static CompletableFuture<Void> rejectReaderUpload() {
+        return CompletableFuture.failedFuture(
+            new UnsupportedOperationException("Remote read-only view cannot publish an object")
+        );
     }
 
     private synchronized void release(long objectId, boolean logical) {

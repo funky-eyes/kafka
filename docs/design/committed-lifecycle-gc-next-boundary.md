@@ -3045,3 +3045,46 @@ COMMITTED deletes. Native Kafka Leader/Follower, ISR, HW, broker
 and partition epochs and KRaft remain unchanged; PR #2 stays
 Draft and frozen MinIO GA base is
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
+
+
+## Batch 294 — reject all reader-only upload overloads before consuming parts
+
+**Verified base:** Batch 293 at
+`c4df949d8b26a9405e40a054a13b856f59c5f53e`
+passed 17/17 Java 25, real MinIO, Kafka native multi-replica,
+KRaft HA, Ring WAL, and crash-window CI workflows.
+
+`ActiveCommittedObjectReads.trackingReaderStore` produces the
+read-only `ObjectStore` view used by `SharedObjectReader`.
+It already rejected `put(long, ByteBuffer)` and `delete`, but
+`ObjectStore` also defines three default upload overloads:
+a `List<ByteBuffer>`, a lazy `PartSource`, and an exact-size
+`PartSource`. Default implementations **materialize or drain**
+the supplied data before eventually calling the rejected PUT.
+Consequently, an accidental write through the read-only view
+could still allocate an entire multipart object in heap or
+consume and close an upload source, despite the final rejection.
+
+Explicitly override all four upload entry points on the
+reader view and immediately return the same failed Future.
+No PartSource is pulled or closed, no multipart buffer is
+materialized, and no backing PUT can be invoked. The existing
+physical Range GET and logical cache-hit admission fences
+remain unchanged, as does the explicit DELETE denial.
+
+Three deterministic required JUnit tests verify that both
+PartSource overloads and the List upload are rejected before
+any source pull, close, or backing call; that two reader views
+sharing one local registry cannot declare an object drained
+until both underlying transport Futures settle; and that
+cancelling a read-view Future does not cancel or unpin the
+underlying S3 GET. Strict JUnit evidence increases 692 -> 695.
+Existing workflows and Java 25 baseline are unchanged.
+
+**Hard safety boundary:** The local reader registry still
+cannot establish cross-Broker writer/read quiescence or issue
+Controller retirement authorizations. Physical COMMITTED S3
+DELETE remains disabled; Kafka Leader/Follower, ISR, HW,
+partition epochs and KRaft are unchanged. PR #2 stays Draft
+and frozen MinIO GA base remains
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`.

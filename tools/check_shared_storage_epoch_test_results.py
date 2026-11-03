@@ -70,6 +70,9 @@ REQUIRED_TESTS = {
         "forgedSmallBatchCountAbovePayloadCapacityFailsClosed",
     ),
     "org.apache.kafka.storage.internals.shared.object.ActiveCommittedObjectReadsTest": (
+        "readOnlyViewRejectsMultipartSourcesBeforeAnyMaterializationOrClose",
+        "twoReadViewsShareAllTransportLeasesUntilTheirUnderlyingGetsComplete",
+        "cancellingReadViewFutureCannotUnpinUnderlyingTransport",
         "cachedLogicalReadLeaseMustDrainAlongsidePhysicalRangeGets",
         "readerTrackingViewCannotPublishOrDeletePhysicalObjects",
         "localDrainRequiresFenceAndAllPhysicalGetLeases",

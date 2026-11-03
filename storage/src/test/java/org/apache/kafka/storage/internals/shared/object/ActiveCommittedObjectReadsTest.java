@@ -19,6 +19,7 @@ package org.apache.kafka.storage.internals.shared.object;
 import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -147,6 +148,130 @@ class ActiveCommittedObjectReadsTest {
         assertEquals(0, writes.get());
         assertEquals(0, deletes.get());
         assertEquals(0L, pins.inFlightRangeGets(106L));
+    }
+
+    @Test
+    void readOnlyViewRejectsMultipartSourcesBeforeAnyMaterializationOrClose() {
+        AtomicInteger writes = new AtomicInteger();
+        AtomicInteger sourcePulls = new AtomicInteger();
+        AtomicInteger sourceCloses = new AtomicInteger();
+        ObjectStore delegate = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                writes.incrementAndGet();
+                return CompletableFuture.completedFuture(null);
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                return CompletableFuture.completedFuture(ByteBuffer.allocate(length));
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+        };
+        ObjectStore.PartSource source = new ObjectStore.PartSource() {
+            @Override
+            public ByteBuffer nextPart() {
+                sourcePulls.incrementAndGet();
+                return ByteBuffer.wrap(new byte[] {1});
+            }
+
+            @Override
+            public void close() {
+                sourceCloses.incrementAndGet();
+            }
+        };
+        ActiveCommittedObjectReads pins = new ActiveCommittedObjectReads();
+        ObjectStore reader = pins.trackingReaderStore(delegate);
+        List<CompletableFuture<Void>> rejected = List.of(
+            reader.put(110L, List.of(ByteBuffer.wrap(new byte[] {1}))),
+            reader.put(110L, source),
+            reader.put(110L, 1L, source)
+        );
+        for (CompletableFuture<Void> attempt : rejected) {
+            CompletionException failure = assertThrows(CompletionException.class, attempt::join);
+            assertTrue(failure.getCause() instanceof UnsupportedOperationException);
+        }
+        assertEquals(0, sourcePulls.get(),
+            "Read-only views must not drain a PartSource or materialize multipart data");
+        assertEquals(0, sourceCloses.get(), "Rejected uploads cannot steal source ownership");
+        assertEquals(0, writes.get(), "No upload overload may reach the backing ObjectStore");
+        assertEquals(0L, pins.inFlightRangeGets(110L));
+    }
+
+    @Test
+    void twoReadViewsShareAllTransportLeasesUntilTheirUnderlyingGetsComplete() {
+        CompletableFuture<ByteBuffer> first = new CompletableFuture<>();
+        CompletableFuture<ByteBuffer> second = new CompletableFuture<>();
+        ObjectStore backing = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                return position == 0L ? first : second;
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+        };
+        ActiveCommittedObjectReads registry = new ActiveCommittedObjectReads();
+        ObjectStore readerA = registry.trackingReaderStore(backing);
+        ObjectStore readerB = registry.trackingReaderStore(backing);
+        CompletableFuture<ByteBuffer> a = readerA.rangeRead(111L, 0L, 1);
+        CompletableFuture<ByteBuffer> b = readerB.rangeRead(111L, 1L, 1);
+
+        registry.fence(111L);
+        assertEquals(2L, registry.inFlightRangeGets(111L));
+        assertFalse(registry.locallyDrainedAfterFence(111L));
+        first.complete(ByteBuffer.wrap(new byte[] {1}));
+        assertEquals(1, a.join().remaining());
+        assertEquals(1L, registry.inFlightRangeGets(111L));
+        assertFalse(registry.locallyDrainedAfterFence(111L),
+            "One finished reader cannot erase another reader's pending transport");
+        second.complete(ByteBuffer.wrap(new byte[] {2}));
+        assertEquals(1, b.join().remaining());
+        assertTrue(registry.locallyDrainedAfterFence(111L));
+        assertEquals(0L, registry.inFlightRangeGets(111L));
+    }
+
+    @Test
+    void cancellingReadViewFutureCannotUnpinUnderlyingTransport() {
+        CompletableFuture<ByteBuffer> transport = new CompletableFuture<>();
+        ObjectStore backing = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                return transport;
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+        };
+        ActiveCommittedObjectReads registry = new ActiveCommittedObjectReads();
+        ObjectStore reader = registry.trackingReaderStore(backing);
+        CompletableFuture<ByteBuffer> result = reader.rangeRead(112L, 0L, 1);
+        assertEquals(1L, registry.inFlightRangeGets(112L));
+        assertTrue(result.cancel(true));
+        assertFalse(transport.isDone());
+        registry.fence(112L);
+        assertFalse(registry.locallyDrainedAfterFence(112L));
+        transport.complete(ByteBuffer.wrap(new byte[] {1}));
+        assertTrue(registry.locallyDrainedAfterFence(112L));
+        assertTrue(result.isCancelled());
     }
 
     @Test
