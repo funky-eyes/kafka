@@ -3088,3 +3088,51 @@ DELETE remains disabled; Kafka Leader/Follower, ISR, HW,
 partition epochs and KRaft are unchanged. PR #2 stays Draft
 and frozen MinIO GA base remains
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
+
+
+## Batch 295 — isolate KSO2 cache waiters' cancellation from shared fetches
+
+**Verified stable parent:** Batch 294 at
+`d4fc209cb45a26efd9f9acb1d1af86f51727a33f` passed
+17/17 Java 25, real MinIO, multi-replica acks=all, KRaft
+Controller HA, WAL crash, Ring WAL and object format gates.
+
+The immutable KSO2 Index Cache and DataBlock Cache intentionally
+coalesce concurrent reads of the same physical Object ID and
+descriptor. However, their `get` methods returned their **internal
+shared CompletableFuture** to each caller. Any consumer cancelling
+one returned Future could cancel the shared state for all readers:
+a pending verified descriptor or DataBlock became poisoned/evicted
+even when another reader still needed it. Because the underlying
+physical GET Future was separately tracked by Batch 291's
+`ActiveCommittedObjectReads`, this was not proof of early S3
+transport quiescence, but it was a read-availability and
+cache-coalescing correctness violation.
+
+Both caches now return a separate dependent completion view via
+`thenApply` for every waiter. This retains one shared loader and
+one immutable snapshot but prevents a caller's `cancel()` from
+cancelling the internal coalescing Future or any other waiter's
+view. The same cancellation boundary is used for index-cache
+bypass (including legacy descriptors) and data-cache bypass
+(disabled or oversized). Real underlying failures still evict
+failed cached entries and remain retryable; verified successes
+stay reusable according to the existing LRU and byte budget.
+
+Five deterministic, required JUnit regressions exercise:
+(1) one cancelled index waiter with another still pending and
+later reusing the verified index; (2) cancellation isolation with
+index caching disabled; (3) the equivalent shared DataBlock
+case; (4) cancelled uncached DataBlock reads; and (5) a failed
+shared block load after one waiter cancels, followed by successful
+reload. Existing tests that asserted *Future object identity*
+now assert distinct caller views and the SAME verified immutable
+snapshot object. Strict JUnit evidence grows 695 -> 700 without
+adding CI workflows or enabling Native Image builds.
+
+**Retirement safety is unchanged:** no controller writer/grant,
+cross-Broker Reader/Writer fence, S3 COMMITTED physical DELETE,
+or WAL reclamation policy is enabled. Native Kafka Leader/Follower,
+ISR/HW, KRaft partition epochs and object durability remain
+authoritative. PR #2 stays Draft and frozen MinIO GA remains at
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`.

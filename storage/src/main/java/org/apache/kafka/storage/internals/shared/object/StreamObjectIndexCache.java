@@ -28,6 +28,7 @@ import java.util.concurrent.CompletableFuture;
 /**
  * Bounded LRU of immutable object-index loads. Failed loads are never retained.
  * Slow physical object-store calls execute outside the per-cache publication monitor.
+ * Caller cancellation must never cancel the shared coalescing Future.
  */
 final class StreamObjectIndexCache {
     private final int maxEntries;
@@ -50,7 +51,7 @@ final class StreamObjectIndexCache {
         if (maxEntries == 0 || !reference.hasObjectDescriptor()) {
             // Cache bypass must still honor the asynchronous failure contract,
             // otherwise synchronous transport errors skip COMMITTED fallback.
-            return loadOnce(reference, loader);
+            return callerView(loadOnce(reference, loader));
         }
 
         Key key = Key.from(reference);
@@ -58,7 +59,7 @@ final class StreamObjectIndexCache {
         synchronized (this) {
             CompletableFuture<Optional<StreamObjectIndexReader.IndexSnapshot>> existing = entries.get(key);
             if (existing != null) {
-                return existing;
+                return callerView(existing);
             }
             // Publish the coalescing Future while holding the short cache
             // lock, but never invoke a potentially blocking Range GET here.
@@ -84,7 +85,12 @@ final class StreamObjectIndexCache {
                 installed.complete(snapshot);
             }
         });
-        return installed;
+        return callerView(installed);
+    }
+
+    /** An independent cancellation boundary for every index-cache consumer. */
+    private static <T> CompletableFuture<T> callerView(CompletableFuture<T> shared) {
+        return shared.thenApply(value -> value);
     }
 
     private static CompletableFuture<Optional<StreamObjectIndexReader.IndexSnapshot>> loadOnce(

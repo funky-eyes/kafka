@@ -30,7 +30,10 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class StreamObjectDataBlockCacheTest {
@@ -63,10 +66,11 @@ class StreamObjectDataBlockCacheTest {
             }
         );
 
-        assertSame(first, second);
+        assertNotSame(first, second, "Coalescing must not share a caller cancellation handle");
         assertEquals(1, loads.get());
         pending.complete(snapshot);
         assertSame(snapshot, first.get(10, TimeUnit.SECONDS));
+        assertSame(snapshot, second.get(10, TimeUnit.SECONDS));
         assertSame(snapshot, cache.get(
             reference,
             block,
@@ -78,6 +82,103 @@ class StreamObjectDataBlockCacheTest {
         assertEquals(1, loads.get());
         assertEquals(1, cache.size());
         assertEquals(80, cache.cachedBytes());
+    }
+
+    @Test
+    void cancelledDataBlockWaiterCannotPoisonSharedVerifiedBlock() throws Exception {
+        StreamObjectDataBlockCache cache = new StreamObjectDataBlockCache(256);
+        RemoteObjectIndex.RangeReference ref = reference(5L);
+        StreamObjectFormat.DataBlockIndexEntry dataBlock = block(16, 80, 501L);
+        StreamObjectDataBlockReader.DataBlockSnapshot snapshot = snapshot();
+        CompletableFuture<StreamObjectDataBlockReader.DataBlockSnapshot> pending = new CompletableFuture<>();
+        AtomicInteger loads = new AtomicInteger();
+        CompletableFuture<StreamObjectDataBlockReader.DataBlockSnapshot> abandoned = cache.get(
+            ref, dataBlock, () -> {
+                loads.incrementAndGet();
+                return pending;
+            }
+        );
+        CompletableFuture<StreamObjectDataBlockReader.DataBlockSnapshot> survivor = cache.get(
+            ref, dataBlock, () -> {
+                loads.incrementAndGet();
+                return CompletableFuture.completedFuture(snapshot);
+            }
+        );
+        assertNotSame(abandoned, survivor);
+        assertEquals(1, loads.get());
+        assertTrue(abandoned.cancel(true));
+        assertFalse(pending.isCancelled(), "One reader cannot cancel the underlying shared DataBlock GET");
+        assertFalse(survivor.isDone());
+        assertEquals(80L, cache.cachedBytes());
+
+        pending.complete(snapshot);
+        assertTrue(abandoned.isCancelled());
+        assertSame(snapshot, survivor.get(10, TimeUnit.SECONDS));
+        assertSame(snapshot, cache.get(ref, dataBlock, () -> completedLoad(loads))
+            .get(10, TimeUnit.SECONDS));
+        assertEquals(1, loads.get(), "One cancelled waiter must not evict the reusable verified block");
+        assertEquals(1, cache.size());
+        assertEquals(80L, cache.cachedBytes());
+    }
+
+    @Test
+    void noCacheStillKeepsCancelledWaiterSeparateFromSourceLoad() throws Exception {
+        StreamObjectDataBlockCache cache = new StreamObjectDataBlockCache(0);
+        RemoteObjectIndex.RangeReference ref = reference(6L);
+        StreamObjectFormat.DataBlockIndexEntry dataBlock = block(16, 80, 601L);
+        StreamObjectDataBlockReader.DataBlockSnapshot snapshot = snapshot();
+        CompletableFuture<StreamObjectDataBlockReader.DataBlockSnapshot> transport = new CompletableFuture<>();
+        AtomicInteger loads = new AtomicInteger();
+        CompletableFuture<StreamObjectDataBlockReader.DataBlockSnapshot> cancelled = cache.get(
+            ref, dataBlock, () -> {
+                loads.incrementAndGet();
+                return transport;
+            }
+        );
+        assertTrue(cancelled.cancel(true));
+        assertFalse(transport.isCancelled(), "Zero-budget cache bypass must not cancel a physical block load");
+        transport.complete(snapshot);
+        assertTrue(cancelled.isCancelled());
+        assertSame(snapshot, transport.join());
+        assertEquals(0, cache.size());
+        assertSame(snapshot, cache.get(ref, dataBlock, () -> completedLoad(loads))
+            .get(10, TimeUnit.SECONDS));
+        assertEquals(2, loads.get(), "Cache bypass still launches a fresh load for the next caller");
+    }
+
+    @Test
+    void failedSharedDataBlockMustEvictEvenWhenOneWaiterWasCancelled() throws Exception {
+        StreamObjectDataBlockCache cache = new StreamObjectDataBlockCache(256);
+        RemoteObjectIndex.RangeReference ref = reference(7L);
+        StreamObjectFormat.DataBlockIndexEntry dataBlock = block(16, 80, 701L);
+        StreamObjectDataBlockReader.DataBlockSnapshot recovered = snapshot();
+        CompletableFuture<StreamObjectDataBlockReader.DataBlockSnapshot> pending = new CompletableFuture<>();
+        AtomicInteger loads = new AtomicInteger();
+
+        CompletableFuture<StreamObjectDataBlockReader.DataBlockSnapshot> cancelled = cache.get(
+            ref, dataBlock, () -> {
+                loads.incrementAndGet();
+                return pending;
+            }
+        );
+        CompletableFuture<StreamObjectDataBlockReader.DataBlockSnapshot> survivor = cache.get(
+            ref, dataBlock, () -> completedLoad(loads)
+        );
+        assertTrue(cancelled.cancel(true));
+        IOException failure = new IOException("retryable physical DataBlock failure");
+        pending.completeExceptionally(failure);
+        ExecutionException propagated = assertThrows(
+            ExecutionException.class, () -> survivor.get(10, TimeUnit.SECONDS)
+        );
+        assertSame(failure, propagated.getCause());
+        assertEquals(0, cache.size(), "Failed shared load must still be evicted");
+        assertEquals(0L, cache.cachedBytes());
+        assertSame(recovered, cache.get(ref, dataBlock, () -> {
+            loads.incrementAndGet();
+            return CompletableFuture.completedFuture(recovered);
+        }).get(10, TimeUnit.SECONDS));
+        assertEquals(2, loads.get());
+        assertEquals(1, cache.size());
     }
 
     @Test

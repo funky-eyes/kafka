@@ -62,8 +62,15 @@ REQUIRED_TESTS = {
         "eitherFailedKso2MetadataRangeMustNotWaitForOtherPendingRange",
     ),
     "org.apache.kafka.storage.internals.shared.object.StreamObjectIndexCacheTest": (
+        "cancelledIndexCacheWaiterDoesNotPoisonCoalescedReader",
+        "disablingIndexCacheStillIsolatesCallerCancellationFromSourceGet",
         "blockingRangeGetCannotHoldTheSharedIndexCacheMonitor",
         "synchronouslyThrowingObjectStoreDoesNotPoisonIndexCache",
+    ),
+    "org.apache.kafka.storage.internals.shared.object.StreamObjectDataBlockCacheTest": (
+        "cancelledDataBlockWaiterCannotPoisonSharedVerifiedBlock",
+        "noCacheStillKeepsCancelledWaiterSeparateFromSourceLoad",
+        "failedSharedDataBlockMustEvictEvenWhenOneWaiterWasCancelled",
     ),
     "org.apache.kafka.storage.internals.shared.object.StreamObjectDataBlockReaderTest": (
         "forgedHugeBatchCountCannotAllocateBeyondDataBlockBytes",

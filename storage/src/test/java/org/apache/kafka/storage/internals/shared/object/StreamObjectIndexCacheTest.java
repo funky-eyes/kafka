@@ -40,6 +40,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -63,12 +64,93 @@ class StreamObjectIndexCacheTest {
         CompletableFuture<java.util.Optional<StreamObjectIndexReader.IndexSnapshot>> first = cache.get(reference, loader);
         CompletableFuture<java.util.Optional<StreamObjectIndexReader.IndexSnapshot>> second = cache.get(reference, loader);
 
-        assertSame(first, second);
-        first.get(10, TimeUnit.SECONDS);
+        assertNotSame(first, second, "Independent callers must not share a cancellable Future");
+        assertSame(first.get(10, TimeUnit.SECONDS).orElseThrow(), second.get(10, TimeUnit.SECONDS).orElseThrow());
         assertEquals(3, store.readCount());
         cache.get(reference, loader).get(10, TimeUnit.SECONDS);
         assertEquals(3, store.readCount());
         assertEquals(1, cache.size());
+    }
+
+    @Test
+    void cancelledIndexCacheWaiterDoesNotPoisonCoalescedReader() throws Exception {
+        PackedObject packed = packObject(928L);
+        CountingObjectStore delegate = new CountingObjectStore();
+        delegate.install(packed.metadata().objectId(), packed.bytes());
+        CompletableFuture<ByteBuffer> pendingHeader = new CompletableFuture<>();
+        AtomicInteger requests = new AtomicInteger();
+        ObjectStore delayed = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                requests.incrementAndGet();
+                return position == 0L ? pendingHeader : delegate.rangeRead(objectId, position, length);
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+        };
+        StreamObjectIndexCache cache = new StreamObjectIndexCache(4);
+        StreamObjectIndexReader loader = new StreamObjectIndexReader(delayed);
+        RemoteObjectIndex.RangeReference ref = reference(packed.metadata());
+
+        CompletableFuture<Optional<StreamObjectIndexReader.IndexSnapshot>> cancelled = cache.get(ref, loader);
+        CompletableFuture<Optional<StreamObjectIndexReader.IndexSnapshot>> surviving = cache.get(ref, loader);
+        assertNotSame(cancelled, surviving);
+        assertEquals(2, requests.get(), "One shared Header/Footer load must serve both readers");
+        assertTrue(cancelled.cancel(true));
+        assertFalse(pendingHeader.isCancelled(), "Cancelling one reader must not cancel the pending Header GET");
+        assertFalse(surviving.isDone());
+        assertEquals(1, cache.size(), "One caller cancellation cannot evict a live shared load");
+
+        pendingHeader.complete(delegate.rangeRead(ref.objectId(), 0, StreamObjectFormat.OBJECT_HEADER_BYTES).join());
+        StreamObjectIndexReader.IndexSnapshot expected = surviving.get(10, TimeUnit.SECONDS).orElseThrow();
+        assertTrue(cancelled.isCancelled());
+        assertEquals(3, requests.get(), "The index load must continue after one caller cancels");
+        assertSame(expected, cache.get(ref, loader).get(10, TimeUnit.SECONDS).orElseThrow());
+        assertEquals(3, requests.get(), "A verified descriptor must remain reusable");
+        assertEquals(1, cache.size());
+    }
+
+    @Test
+    void disablingIndexCacheStillIsolatesCallerCancellationFromSourceGet() throws Exception {
+        PackedObject packed = packObject(929L);
+        CountingObjectStore delegate = new CountingObjectStore();
+        delegate.install(packed.metadata().objectId(), packed.bytes());
+        CompletableFuture<ByteBuffer> pendingHeader = new CompletableFuture<>();
+        ObjectStore delayed = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                return position == 0L ? pendingHeader : delegate.rangeRead(objectId, position, length);
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+        };
+        StreamObjectIndexCache cache = new StreamObjectIndexCache(0);
+        CompletableFuture<Optional<StreamObjectIndexReader.IndexSnapshot>> abandoned =
+            cache.get(reference(packed.metadata()), new StreamObjectIndexReader(delayed));
+        assertTrue(abandoned.cancel(true));
+        assertFalse(pendingHeader.isCancelled());
+        pendingHeader.complete(delegate.rangeRead(
+            packed.metadata().objectId(), 0, StreamObjectFormat.OBJECT_HEADER_BYTES
+        ).join());
+        assertTrue(abandoned.isCancelled());
+        assertEquals(3, delegate.readCount(), "Bypassed caching must not cancel the source index read");
+        assertEquals(0, cache.size());
     }
 
     @Test
@@ -193,8 +275,11 @@ class StreamObjectIndexCacheTest {
             assertFalse(same.isDone());
 
             releaseFirstHeader.countDown();
-            assertSame(same, first.get(5L, TimeUnit.SECONDS));
-            assertTrue(same.get(5L, TimeUnit.SECONDS).isPresent());
+            CompletableFuture<Optional<StreamObjectIndexReader.IndexSnapshot>> original =
+                first.get(5L, TimeUnit.SECONDS);
+            assertNotSame(same, original, "Shared loading must not share a caller cancellation handle");
+            assertSame(same.get(5L, TimeUnit.SECONDS).orElseThrow(),
+                original.get(5L, TimeUnit.SECONDS).orElseThrow());
             assertEquals(3, slowDelegate.readCount());
             assertEquals(2, cache.size());
         } finally {
