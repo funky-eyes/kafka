@@ -141,9 +141,12 @@ class StreamObjectDataBlockCacheTest {
         assertTrue(cancelled.isCancelled());
         assertSame(snapshot, transport.join());
         assertEquals(0, cache.size());
-        assertSame(snapshot, cache.get(ref, dataBlock, () -> completedLoad(loads))
-            .get(10, TimeUnit.SECONDS));
+        StreamObjectDataBlockReader.DataBlockSnapshot reloaded =
+            cache.get(ref, dataBlock, () -> completedLoad(loads)).get(10, TimeUnit.SECONDS);
+        assertNotSame(snapshot, reloaded, "A zero-budget cache must load a fresh DataBlock snapshot");
+        assertEquals(snapshot, reloaded, "Both independently loaded snapshots must have the same verified content");
         assertEquals(2, loads.get(), "Cache bypass still launches a fresh load for the next caller");
+        assertEquals(0L, cache.cachedBytes(), "Disabled caching must retain no byte budget");
     }
 
     @Test

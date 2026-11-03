@@ -3136,3 +3136,35 @@ or WAL reclamation policy is enabled. Native Kafka Leader/Follower,
 ISR/HW, KRaft partition epochs and object durability remain
 authoritative. PR #2 stays Draft and frozen MinIO GA remains at
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
+
+
+## Batch 296 — correct zero-budget cache reload test identity assertion
+
+**Base:** Batch 295 at
+`748bc629195f2df8d7265df6ffa5ff5d2212f869`
+completed 15/17 workflows successfully. Both failing workflows,
+`Shared Storage Object Format Correctness` and `Shared Storage`,
+failed at the same new JUnit assertion in
+`StreamObjectDataBlockCacheTest.noCacheStillKeepsCancelledWaiterSeparateFromSourceLoad`.
+Every other newly introduced cancellation isolation regression passed.
+
+The test incorrectly asserted Java object identity between the
+first transport's DataBlockSnapshot and the result of a new
+`completedLoad` invocation with the cache budget set to zero.
+A **disabled cache must not retain or reuse the previous instance**.
+The second loader intentionally constructs a fresh, value-equivalent
+snapshot, so the two objects cannot be reference-identical.
+This was a test expectation error, not a production cache failure.
+
+Assert that a fresh instance was returned, that the new immutable
+snapshot has the same validated field values, and that the
+second loader was invoked exactly once. Also assert the disabled
+cache has no retained bytes. Keep all five strict Batch 295
+cancellation regressions and the complete 700-method mandatory
+JUnit evidence unchanged.
+
+Production index/data cache code, Kafka Leader/Follower and
+ISR/HW semantics, KRaft metadata, transport read leases and
+the disabled COMMITTED S3 physical DELETE boundary are untouched.
+PR #2 remains Draft; frozen MinIO GA base remains
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
