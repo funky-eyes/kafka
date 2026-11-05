@@ -584,6 +584,8 @@ REQUIRED_TESTS = {
         "pendingLogicalReadOrPhysicalUploadBlocksLocalDrain",
         "physicalObjectTopicAndAuthorityCasCannotCrossBorrowEvidence",
         "missingMalformedOrNullReportNeverPassesPrecheck",
+        "staleOrMixedFenceRoundsCannotBeJoinedIntoOneCompleteSet",
+        "localFenceGenerationsMayDifferButRoundIdentityMustMatch",
     ),
     "org.apache.kafka.controller.PartitionRetirementControllerPrecheckTest": (
         "currentRecoveredLeaderInIsrMatchesButIsNotWriteAuthorization",

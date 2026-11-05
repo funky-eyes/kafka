@@ -41,6 +41,7 @@ import static org.mockito.Mockito.when;
 class PartitionRetirementReplicaQuiescencePrecheckTest {
     private static final Key KEY = new Key(Uuid.randomUuid(), 0);
     private static final long OBJECT_ID = 901L;
+    private static final Uuid FENCE_ROUND = Uuid.randomUuid();
     private static final Uuid[] INCARNATIONS = {
         Uuid.randomUuid(), Uuid.randomUuid(), Uuid.randomUuid(), Uuid.randomUuid()
     };
@@ -110,7 +111,7 @@ class PartitionRetirementReplicaQuiescencePrecheckTest {
             KEY, 1, 999L, Uuid.randomUuid(), 7, 11, -1L, 20L, 50L);
         assertEquals(Finding.BROKER_IDENTITY_MISMATCH,
             PartitionRetirementReplicaQuiescencePrecheck.assess(
-                f.replicas(), f.cluster(), staleLeader, OBJECT_ID, reports()),
+                f.replicas(), f.cluster(), staleLeader, OBJECT_ID, FENCE_ROUND, reports()),
             "A current replica report must not validate an old source candidate");
         when(f.cluster().registration(2)).thenReturn(
             broker(2, 200L, INCARNATIONS[1], false, false));
@@ -164,19 +165,57 @@ class PartitionRetirementReplicaQuiescencePrecheckTest {
         assertEquals(Finding.MISSING_OR_FOREIGN_REPLICA_REPORT, assess(f, incomplete));
         assertThrows(IllegalArgumentException.class,
             () -> PartitionRetirementReplicaQuiescencePrecheck.assess(
-                f.replicas(), f.cluster(), CANDIDATE, 0L, reports()));
+                f.replicas(), f.cluster(), CANDIDATE, 0L, FENCE_ROUND, reports()));
         assertThrows(IllegalArgumentException.class,
             () -> new Report(KEY, OBJECT_ID, 2, 102L, Uuid.ZERO_UUID, 7, 11,
-                -1L, 20L, 1L, true, true));
+                -1L, 20L, 1L, FENCE_ROUND, true, true));
         assertThrows(IllegalArgumentException.class,
             () -> new Report(KEY, OBJECT_ID, 2, 102L, INCARNATIONS[1], 7, 11,
-                -1L, 20L, 0L, true, true));
+                -1L, 20L, 0L, FENCE_ROUND, true, true));
         assertTrue(assess(f, reports()) == Finding.MATCHED_UNTRUSTED);
+    }
+
+    @Test
+    void staleOrMixedFenceRoundsCannotBeJoinedIntoOneCompleteSet() {
+        Fixture f = fixture();
+        Uuid nextRound = Uuid.randomUuid();
+        assertEquals(Finding.FENCE_ROUND_MISMATCH,
+            assess(f, List.of(report(1), withRound(report(2), nextRound), report(3))),
+            "A report from a different round cannot fill the missing replica");
+        assertEquals(Finding.FENCE_ROUND_MISMATCH,
+            PartitionRetirementReplicaQuiescencePrecheck.assess(
+                f.replicas(), f.cluster(), CANDIDATE, OBJECT_ID, nextRound, reports()),
+            "Even an otherwise identical KRaft generation requires the expected round");
+        assertEquals(Finding.MATCHED_UNTRUSTED, assess(f, reports()));
+        assertThrows(IllegalArgumentException.class, () ->
+            PartitionRetirementReplicaQuiescencePrecheck.assess(
+                f.replicas(), f.cluster(), CANDIDATE, OBJECT_ID, Uuid.ZERO_UUID, reports()));
+        assertThrows(IllegalArgumentException.class, () ->
+            withRound(report(1), Uuid.ZERO_UUID));
+    }
+
+    @Test
+    void localFenceGenerationsMayDifferButRoundIdentityMustMatch() {
+        Fixture f = fixture();
+        // Per-Broker local counters are not globally comparable. The Controller
+        // round is a separate challenge coordinate and remains untrusted here.
+        assertEquals(Finding.MATCHED_UNTRUSTED,
+            assess(f, List.of(
+                withLocalGeneration(report(1), 2L),
+                withLocalGeneration(report(2), 101L),
+                withLocalGeneration(report(3), Long.MAX_VALUE)
+            )));
+        assertEquals(Finding.FENCE_ROUND_MISMATCH,
+            assess(f, List.of(
+                withLocalGeneration(report(1), 2L),
+                withRound(withLocalGeneration(report(2), 101L), Uuid.randomUuid()),
+                withLocalGeneration(report(3), Long.MAX_VALUE)
+            )));
     }
 
     private static Finding assess(Fixture f, List<Report> reports) {
         return PartitionRetirementReplicaQuiescencePrecheck.assess(
-            f.replicas(), f.cluster(), CANDIDATE, OBJECT_ID, reports
+            f.replicas(), f.cluster(), CANDIDATE, OBJECT_ID, FENCE_ROUND, reports
         );
     }
 
@@ -204,7 +243,25 @@ class PartitionRetirementReplicaQuiescencePrecheckTest {
         boolean writes
     ) {
         return new Report(key, objectId, id, 100L + id, INCARNATIONS[id - 1],
-            leaderEpoch, partitionEpoch, previous, next, 1L, reads, writes);
+            leaderEpoch, partitionEpoch, previous, next, 1L, FENCE_ROUND, reads, writes);
+    }
+
+    private static Report withRound(Report report, Uuid round) {
+        return new Report(
+            report.key(), report.objectId(), report.brokerId(), report.brokerEpoch(),
+            report.brokerIncarnationId(), report.sourceLeaderEpoch(), report.sourcePartitionEpoch(),
+            report.expectedPreviousAuthorityOffset(), report.nextAuthorityOffset(),
+            report.localFenceGeneration(), round, report.readerDrained(), report.writerDrained()
+        );
+    }
+
+    private static Report withLocalGeneration(Report report, long generation) {
+        return new Report(
+            report.key(), report.objectId(), report.brokerId(), report.brokerEpoch(),
+            report.brokerIncarnationId(), report.sourceLeaderEpoch(), report.sourcePartitionEpoch(),
+            report.expectedPreviousAuthorityOffset(), report.nextAuthorityOffset(),
+            generation, report.fenceRoundId(), report.readerDrained(), report.writerDrained()
+        );
     }
 
     private static Fixture fixture() {

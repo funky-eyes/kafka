@@ -3336,3 +3336,60 @@ not modified. PR #2 remains Draft, frozen MinIO GA remains
 negative-first precondition for a future authenticated and persistent
 Controller-controlled retirement protocol; CI of the exact Batch 299
 commit is required before treating it as stable.
+
+
+## Batch 300 — bounded Controller verification and fence-round correlation
+
+**Parent status:** Batch 299 at
+`858f16858a6ad85317792d30cf508d29350c3d9d`
+completed 15 of 17 workflows successfully. The main Shared Storage
+Java 25 workflow failed *before JUnit* at metadata Checkstyle: the
+monolithic replica precheck had cyclomatic complexity 30 (limit 16)
+and NPath complexity 453,720 (limit 500). The acks=1 RF1 job failed
+during Gradle buildscript dependency resolution, before durability
+testing; RF2 and RF3 and the other Kafka/MinIO gates passed. There was
+no evidence of a changed Kafka replica durability or WAL failure.
+
+Refactor `PartitionRetirementReplicaQuiescencePrecheck` into bounded
+operations: KRaft partition lookup; all-assigned-replica membership;
+per-replica immutable Topic ID/Object ID/authority CAS and source epoch
+coordinates; broker registration and source-candidate incarnation
+verification; and local physical/logical reader and writer drain
+classification. This reduces Checkstyle method complexity without
+omitting any of Batch 299's fail-closed conditions.
+
+One epoch is insufficient to distinguish repeated inspections of
+the same object while the Kafka partition topology is unchanged. Add
+a **nonzero fence-round UUID** to each untrusted replica report, and
+an independently supplied expected round to the assessment. A stale
+report from a previous or different round is classified as
+`FENCE_ROUND_MISMATCH` even when the object ID, current broker
+incarnation and KRaft partition epoch are identical. Broker-local
+fence generation counters are not globally comparable and need not
+have the same numeric value, but each report must echo the same
+expected round UUID.
+
+This is correlation only, NOT a Controller-issued or consumed nonce
+or authenticated challenge. The expected round is still a caller-
+provided value. Reporting the same UUID does not establish legitimate
+Broker identity, ordered durable I/O drain, cross-incarnation
+authenticity, Controller leadership, global KSO2 packed-object range
+coverage, or COMMITTED S3 DELETE eligibility. An actual Controller
+challenge registry must own issuance, single-use consumption, broker
+principal binding, active-registration checking, expiry, and
+revalidation inside the serialized KRaft event. No such production
+grant, adapter or emitter is introduced here.
+
+Two extra unskipped JUnit regressions cover mixed/stale report rounds
+and independent local fence generations bound to one observation
+round. The mandatory Java 25 inventory increases **716 -> 718**,
+including synchronized Python checker unit assertions. The existing
+Controller suite selection automatically executes the new tests; no
+new workflow is introduced.
+
+Frozen MinIO GA remains
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
+PR #2 remains Draft, native Kafka Leader/Follower, ISR/HW, epoch,
+replication and storage formats are untouched, and **COMMITTED
+physical GC remains disabled**. Treat this batch as developmental
+until all 17 exact-SHA CI workflows succeed.
