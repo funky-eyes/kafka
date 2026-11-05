@@ -20,6 +20,7 @@ import org.apache.kafka.common.Uuid;
 import org.apache.kafka.controller.PartitionRetirementCandidatePrecheck.Candidate;
 import org.apache.kafka.controller.PartitionRetirementReplicaQuiescencePrecheck.Finding;
 import org.apache.kafka.controller.PartitionRetirementReplicaQuiescencePrecheck.Report;
+import org.apache.kafka.metadata.BrokerRegistration;
 import org.apache.kafka.metadata.PartitionRegistration;
 import org.apache.kafka.metadata.PartitionRetirementAuthorityState.Key;
 
@@ -37,10 +38,11 @@ import java.util.concurrent.TimeUnit;
  * Bounded, one-use, controller-volatile correlation of assigned-replica drain
  * diagnostics for a physical object and one KRaft partition generation.
  *
- * <p>This registry is NOT a challenge authentication service. In particular,
- * {@link #recordReport(Uuid, Report, long)} accepts untrusted value objects,
- * and a matching final classification remains MATCHED_UNTRUSTED. The caller
- * must never use that result as a physical COMMITTED object deletion permit.
+ * <p>Raw report collection remains a package-local diagnostic only.
+ * An authenticated-ingress preflight additionally checks the actual
+ * Controller request context, unique Broker principal mapping, live Broker
+ * registration, and current KRaft partition topology. Neither path can
+ * certify remote object durability or grant COMMITTED S3 deletion.
  * No KRaft records, network protocol, or S3 operations are exposed here.</p>
  *
  * <p>Call from the Controller event queue. Replace or clear the registry on
@@ -130,6 +132,91 @@ final class PartitionRetirementReplicaRoundRegistry {
             return false;
         }
         return state.reports().putIfAbsent(report.brokerId(), report) == null;
+    }
+
+    /**
+     * Non-emitting preflight for an eventual direct-Broker report transport.
+     *
+     * <p>The context must come from the real Controller network request, not
+     * a constructed principal/header; exact BrokerHeartbeat v3 is required.
+     * Only a unique, trusted Broker principal can submit the reply for its
+     * current registered epoch and incarnation. No such report is currently
+     * carried over the production heartbeat protocol. This method does NOT
+     * issue an RPC, authenticate S3 bytes, or confer GC authority.</p>
+     *
+     * <p>A rejected, foreign or forwarded request cannot consume another
+     * Broker's receipt slot. Consumption later rechecks KRaft registration.</p>
+     */
+    boolean recordAuthenticated(
+        Uuid roundId,
+        Report report,
+        ControllerRequestContext context,
+        PartitionRetirementBrokerPrincipalPolicy principalPolicy,
+        ReplicationControlManager replicationControl,
+        ClusterControlManager clusterControl,
+        long nowNs
+    ) {
+        Objects.requireNonNull(roundId, "roundId");
+        Objects.requireNonNull(report, "report");
+        Objects.requireNonNull(context, "context");
+        Objects.requireNonNull(principalPolicy, "principalPolicy");
+        Objects.requireNonNull(replicationControl, "replicationControl");
+        Objects.requireNonNull(clusterControl, "clusterControl");
+        Pending state = pending.get(roundId);
+        if (state == null) {
+            return false;
+        }
+        if (!fresh(state.issuedAtNs(), nowNs)) {
+            pending.remove(roundId);
+            return false;
+        }
+        if (!trustedIngress(context, principalPolicy, report.brokerId())) {
+            return false;
+        }
+        Challenge challenge = state.challenge();
+        if (!challenge.assignedReplicas().contains(report.brokerId())
+            || !matchesChallenge(challenge, report)) {
+            return false;
+        }
+        PartitionRegistration partition = replicationControl.getPartition(
+            challenge.candidate().key().topicId(), challenge.candidate().key().partitionId());
+        if (!matchesCurrentPartition(partition, challenge.candidate())
+            || !challenge.assignedReplicas().equals(assignedReplicaIds(partition))) {
+            return false;
+        }
+        BrokerRegistration broker = clusterControl.registration(report.brokerId());
+        if (!matchesRegisteredBroker(broker, report, challenge.candidate())) {
+            return false;
+        }
+        return state.reports().putIfAbsent(report.brokerId(), report) == null;
+    }
+
+    private static boolean trustedIngress(
+        ControllerRequestContext context,
+        PartitionRetirementBrokerPrincipalPolicy principalPolicy,
+        int brokerId
+    ) {
+        return context.isDirectAuthenticatedBrokerChannel()
+            && PartitionRetirementHeartbeatReportGate.isVersionThreeHeartbeat(context)
+            && principalPolicy.matches(context.principal(), brokerId);
+    }
+
+    private static boolean matchesRegisteredBroker(
+        BrokerRegistration broker,
+        Report report,
+        Candidate candidate
+    ) {
+        if (broker == null || broker.id() != report.brokerId() || broker.fenced()
+            || broker.inControlledShutdown() || broker.incarnationId() == null) {
+            return false;
+        }
+        if (broker.epoch() != report.brokerEpoch()
+            || !broker.incarnationId().equals(report.brokerIncarnationId())) {
+            return false;
+        }
+        return report.brokerId() != candidate.brokerId()
+            || (broker.epoch() == candidate.brokerEpoch()
+                && broker.incarnationId().equals(candidate.brokerIncarnationId()));
     }
 
     /**
@@ -229,6 +316,9 @@ final class PartitionRetirementReplicaRoundRegistry {
     }
 
     private static boolean fresh(long issuedAtNs, long nowNs) {
-        return nowNs >= issuedAtNs && nowNs - issuedAtNs <= MAX_AGE_NS;
+        // System.nanoTime has an arbitrary signed origin. Subtracting before
+        // comparison handles crossing Long.MAX_VALUE to Long.MIN_VALUE.
+        long elapsedNs = nowNs - issuedAtNs;
+        return elapsedNs >= 0L && elapsedNs < MAX_AGE_NS;
     }
 }

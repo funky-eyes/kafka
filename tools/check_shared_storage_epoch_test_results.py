@@ -582,6 +582,11 @@ REQUIRED_TESTS = {
         "brokerReregistrationAndPartitionEpochChangeInvalidateCollectedRound",
         "expiryAndControllerLeadershipResetRevokeAllVolatileRounds",
         "perSourceCapacityAndInvalidPhysicalCoordinatesFailClosed",
+        "authenticatedReplicaIngressStillProducesOnlyUntrustedFinding",
+        "foreignAnonymousAndUnmappedPrincipalsCannotClaimAnotherReplicaSlot",
+        "plaintextForwardedTokenSyntheticAndWrongVersionCannotEnterRound",
+        "brokerIncarnationAndKraftTopologyMustBeCurrentAtIngress",
+        "monotonicClockWrapAcceptsShortElapsedButRejectsExactTtl",
     ),
     "org.apache.kafka.controller.PartitionRetirementReplicaQuiescencePrecheckTest": (
         "allAssignedReplicasIncludingOutOfIsrAreRequired",

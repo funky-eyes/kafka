@@ -18,6 +18,10 @@ package org.apache.kafka.controller;
 
 import org.apache.kafka.common.DirectoryId;
 import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.protocol.ApiKeys;
+import org.apache.kafka.common.security.auth.KafkaPrincipal;
+import org.apache.kafka.common.security.auth.SecurityProtocol;
+import org.apache.kafka.metadata.authorizer.MockAuthorizableRequestContext;
 import org.apache.kafka.common.metadata.PartitionChangeRecord;
 import org.apache.kafka.controller.PartitionRetirementCandidatePrecheck.Candidate;
 import org.apache.kafka.controller.PartitionRetirementReplicaQuiescencePrecheck.Finding;
@@ -29,7 +33,9 @@ import org.apache.kafka.metadata.PartitionRetirementAuthorityState.Key;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -49,6 +55,16 @@ class PartitionRetirementReplicaRoundRegistryTest {
         new Candidate(KEY, 1, 101L, INCARNATIONS[0], 7, 11, -1L, 20L, 50L);
     private static final long OBJECT_ID = 901L;
     private static final long NOW_NS = 10_000_000L;
+    private static final KafkaPrincipal BROKER_ONE =
+        new KafkaPrincipal(KafkaPrincipal.USER_TYPE, "unique-replica-one");
+    private static final KafkaPrincipal BROKER_TWO =
+        new KafkaPrincipal(KafkaPrincipal.USER_TYPE, "unique-replica-two");
+    private static final KafkaPrincipal BROKER_THREE =
+        new KafkaPrincipal(KafkaPrincipal.USER_TYPE, "unique-replica-three");
+    private static final PartitionRetirementBrokerPrincipalPolicy BOUND =
+        new PartitionRetirementBrokerPrincipalPolicy(
+            Map.of(1, BROKER_ONE, 2, BROKER_TWO, 3, BROKER_THREE));
+
 
     @Test
     void fullAssignedReplicaRoundCanOnlyProduceOneUntrustedDiagnostic() {
@@ -155,6 +171,143 @@ class PartitionRetirementReplicaRoundRegistryTest {
         assertTrue(registry.issue(f.replicas(), CANDIDATE, OBJECT_ID, NOW_NS + 1L).isPresent());
         assertEquals(PartitionRetirementReplicaRoundRegistry.MAX_PENDING_PER_SOURCE,
             registry.pendingCount());
+    }
+
+    @Test
+    void authenticatedReplicaIngressStillProducesOnlyUntrustedFinding() {
+        Fixture f = fixture();
+        PartitionRetirementReplicaRoundRegistry rounds = new PartitionRetirementReplicaRoundRegistry();
+        PartitionRetirementReplicaRoundRegistry.Challenge round = issue(rounds, f, OBJECT_ID, NOW_NS);
+        for (int brokerId = 1; brokerId <= 3; brokerId++) {
+            assertTrue(recordAuthenticated(rounds, f, round,
+                report(round, brokerId), trusted(brokerId), NOW_NS));
+        }
+        assertEquals(Optional.of(Finding.MATCHED_UNTRUSTED),
+            rounds.consume(round.roundId(), f.replicas(), f.cluster(), NOW_NS));
+        assertFalse(recordAuthenticated(rounds, f, round, report(round, 1), trusted(1), NOW_NS));
+    }
+
+    @Test
+    void foreignAnonymousAndUnmappedPrincipalsCannotClaimAnotherReplicaSlot() {
+        Fixture f = fixture();
+        PartitionRetirementReplicaRoundRegistry rounds = new PartitionRetirementReplicaRoundRegistry();
+        PartitionRetirementReplicaRoundRegistry.Challenge round = issue(rounds, f, OBJECT_ID, NOW_NS);
+        Report one = report(round, 1);
+        assertFalse(recordAuthenticated(rounds, f, round, one, trusted(2), NOW_NS));
+        assertFalse(recordAuthenticated(rounds, f, round, one,
+            context((short) 3, KafkaPrincipal.ANONYMOUS, SecurityProtocol.SASL_SSL, false), NOW_NS));
+        assertFalse(rounds.recordAuthenticated(
+            round.roundId(), one, trusted(1), PartitionRetirementBrokerPrincipalPolicy.DENY_ALL,
+            f.replicas(), f.cluster(), NOW_NS));
+        assertTrue(recordAuthenticated(rounds, f, round, one, trusted(1), NOW_NS));
+        assertFalse(recordAuthenticated(rounds, f, round, one, trusted(1), NOW_NS),
+            "An authenticated duplicate must not overwrite an already accepted observation");
+    }
+
+    @Test
+    void plaintextForwardedTokenSyntheticAndWrongVersionCannotEnterRound() {
+        Fixture f = fixture();
+        PartitionRetirementReplicaRoundRegistry rounds = new PartitionRetirementReplicaRoundRegistry();
+        PartitionRetirementReplicaRoundRegistry.Challenge round = issue(rounds, f, OBJECT_ID, NOW_NS);
+        Report one = report(round, 1);
+        for (SecurityProtocol protocol : List.of(SecurityProtocol.PLAINTEXT,
+            SecurityProtocol.SASL_PLAINTEXT)) {
+            assertFalse(recordAuthenticated(rounds, f, round, one,
+                context((short) 3, BROKER_ONE, protocol, false), NOW_NS));
+        }
+        assertFalse(recordAuthenticated(rounds, f, round, one,
+            context((short) 3, BROKER_ONE, SecurityProtocol.SASL_SSL, true), NOW_NS));
+        KafkaPrincipal token = new KafkaPrincipal(BROKER_ONE.getPrincipalType(),
+            BROKER_ONE.getName(), true);
+        assertFalse(recordAuthenticated(rounds, f, round, one,
+            context((short) 3, token, SecurityProtocol.SASL_SSL, false), NOW_NS));
+        for (short version : new short[] {2, 4}) {
+            assertFalse(recordAuthenticated(rounds, f, round, one,
+                context(version, BROKER_ONE, SecurityProtocol.SASL_SSL, false), NOW_NS));
+        }
+        assertFalse(recordAuthenticated(rounds, f, round, one,
+            new ControllerRequestContext(
+                trusted(1).requestHeader(), BROKER_ONE, OptionalLong.empty()), NOW_NS));
+        ControllerRequestContext foreignApi = new ControllerRequestContext(
+            new MockAuthorizableRequestContext.Builder()
+                .setRequestType(ApiKeys.ALTER_CONFIGS)
+                .setRequestVersion((short) 3)
+                .setPrincipal(BROKER_ONE)
+                .setSecurityProtocol(SecurityProtocol.SASL_SSL)
+                .build(), OptionalLong.empty());
+        assertFalse(recordAuthenticated(rounds, f, round, one, foreignApi, NOW_NS));
+        assertTrue(recordAuthenticated(rounds, f, round, one, trusted(1), NOW_NS));
+    }
+
+    @Test
+    void brokerIncarnationAndKraftTopologyMustBeCurrentAtIngress() {
+        Fixture f = fixture();
+        PartitionRetirementReplicaRoundRegistry rounds = new PartitionRetirementReplicaRoundRegistry();
+        PartitionRetirementReplicaRoundRegistry.Challenge round = issue(rounds, f, OBJECT_ID, NOW_NS);
+        Report second = report(round, 2);
+        when(f.cluster().registration(2)).thenReturn(broker(2, 103L, Uuid.randomUuid()));
+        assertFalse(recordAuthenticated(rounds, f, round, second, trusted(2), NOW_NS));
+        when(f.cluster().registration(2)).thenReturn(broker(2, 102L, INCARNATIONS[1]));
+        PartitionRegistration changed = partition().merge(
+            new PartitionChangeRecord().setIsr(List.of(1)));
+        when(f.replicas().getPartition(KEY.topicId(), 0)).thenReturn(changed);
+        assertFalse(recordAuthenticated(rounds, f, round, second, trusted(2), NOW_NS));
+        when(f.replicas().getPartition(KEY.topicId(), 0)).thenReturn(partition());
+        assertTrue(recordAuthenticated(rounds, f, round, second, trusted(2), NOW_NS));
+        assertFalse(recordAuthenticated(rounds, f, round, second, trusted(2), NOW_NS));
+    }
+
+    @Test
+    void monotonicClockWrapAcceptsShortElapsedButRejectsExactTtl() {
+        Fixture f = fixture();
+        PartitionRetirementReplicaRoundRegistry rounds = new PartitionRetirementReplicaRoundRegistry();
+        long issuedNearWrap = Long.MAX_VALUE - 20L;
+        long shortElapsed = Long.MIN_VALUE + 20L;
+        PartitionRetirementReplicaRoundRegistry.Challenge wrap =
+            issue(rounds, f, OBJECT_ID, issuedNearWrap);
+        assertTrue(recordAuthenticated(rounds, f, wrap,
+            report(wrap, 1), trusted(1), shortElapsed));
+        assertEquals(Optional.of(Finding.MISSING_OR_FOREIGN_REPLICA_REPORT),
+            rounds.consume(wrap.roundId(), f.replicas(), f.cluster(), shortElapsed));
+
+        PartitionRetirementReplicaRoundRegistry.Challenge boundary =
+            issue(rounds, f, OBJECT_ID, NOW_NS);
+        long expiredAt = NOW_NS + PartitionRetirementReplicaRoundRegistry.MAX_AGE_NS;
+        assertFalse(recordAuthenticated(rounds, f, boundary,
+            report(boundary, 1), trusted(1), expiredAt));
+        assertTrue(rounds.consume(boundary.roundId(), f.replicas(), f.cluster(), expiredAt).isEmpty());
+    }
+
+    private static boolean recordAuthenticated(
+        PartitionRetirementReplicaRoundRegistry registry,
+        Fixture fixture,
+        PartitionRetirementReplicaRoundRegistry.Challenge round,
+        Report report,
+        ControllerRequestContext context,
+        long nowNs
+    ) {
+        return registry.recordAuthenticated(round.roundId(), report, context, BOUND,
+            fixture.replicas(), fixture.cluster(), nowNs);
+    }
+
+    private static ControllerRequestContext trusted(int brokerId) {
+        KafkaPrincipal principal = switch (brokerId) {
+            case 1 -> BROKER_ONE;
+            case 2 -> BROKER_TWO;
+            case 3 -> BROKER_THREE;
+            default -> KafkaPrincipal.ANONYMOUS;
+        };
+        return context((short) 3, principal, SecurityProtocol.SASL_SSL, false);
+    }
+
+    private static ControllerRequestContext context(
+        short version,
+        KafkaPrincipal principal,
+        SecurityProtocol protocol,
+        boolean forwarded
+    ) {
+        return ControllerRequestContextUtil.brokerDiagnosticContext(
+            version, principal, protocol, forwarded);
     }
 
     private static PartitionRetirementReplicaRoundRegistry.Challenge issue(

@@ -3458,3 +3458,52 @@ Six required Java 25 controller JUnit cases are added: the mandatory inventory
 changes from 718 to 724, with the Python anti-skip checker and Controller
 workflow suite list updated. Treat this batch as UNVERIFIED until the exact
 SHA passes all 17 workflows; no Native Image build is added during development.
+
+## Batch 303 — direct-Broker report ingress preflight and monotonic clock wrap
+
+Batch 302 introduced controller-volatile one-shot rounds and all-assigned-replica
+aggregation but offered only a raw package-local diagnostic report recorder.
+That method takes caller-supplied Broker IDs and cannot authenticate a
+network source. A matching round alone is not identity binding.
+
+Add `recordAuthenticated`, an explicitly **non-emitting** admission seam
+for an eventual Broker report transport. It requires a real, direct,
+nonforwarded, non-token-authenticated SSL/SASL_SSL ControllerRequestContext,
+the **exact** BrokerHeartbeat API key at experimental version 3, an
+explicit, unique, trusted broker-principal mapping, a current KRaft
+partition/leader/partition-epoch image with unchanged full assigned-replica
+membership, and a live, nonfenced/non-shutting-down BrokerRegistration
+matching the report's Broker ID, Epoch and Incarnation UUID. The source
+Broker also must match the immutable original Candidate identity.
+A rejected foreign/anonymous/replayed principal cannot claim or overwrite
+an otherwise valid Broker receipt slot. Consumption still independently
+revalidates all registered Broker identities.
+
+There is **no** new wire field or network handler for Reader/Writer
+reports in this batch: BrokerHeartbeat v3 is the reserved diagnostic
+API/version context, not evidence that the production heartbeat already
+carries these reports. The legacy raw method remains available only as
+an in-process untrusted test/diagnostic primitive. Merely invoking the
+new seam is not a distributed identity certificate or storage
+durability proof; the best outcome remains `MATCHED_UNTRUSTED`.
+
+Use the same overflow-safe `System.nanoTime()` duration subtraction
+as the existing Source/WAL challenge registry. A round remains fresh
+across signed-long wrap for a short positive elapsed duration, and
+expires at the exact five-second boundary. Reject a clock reversal
+and never extend TTL based on a submitted reply.
+
+Five required negative-first Java 25 JUnit regressions cover direct
+bound Broker admission, anonymous/foreign/default-deny principals,
+plaintext/forwarded/token/synthetic/wrong API or version channels,
+Broker Epoch/Incarnation and KRaft topology changes at report ingress,
+and monotonic-clock wrap/exact expiry. The mandatory inventory grows
+**724 -> 729**; its Python anti-skip unit checker is updated without
+removing other tests.
+
+This is still a Controller-event-queue, volatile and non-authorizing
+diagnostic. No KRaft retirement record writer, COMMITTED reference
+eviction, S3 DELETE, broker protocol emitter, native Kafka ISR/HW
+change or production GC authorization has been introduced. PR #2
+remains Draft and the frozen MinIO GA remains
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
