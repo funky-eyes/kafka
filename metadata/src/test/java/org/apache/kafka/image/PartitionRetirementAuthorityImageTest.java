@@ -180,6 +180,20 @@ class PartitionRetirementAuthorityImageTest {
     }
 
     @Test
+    void negotiatedKRaftReplayRejectsReservedTopicIdWithoutPoisoningImage() {
+        MetadataDelta delta = negotiatedDelta();
+        delta.replay(record(PARTITION, ELECTED));
+        PartitionRetirementAuthorityRecord forged = record(
+            PARTITION, new Value(11L, 7, 2, 40L, false)
+        ).setTopicId(Uuid.ZERO_UUID);
+
+        assertThrows(IllegalArgumentException.class, () -> delta.replay(forged));
+        MetadataImage image = delta.apply(MetadataProvenance.EMPTY);
+        assertEquals(ELECTED, image.partitionRetirements().get(PARTITION));
+        assertEquals(1, image.partitionRetirements().entries().size());
+    }
+
+    @Test
     void negotiatedImageRejectsDowngradeSnapshotTarget() {
         MetadataDelta delta = negotiatedDelta();
         delta.replay(record(PARTITION, ELECTED));
@@ -211,6 +225,73 @@ class PartitionRetirementAuthorityImageTest {
     }
 
     @Test
+    void partitionEpochSurvivesFeatureGatedFullMetadataImageSnapshot() {
+        Uuid incarnation = Uuid.randomUuid();
+        Value original = new Value(40L, 7, 12, 1, 20L, false, 300L, incarnation);
+        MetadataDelta live = negotiatedDelta();
+        live.replay(record(PARTITION, original));
+
+        MetadataImage restored = negotiatedSnapshotRoundTrip(live.apply(MetadataProvenance.EMPTY));
+        assertEquals(original, restored.partitionRetirements().get(PARTITION));
+        assertEquals(12, restored.partitionRetirements().get(PARTITION).sourcePartitionEpoch());
+        assertTrue(restored.partitionRetirements().get(PARTITION).hasPartitionTopologyProof());
+        assertTrue(restored.features().isPartitionRetirementAuthorityEnabled());
+    }
+
+    @Test
+    void legacyMetadataSnapshotKeepsUnknownEpochUntilAnExplicitUpgrade() {
+        Uuid incarnation = Uuid.randomUuid();
+        Value legacy = new Value(40L, 7, 1, 20L, false, 300L, incarnation);
+        MetadataDelta live = negotiatedDelta();
+        live.replay(record(PARTITION, legacy));
+        MetadataImage restored = negotiatedSnapshotRoundTrip(live.apply(MetadataProvenance.EMPTY));
+
+        assertEquals(-1, restored.partitionRetirements().get(PARTITION).sourcePartitionEpoch());
+        assertTrue(!restored.partitionRetirements().get(PARTITION).hasPartitionTopologyProof());
+
+        // A later real KRaft record may upgrade an untagged legacy value,
+        // but the snapshot must never manufacture that version on its own.
+        MetadataDelta upgrade = new MetadataDelta.Builder().setImage(restored).build();
+        Value versioned = new Value(41L, 7, 12, 1, 20L, false, 300L, incarnation);
+        upgrade.replay(record(PARTITION, versioned));
+        assertEquals(versioned, upgrade.apply(MetadataProvenance.EMPTY).partitionRetirements().get(PARTITION));
+    }
+
+    @Test
+    void recoveredMetadataImageRejectsStaleIsrEpochAndKeepsLastValidValue() {
+        Uuid incarnation = Uuid.randomUuid();
+        Value original = new Value(40L, 7, 12, 1, 20L, false, 300L, incarnation);
+        MetadataDelta live = negotiatedDelta();
+        live.replay(record(PARTITION, original));
+        MetadataImage restored = negotiatedSnapshotRoundTrip(live.apply(MetadataProvenance.EMPTY));
+
+        MetadataDelta continuation = new MetadataDelta.Builder().setImage(restored).build();
+        Value stale = new Value(41L, 7, 11, 1, 21L, false, 300L, incarnation);
+        assertThrows(IllegalStateException.class, () -> continuation.replay(record(PARTITION, stale)));
+        assertEquals(original, continuation.apply(MetadataProvenance.EMPTY).partitionRetirements().get(PARTITION));
+
+        Value advanced = new Value(41L, 7, 13, 1, 21L, false, 300L, incarnation);
+        continuation.replay(record(PARTITION, advanced));
+        assertEquals(advanced, continuation.apply(MetadataProvenance.EMPTY).partitionRetirements().get(PARTITION));
+    }
+
+    @Test
+    void terminalTombstoneRetainsLastPartitionEpochThroughFullSnapshot() {
+        Value deleted = new Value(40L, 7, 12, -1, 20L, true, -1L, Uuid.ZERO_UUID);
+        MetadataDelta live = negotiatedDelta();
+        live.replay(record(PARTITION, deleted));
+        MetadataImage restored = negotiatedSnapshotRoundTrip(live.apply(MetadataProvenance.EMPTY));
+
+        assertEquals(deleted, restored.partitionRetirements().get(PARTITION));
+        assertEquals(12, restored.partitionRetirements().get(PARTITION).sourcePartitionEpoch());
+        MetadataDelta afterSnapshot = new MetadataDelta.Builder().setImage(restored).build();
+        assertThrows(IllegalStateException.class, () ->
+            afterSnapshot.replay(record(PARTITION, new Value(41L, 8, 13, 2, 20L, false,
+                301L, Uuid.randomUuid())))
+        );
+    }
+
+    @Test
     void malformedBrokerIdentityCannotEnterBrokerMetadataImage() {
         PartitionRetirementAuthorityRecord forged = record(
             PARTITION, new Value(18L, 8, 1, 50L, false)
@@ -227,6 +308,15 @@ class PartitionRetirementAuthorityImageTest {
         assertThrows(IllegalStateException.class, () ->
             delta.replay(record(PARTITION, new Value(19L, 8, 1, 50L, false, 778L, Uuid.randomUuid())))
         );
+    }
+
+    private static MetadataImage negotiatedSnapshotRoundTrip(MetadataImage current) {
+        RecordListWriter writer = new RecordListWriter();
+        current.write(writer, new ImageWriterOptions.Builder(MetadataVersion.IBP_4_4_IV0).build());
+        MetadataDelta loaded = new MetadataDelta.Builder().build();
+        writer.records().forEach(entry -> loaded.replay(entry.message()));
+        loaded.finishSnapshot();
+        return loaded.apply(MetadataProvenance.EMPTY);
     }
 
     private static FeatureLevelRecord feature(String name, short level) {

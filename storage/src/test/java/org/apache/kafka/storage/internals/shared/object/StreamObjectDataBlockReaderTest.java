@@ -83,6 +83,16 @@ class StreamObjectDataBlockReaderTest {
     }
 
     @Test
+    void forgedHugeBatchCountCannotAllocateBeyondDataBlockBytes() throws Exception {
+        assertRejectsImpossibleBatchCount(903L, Integer.MAX_VALUE);
+    }
+
+    @Test
+    void forgedSmallBatchCountAbovePayloadCapacityFailsClosed() throws Exception {
+        assertRejectsImpossibleBatchCount(904L, 3);
+    }
+
+    @Test
     void shouldRejectMetadataLogicalRangeMissingFromIndexedBlock() throws Exception {
         PackedObject packed = packObject(902);
         ByteBuffer object = packed.bytes();
@@ -104,6 +114,27 @@ class StreamObjectDataBlockReaderTest {
         );
         IOException error = assertThrows(IOException.class, () -> snapshot.batch(missing));
         assertTrue(error.getMessage().contains("missing") || error.getMessage().contains("outside"));
+    }
+
+    private void assertRejectsImpossibleBatchCount(long objectId, int count) throws Exception {
+        PackedObject packed = packObject(objectId);
+        ByteBuffer object = packed.bytes();
+        StreamObjectFormat.Footer footer = StreamObjectFormat.readFooter(object);
+        StreamObjectFormat.DataBlockIndexEntry actual = StreamObjectFormat.readIndex(object, footer).get(0);
+        ByteBuffer data = writableCopy(slice(object, actual.blockPosition(), actual.blockLength()));
+
+        // Match the forged count in both the DataBlock header and its index
+        // entry, so ordinary cross-checks pass. The payload CRC remains valid.
+        int countOffset = 2 * Long.BYTES + 2 * Integer.BYTES + 2 * Long.BYTES;
+        data.putInt(countOffset, count);
+        StreamObjectFormat.DataBlockIndexEntry forged = new StreamObjectFormat.DataBlockIndexEntry(
+            actual.partition(), actual.leaderEpoch(), actual.offsets(), actual.blockPosition(),
+            actual.blockLength(), count, actual.checksum()
+        );
+
+        IOException failure = assertThrows(IOException.class, () -> StreamObjectDataBlockReader.read(data, forged));
+        assertTrue(failure.getMessage().contains("batch count"),
+            "Inconsistent batch count must be rejected before allocating the batch list");
     }
 
     private PackedObject packObject(long objectId) throws Exception {

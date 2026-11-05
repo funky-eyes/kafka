@@ -20,10 +20,14 @@ package org.apache.kafka.metadata;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.metadata.MetadataRecordType;
 import org.apache.kafka.common.metadata.PartitionRetirementAuthorityRecord;
+import org.apache.kafka.common.protocol.ByteBufferAccessor;
+import org.apache.kafka.common.protocol.ObjectSerializationCache;
 import org.apache.kafka.metadata.PartitionRetirementAuthorityState.Key;
 import org.apache.kafka.metadata.PartitionRetirementAuthorityState.Value;
 
 import org.junit.jupiter.api.Test;
+
+import java.nio.ByteBuffer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -47,10 +51,86 @@ class PartitionRetirementAuthorityStateTest {
     }
 
     @Test
+    void taggedPartitionEpochSurvivesKRaftMetadataVersionZeroBinaryRoundTrip() {
+        Uuid incarnation = Uuid.randomUuid();
+        Value original = new Value(90L, 7, 12, 1, 50L, false, 300L, incarnation);
+        PartitionRetirementAuthorityRecord record = PartitionRetirementAuthorityState.record(PARTITION, original);
+        assertEquals(12, record.sourcePartitionEpoch());
+        ObjectSerializationCache cache = new ObjectSerializationCache();
+        ByteBuffer encoded = ByteBuffer.allocate(record.size(cache, (short) 0));
+        record.write(new ByteBufferAccessor(encoded), cache, (short) 0);
+        encoded.flip();
+        PartitionRetirementAuthorityRecord decoded = new PartitionRetirementAuthorityRecord();
+        decoded.read(new ByteBufferAccessor(encoded), (short) 0);
+        assertEquals(original, PartitionRetirementAuthorityState.value(decoded));
+        assertEquals(PARTITION, PartitionRetirementAuthorityState.key(decoded));
+        assertEquals(true, original.hasPartitionTopologyProof());
+    }
+
+    @Test
+    void legacyKRaftRecordWithoutTaggedPartitionEpochRemainsUnverified() {
+        Value legacy = new Value(90L, 7, 1, 50L, false, 300L, Uuid.randomUuid());
+        PartitionRetirementAuthorityRecord record = PartitionRetirementAuthorityState.record(PARTITION, legacy);
+        assertEquals(-1, record.sourcePartitionEpoch());
+        assertEquals(legacy, PartitionRetirementAuthorityState.value(record));
+        assertEquals(false, legacy.hasPartitionTopologyProof());
+    }
+
+    @Test
+    void replayRejectsRegressedOrErasedPartitionEpoch() {
+        Uuid incarnation = Uuid.randomUuid();
+        Value original = new Value(90L, 7, 12, 1, 50L, false, 300L, incarnation);
+        Value regressed = new Value(91L, 7, 11, 1, 50L, false, 300L, incarnation);
+        Value erased = new Value(92L, 7, 1, 50L, false, 300L, incarnation);
+        assertThrows(IllegalStateException.class, () ->
+            PartitionRetirementAuthorityState.validateAdvance(original, regressed));
+        assertThrows(IllegalStateException.class, () ->
+            PartitionRetirementAuthorityState.validateAdvance(original, erased));
+        // Migration from an untagged legacy record is permitted only by
+        // a new KRaft authority offset; it cannot resurrect old positions.
+        Value upgraded = new Value(93L, 7, 12, 1, 50L, false, 300L, incarnation);
+        PartitionRetirementAuthorityState.validateAdvance(erased, upgraded);
+    }
+
+    @Test
+    void freshLeaderEpochAlsoRequiresAdvancedPartitionEpoch() {
+        Uuid incarnation = Uuid.randomUuid();
+        Value previous = new Value(90L, 7, 12, 1, 50L, false, 300L, incarnation);
+        Value invalid = new Value(91L, 8, 12, 1, 50L, false, 300L, incarnation);
+        Value valid = new Value(91L, 8, 13, 1, 50L, false, 300L, incarnation);
+        assertThrows(IllegalStateException.class, () ->
+            PartitionRetirementAuthorityState.validateAdvance(previous, invalid));
+        PartitionRetirementAuthorityState.validateAdvance(previous, valid);
+    }
+
+    @Test
+    void sameLeaderEpochAllowsAdvancingIsrGenerationButNeverRegressingIt() {
+        Uuid incarnation = Uuid.randomUuid();
+        Value previous = new Value(90L, 7, 12, 1, 50L, false, 300L, incarnation);
+        Value next = new Value(91L, 7, 13, 1, 50L, false, 300L, incarnation);
+        PartitionRetirementAuthorityState.validateAdvance(previous, next);
+        assertThrows(IllegalStateException.class, () ->
+            PartitionRetirementAuthorityState.validateAdvance(next, previous));
+    }
+
+    @Test
     void distinctTopicIncarnationNeverSharesAnAuthorityKey() {
         Key recreated = new Key(Uuid.randomUuid(), 0);
         assertNotEquals(PARTITION, recreated);
         assertNotEquals(PARTITION, new Key(PARTITION.topicId(), 1));
+    }
+
+    @Test
+    void reservedZeroTopicIdCannotBecomeAnAuthorityKey() {
+        assertThrows(IllegalArgumentException.class, () -> new Key(Uuid.ZERO_UUID, 0));
+    }
+
+    @Test
+    void malformedKRaftRecordWithZeroTopicIdCannotBeDecodedAsAuthorityKey() {
+        PartitionRetirementAuthorityRecord forged = PartitionRetirementAuthorityState.record(
+            PARTITION, active(30L, 7, 1, 5L)
+        ).setTopicId(Uuid.ZERO_UUID);
+        assertThrows(IllegalArgumentException.class, () -> PartitionRetirementAuthorityState.key(forged));
     }
 
     @Test

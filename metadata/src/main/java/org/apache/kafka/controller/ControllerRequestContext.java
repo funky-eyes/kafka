@@ -20,6 +20,7 @@ package org.apache.kafka.controller;
 import org.apache.kafka.common.errors.ThrottlingQuotaExceededException;
 import org.apache.kafka.common.message.RequestHeaderData;
 import org.apache.kafka.common.security.auth.KafkaPrincipal;
+import org.apache.kafka.common.security.auth.SecurityProtocol;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.server.authorizer.AuthorizableRequestContext;
 
@@ -42,6 +43,11 @@ public class ControllerRequestContext {
     private final KafkaPrincipal principal;
     private final OptionalLong deadlineNs;
     private final RequestHeaderData requestHeader;
+    // Only a real network AuthorizableRequestContext supplies this
+    // information. Synthetic header/principal constructors default to
+    // unknown transport and cannot open a Source/WAL diagnostic path.
+    private final SecurityProtocol securityProtocol;
+    private final boolean forwarded;
 
     private final Consumer<Integer> partitionChangeQuotaApplier;
 
@@ -59,10 +65,23 @@ public class ControllerRequestContext {
         OptionalLong deadlineNs,
         Consumer<Integer> partitionChangeQuotaApplier
     ) {
+        this(requestHeader, principal, deadlineNs, partitionChangeQuotaApplier, null, false);
+    }
+
+    private ControllerRequestContext(
+        RequestHeaderData requestHeader,
+        KafkaPrincipal principal,
+        OptionalLong deadlineNs,
+        Consumer<Integer> partitionChangeQuotaApplier,
+        SecurityProtocol securityProtocol,
+        boolean forwarded
+    ) {
         this.requestHeader = requestHeader;
         this.principal = principal;
         this.deadlineNs = deadlineNs;
         this.partitionChangeQuotaApplier = partitionChangeQuotaApplier;
+        this.securityProtocol = securityProtocol;
+        this.forwarded = forwarded;
     }
 
     public ControllerRequestContext(
@@ -77,6 +96,28 @@ public class ControllerRequestContext {
         OptionalLong deadlineNs,
         Consumer<Integer> partitionChangeQuotaApplier
     ) {
+        this(requestContext, deadlineNs, partitionChangeQuotaApplier, false);
+    }
+
+    /**
+     * Preserve the authenticated transport and forwarding state from the
+     * actual Controller request. Forwarded principals are not proof that
+     * the original Broker authenticated on the current network channel.
+     */
+    public ControllerRequestContext(
+        AuthorizableRequestContext requestContext,
+        OptionalLong deadlineNs,
+        boolean forwarded
+    ) {
+        this(requestContext, deadlineNs, __ -> { }, forwarded);
+    }
+
+    private ControllerRequestContext(
+        AuthorizableRequestContext requestContext,
+        OptionalLong deadlineNs,
+        Consumer<Integer> partitionChangeQuotaApplier,
+        boolean forwarded
+    ) {
         this(
             new RequestHeaderData()
                 .setRequestApiKey((short) requestContext.requestType())
@@ -85,7 +126,9 @@ public class ControllerRequestContext {
                 .setClientId(requestContext.clientId()),
             requestContext.principal(),
             deadlineNs,
-            partitionChangeQuotaApplier
+            partitionChangeQuotaApplier,
+            requestContext.securityProtocol(),
+            forwarded
         );
     }
 
@@ -99,6 +142,22 @@ public class ControllerRequestContext {
 
     public OptionalLong deadlineNs() {
         return deadlineNs;
+    }
+
+    /**
+     * Admission for experimental Broker Source/WAL diagnostics ONLY. This
+     * does not grant storage authority and must additionally match a unique
+     * trusted broker-principal mapping and current BrokerRegistration.
+     * SSL requires a non-anonymous client principal provided by the TLS
+     * authenticator; SASL_SSL supplies SASL client authentication.
+     */
+    public boolean isDirectAuthenticatedBrokerChannel() {
+        if (forwarded || principal == null || KafkaPrincipal.ANONYMOUS.equals(principal)
+            || principal.tokenAuthenticated()) {
+            return false;
+        }
+        return securityProtocol == SecurityProtocol.SASL_SSL
+            || securityProtocol == SecurityProtocol.SSL;
     }
 
     /**

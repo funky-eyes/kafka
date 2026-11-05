@@ -31,6 +31,9 @@ import java.util.function.Supplier;
  * <p>Loads for the same immutable object/block descriptor are coalesced. Failed loads are removed immediately so a
  * transient object-store failure or corruption result cannot poison later reads. Entries larger than the complete
  * cache budget bypass the cache rather than evicting all useful blocks. A zero-byte budget disables caching.</p>
+ *
+ * <p>Consumers receive independent Futures: cancelling one caller does not cancel the shared
+ * pending read or evict a valid immutable DataBlock for other readers.</p>
  */
 final class StreamObjectDataBlockCache {
     private final long maxBytes;
@@ -53,7 +56,7 @@ final class StreamObjectDataBlockCache {
         Objects.requireNonNull(block, "block");
         Objects.requireNonNull(loader, "loader");
         if (maxBytes == 0 || block.blockLength() > maxBytes) {
-            return load(loader);
+            return callerView(load(loader));
         }
 
         Key key = Key.from(reference, block);
@@ -61,7 +64,7 @@ final class StreamObjectDataBlockCache {
         synchronized (this) {
             Entry existing = entries.get(key);
             if (existing != null) {
-                return existing.future();
+                return callerView(existing.future());
             }
             installed = new Entry(new CompletableFuture<>(), block.blockLength());
             entries.put(key, installed);
@@ -81,7 +84,7 @@ final class StreamObjectDataBlockCache {
             loaded = Objects.requireNonNull(loader.get(), "loader returned null future");
         } catch (Throwable error) {
             shared.future().completeExceptionally(error);
-            return shared.future();
+            return callerView(shared.future());
         }
         loaded.whenComplete((snapshot, error) -> {
             if (error != null) {
@@ -92,7 +95,12 @@ final class StreamObjectDataBlockCache {
                 shared.future().complete(snapshot);
             }
         });
-        return shared.future();
+        return callerView(shared.future());
+    }
+
+    /** Keep callers' cancellation independent from the shared in-flight loader. */
+    private static <T> CompletableFuture<T> callerView(CompletableFuture<T> shared) {
+        return shared.thenApply(value -> value);
     }
 
     synchronized int size() {

@@ -17,9 +17,12 @@
 import unittest
 from pathlib import Path
 
+from shared_storage_ga_manifest import EVIDENCE_WORKFLOW_PATHS, PRODUCTION_PATHS, REAL_S3_REQUIRED, is_production_path
+
 from check_shared_storage_ga_workflows import (
     foreign_evidence_workflow_triggers,
     event_path_patterns,
+    concrete_production_paths,
     path_is_triggered,
     full_manifest_after_source_wait_loop,
     missing_minio_evidence_requirements,
@@ -29,7 +32,307 @@ from check_shared_storage_ga_workflows import (
 )
 
 
+
+class CommittedObjectDeletionSafetyContractTest(unittest.TestCase):
+    def test_replica_local_read_view_cannot_emit_committed_tombstone(self):
+        root = Path(__file__).resolve().parents[1]
+        cleaner = (root / "storage/src/main/java/org/apache/kafka/storage/internals/shared/object/"
+                   "OrphanObjectCleaner.java").read_text(encoding="utf-8")
+        self.assertNotIn("deleteRedundantCommitted(", cleaner)
+        self.assertNotIn("deleteRedundantCommittedObjects(", cleaner)
+        self.assertNotIn("metadataStore.delete(", cleaner)
+        self.assertIn("metadataStore.claimCleanup(", cleaner)
+
+        sources = (
+            "storage/src/main/java/org/apache/kafka/storage/internals/shared/metadata/"
+            "InMemoryObjectMetadataStore.java",
+            "storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/"
+            "shared/s3/KafkaObjectMetadataStore.java",
+        )
+        for path in sources:
+            with self.subTest(source=path):
+                source = (root / path).read_text(encoding="utf-8")
+                self.assertEqual(1, source.count("public CompletableFuture<Void> delete(long objectId) {"))
+                method = source.split(
+                    "public CompletableFuture<Void> delete(long objectId) {", 1
+                )[1].split("\n    }", 1)[0]
+                self.assertIn("CompletableFuture.failedFuture(", method)
+                self.assertIn("UnsupportedOperationException(", method)
+                self.assertNotIn("entries.remove(", method)
+                self.assertNotIn("writeRecord(", method)
+
+
+class BrokerSourceWalNonEmissionContractTest(unittest.TestCase):
+    def test_production_broker_heartbeat_does_not_emit_unstable_gc_reports(self):
+        # The broker's normal heartbeat must remain a stable request until
+        # the transport is independently bound to an authenticated per-Broker
+        # principal. This is a negative-path guard, not authentication.
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java"
+                  ).read_text(encoding="utf-8")
+        self.assertNotIn("BrokerHeartbeatSourceWalReportDispatch.prepareOnce(", source)
+        self.assertNotIn(".setSourceWalProbeReport(", source)
+        self.assertIn(
+            "channelManager.sendRequest(new BrokerHeartbeatRequest.Builder(data), handler);",
+            source,
+        )
+
+
+    def test_dedicated_report_dispatch_is_not_wired_into_production_server(self):
+        # The transport adapter is deliberately dormant until the active
+        # Controller channel can prove a unique authenticated Broker identity.
+        root = Path(__file__).resolve().parents[1]
+        production_root = root / "server/src/main/java"
+        dispatcher = production_root / (
+            "org/apache/kafka/server/BrokerHeartbeatSourceWalReportDispatch.java"
+        )
+        self.assertTrue(dispatcher.is_file(), str(dispatcher))
+        self.assertIn(
+            "static boolean sendDiagnosticOnce(",
+            dispatcher.read_text(encoding="utf-8"),
+        )
+        for java_source in sorted(production_root.rglob("*.java")):
+            if java_source == dispatcher:
+                continue
+            with self.subTest(source=java_source.relative_to(production_root)):
+                source = java_source.read_text(encoding="utf-8")
+                self.assertNotIn("sendDiagnosticOnce(", source)
+                self.assertNotIn(
+                    "BrokerHeartbeatSourceWalReportDispatch.prepareOnce(", source
+                )
+                self.assertNotIn(
+                    "import static org.apache.kafka.server."
+                    "BrokerHeartbeatSourceWalReportDispatch.sendDiagnosticOnce",
+                    source,
+                )
+
+    def test_transport_dispatch_requires_real_broker_bound_connection_snapshot(self):
+        root = Path(__file__).resolve().parents[1]
+        interface = (root / "server-common/src/main/java/org/apache/kafka/server/common/"
+                     "NodeToControllerChannelManager.java").read_text(encoding="utf-8")
+        concrete = (root / "server/src/main/java/org/apache/kafka/server/"
+                    "NodeToControllerChannelManagerImpl.java").read_text(encoding="utf-8")
+        dispatcher = (root / "server/src/main/java/org/apache/kafka/server/"
+                      "BrokerHeartbeatSourceWalReportDispatch.java").read_text(encoding="utf-8")
+        self.assertIn("default Optional<NodeApiVersions> authenticatedBrokerDiagnosticVersions(", interface)
+        default_gate = interface.split(
+            "default Optional<NodeApiVersions> authenticatedBrokerDiagnosticVersions(", 1
+        )[1].split("\n    }", 1)[0]
+        self.assertIn("return Optional.empty();", default_gate)
+        # The existing production transport has no unique client-identity
+        # attestation; generic protocol negotiation cannot opt into sending.
+        self.assertNotIn("authenticatedBrokerDiagnosticVersions(", concrete)
+        send = dispatcher.split("static boolean sendDiagnosticOnce(", 1)[1].split(
+            "private static final class DiagnosticResponseHandler", 1
+        )[0]
+        self.assertIn("channel.authenticatedBrokerDiagnosticVersions(", send)
+        self.assertIn("authenticatedVersions.isPresent()", send)
+        self.assertNotIn("channel.controllerApiVersions()", send)
+        self.assertNotIn("boolean uniqueBrokerChannelIdentityVerified", send)
+
+    def test_controller_consumes_source_probe_only_via_authenticated_gate(self):
+        root = Path(__file__).resolve().parents[1]
+        controller_root = root / "metadata/src/main/java/org/apache/kafka/controller"
+        controller = controller_root / "QuorumController.java"
+        source = controller.read_text(encoding="utf-8")
+        self.assertIn("retirementSourceProbeRegistry.consumeAuthenticated(", source)
+        self.assertNotIn("retirementSourceProbeRegistry.consume(", source)
+        for java_source in sorted(controller_root.rglob("*.java")):
+            if java_source.name == "PartitionRetirementSourceProbeRegistry.java":
+                continue
+            with self.subTest(source=java_source.relative_to(controller_root)):
+                self.assertNotIn(
+                    "retirementSourceProbeRegistry.consume(", 
+                    java_source.read_text(encoding="utf-8"),
+                )
+
+    def test_synthetic_controller_request_cannot_claim_network_authentication(self):
+        root = Path(__file__).resolve().parents[1]
+        context = (root / "metadata/src/main/java/org/apache/kafka/controller/ControllerRequestContext.java"
+                   ).read_text(encoding="utf-8")
+        self.assertIn(
+            "this(requestHeader, principal, deadlineNs, partitionChangeQuotaApplier, null, false);",
+            context,
+        )
+        self.assertIn("requestContext.securityProtocol()", context)
+        self.assertIn("principal.tokenAuthenticated()", context)
+        self.assertIn("securityProtocol == SecurityProtocol.SASL_SSL", context)
+        self.assertIn("securityProtocol == SecurityProtocol.SSL", context)
+        self.assertIn("if (forwarded || principal == null", context)
+
 class WorkflowTriggerOwnershipTest(unittest.TestCase):
+    def test_broker_registration_replay_revokes_diagnostics_after_successful_metadata_apply(self):
+        root = Path(__file__).resolve().parents[1]
+        controller = (root / "metadata/src/main/java/org/apache/kafka/controller/QuorumController.java"
+                      ).read_text(encoding="utf-8")
+        replay = controller.split("private void replay(ApiMessage message,", 1)[1]
+        replay = replay.split("case ACCESS_CONTROL_ENTRY_RECORD:", 1)[0]
+        events = {
+            "REGISTER_BROKER_RECORD": ("RegisterBrokerRecord", "brokerId()"),
+            "UNREGISTER_BROKER_RECORD": ("UnregisterBrokerRecord", "brokerId()"),
+            "FENCE_BROKER_RECORD": ("FenceBrokerRecord", "id()"),
+            "UNFENCE_BROKER_RECORD": ("UnfenceBrokerRecord", "id()"),
+            "BROKER_REGISTRATION_CHANGE_RECORD": ("BrokerRegistrationChangeRecord", "brokerId()"),
+        }
+        for kind, (record, getter) in events.items():
+            with self.subTest(event=kind):
+                block = replay.split("case " + kind + ":", 1)[1].split("break;", 1)[0]
+                applied = "clusterControl.replay((" + record + ") message"
+                revoke = "retirementSourceProbeRegistry.invalidateBroker(((" + record + ") message)." + getter + ");"
+                self.assertIn(applied, block)
+                self.assertIn(revoke, block)
+                self.assertLess(block.index(applied), block.index(revoke))
+
+    def test_topic_and_partition_replay_revokes_diagnostics_after_successful_metadata_apply(self):
+        root = Path(__file__).resolve().parents[1]
+        controller = (root / "metadata/src/main/java/org/apache/kafka/controller/QuorumController.java"
+                      ).read_text(encoding="utf-8")
+        replay = controller.split("private void replay(ApiMessage message,", 1)[1]
+        events = {
+            "TOPIC_RECORD": ("TopicRecord", "replicationControl", "invalidateTopic", "topicId()"),
+            "PARTITION_RECORD": ("PartitionRecord", "replicationControl", "invalidatePartition",
+                                 "topicId(), ((PartitionRecord) message).partitionId()"),
+            "PARTITION_CHANGE_RECORD": ("PartitionChangeRecord", "replicationControl",
+                                        "invalidatePartition",
+                                        "topicId(), ((PartitionChangeRecord) message).partitionId()"),
+            "REMOVE_TOPIC_RECORD": ("RemoveTopicRecord", "replicationControl", "invalidateTopic", "topicId()"),
+        }
+        for kind, (record, manager, invalidator, getters) in events.items():
+            with self.subTest(event=kind):
+                block = replay.split("case " + kind + ":", 1)[1].split("break;", 1)[0]
+                applied = manager + ".replay((" + record + ") message)"
+                if invalidator == "invalidatePartition":
+                    revoke = ("retirementSourceProbeRegistry.invalidatePartition(((" + record
+                              + ") message)." + getters + ");")
+                else:
+                    revoke = ("retirementSourceProbeRegistry.invalidateTopic(((" + record
+                              + ") message)." + getters + ");")
+                # Check the actual Java expression rather than a particular
+                # line-wrap layout. Keep the exact record getters AND strict
+                # replay-before-revoke ordering as part of the contract.
+                compact = "".join(block.split())
+                compact_applied = "".join(applied.split())
+                compact_revoke = "".join(revoke.split())
+                self.assertIn(compact_applied, compact)
+                self.assertIn(compact_revoke, compact)
+                self.assertLess(compact.index(compact_applied), compact.index(compact_revoke))
+
+    def test_feature_and_authority_replay_revoke_diagnostics_after_successful_apply(self):
+        root = Path(__file__).resolve().parents[1]
+        controller = (root / "metadata/src/main/java/org/apache/kafka/controller/QuorumController.java"
+                      ).read_text(encoding="utf-8")
+        replay = controller.split("private void replay(ApiMessage message,", 1)[1]
+        feature = replay.split("case FEATURE_LEVEL_RECORD:", 1)[1].split("break;", 1)[0]
+        applied = "featureControl.replay((FeatureLevelRecord)message);"
+        revoked = "retirementSourceProbeRegistry.invalidateAll();"
+        compact_feature = "".join(feature.split())
+        self.assertIn(applied, compact_feature)
+        self.assertIn(revoked, compact_feature)
+        self.assertLess(compact_feature.index(applied), compact_feature.index(revoked))
+
+        authority = controller.split("private void replayPartitionRetirementAuthority(", 1)[1]
+        authority = authority.split("private final FaultHandler", 1)[0]
+        compact_authority = "".join(authority.split())
+        applied = "partitionRetirementControl.replayFromKRaft(record,snapshotId,offset);"
+        revoked = "retirementSourceProbeRegistry.invalidatePartition(record.topicId(),record.partitionId());"
+        self.assertIn(applied, compact_authority)
+        self.assertIn(revoked, compact_authority)
+        self.assertLess(compact_authority.index(applied), compact_authority.index(revoked))
+
+    def test_heartbeat_network_context_preserves_transport_and_forwarding(self):
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "core/src/main/scala/kafka/server/ControllerApis.scala"
+                  ).read_text(encoding="utf-8")
+        block = source.split("def handleBrokerHeartBeatRequest(", 1)[1].split(
+            "def handleUnregisterBroker(", 1
+        )[0]
+        self.assertIn("new ControllerRequestContext(request.context,", block)
+        self.assertIn("request.isForwarded", block)
+        self.assertNotIn(
+            "new ControllerRequestContext(request.context.header.data", block
+        )
+
+    def test_kraft_gc_controller_changes_trigger_every_ga_workflow(self):
+        protected = {
+            "metadata/src/main/java/org/apache/kafka/controller/QuorumController.java",
+            "metadata/src/main/java/org/apache/kafka/controller/ControllerRequestContext.java",
+            "core/src/main/scala/kafka/server/ControllerApis.scala",
+            "metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementSourceProbeRegistry.java",
+            "metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementHeartbeatReportGate.java",
+            "metadata/src/main/java/org/apache/kafka/metadata/BrokerHeartbeatReply.java",
+            "metadata/src/main/java/org/apache/kafka/metadata/PartitionRetirementAuthorityState.java",
+            "metadata/src/main/java/org/apache/kafka/image/PartitionRetirementAuthorityImage.java",
+        }
+        root = Path(__file__).resolve().parents[1]
+        for path in protected:
+            self.assertTrue(is_production_path(path), path)
+        for name, filename in sorted(EVIDENCE_WORKFLOW_PATHS.items()):
+            if name == REAL_S3_REQUIRED:
+                continue
+            workflow = (root / filename).read_text(encoding="utf-8")
+            events = ["push"]
+            if "\n  pull_request:\n" in workflow:
+                events.append("pull_request")
+            for event in events:
+                patterns = event_path_patterns(workflow, event)
+                for source in sorted(protected):
+                    with self.subTest(gate=name, event=event, source=source):
+                        self.assertTrue(
+                            path_is_triggered(source, patterns),
+                            f"{filename}: {event}.paths must cover {source}",
+                        )
+
+    def test_gc_protocol_changes_trigger_every_ga_evidence_workflow(self):
+        # Every GC protocol and Broker auth-boundary input below is included
+        # for the Source/WAL diagnostics. Every eligible source-SHA gate
+        # must rerun when any of their blobs changes.
+        protected = {
+            "server/src/main/java/org/apache/kafka/server/BrokerHeartbeatSourceWalReportDispatch.java",
+            "server-common/src/main/java/org/apache/kafka/server/common/NodeToControllerChannelManager.java",
+            "clients/src/main/java/org/apache/kafka/common/replica/PartitionRetirementSourceProbe.java",
+            "clients/src/main/java/org/apache/kafka/common/requests/BrokerHeartbeatRequest.java",
+            "clients/src/main/resources/common/message/BrokerHeartbeatRequest.json",
+            "clients/src/main/resources/common/message/BrokerHeartbeatResponse.json",
+        }
+        self.assertTrue(protected.issubset(PRODUCTION_PATHS))
+        root = Path(__file__).resolve().parents[1]
+        for name, filename in sorted(EVIDENCE_WORKFLOW_PATHS.items()):
+            if name == REAL_S3_REQUIRED:
+                # The special Real S3 workflow is manually/branch dispatched.
+                continue
+            workflow = (root / filename).read_text(encoding="utf-8")
+            events = ["push"]
+            if "\n  pull_request:\n" in workflow:
+                events.append("pull_request")
+            for event in events:
+                patterns = event_path_patterns(workflow, event)
+                for source in sorted(protected):
+                    with self.subTest(gate=name, event=event, source=source):
+                        self.assertTrue(
+                            path_is_triggered(source, patterns),
+                            f"{filename}: {event}.paths must cover {source}",
+                        )
+
+    def test_explicit_client_protocol_paths_require_ga_fingerprint_coverage(self):
+        workflow = """on:
+  push:
+    paths:
+      - 'clients/src/main/java/org/apache/kafka/common/replica/PartitionRetirementSourceProbe.java'
+      - 'clients/src/main/java/org/apache/kafka/common/requests/BrokerHeartbeatRequest.java'
+      - 'clients/src/main/resources/common/message/BrokerHeartbeatRequest.json'
+      - 'clients/src/main/resources/common/message/BrokerHeartbeatResponse.json'
+      - 'clients/src/test/java/org/apache/kafka/common/requests/HeartbeatRequestTest.java'
+"""
+        self.assertEqual(
+            {
+                "clients/src/main/java/org/apache/kafka/common/replica/PartitionRetirementSourceProbe.java",
+                "clients/src/main/java/org/apache/kafka/common/requests/BrokerHeartbeatRequest.java",
+                "clients/src/main/resources/common/message/BrokerHeartbeatRequest.json",
+                "clients/src/main/resources/common/message/BrokerHeartbeatResponse.json",
+            },
+            concrete_production_paths(workflow),
+        )
+
     def test_rejects_exact_foreign_workflow_trigger(self):
         text = """on:
   push:

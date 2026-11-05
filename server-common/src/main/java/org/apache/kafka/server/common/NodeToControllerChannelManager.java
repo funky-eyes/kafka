@@ -18,6 +18,7 @@
 package org.apache.kafka.server.common;
 
 import org.apache.kafka.clients.NodeApiVersions;
+import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.requests.AbstractRequest;
 
 import java.util.Optional;
@@ -29,6 +30,31 @@ public interface NodeToControllerChannelManager {
     void shutdown() throws InterruptedException;
 
     Optional<NodeApiVersions> controllerApiVersions();
+
+    /**
+     * Return negotiated versions ONLY when the current active Controller
+     * connection is independently authenticated as this exact Broker
+     * registration. The identity, epoch, incarnation, controller destination
+     * and protocol versions MUST come from the same active authenticated
+     * network session, not separate connection snapshots.
+     *
+     * <p>A configured listener, SASL_SSL setting, BrokerId, or CLUSTER_ACTION
+     * authorization is NOT proof of unique per-Broker authentication.
+     * Implementations must also prove ownership of the current KRaft
+     * BrokerRegistration before overriding this method.</p>
+     *
+     * <p>Default DENY: the existing generic Controller channel cannot attest
+     * this binding. Consequently v3 Source/WAL diagnostics remain dormant
+     * until a genuine per-Broker authenticated transport is implemented
+     * and independently verified.</p>
+     */
+    default Optional<NodeApiVersions> authenticatedBrokerDiagnosticVersions(
+        int brokerId,
+        long brokerEpoch,
+        Uuid brokerIncarnationId
+    ) {
+        return Optional.empty();
+    }
 
     void sendRequest(
         AbstractRequest.Builder<? extends AbstractRequest> request,

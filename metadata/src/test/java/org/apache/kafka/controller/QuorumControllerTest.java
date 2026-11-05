@@ -21,6 +21,8 @@ import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.config.ConfigResource;
 import org.apache.kafka.common.config.TopicConfig;
 import org.apache.kafka.common.errors.BrokerIdNotRegisteredException;
+import org.apache.kafka.common.errors.ClusterAuthorizationException;
+import org.apache.kafka.common.errors.InvalidRequestException;
 import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
 import org.apache.kafka.common.errors.UnsupportedVersionException;
@@ -53,6 +55,7 @@ import org.apache.kafka.common.metadata.BrokerRegistrationChangeRecord;
 import org.apache.kafka.common.metadata.ConfigRecord;
 import org.apache.kafka.common.metadata.EndTransactionRecord;
 import org.apache.kafka.common.metadata.FeatureLevelRecord;
+import org.apache.kafka.common.metadata.PartitionRetirementAuthorityRecord;
 import org.apache.kafka.common.metadata.PartitionRecord;
 import org.apache.kafka.common.metadata.ProducerIdsRecord;
 import org.apache.kafka.common.metadata.RegisterBrokerRecord;
@@ -62,6 +65,7 @@ import org.apache.kafka.common.metadata.RegisterControllerRecord;
 import org.apache.kafka.common.metadata.TopicRecord;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.replica.PartitionRetirementSourceProbe;
 import org.apache.kafka.common.requests.AlterPartitionRequest;
 import org.apache.kafka.common.requests.ApiError;
 import org.apache.kafka.common.security.auth.KafkaPrincipal;
@@ -162,6 +166,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -172,6 +177,485 @@ public class QuorumControllerTest {
 
     static final BootstrapMetadata SIMPLE_BOOTSTRAP = BootstrapMetadata.
             fromVersion(MetadataVersion.IBP_3_7_IV0, "test-provided bootstrap");
+
+    @Test
+    public void testUntrustedRetirementClaimIsRejectedByProductionFeatureWithoutKRaftRecords() throws Exception {
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv).build()
+        ) {
+            QuorumController controller = controlEnv.activeController();
+            long recordCount = retirementAuthorityRecordCount(clientEnv);
+            var candidate = untrustedRetirementCandidate();
+            var claim = untrustedRetirementSourceClaim(candidate);
+            assertEquals(
+                PartitionRetirementCandidatePrecheck.Finding.FEATURE_NOT_NEGOTIATED,
+                controller.preflightUntrustedPartitionRetirement(ANONYMOUS_CONTEXT, candidate, claim)
+                    .get(10, TimeUnit.SECONDS)
+            );
+            assertEquals(recordCount, retirementAuthorityRecordCount(clientEnv));
+        }
+    }
+
+    @Test
+    public void testUntrustedRetirementClaimCannotBypassTheSerializedControllerEventQueue() throws Exception {
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv).build()
+        ) {
+            QuorumController controller = controlEnv.activeController();
+            CountDownLatch entered = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            controller.appendControlEvent("holdRetirementSourcePreflight", () -> {
+                entered.countDown();
+                try {
+                    if (!release.await(10, TimeUnit.SECONDS)) {
+                        throw new AssertionError("Controller gate was not released");
+                    }
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException(interrupted);
+                }
+            });
+            try {
+                assertTrue(entered.await(10, TimeUnit.SECONDS));
+                var candidate = untrustedRetirementCandidate();
+                var assessment = controller.preflightUntrustedPartitionRetirement(
+                    ANONYMOUS_CONTEXT, candidate, untrustedRetirementSourceClaim(candidate)
+                );
+                assertFalse(assessment.isDone());
+                release.countDown();
+                assertEquals(PartitionRetirementCandidatePrecheck.Finding.FEATURE_NOT_NEGOTIATED,
+                    assessment.get(10, TimeUnit.SECONDS));
+            } finally {
+                release.countDown();
+            }
+        }
+    }
+
+    @Test
+    public void testProbeIssuanceIsDisabledUntilFeatureAndBrokerAuthAreNegotiated() throws Exception {
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv).build()
+        ) {
+            QuorumController controller = controlEnv.activeController();
+            long recordCount = retirementAuthorityRecordCount(clientEnv);
+            var candidate = untrustedRetirementCandidate();
+            assertTrue(controller.beginRetirementSourceProbe(ANONYMOUS_CONTEXT, candidate)
+                .get(10, TimeUnit.SECONDS).isEmpty());
+            assertEquals(recordCount, retirementAuthorityRecordCount(clientEnv));
+        }
+    }
+
+    @Test
+    public void testForgedSourceProbeCannotPublishControllerAuthorityRecord() throws Exception {
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv).build()
+        ) {
+            QuorumController controller = controlEnv.activeController();
+            long recordCount = retirementAuthorityRecordCount(clientEnv);
+            var candidate = untrustedRetirementCandidate();
+            var forged = new PartitionRetirementSourceProbeRegistry.Challenge(
+                Uuid.randomUuid(), clientEnv.clusterId(), candidate
+            );
+            assertEquals(
+                PartitionRetirementCandidatePrecheck.Finding.SOURCE_PROBE_NOT_VERIFIED,
+                controller.inspectRetirementSourceProbe(
+                    ANONYMOUS_CONTEXT, candidate, forged, untrustedRetirementSourceClaim(candidate)
+                ).get(10, TimeUnit.SECONDS)
+            );
+            assertEquals(recordCount, retirementAuthorityRecordCount(clientEnv));
+        }
+    }
+
+    @Test
+    public void testUnsignedSourceWalReportCannotBecomeControllerAuthority() throws Exception {
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv).build()
+        ) {
+            QuorumController controller = controlEnv.activeController();
+            long recordsBefore = retirementAuthorityRecordCount(clientEnv);
+            var candidate = untrustedRetirementCandidate();
+            var request = new PartitionRetirementSourceProbe.Request(
+                new Uuid(21L, 22L), clientEnv.clusterId(), candidate.key().topicId(),
+                candidate.key().partitionId(), candidate.brokerId(), candidate.brokerEpoch(),
+                candidate.brokerIncarnationId(), candidate.sourceLeaderEpoch(),
+                candidate.sourcePartitionEpoch(), candidate.expectedPreviousAuthorityOffset(), candidate.nextAuthorityOffset(),
+                candidate.claimedLogStartOffset()
+            );
+            var report = new PartitionRetirementSourceProbe.Report(
+                request, 1L, 0L, 10L, 10L, 0L, 0L
+            );
+            assertEquals(
+                PartitionRetirementCandidatePrecheck.Finding.SOURCE_PROBE_NOT_VERIFIED,
+                controller.inspectRetirementSourceReport(ANONYMOUS_CONTEXT, candidate, report)
+                    .get(10, TimeUnit.SECONDS)
+            );
+            assertEquals(recordsBefore, retirementAuthorityRecordCount(clientEnv));
+        }
+    }
+
+    @Test
+    public void testMissingSourceWalReportNeverConsumesOrEmitsControllerRecords() throws Exception {
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv).build()
+        ) {
+            QuorumController controller = controlEnv.activeController();
+            var candidate = untrustedRetirementCandidate();
+            long recordsBefore = retirementAuthorityRecordCount(clientEnv);
+            assertEquals(
+                PartitionRetirementCandidatePrecheck.Finding.SOURCE_PROBE_NOT_VERIFIED,
+                controller.inspectRetirementSourceReport(ANONYMOUS_CONTEXT, candidate, null)
+                    .get(10, TimeUnit.SECONDS)
+            );
+            assertEquals(recordsBefore, retirementAuthorityRecordCount(clientEnv));
+        }
+    }
+
+    @Test
+    public void testUntrustedHeartbeatProbeRejectsBeforeAnyKRaftWrite() throws Exception {
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv).build()
+        ) {
+            QuorumController controller = controlEnv.activeController();
+            long recordsBefore = retirementAuthorityRecordCount(clientEnv);
+            ControllerRequestContext context = new ControllerRequestContext(
+                new RequestHeaderData().setRequestApiKey((short) 63).setRequestApiVersion((short) 3),
+                KafkaPrincipal.ANONYMOUS, OptionalLong.empty()
+            );
+            BrokerHeartbeatRequestData heartbeat = new BrokerHeartbeatRequestData()
+                .setBrokerId(3)
+                .setBrokerEpoch(54L)
+                .setSourceWalProbeReport(new BrokerHeartbeatRequestData.SourceWalProbeReport()
+                    .setNonce(new Uuid(1L, 2L))
+                    .setClusterId(clientEnv.clusterId())
+                    .setTopicId(new Uuid(3L, 4L))
+                    .setPartitionId(0));
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                () -> controller.processBrokerHeartbeat(context, heartbeat).get(10, TimeUnit.SECONDS));
+            assertTrue(failure.getCause() instanceof ClusterAuthorizationException);
+            assertEquals(recordsBefore, retirementAuthorityRecordCount(clientEnv));
+        }
+    }
+
+    @Test
+    public void testHeartbeatProbeCannotBypassStableProtocolVersion() throws Exception {
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv).build()
+        ) {
+            QuorumController controller = controlEnv.activeController();
+            long recordsBefore = retirementAuthorityRecordCount(clientEnv);
+            ControllerRequestContext context = new ControllerRequestContext(
+                new RequestHeaderData().setRequestApiKey((short) 63).setRequestApiVersion((short) 2),
+                KafkaPrincipal.ANONYMOUS, OptionalLong.empty()
+            );
+            BrokerHeartbeatRequestData heartbeat = new BrokerHeartbeatRequestData()
+                .setBrokerId(3)
+                .setBrokerEpoch(54L)
+                .setSourceWalProbeReport(new BrokerHeartbeatRequestData.SourceWalProbeReport()
+                    .setNonce(new Uuid(1L, 2L)));
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                () -> controller.processBrokerHeartbeat(context, heartbeat).get(10, TimeUnit.SECONDS));
+            assertTrue(failure.getCause() instanceof InvalidRequestException);
+            assertEquals(recordsBefore, retirementAuthorityRecordCount(clientEnv));
+        }
+    }
+
+    /**
+     * Controller bootstrap may append unrelated feature/registration records
+     * after activeController() returns. Retirement preflight must be proven
+     * non-emitting without racing those independent startup writes.
+     */
+    @Test
+    public void testProductionV3HeartbeatNeverIssuesUnauthenticatedSourceChallenge() throws Exception {
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv).build()
+        ) {
+            QuorumController active = controlEnv.activeController(true);
+            ListenerCollection listeners = new ListenerCollection();
+            listeners.add(new Listener().setName("PLAINTEXT")
+                .setHost("localhost").setPort(9092));
+            long epoch = active.registerBroker(
+                ANONYMOUS_CONTEXT,
+                new BrokerRegistrationRequestData()
+                    .setBrokerId(0)
+                    .setClusterId(clientEnv.clusterId())
+                    .setIncarnationId(new Uuid(55L, 66L))
+                    .setFeatures(brokerFeaturesPlusFeatureVersions(
+                        MetadataVersion.MINIMUM_VERSION, MetadataVersion.latestTesting(),
+                        Map.of(EligibleLeaderReplicasVersion.FEATURE_NAME,
+                            EligibleLeaderReplicasVersion.ELRV_1.featureLevel())))
+                    .setLogDirs(List.of(new Uuid(77L, 88L)))
+                    .setListeners(listeners)
+            ).get(10, TimeUnit.SECONDS).epoch();
+            ControllerRequestContext versionThree = new ControllerRequestContext(
+                new RequestHeaderData().setRequestApiKey((short) 63).setRequestApiVersion((short) 3),
+                KafkaPrincipal.ANONYMOUS, OptionalLong.empty()
+            );
+            var reply = active.processBrokerHeartbeat(
+                versionThree, new BrokerHeartbeatRequestData()
+                    .setBrokerId(0).setBrokerEpoch(epoch)
+                    .setCurrentMetadataOffset(100000L).setWantFence(false)
+            ).get(10, TimeUnit.SECONDS);
+            assertTrue(reply.isCaughtUp());
+            assertFalse(reply.isFenced());
+            assertNull(reply.sourceWalProbeChallenge());
+            assertEquals(0L, retirementAuthorityRecordCount(clientEnv));
+        }
+    }
+
+    @Test
+    public void testSourceProbeHeartbeatEligibilityRejectsUnsafeBrokerStates() {
+        BrokerHeartbeatRequestData heartbeat = new BrokerHeartbeatRequestData()
+            .setBrokerId(3).setBrokerEpoch(54L);
+        BrokerHeartbeatReply ready = new BrokerHeartbeatReply(true, false, false, false);
+        assertTrue(QuorumController.sourceProbeHeartbeatEligible(heartbeat, ready, false));
+        assertFalse(QuorumController.sourceProbeHeartbeatEligible(heartbeat, ready, true));
+        assertFalse(QuorumController.sourceProbeHeartbeatEligible(
+            heartbeat.duplicate().setWantFence(true), ready, false));
+        assertFalse(QuorumController.sourceProbeHeartbeatEligible(
+            heartbeat.duplicate().setWantShutDown(true), ready, false));
+        assertFalse(QuorumController.sourceProbeHeartbeatEligible(
+            heartbeat.duplicate().setOfflineLogDirs(List.of(new Uuid(71L, 72L))), ready, false));
+        assertFalse(QuorumController.sourceProbeHeartbeatEligible(
+            heartbeat, new BrokerHeartbeatReply(false, false, false, false), false));
+        assertFalse(QuorumController.sourceProbeHeartbeatEligible(
+            heartbeat, new BrokerHeartbeatReply(true, true, false, false), false));
+        assertFalse(QuorumController.sourceProbeHeartbeatEligible(
+            heartbeat, new BrokerHeartbeatReply(true, false, true, false), false));
+        assertFalse(QuorumController.sourceProbeHeartbeatEligible(
+            heartbeat, new BrokerHeartbeatReply(true, false, false, true), false));
+    }
+
+    @Test
+    public void testUniquelyBoundHeartbeatReportIsSerializedAndStillDeniedWithoutNonce() throws Exception {
+        KafkaPrincipal uniqueBroker = new KafkaPrincipal(KafkaPrincipal.USER_TYPE, "broker-id-three");
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv)
+                .setControllerBuilderInitializer(builder ->
+                    builder.setPartitionRetirementBrokerPrincipalPolicy(
+                        new PartitionRetirementBrokerPrincipalPolicy(Map.of(3, uniqueBroker))
+                    )
+                ).build()
+        ) {
+            QuorumController controller = controlEnv.activeController(true);
+            long recordsBefore = retirementAuthorityRecordCount(clientEnv);
+            CountDownLatch entered = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            controller.appendControlEvent("holdSourceWalDiagnostic", () -> {
+                entered.countDown();
+                try {
+                    if (!release.await(10, TimeUnit.SECONDS)) {
+                        throw new AssertionError("Diagnostic gate was not released");
+                    }
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException(interrupted);
+                }
+            });
+            try {
+                assertTrue(entered.await(10, TimeUnit.SECONDS));
+                CompletableFuture<BrokerHeartbeatReply> attempted = controller.processBrokerHeartbeat(
+                    retirementReportContext((short) 3, uniqueBroker), untrustedHeartbeatReport()
+                );
+                // Even a correctly mapped Principal cannot bypass the
+                // serialized Controller event or treat unverified bytes as authority.
+                assertFalse(attempted.isDone());
+                release.countDown();
+                ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> attempted.get(10, TimeUnit.SECONDS));
+                assertTrue(failure.getCause() instanceof InvalidRequestException);
+                assertTrue(failure.getCause().getMessage().contains("SOURCE_PROBE_NOT_VERIFIED"));
+                assertEquals(recordsBefore, retirementAuthorityRecordCount(clientEnv));
+            } finally {
+                release.countDown();
+            }
+        }
+    }
+
+    @Test
+    public void testBoundBrokerCannotBorrowForeignIdentityOrFutureHeartbeatVersion() throws Exception {
+        KafkaPrincipal uniqueBroker = new KafkaPrincipal(KafkaPrincipal.USER_TYPE, "broker-id-three");
+        KafkaPrincipal foreignBroker = new KafkaPrincipal(KafkaPrincipal.USER_TYPE, "broker-id-four");
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv)
+                .setControllerBuilderInitializer(builder ->
+                    builder.setPartitionRetirementBrokerPrincipalPolicy(
+                        new PartitionRetirementBrokerPrincipalPolicy(Map.of(3, uniqueBroker))
+                    )
+                ).build()
+        ) {
+            QuorumController controller = controlEnv.activeController(true);
+            long recordsBefore = retirementAuthorityRecordCount(clientEnv);
+            ExecutionException wrongIdentity = assertThrows(ExecutionException.class, () ->
+                controller.processBrokerHeartbeat(
+                    retirementReportContext((short) 3, foreignBroker), untrustedHeartbeatReport()
+                ).get(10, TimeUnit.SECONDS));
+            assertTrue(wrongIdentity.getCause() instanceof ClusterAuthorizationException);
+            ExecutionException futureVersion = assertThrows(ExecutionException.class, () ->
+                controller.processBrokerHeartbeat(
+                    retirementReportContext((short) 4, uniqueBroker), untrustedHeartbeatReport()
+                ).get(10, TimeUnit.SECONDS));
+            assertTrue(futureVersion.getCause() instanceof InvalidRequestException);
+            assertEquals(recordsBefore, retirementAuthorityRecordCount(clientEnv));
+        }
+    }
+
+    @Test
+    public void testBoundBrokerForeignRequestApiKeyCannotIssueSourceWalReport() throws Exception {
+        KafkaPrincipal uniqueBroker = new KafkaPrincipal(KafkaPrincipal.USER_TYPE, "broker-id-three");
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv)
+                .setControllerBuilderInitializer(builder ->
+                    builder.setPartitionRetirementBrokerPrincipalPolicy(
+                        new PartitionRetirementBrokerPrincipalPolicy(Map.of(3, uniqueBroker))
+                    )
+                ).build()
+        ) {
+            QuorumController controller = controlEnv.activeController(true);
+            long recordsBefore = retirementAuthorityRecordCount(clientEnv);
+            ControllerRequestContext unrelated = new ControllerRequestContext(
+                new RequestHeaderData().setRequestApiKey((short) 1).setRequestApiVersion((short) 3),
+                uniqueBroker, OptionalLong.empty()
+            );
+            ExecutionException failure = assertThrows(ExecutionException.class, () ->
+                controller.processBrokerHeartbeat(unrelated, untrustedHeartbeatReport())
+                    .get(10, TimeUnit.SECONDS)
+            );
+            assertTrue(failure.getCause() instanceof InvalidRequestException);
+            assertTrue(failure.getCause().getMessage().contains("VERSION_NOT_NEGOTIATED"));
+            assertEquals(recordsBefore, retirementAuthorityRecordCount(clientEnv));
+        }
+    }
+
+    @Test
+    public void testPlaintextForwardedOrSyntheticBrokerReportRejectedBeforeControllerQueue() throws Exception {
+        KafkaPrincipal bound = new KafkaPrincipal(KafkaPrincipal.USER_TYPE, "broker-id-three");
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv env = new QuorumControllerTestEnv.Builder(clientEnv)
+                .setControllerBuilderInitializer(builder ->
+                    builder.setPartitionRetirementBrokerPrincipalPolicy(
+                        new PartitionRetirementBrokerPrincipalPolicy(Map.of(3, bound))
+                    )
+                ).build()
+        ) {
+            QuorumController controller = env.activeController(true);
+            long before = retirementAuthorityRecordCount(clientEnv);
+            List<ControllerRequestContext> denied = List.of(
+                ControllerRequestContextUtil.brokerDiagnosticContext(
+                    (short) 3, bound, SecurityProtocol.PLAINTEXT, false),
+                ControllerRequestContextUtil.brokerDiagnosticContext(
+                    (short) 3, bound, SecurityProtocol.SASL_PLAINTEXT, false),
+                ControllerRequestContextUtil.brokerDiagnosticContext(
+                    (short) 3, bound, SecurityProtocol.SASL_SSL, true),
+                new ControllerRequestContext(
+                    new RequestHeaderData().setRequestApiKey((short) 63).setRequestApiVersion((short) 3),
+                    bound, OptionalLong.empty()
+                )
+            );
+            for (ControllerRequestContext context : denied) {
+                ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> controller.processBrokerHeartbeat(context, untrustedHeartbeatReport())
+                        .get(10, TimeUnit.SECONDS)
+                );
+                assertTrue(failure.getCause() instanceof ClusterAuthorizationException);
+            }
+            assertEquals(before, retirementAuthorityRecordCount(clientEnv));
+        }
+    }
+
+    @Test
+    public void testMappedBrokerCannotReportWhileFencingOrShuttingDown() throws Exception {
+        KafkaPrincipal uniqueBroker = new KafkaPrincipal(KafkaPrincipal.USER_TYPE, "broker-id-three");
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv)
+                .setControllerBuilderInitializer(builder ->
+                    builder.setPartitionRetirementBrokerPrincipalPolicy(
+                        new PartitionRetirementBrokerPrincipalPolicy(Map.of(3, uniqueBroker))
+                    )
+                ).build()
+        ) {
+            QuorumController controller = controlEnv.activeController(true);
+            long recordsBefore = retirementAuthorityRecordCount(clientEnv);
+            for (BrokerHeartbeatRequestData disallowed : List.of(
+                untrustedHeartbeatReport().setWantFence(true),
+                untrustedHeartbeatReport().setWantShutDown(true),
+                untrustedHeartbeatReport().setOfflineLogDirs(List.of(new Uuid(77L, 88L)))
+            )) {
+                ExecutionException failure = assertThrows(ExecutionException.class, () ->
+                    controller.processBrokerHeartbeat(
+                        retirementReportContext((short) 3, uniqueBroker), disallowed
+                    ).get(10, TimeUnit.SECONDS)
+                );
+                assertTrue(failure.getCause() instanceof InvalidRequestException);
+                assertTrue(failure.getCause().getMessage().contains("BROKER_NOT_ELIGIBLE"));
+            }
+            assertEquals(recordsBefore, retirementAuthorityRecordCount(clientEnv));
+        }
+    }
+
+    private static ControllerRequestContext retirementReportContext(short version, KafkaPrincipal principal) {
+        return ControllerRequestContextUtil.brokerDiagnosticContext(
+            version, principal, SecurityProtocol.SASL_SSL, false
+        );
+    }
+
+    private static BrokerHeartbeatRequestData untrustedHeartbeatReport() {
+        return new BrokerHeartbeatRequestData()
+            .setBrokerId(3)
+            .setBrokerEpoch(54L)
+            .setSourceWalProbeReport(new BrokerHeartbeatRequestData.SourceWalProbeReport()
+                .setNonce(new Uuid(1L, 2L))
+                .setClusterId("test-cluster")
+                .setTopicId(new Uuid(3L, 4L))
+                .setPartitionId(0)
+                .setBrokerIncarnationId(new Uuid(5L, 6L))
+                .setSourceLeaderEpoch(8)
+                .setSourcePartitionEpoch(8)
+                .setExpectedPreviousAuthorityOffset(-1L)
+                .setNextAuthorityOffset(100L)
+                .setLocalLeadershipGeneration(2L)
+                .setNativeLogStartOffset(0L)
+                .setNativeHighWatermark(10L)
+                .setNativeLogEndOffset(10L)
+                .setWalMutationRevision(12L)
+                .setWalAdmissionRevision(13L));
+    }
+
+    private static long retirementAuthorityRecordCount(MockRaftClientTestEnv clientEnv) {
+        return clientEnv.allRecords().stream()
+            .filter(record -> record.message() instanceof PartitionRetirementAuthorityRecord)
+            .count();
+    }
+
+    private static PartitionRetirementCandidatePrecheck.Candidate untrustedRetirementCandidate() {
+        return new PartitionRetirementCandidatePrecheck.Candidate(
+            new org.apache.kafka.metadata.PartitionRetirementAuthorityState.Key(Uuid.randomUuid(), 0),
+            3, 54L, new Uuid(10L, 11L), 8, 8, -1L, 100L, 0L
+        );
+    }
+
+    private static PartitionRetirementUntrustedSourceClaim untrustedRetirementSourceClaim(
+        PartitionRetirementCandidatePrecheck.Candidate candidate
+    ) {
+        return new PartitionRetirementUntrustedSourceClaim(
+            candidate.key(), candidate.brokerId(), candidate.brokerEpoch(),
+            candidate.brokerIncarnationId(), candidate.sourceLeaderEpoch(),
+            1L, 0L, 10L, 10L, 0L, 0L, true
+        );
+    }
 
     /**
      * Test setting some configuration values and reading them back.

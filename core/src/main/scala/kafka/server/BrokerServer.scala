@@ -29,6 +29,7 @@ import org.apache.kafka.common.internals.Plugin
 import org.apache.kafka.common.message.ApiMessageType.ListenerType
 import org.apache.kafka.common.metrics.Metrics
 import org.apache.kafka.common.network.ListenerName
+import org.apache.kafka.common.replica.PartitionRetirementSourceProbe
 import org.apache.kafka.common.security.scram.internals.ScramMechanism
 import org.apache.kafka.common.security.token.delegation.internals.DelegationTokenCache
 import org.apache.kafka.common.utils.{LogContext, Time, Utils}
@@ -57,14 +58,16 @@ import org.apache.kafka.server.util.timer.{SystemTimer, SystemTimerReaper}
 import org.apache.kafka.server.util.{Deadline, FutureUtils, KafkaScheduler, NetworkPartitionMetadataClient, PartitionMetadataClient}
 import org.apache.kafka.server.{AssignmentsManager, BrokerFeatures, BrokerLifecycleManager, ClientMetricsManager, DefaultApiVersionManager, DelayedActionQueue, FetchManager, FetchSessionCacheShard, KRaftTopicCreator, NodeToControllerChannelManagerImpl, ProcessRole, RaftControllerNodeProvider}
 import org.apache.kafka.server.transaction.AddPartitionsToTxnManager
-import org.apache.kafka.storage.internals.log.{KafkaStorageExtension, LogDirFailureChannel, StorageExtensionBrokerContext, StorageExtensionContext, StorageExtensionLoader}
+import org.apache.kafka.storage.internals.log.{KafkaStorageExtension, LogDirFailureChannel, StorageExtensionBrokerContext, StorageExtensionContext, StorageExtensionLoader, UnifiedLog}
+import org.apache.kafka.storage.internals.shared.kafka.SharedStorageExtension
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats
 
 import java.time.Duration
 import java.util
 import java.util.Optional
 import java.util.concurrent.locks.{Condition, ReentrantLock}
-import java.util.concurrent.{CompletableFuture, ExecutionException, TimeUnit, TimeoutException}
+import java.util.concurrent.{CompletableFuture, ExecutionException, Executor, TimeUnit, TimeoutException}
+import java.util.function.Function
 import scala.collection.Map
 import scala.jdk.CollectionConverters._
 import scala.jdk.OptionConverters.RichOption
@@ -112,6 +115,25 @@ class BrokerServer(
   var logManager: LogManager = _
   var remoteLogManagerOpt: Option[RemoteLogManager] = None
   var storageExtensionOpt: Option[KafkaStorageExtension] = None
+
+  /**
+   * Construct the read-only native Source/WAL adapter against this Broker's
+   * current metadata image and LogManager. There is deliberately NO call to
+   * lifecycleManager.setSourceWalProbeSampler here: only a future unique,
+   * authenticated Broker identity gate may activate diagnostic collection.
+   * The caller owns a bounded, off-heartbeat Executor.
+   */
+  private[server] def createReadOnlySourceWalProbeSampler(
+    extension: SharedStorageExtension,
+    worker: Executor
+  ): BrokerLifecycleManager.SourceWalProbeSampler = {
+    BrokerServer.readOnlySourceWalProbeSampler(
+      extension,
+      (topicId: Uuid) => metadataCache.getTopicName(topicId),
+      (partition: TopicPartition) => logManager.getLog(partition),
+      worker
+    )
+  }
 
   var tokenManager: DelegationTokenManager = _
 
@@ -943,4 +965,32 @@ class BrokerServer(
 
   override def boundPort(listenerName: ListenerName): Int = socketServer.boundPort(listenerName)
 
+}
+
+/**
+ * Transport-neutral adapter across the Broker metadata/topic resolver and
+ * the SharedStorageExtension native Source/WAL precheck. Never installs a
+ * sampler, sends a heartbeat report, or grants COMMITTED GC authority.
+ */
+object BrokerServer {
+  private[server] def readOnlySourceWalProbeSampler(
+    extension: SharedStorageExtension,
+    topicNameById: Uuid => Optional[String],
+    currentLog: TopicPartition => Option[UnifiedLog],
+    worker: Executor
+  ): BrokerLifecycleManager.SourceWalProbeSampler = {
+    val lookup: Function[PartitionRetirementSourceProbe.Request, Optional[UnifiedLog]] =
+      (challenge: PartitionRetirementSourceProbe.Request) => {
+        val resolved = topicNameById(challenge.topicId())
+        if (resolved == null || resolved.isEmpty) {
+          Optional.empty[UnifiedLog]()
+        } else {
+          // LogManager supplies the current local UnifiedLog rather than a
+          // future replica or an arbitrary object from another TopicId.
+          currentLog(new TopicPartition(resolved.get(), challenge.partitionId())).toJava
+        }
+      }
+    val capture = extension.readOnlySourceWalSampler(lookup, worker)
+    (challenge: PartitionRetirementSourceProbe.Request) => capture.apply(challenge)
+  }
 }

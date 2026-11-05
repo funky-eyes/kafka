@@ -91,17 +91,23 @@ public final class OrphanCleanupScheduler implements AutoCloseable {
 
         final long cutoff;
         try {
-            cutoff = Math.max(0L, Math.subtractExact(currentTimeMsSupplier.getAsLong(), orphanGraceMs));
-        } catch (ArithmeticException e) {
+            cutoff = cleanupCutoff();
+        } catch (RuntimeException e) {
+            // A non-arithmetic clock failure must not retain the admission
+            // slot indefinitely or prevent broker shutdown from draining.
+            lastFailure.set(e);
             releaseCleanupSlot();
+            LOG.warn("Shared orphan cleanup failed while computing cutoff", e);
             return CompletableFuture.failedFuture(e);
         }
 
         final CompletableFuture<Integer> result;
         try {
-            result = cleaner.clean(cutoff);
+            result = cutoff < 0L ? cleaner.cleanClaimedOnly() : cleaner.clean(cutoff);
         } catch (RuntimeException e) {
+            lastFailure.set(e);
             releaseCleanupSlot();
+            LOG.warn("Shared orphan cleanup failed before asynchronous delete", e);
             return CompletableFuture.failedFuture(e);
         }
         return result.whenComplete((deleted, error) -> {
@@ -119,6 +125,21 @@ public final class OrphanCleanupScheduler implements AutoCloseable {
                 releaseCleanupSlot();
             }
         });
+    }
+
+    /**
+     * Compute the orphan grace boundary independently from admission/drain.
+     * Negative cutoff is an internal CLAIMED-only retry signal and must
+     * never reach the PREPARED candidate scan.
+     */
+    private long cleanupCutoff() {
+        long nowMs = currentTimeMsSupplier.getAsLong();
+        if (nowMs < 0L) {
+            throw new IllegalStateException("Orphan cleanup clock must be non-negative");
+        }
+        // Before grace expires, PREPARED at epoch zero cannot be claimed.
+        // Previously CLAIMED fences must still be re-deleted after late PUTs.
+        return nowMs < orphanGraceMs ? -1L : Math.subtractExact(nowMs, orphanGraceMs);
     }
 
     public Optional<Throwable> lastFailure() {

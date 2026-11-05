@@ -87,13 +87,22 @@ public final class SharedObjectUploader {
         long createdTimeMs,
         List<SharedStorageEngine.UploadCandidate> candidates
     ) {
+        final ActiveObjectUploads.UploadLease uploadLease;
+        try {
+            // Fence admission precedes any planning or WAL descriptor scan.
+            // A rejected object never consumes remote metadata/PUT resources.
+            uploadLease = activeUploads.beginLease(objectId);
+        } catch (RuntimeException e) {
+            return CompletableFuture.failedFuture(e);
+        }
+
         final UploadPlan plan;
         final UploadContext plannedContext;
         try {
             plan = packer.plan(objectId, candidates, engine);
             plannedContext = UploadContext.planned(objectId, createdTimeMs, plan.objectSize());
-            activeUploads.begin(objectId);
         } catch (RuntimeException e) {
+            uploadLease.close();
             return CompletableFuture.failedFuture(e);
         }
 
@@ -108,10 +117,14 @@ public final class SharedObjectUploader {
                 ))
                 .thenCompose(ignored -> finishUpload(plan, plannedContext));
         } catch (RuntimeException e) {
-            activeUploads.end(objectId);
+            uploadLease.close();
             return CompletableFuture.failedFuture(e);
         }
-        return result.whenComplete((ignored, error) -> activeUploads.end(objectId));
+        // Upload completion, not caller cancellation, releases the identity-scoped lease.
+        // The public Future is a dependent view and cannot cancel the internal
+        // metadata/PUT/COMMIT continuation before its asynchronous cleanup.
+        result.whenComplete((ignored, error) -> uploadLease.close());
+        return result.thenApply(metadata -> metadata);
     }
 
     private CompletableFuture<SharedObjectMetadata> finishUpload(UploadPlan plan, UploadContext plannedContext) {

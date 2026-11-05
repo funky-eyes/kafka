@@ -18,6 +18,7 @@ package org.apache.kafka.controller;
 
 import org.apache.kafka.common.DirectoryId;
 import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.metadata.PartitionChangeRecord;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.metadata.BrokerRegistration;
 import org.apache.kafka.metadata.LeaderRecoveryState;
@@ -29,6 +30,8 @@ import org.apache.kafka.controller.PartitionRetirementCandidatePrecheck.Candidat
 import org.apache.kafka.timeline.SnapshotRegistry;
 
 import org.junit.jupiter.api.Test;
+
+import java.util.List;
 
 import static org.apache.kafka.controller.PartitionRetirementCandidatePrecheck.Finding;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -91,6 +94,47 @@ class PartitionRetirementCandidatePrecheckTest {
         Fixture f = fixture();
         when(f.replicas.getPartition(KEY.topicId(), 0)).thenReturn(partition(1, 8));
         assertEquals(Finding.LEADER_REGISTRATION_MISMATCH, evaluate(f, candidate()));
+    }
+
+    @Test
+    void controllerCandidateCannotUseStableLeaderEpochDuringReplicaReassignment() {
+        Fixture f = fixture();
+        PartitionRegistration changing = partition(1, 7).merge(new PartitionChangeRecord()
+            .setReplicas(List.of(1, 2, 3, 4))
+            .setDirectories(Uuid.toList(DirectoryId.unassignedArray(4)))
+            .setAddingReplicas(List.of(4)));
+        // Kafka retains the same leaderEpoch for this topology change.
+        assertEquals(7, changing.leaderEpoch);
+        assertEquals(8, changing.partitionEpoch);
+        when(f.replicas.getPartition(KEY.topicId(), 0)).thenReturn(changing);
+        assertEquals(Finding.LEADER_REGISTRATION_MISMATCH, evaluate(f, candidate()));
+        assertNull(f.authority.get(KEY));
+    }
+
+    @Test
+    void sourcePartitionEpochIsCarriedIntoProposedKRaftAuthorityValue() {
+        Candidate issued = candidate();
+        assertEquals(issued.sourcePartitionEpoch(), issued.proposedValue().sourcePartitionEpoch());
+        assertEquals(issued.sourcePartitionEpoch(), PartitionRetirementAuthorityState.value(
+            PartitionRetirementAuthorityState.record(KEY, issued.proposedValue())
+        ).sourcePartitionEpoch());
+        assertEquals(true, issued.proposedValue().hasPartitionTopologyProof());
+    }
+
+    @Test
+    void isrShrinkWithoutLeaderChangeInvalidatesPriorPartitionEpochCandidate() {
+        Fixture f = fixture();
+        Candidate stale = candidate();
+        PartitionRegistration changed = partition(1, 7).merge(
+            new PartitionChangeRecord().setIsr(List.of(1))
+        );
+        assertEquals(7, changed.leaderEpoch);
+        assertEquals(8, changed.partitionEpoch);
+        when(f.replicas.getPartition(KEY.topicId(), 0)).thenReturn(changed);
+        assertEquals(Finding.PARTITION_EPOCH_MISMATCH, evaluate(f, stale));
+        Candidate refreshed = new Candidate(KEY, 1, 300L, INCARNATION, 7, 8, -1L, 20L, 50L);
+        assertEquals(Finding.SOURCE_LOG_START_NOT_VERIFIED, evaluate(f, refreshed));
+        assertNull(f.authority.get(KEY));
     }
 
     @Test
@@ -190,7 +234,7 @@ class PartitionRetirementCandidatePrecheckTest {
     void zeroTopicIdCannotBeUsedAsRetirementCasIdentity() {
         assertThrows(IllegalArgumentException.class, () ->
             new Candidate(new Key(Uuid.ZERO_UUID, 0),
-                1, 300L, INCARNATION, 7, -1L, 20L, 50L));
+                1, 300L, INCARNATION, 7, 7, -1L, 20L, 50L));
     }
 
     @Test
@@ -244,6 +288,198 @@ class PartitionRetirementCandidatePrecheckTest {
         assertNull(f.authority.get(KEY));
     }
 
+    @Test
+    void matchingSourceWindowClaimStillNeverAuthorizesKRaftRetirement() {
+        Fixture f = fixture();
+        Candidate request = candidate();
+        assertEquals(
+            Finding.SOURCE_LOG_START_NOT_VERIFIED,
+            assessClaim(f, request, sourceClaim(request))
+        );
+        assertNull(f.authority.get(KEY));
+    }
+
+    @Test
+    void missingUntrustedSourceClaimCannotPassControllerAgreementGate() {
+        Fixture f = fixture();
+        assertEquals(Finding.SOURCE_CLAIM_MISSING, assessClaim(f, candidate(), null));
+        assertNull(f.authority.get(KEY));
+    }
+
+    @Test
+    void incompleteLocalCoverageCannotInventDurableKafkaSourceBytes() {
+        Fixture f = fixture();
+        Candidate request = candidate();
+        assertEquals(Finding.SOURCE_CLAIM_LOCAL_COVERAGE_INCOMPLETE,
+            assessClaim(f, request, untrusted(
+                request.key(), 1, 300L, INCARNATION, 7, 50L, false)));
+        assertNull(f.authority.get(KEY));
+    }
+
+    @Test
+    void claimForAnotherImmutableTopicIdDoesNotMatchCurrentAuthorityKey() {
+        Fixture f = fixture();
+        Candidate request = candidate();
+        assertEquals(Finding.SOURCE_CLAIM_IDENTITY_MISMATCH,
+            assessClaim(f, request, untrusted(
+                new Key(Uuid.randomUuid(), 0), 1, 300L, INCARNATION, 7, 50L, true)));
+    }
+
+    @Test
+    void claimForAnotherPartitionCannotBorrowRetirementAuthority() {
+        Fixture f = fixture();
+        assertEquals(Finding.SOURCE_CLAIM_IDENTITY_MISMATCH,
+            assessClaim(f, candidate(), untrusted(
+                new Key(KEY.topicId(), 1), 1, 300L, INCARNATION, 7, 50L, true)));
+    }
+
+    @Test
+    void claimForDifferentBrokerIdCannotBorrowTheCurrentLeader() {
+        Fixture f = fixture();
+        assertEquals(Finding.SOURCE_CLAIM_IDENTITY_MISMATCH,
+            assessClaim(f, candidate(), untrusted(KEY, 2, 300L, INCARNATION, 7, 50L, true)));
+    }
+
+    @Test
+    void claimFromOldBrokerEpochCannotBorrowCurrentRegistration() {
+        Fixture f = fixture();
+        assertEquals(Finding.SOURCE_CLAIM_IDENTITY_MISMATCH,
+            assessClaim(f, candidate(), untrusted(KEY, 1, 299L, INCARNATION, 7, 50L, true)));
+    }
+
+    @Test
+    void claimFromDifferentBrokerIncarnationCannotPassIdentityAgreement() {
+        Fixture f = fixture();
+        assertEquals(Finding.SOURCE_CLAIM_IDENTITY_MISMATCH,
+            assessClaim(f, candidate(), untrusted(KEY, 1, 300L, Uuid.randomUuid(), 7, 50L, true)));
+    }
+
+    @Test
+    void claimFromOldKafkaSourceLeaderEpochCannotPassIdentityAgreement() {
+        Fixture f = fixture();
+        assertEquals(Finding.SOURCE_CLAIM_IDENTITY_MISMATCH,
+            assessClaim(f, candidate(), untrusted(KEY, 1, 300L, INCARNATION, 6, 50L, true)));
+    }
+
+    @Test
+    void nativeKafkaLogStartDisagreementCannotBeOverriddenByCoverageFlag() {
+        Fixture f = fixture();
+        assertEquals(Finding.SOURCE_CLAIM_LOG_START_MISMATCH,
+            assessClaim(f, candidate(), untrusted(KEY, 1, 300L, INCARNATION, 7, 51L, true)));
+        assertNull(f.authority.get(KEY));
+    }
+
+    @Test
+    void malformedNativeHighWatermarkOrLogEndOffsetsFailAtClaimBoundary() {
+        assertThrows(IllegalArgumentException.class, () -> new PartitionRetirementUntrustedSourceClaim(
+            KEY, 1, 300L, INCARNATION, 7, 9L, 50L, 49L, 70L, 2L, 4L, true));
+        assertThrows(IllegalArgumentException.class, () -> new PartitionRetirementUntrustedSourceClaim(
+            KEY, 1, 300L, INCARNATION, 7, 9L, 50L, 70L, 69L, 2L, 4L, true));
+        assertThrows(IllegalArgumentException.class, () -> new PartitionRetirementUntrustedSourceClaim(
+            KEY, 1, 300L, INCARNATION, 7, 9L, -1L, 70L, 80L, 2L, 4L, true));
+    }
+
+    @Test
+    void emptyNativeKafkaSourceWindowCannotAdvertiseDurableDataCoverage() {
+        assertThrows(IllegalArgumentException.class, () -> new PartitionRetirementUntrustedSourceClaim(
+            KEY, 1, 300L, INCARNATION, 7, 9L, 50L, 50L, 50L, 2L, 4L, true));
+        // Empty source observations are allowed only as explicitly incomplete
+        // diagnostic claims; they must never become DATA coverage evidence.
+        var empty = new PartitionRetirementUntrustedSourceClaim(
+            KEY, 1, 300L, INCARNATION, 7, 9L, 50L, 50L, 50L, 2L, 4L, false);
+        assertEquals(Finding.SOURCE_CLAIM_LOCAL_COVERAGE_INCOMPLETE,
+            assessClaim(fixture(), candidate(), empty));
+    }
+
+    @Test
+    void unknownOrInflightWalRevisionsCannotBeTreatedAsStableProof() {
+        assertThrows(IllegalArgumentException.class, () -> new PartitionRetirementUntrustedSourceClaim(
+            KEY, 1, 300L, INCARNATION, 7, 9L, 50L, 70L, 80L, -1L, 4L, true));
+        assertThrows(IllegalArgumentException.class, () -> new PartitionRetirementUntrustedSourceClaim(
+            KEY, 1, 300L, INCARNATION, 7, 9L, 50L, 70L, 80L, 2L, -1L, true));
+    }
+
+    @Test
+    void unversionedLeaderTicketAndIncompleteBrokerIdentityCannotFormClaim() {
+        assertThrows(IllegalArgumentException.class, () -> new PartitionRetirementUntrustedSourceClaim(
+            KEY, 1, 300L, INCARNATION, 7, 0L, 50L, 70L, 80L, 2L, 4L, true));
+        assertThrows(IllegalArgumentException.class, () -> new PartitionRetirementUntrustedSourceClaim(
+            KEY, 1, 300L, INCARNATION, -1, 9L, 50L, 70L, 80L, 2L, 4L, true));
+        assertThrows(IllegalArgumentException.class, () -> new PartitionRetirementUntrustedSourceClaim(
+            KEY, 1, -1L, INCARNATION, 7, 9L, 50L, 70L, 80L, 2L, 4L, true));
+        assertThrows(IllegalArgumentException.class, () -> new PartitionRetirementUntrustedSourceClaim(
+            KEY, 1, 300L, Uuid.ZERO_UUID, 7, 9L, 50L, 70L, 80L, 2L, 4L, true));
+    }
+
+    @Test
+    void disabledFeatureRemainsDominantEvenWithMatchingPositiveLocalClaim() {
+        Fixture f = fixture();
+        when(f.features.isPartitionRetirementAuthorityEnabled()).thenReturn(false);
+        assertEquals(Finding.FEATURE_NOT_NEGOTIATED,
+            assessClaim(f, candidate(), sourceClaim(candidate())));
+    }
+
+    @Test
+    void changedLiveBrokerRegistrationWinsOverCallerSuppliedClaim() {
+        Fixture f = fixture();
+        Candidate request = candidate();
+        var copied = sourceClaim(request);
+        assertEquals(Finding.SOURCE_LOG_START_NOT_VERIFIED, assessClaim(f, request, copied));
+        when(f.cluster.registration(1)).thenReturn(broker(301L, Uuid.randomUuid(), false, false));
+        assertEquals(Finding.BROKER_EPOCH_MISMATCH, assessClaim(f, request, copied));
+        assertNull(f.authority.get(KEY));
+    }
+
+    @Test
+    void changedCurrentKRaftLeaderRejectsPreviouslyMatchingSourceClaim() {
+        Fixture f = fixture();
+        Candidate request = candidate();
+        var copied = sourceClaim(request);
+        assertEquals(Finding.SOURCE_LOG_START_NOT_VERIFIED, assessClaim(f, request, copied));
+        when(f.replicas.getPartition(KEY.topicId(), 0)).thenReturn(partition(2, 8));
+        assertEquals(Finding.LEADER_REGISTRATION_MISMATCH, assessClaim(f, request, copied));
+    }
+
+    @Test
+    void authorityReplayChangeAndWrongKRaftPositionOverridePositiveClaim() {
+        Fixture f = fixture();
+        Candidate request = candidate();
+        var copied = sourceClaim(request);
+        assertEquals(Finding.WRONG_KRAFT_WRITE_POSITION,
+            PartitionRetirementCandidatePrecheck.assessUntrustedSourceClaim(
+                f.features, f.cluster, f.replicas, f.authority, request, 21L, copied
+            ));
+        f.authority.replay(record(prior(30L)));
+        assertEquals(Finding.STALE_AUTHORITY_VERSION, assessClaim(f, request, copied));
+        assertEquals(10L, f.authority.get(KEY).authorityOffset());
+    }
+
+    private static Finding assessClaim(
+        Fixture f,
+        Candidate request,
+        PartitionRetirementUntrustedSourceClaim claim
+    ) {
+        return PartitionRetirementCandidatePrecheck.assessUntrustedSourceClaim(
+            f.features, f.cluster, f.replicas, f.authority, request, 20L, claim
+        );
+    }
+
+    private static PartitionRetirementUntrustedSourceClaim sourceClaim(Candidate request) {
+        return untrusted(request.key(), request.brokerId(), request.brokerEpoch(),
+            request.brokerIncarnationId(), request.sourceLeaderEpoch(),
+            request.claimedLogStartOffset(), true);
+    }
+
+    private static PartitionRetirementUntrustedSourceClaim untrusted(
+        Key key, int brokerId, long brokerEpoch, Uuid incarnation,
+        int leaderEpoch, long logStart, boolean covered
+    ) {
+        return new PartitionRetirementUntrustedSourceClaim(
+            key, brokerId, brokerEpoch, incarnation, leaderEpoch, 9L,
+            logStart, Math.max(70L, logStart), Math.max(80L, logStart), 2L, 4L, covered
+        );
+    }
+
     private static PartitionRetirementCandidatePrecheck.Candidate candidate() {
         return request(1, 300L, INCARNATION, 7, -1L, 20L, 50L);
     }
@@ -253,7 +489,7 @@ class PartitionRetirementCandidatePrecheckTest {
         long priorAuthorityOffset, long nextAuthorityOffset, long logStart
     ) {
         return new PartitionRetirementCandidatePrecheck.Candidate(
-            KEY, brokerId, brokerEpoch, incarnation, leaderEpoch,
+            KEY, brokerId, brokerEpoch, incarnation, leaderEpoch, leaderEpoch,
             priorAuthorityOffset, nextAuthorityOffset, logStart
         );
     }
