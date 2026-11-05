@@ -575,6 +575,14 @@ REQUIRED_TESTS = {
         "claimedAuthorityGenerationCannotBeChangedAcrossWireConversion",
         "changedPartitionEpochInvalidatesOneTimeChallengeWithoutLeaderChange",
     ),
+    "org.apache.kafka.controller.PartitionRetirementReplicaRoundRegistryTest": (
+        "fullAssignedReplicaRoundCanOnlyProduceOneUntrustedDiagnostic",
+        "reissueRevokesOldRoundAndDuplicatesCannotOverwriteReceipt",
+        "incompleteOrForeignBrokerReceiptsFailClosedAndBurnRound",
+        "brokerReregistrationAndPartitionEpochChangeInvalidateCollectedRound",
+        "expiryAndControllerLeadershipResetRevokeAllVolatileRounds",
+        "perSourceCapacityAndInvalidPhysicalCoordinatesFailClosed",
+    ),
     "org.apache.kafka.controller.PartitionRetirementReplicaQuiescencePrecheckTest": (
         "allAssignedReplicasIncludingOutOfIsrAreRequired",
         "duplicatedOrForeignBrokerCannotCompleteReplicaSet",

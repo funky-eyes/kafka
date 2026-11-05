@@ -3424,3 +3424,37 @@ No Kafka native replication semantics, metadata records, remote
 reference lifecycle, MinIO GA baseline or COMMITTED physical object
 GC path are changed. PR #2 stays Draft. Batch 301 must pass
 all 17 exact-SHA workflows before becoming a stable development base.
+
+
+## Batch 302 — controller-volatile one-use replica drain round diagnostics
+
+The Controller has a non-emitting, bounded `PartitionRetirementReplicaRoundRegistry`.
+For an exact physical Object ID and immutable Topic ID/partition, it snapshots
+the full assigned-replica set from current KRaft registration, including
+out-of-ISR replicas. Issuing a new round for the same object revokes the old one.
+Each round uses its own UUID, accepts at most one report per assigned broker,
+has a five-second monotonic-time TTL, and is consumed exactly once even if
+incomplete. The registry must be discarded on Controller leadership loss.
+
+Consumption rejects changed leader/partition epochs, replica membership,
+Broker Epoch/incarnation identity, missing/foreign/duplicate reports, or
+incomplete local Reader/Writer drain observations. A single source broker
+may hold at most 16 pending rounds, and the registry at most 128. More than
+256 assigned replicas fail closed rather than accepting a partial sample.
+
+**No security upgrade is implied by an echoed UUID.** These are still
+caller-supplied, unauthenticated report objects, and a perfect match returns
+only `MATCHED_UNTRUSTED`. The registry is not wired to a network endpoint,
+Controller event producer, durable acknowledgement or KRaft retirement writer.
+It cannot certify global quiescence for an object packed from several
+Topic/Partition ranges. COMMITTED physical GC remains DISABLED, the frozen
+MinIO GA remains `9a28c11b6d97ecacafe1b8566cde5cc34d604889`, and PR #2
+remains Draft. Before any future deletion authority, bind verified channel
+principals to broker registrations, persist and revalidate per-replica evidence
+on Controller failover, verify all packed range references, and fence both
+Reader/Writer I/O across Broker incarnations.
+
+Six required Java 25 controller JUnit cases are added: the mandatory inventory
+changes from 718 to 724, with the Python anti-skip checker and Controller
+workflow suite list updated. Treat this batch as UNVERIFIED until the exact
+SHA passes all 17 workflows; no Native Image build is added during development.
