@@ -3393,3 +3393,34 @@ PR #2 remains Draft, native Kafka Leader/Follower, ISR/HW, epoch,
 replication and storage formats are untouched, and **COMMITTED
 physical GC remains disabled**. Treat this batch as developmental
 until all 17 exact-SHA CI workflows succeed.
+
+
+## Batch 301 — strict Checkstyle threshold and Gradle distribution retry margin
+
+**Parent:** Batch 300 at
+`0becc15453ba9da84c8e4431d1f6c61fdadfa482`.
+The Java 25 main job was blocked in `metadata:checkstyleMain`
+before JUnit by `BooleanExpressionComplexity`: one `Report`
+constructor predicate used six boolean operators, exceeding the
+configured maximum five. This was a static-style failure, not a
+tested data-safety regression.
+
+Split that validation into two separate checks with exactly the
+same full set of requirements and the same exception semantics:
+valid leader/partition/CAS coordinates and strict authority order,
+positive local fence generation, and nonzero expected fence round.
+Keep all 718 mandatory JUnit test methods and their fixed-count gate.
+
+Several otherwise independent CI jobs also failed *before executing
+tests* because GitHub Runner timed out trying to download the
+pinned Gradle `9.2.1` distribution after 10 seconds. Increase only
+`gradle/wrapper/gradle-wrapper.properties` network timeout from
+10,000 to 60,000 milliseconds. The Gradle distribution URL,
+version `9.2.1`, SHA256 checksum and distribution URL validation
+remain strictly unchanged. This is a CI download tolerance fix,
+not a relaxation of any correctness or durability gate.
+
+No Kafka native replication semantics, metadata records, remote
+reference lifecycle, MinIO GA baseline or COMMITTED physical object
+GC path are changed. PR #2 stays Draft. Batch 301 must pass
+all 17 exact-SHA workflows before becoming a stable development base.

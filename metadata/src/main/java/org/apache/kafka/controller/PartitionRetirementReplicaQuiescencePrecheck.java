@@ -78,8 +78,10 @@ final class PartitionRetirementReplicaQuiescencePrecheck {
                 throw new IllegalArgumentException("A replica report needs a physical object and broker incarnation");
             }
             if (sourceLeaderEpoch < 0 || sourcePartitionEpoch < 0
-                || expectedPreviousAuthorityOffset < -1L || nextAuthorityOffset < 0L
-                || nextAuthorityOffset <= expectedPreviousAuthorityOffset
+                || expectedPreviousAuthorityOffset < -1L || nextAuthorityOffset < 0L) {
+                throw new IllegalArgumentException("A replica report needs valid epoch, CAS and fence coordinates");
+            }
+            if (nextAuthorityOffset <= expectedPreviousAuthorityOffset
                 || localFenceGeneration <= 0L || Uuid.ZERO_UUID.equals(fenceRoundId)) {
                 throw new IllegalArgumentException("A replica report needs valid epoch, CAS and fence coordinates");
             }
