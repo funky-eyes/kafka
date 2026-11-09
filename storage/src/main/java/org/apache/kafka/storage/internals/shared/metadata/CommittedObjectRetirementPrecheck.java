@@ -81,7 +81,8 @@ public final class CommittedObjectRetirementPrecheck {
         return new AssessmentSnapshot(evidence.lastConsumedMetadataOffset(), findings);
     }
 
-    private static Finding assessRanges(SharedObjectMetadata object, Map<SharedPartitionId, Long> watermarks) {
+    // Package-visible for read-only cross-partition closure on the same atomic evidence snapshot.
+    static Finding assessRanges(SharedObjectMetadata object, Map<SharedPartitionId, Long> watermarks) {
         boolean missingWatermark = false;
         boolean hasUnretiredRange = false;
         for (SharedObjectRange range : object.ranges()) {

@@ -30,6 +30,16 @@ REQUIRED_TESTS = {
         "shouldRejectDifferentKafkaByteLengthWithSameOffsetsEpochAndCrc",
         "laterPackedLengthConflictCannotPublishAnEarlierLowerObjectId",
     ),
+    "org.apache.kafka.storage.internals.shared.metadata.CommittedObjectReplicaReferenceClosurePrecheckTest": (
+        "packedCrossTopicRequiresAllDistinctPartitions",
+        "repeatedRangesFromOnePartitionNeedExactlyOneConfirmation",
+        "duplicateOrForeignReceiptCannotReplaceMissingPackedPartition",
+        "committedDescriptorAndReportDescriptorMustMatchEntirePackedObject",
+        "metadataReplayOffsetMismatchCannotBorrowPreviousSnapshot",
+        "anyReaderWriterOrReferenceRemainingBlocksPackedClosure",
+        "missingOrPartialWatermarkBlocksEvenCompleteReplicaReports",
+        "untrackedReplayAndInvalidReceiptsNeverPassAsEvidence",
+    ),
     "org.apache.kafka.storage.internals.shared.metadata.CommittedObjectRetirementPrecheckTest": (
         "absentOrPreparedObjectCannotBeDeclaredRetiredUsingOldWatermarks",
         "forgedDescriptorCannotBorrowAnotherCommittedPackedObjectsWatermarks",

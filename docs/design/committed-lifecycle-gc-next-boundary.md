@@ -3530,3 +3530,45 @@ replica reports, cross-partition reference retirement, or physical
 COMMITTED deletion is safe. PR remains Draft; MinIO GA remains
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889`, and
 COMMITTED physical GC is still disabled.
+
+
+## Batch 305 — immutable KSO2 cross-Topic/Partition reference closure diagnostic
+
+A KSO2 physical object may contain multiple ranges from different Topic IDs
+and partitions; one source partition's completed Reader/Writer fence cannot
+justify reclaiming the whole object. The existing retirement precheck already
+requires explicitly replayed LogStart watermarks for EVERY range. Preserve that
+gate and add a separate, read-only
+`CommittedObjectReplicaReferenceClosurePrecheck` in the storage module.
+
+The new diagnostic obtains ONE synchronized immutable
+`SharedMetadataImage.CommittedObjectEvidence` snapshot. It compares the full
+COMMITTED object descriptor, verifies all range-exclusive ends are below the
+explicit watermark for their own immutable Topic ID/Partition, and requires
+a known metadata consumer offset (not the untracked `-1` default).
+Then it requires exactly ONE report for every DISTINCT partition in the
+physical descriptor, including ranges from recreated topics with different
+Topic IDs. Repeated ranges for the same partition need one partition report,
+not duplicated reports.
+
+Reports must match the whole object descriptor and the SAME captured local
+metadata replay offset; missing/foreign/duplicate partitions, forged packed
+descriptors, stale replay offsets, and any reported pending Reader, Writer or
+remote reference deny even the diagnostic closure classification. Test coverage
+includes cross-topic packing, repeated ranges, missing/foreign/duplicate
+reports, stale metadata, forgery, active I/O/reference and untracked replay.
+Eight mandatory JUnit cases are added to the existing storage suite selected
+by `org.apache.kafka.storage.internals.shared.metadata.*`. Mandatory
+JUnit inventory grows **729 -> 737**, with the Python checker fixed count
+updated and no removal of existing tests.
+
+The `PartitionReport` values remain caller-supplied and UNAUTHENTICATED:
+even `MATCHED_UNTRUSTED` does not prove an actual Broker fenced its I/O,
+that all KRaft replicas acknowledged, that metadata replay is caught up to
+the current log end, or that references are durably removed. Nothing is wired
+into a Controller CAS, network protocol, remote index eviction, or S3 DELETE.
+Native Kafka ISR/HW, replication, and recovery semantics are unchanged.
+The PR remains Draft, COMMITTED physical GC remains OFF and MinIO GA base
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889` is frozen.
+This commit must pass all 17 exact-SHA workflows before it is considered
+a verified development base.
