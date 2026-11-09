@@ -3507,3 +3507,26 @@ eviction, S3 DELETE, broker protocol emitter, native Kafka ISR/HW
 change or production GC authorization has been introduced. PR #2
 remains Draft and the frozen MinIO GA remains
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889`.
+
+## Batch 304 — restore Java 25 test compilation after Batch 303
+
+**Batch 303 result:** 2/17 GitHub Actions succeeded and 15/17 failed
+before the new JUnit tests could execute. The common failure is
+`metadata:compileTestJava`: in
+`PartitionRetirementReplicaRoundRegistryTest` the test
+`plaintextForwardedTokenSyntheticAndWrongVersionCannotEnterRound`
+calls `MockAuthorizableRequestContext.Builder.build()`, which declares
+a checked `Exception`. The test method omitted `throws Exception`.
+The compiler reports `unreported exception Exception; must be caught
+or declared to be thrown` on that call site.
+
+Allow the JUnit test method to propagate this checked exception, as
+other repository tests already do. Do not catch and mask the failure.
+No production behavior, test assertions, security checks, CI gate,
+or mandatory JUnit inventory changes: **729 unskipped tests remain**.
+
+This is an exact-SHA CI repair, not evidence that authenticated
+replica reports, cross-partition reference retirement, or physical
+COMMITTED deletion is safe. PR remains Draft; MinIO GA remains
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`, and
+COMMITTED physical GC is still disabled.

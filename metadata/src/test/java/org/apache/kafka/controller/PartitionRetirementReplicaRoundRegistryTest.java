@@ -205,7 +205,7 @@ class PartitionRetirementReplicaRoundRegistryTest {
     }
 
     @Test
-    void plaintextForwardedTokenSyntheticAndWrongVersionCannotEnterRound() {
+    void plaintextForwardedTokenSyntheticAndWrongVersionCannotEnterRound() throws Exception {
         Fixture f = fixture();
         PartitionRetirementReplicaRoundRegistry rounds = new PartitionRetirementReplicaRoundRegistry();
         PartitionRetirementReplicaRoundRegistry.Challenge round = issue(rounds, f, OBJECT_ID, NOW_NS);
