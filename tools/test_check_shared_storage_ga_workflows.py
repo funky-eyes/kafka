@@ -178,7 +178,7 @@ class WorkflowTriggerOwnershipTest(unittest.TestCase):
             with self.subTest(event=kind):
                 block = replay.split("case " + kind + ":", 1)[1].split("break;", 1)[0]
                 applied = "clusterControl.replay((" + record + ") message"
-                revoke = "retirementSourceProbeRegistry.invalidateBroker(((" + record + ") message)." + getter + ");"
+                revoke = "invalidateRetirementDiagnosticsBroker(((" + record + ") message)." + getter + ");"
                 self.assertIn(applied, block)
                 self.assertIn(revoke, block)
                 self.assertLess(block.index(applied), block.index(revoke))
@@ -202,10 +202,10 @@ class WorkflowTriggerOwnershipTest(unittest.TestCase):
                 block = replay.split("case " + kind + ":", 1)[1].split("break;", 1)[0]
                 applied = manager + ".replay((" + record + ") message)"
                 if invalidator == "invalidatePartition":
-                    revoke = ("retirementSourceProbeRegistry.invalidatePartition(((" + record
+                    revoke = ("invalidateRetirementDiagnosticsPartition(((" + record
                               + ") message)." + getters + ");")
                 else:
-                    revoke = ("retirementSourceProbeRegistry.invalidateTopic(((" + record
+                    revoke = ("invalidateRetirementDiagnosticsTopic(((" + record
                               + ") message)." + getters + ");")
                 # Check the actual Java expression rather than a particular
                 # line-wrap layout. Keep the exact record getters AND strict
@@ -224,7 +224,7 @@ class WorkflowTriggerOwnershipTest(unittest.TestCase):
         replay = controller.split("private void replay(ApiMessage message,", 1)[1]
         feature = replay.split("case FEATURE_LEVEL_RECORD:", 1)[1].split("break;", 1)[0]
         applied = "featureControl.replay((FeatureLevelRecord)message);"
-        revoked = "retirementSourceProbeRegistry.invalidateAll();"
+        revoked = "invalidateRetirementDiagnosticsAll();"
         compact_feature = "".join(feature.split())
         self.assertIn(applied, compact_feature)
         self.assertIn(revoked, compact_feature)
@@ -234,10 +234,46 @@ class WorkflowTriggerOwnershipTest(unittest.TestCase):
         authority = authority.split("private final FaultHandler", 1)[0]
         compact_authority = "".join(authority.split())
         applied = "partitionRetirementControl.replayFromKRaft(record,snapshotId,offset);"
-        revoked = "retirementSourceProbeRegistry.invalidatePartition(record.topicId(),record.partitionId());"
+        revoked = "invalidateRetirementDiagnosticsPartition(record.topicId(),record.partitionId());"
         self.assertIn(applied, compact_authority)
         self.assertIn(revoked, compact_authority)
         self.assertLess(compact_authority.index(applied), compact_authority.index(revoked))
+
+    @staticmethod
+    def assert_dual_registry_invalidation(controller, scope, signature, args):
+        # A helper satisfies the replay-after-apply contract only if its
+        # BODY still revokes BOTH independent generations, not merely if a
+        # convenient helper name appears in the KRaft replay switch.
+        header = f"private void invalidateRetirementDiagnostics{scope}({signature}) {{"
+        assert controller.count(header) == 1, f"missing/ambiguous {scope} invalidator"
+        body = controller.split(header, 1)[1].split("\n    }", 1)[0]
+        source = f"retirementSourceProbeRegistry.invalidate{scope}({args});"
+        replicas = f"retirementReplicaRoundRegistry.invalidate{scope}({args});"
+        assert body.count(source) == 1, f"source probe {scope} invalidation missing"
+        assert body.count(replicas) == 1, f"full replica {scope} invalidation missing"
+        assert body.index(source) < body.index(replicas), f"{scope} invalidation ordering changed"
+        assert "return " not in body and "if (" not in body, f"conditional {scope} invalidation"
+
+    def test_controller_diagnostic_helpers_invalidate_both_registries_unconditionally(self):
+        root = Path(__file__).resolve().parents[1]
+        controller = (root / "metadata/src/main/java/org/apache/kafka/controller/QuorumController.java"
+                      ).read_text(encoding="utf-8")
+        specs = {
+            "Broker": ("int brokerId", "brokerId"),
+            "Topic": ("Uuid topicId", "topicId"),
+            "Partition": ("Uuid topicId, int partitionId", "topicId, partitionId"),
+            "All": ("", ""),
+        }
+        for scope, (signature, args) in specs.items():
+            with self.subTest(scope=scope):
+                self.assert_dual_registry_invalidation(controller, scope, signature, args)
+                # Guard against a future change that leaves only one side
+                # while retaining the same helper name and replay call.
+                missing_replica = controller.replace(
+                    f"retirementReplicaRoundRegistry.invalidate{scope}({args});", "", 1
+                )
+                with self.assertRaises(AssertionError):
+                    self.assert_dual_registry_invalidation(missing_replica, scope, signature, args)
 
     def test_heartbeat_network_context_preserves_transport_and_forwarding(self):
         root = Path(__file__).resolve().parents[1]

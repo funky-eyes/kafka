@@ -3813,3 +3813,41 @@ PR #2 stays Draft. The frozen MinIO GA baseline
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889`
 is unchanged, Controller full-replica diagnostics are still volatile
 and non-authorizing, and **COMMITTED physical GC remains DISABLED**.
+
+
+## Batch 311 — GA consistency tests validate both registries behind Controller helpers
+
+**Parent:** Batch 310 at
+`d27fc6dc2cec9bd1ab08c74c5f20399e4a910c78` completed
+**16/17** exact-SHA workflows successfully. The lone failure was
+`Shared Storage GA Workflow Consistency`:
+`tools/test_check_shared_storage_ga_workflows.py` still required
+literal `retirementSourceProbeRegistry.invalidate*` calls directly
+inside `QuorumController.replay`. Batch 310 had centralized those
+calls into four helpers to meet Checkstyle's JavaNCSS 100 limit.
+The actual dual-registry invalidations and ordering were unchanged.
+
+Update the Python regression contract to validate the *new*
+`invalidateRetirementDiagnosticsBroker/Topic/Partition/All` replay
+calls. Retain all specific record-type selectors and exact Broker ID,
+Topic ID and partition getter expressions, including the checks that
+KRaft `replay()` runs **before** the corresponding invalidation.
+
+Add a further non-bypassable anti-regression test for **all four**
+helper method bodies. It checks exact signatures, one source probe
+invalidation, one full-replica round invalidation, unconditional
+execution and source-then-replica ordering. It also deliberately
+deletes each full-replica call from an in-memory source copy and
+asserts that the contract rejects the mutation. The test suite grows
+from 25 to **26** Python GA checker tests; no test is disabled,
+silenced, or removed, and the existing **756** strict Java/Scala
+test inventory remains unchanged.
+
+This is a static safety-contract correction, **not** activation
+of COMMITTED deletion. Default production Broker Principal policy
+continues to deny all reporter identities, the Controller Round
+Registry is volatile and cannot issue durable KRaft authority,
+and neither source probes nor full-replica diagnostics permit
+physical object deletion. PR #2 remains Draft; frozen MinIO GA
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889` is unchanged.
+Require **17/17** exact-SHA CI before declaring Batch 311 stable.
