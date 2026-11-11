@@ -69,7 +69,11 @@ final class PartitionRetirementReplicaRoundRegistry {
         }
     }
 
-    private record Pending(Challenge challenge, long issuedAtNs, Map<Integer, Report> reports) {
+    /** A raw diagnostic report must never acquire authenticated ingress provenance. */
+    private record Receipt(Report report, boolean authenticatedIngress) {
+    }
+
+    private record Pending(Challenge challenge, long issuedAtNs, Map<Integer, Receipt> reports) {
     }
 
     private final Map<Uuid, Pending> pending = new LinkedHashMap<>();
@@ -116,8 +120,9 @@ final class PartitionRetirementReplicaRoundRegistry {
 
     /**
      * Store only a complete, round-bound value; duplicate or foreign replies
-     * are rejected without changing the accepted receipt. This is NOT proof
-     * that the purported broker sent the report.
+     * are rejected without changing the accepted receipt. This raw diagnostic
+     * path carries NO authenticated ingress provenance and must never be
+     * upgraded into an authenticated receipt.
      */
     boolean recordReport(Uuid roundId, Report report, long nowNs) {
         Objects.requireNonNull(roundId, "roundId");
@@ -135,7 +140,7 @@ final class PartitionRetirementReplicaRoundRegistry {
             || !matchesChallenge(challenge, report)) {
             return false;
         }
-        return state.reports().putIfAbsent(report.brokerId(), report) == null;
+        return state.reports().putIfAbsent(report.brokerId(), new Receipt(report, false)) == null;
     }
 
     /**
@@ -192,7 +197,7 @@ final class PartitionRetirementReplicaRoundRegistry {
         if (!matchesRegisteredBroker(broker, report, challenge.candidate())) {
             return false;
         }
-        return state.reports().putIfAbsent(report.brokerId(), report) == null;
+        return state.reports().putIfAbsent(report.brokerId(), new Receipt(report, true)) == null;
     }
 
     private static boolean trustedIngress(
@@ -251,7 +256,8 @@ final class PartitionRetirementReplicaRoundRegistry {
             || !challenge.assignedReplicas().equals(assignedReplicaIds(current))) {
             return Optional.of(Finding.KRAFT_PARTITION_CHANGED);
         }
-        Collection<Report> evidence = state.reports().values();
+        Collection<Report> evidence = state.reports().values().stream()
+            .map(Receipt::report).toList();
         return Optional.of(PartitionRetirementReplicaQuiescencePrecheck.assess(
             replicationControl, clusterControl, challenge.candidate(),
             challenge.objectId(), challenge.roundId(), evidence));
@@ -296,7 +302,9 @@ final class PartitionRetirementReplicaRoundRegistry {
     /**
      * Only the uniquely authenticated original source may consume a round
      * through the Controller event queue. Foreign/anonymous requests cannot
-     * consume or burn the owner's pending observations.
+     * consume or burn the owner's pending observations. A report admitted
+     * through the unauthenticated diagnostic path poisons this source-owned
+     * consumption, even if a Broker later reports the same bytes.
      */
     Optional<Finding> consumeAuthenticated(
         Uuid roundId,
@@ -313,6 +321,17 @@ final class PartitionRetirementReplicaRoundRegistry {
         if (state == null
             || !trustedIngress(context, policy, state.challenge().candidate().brokerId())) {
             return Optional.empty();
+        }
+        if (!fresh(state.issuedAtNs(), nowNs)) {
+            pending.remove(roundId);
+            return Optional.empty();
+        }
+        // An authenticated source may consume only receipts collected from
+        // individually authenticated assigned Brokers. Merely authenticating
+        // the source cannot upgrade package-local diagnostic reports.
+        if (state.reports().values().stream().anyMatch(receipt -> !receipt.authenticatedIngress())) {
+            pending.remove(roundId);
+            return Optional.of(Finding.MISSING_OR_FOREIGN_REPLICA_REPORT);
         }
         return consume(roundId, replicationControl, clusterControl, nowNs);
     }
