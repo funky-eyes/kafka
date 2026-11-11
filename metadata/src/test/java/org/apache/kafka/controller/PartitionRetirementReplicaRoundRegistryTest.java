@@ -278,6 +278,106 @@ class PartitionRetirementReplicaRoundRegistryTest {
         assertTrue(rounds.consume(boundary.roundId(), f.replicas(), f.cluster(), expiredAt).isEmpty());
     }
 
+    @Test
+    void outOfIsrAssignedBrokerRegistrationChangeRevokesCollectedRound() {
+        Fixture f = fixture();
+        PartitionRetirementReplicaRoundRegistry rounds = new PartitionRetirementReplicaRoundRegistry();
+        PartitionRetirementReplicaRoundRegistry.Challenge challenge = issue(rounds, f, OBJECT_ID, NOW_NS);
+        recordAll(rounds, challenge, NOW_NS);
+        rounds.invalidateBroker(3);
+        assertEquals(0, rounds.pendingCount(),
+            "An assigned replica outside ISR must invalidate every old observation");
+        assertFalse(rounds.recordReport(challenge.roundId(), report(challenge, 3), NOW_NS));
+        assertTrue(rounds.consume(challenge.roundId(), f.replicas(), f.cluster(), NOW_NS).isEmpty());
+    }
+
+    @Test
+    void brokerRevocationDoesNotBurnUnrelatedReplicaSet() {
+        Fixture f = fixture();
+        PartitionRetirementReplicaRoundRegistry rounds = new PartitionRetirementReplicaRoundRegistry();
+        PartitionRetirementReplicaRoundRegistry.Challenge original = issue(rounds, f, OBJECT_ID, NOW_NS);
+        PartitionRetirementReplicaRoundRegistry.Challenge other =
+            issueOther(rounds, f, new Key(Uuid.randomUuid(), 0), 902L);
+
+        assertEquals(2, rounds.pendingCount());
+        rounds.invalidateBroker(3);
+        assertEquals(1, rounds.pendingCount());
+        assertFalse(rounds.recordReport(original.roundId(), report(original, 1), NOW_NS));
+        assertTrue(rounds.recordReport(other.roundId(), report(other, 4), NOW_NS));
+    }
+
+    @Test
+    void topicRevocationUsesImmutableTopicIdAcrossAllItsPartitions() {
+        Fixture f = fixture();
+        PartitionRetirementReplicaRoundRegistry rounds = new PartitionRetirementReplicaRoundRegistry();
+        PartitionRetirementReplicaRoundRegistry.Challenge first = issue(rounds, f, OBJECT_ID, NOW_NS);
+        PartitionRetirementReplicaRoundRegistry.Challenge sameTopic =
+            issueOther(rounds, f, new Key(KEY.topicId(), 1), 902L);
+        PartitionRetirementReplicaRoundRegistry.Challenge anotherTopic =
+            issueOther(rounds, f, new Key(Uuid.randomUuid(), 0), 903L);
+
+        assertEquals(3, rounds.pendingCount());
+        rounds.invalidateTopic(KEY.topicId());
+        assertEquals(1, rounds.pendingCount());
+        assertFalse(rounds.recordReport(first.roundId(), report(first, 1), NOW_NS));
+        assertFalse(rounds.recordReport(sameTopic.roundId(), report(sameTopic, 4), NOW_NS));
+        assertTrue(rounds.recordReport(anotherTopic.roundId(), report(anotherTopic, 4), NOW_NS));
+    }
+
+    @Test
+    void authorityCasAndPartitionReplayRevokeOnlyExactTopicPartition() {
+        Fixture f = fixture();
+        PartitionRetirementReplicaRoundRegistry rounds = new PartitionRetirementReplicaRoundRegistry();
+        PartitionRetirementReplicaRoundRegistry.Challenge first = issue(rounds, f, OBJECT_ID, NOW_NS);
+        PartitionRetirementReplicaRoundRegistry.Challenge sibling =
+            issueOther(rounds, f, new Key(KEY.topicId(), 1), 902L);
+
+        rounds.invalidatePartition(KEY.topicId(), 0);
+        assertEquals(1, rounds.pendingCount());
+        assertFalse(rounds.recordReport(first.roundId(), report(first, 1), NOW_NS));
+        assertTrue(rounds.recordReport(sibling.roundId(), report(sibling, 4), NOW_NS));
+        rounds.invalidatePartition(KEY.topicId(), 1);
+        assertEquals(0, rounds.pendingCount());
+        assertTrue(rounds.consume(sibling.roundId(), f.replicas(), f.cluster(), NOW_NS).isEmpty());
+    }
+
+    @Test
+    void foreignPrincipalCannotBurnSourceOwnedRoundOnConsume() {
+        Fixture f = fixture();
+        PartitionRetirementReplicaRoundRegistry rounds = new PartitionRetirementReplicaRoundRegistry();
+        PartitionRetirementReplicaRoundRegistry.Challenge challenge = issue(rounds, f, OBJECT_ID, NOW_NS);
+        recordAll(rounds, challenge, NOW_NS);
+
+        assertTrue(rounds.consumeAuthenticated(challenge.roundId(), trusted(2), BOUND,
+            f.replicas(), f.cluster(), NOW_NS).isEmpty());
+        assertTrue(rounds.consumeAuthenticated(challenge.roundId(), trusted(1),
+            PartitionRetirementBrokerPrincipalPolicy.DENY_ALL,
+            f.replicas(), f.cluster(), NOW_NS).isEmpty());
+        assertTrue(rounds.consumeAuthenticated(challenge.roundId(),
+            context((short) 2, BROKER_ONE, SecurityProtocol.SASL_SSL, false), BOUND,
+            f.replicas(), f.cluster(), NOW_NS).isEmpty());
+        assertEquals(1, rounds.pendingCount(), "Unauthorized callers must not consume the round");
+        assertEquals(Optional.of(Finding.MATCHED_UNTRUSTED),
+            rounds.consumeAuthenticated(challenge.roundId(), trusted(1), BOUND,
+                f.replicas(), f.cluster(), NOW_NS));
+        assertTrue(rounds.consumeAuthenticated(challenge.roundId(), trusted(1), BOUND,
+            f.replicas(), f.cluster(), NOW_NS).isEmpty());
+    }
+
+    @Test
+    void malformedInvalidationCoordinatesFailClosedWithoutClearingOtherRounds() {
+        Fixture f = fixture();
+        PartitionRetirementReplicaRoundRegistry rounds = new PartitionRetirementReplicaRoundRegistry();
+        issue(rounds, f, OBJECT_ID, NOW_NS);
+        assertThrows(IllegalArgumentException.class, () -> rounds.invalidateBroker(-1));
+        assertThrows(IllegalArgumentException.class, () -> rounds.invalidatePartition(KEY.topicId(), -1));
+        assertThrows(NullPointerException.class, () -> rounds.invalidateTopic(null));
+        assertThrows(NullPointerException.class, () -> rounds.invalidatePartition(null, 0));
+        assertEquals(1, rounds.pendingCount());
+        rounds.invalidateAll();
+        assertEquals(0, rounds.pendingCount());
+    }
+
     private static boolean recordAuthenticated(
         PartitionRetirementReplicaRoundRegistry registry,
         Fixture fixture,
@@ -314,6 +414,23 @@ class PartitionRetirementReplicaRoundRegistryTest {
         PartitionRetirementReplicaRoundRegistry registry, Fixture f, long objectId, long nowNs
     ) {
         return registry.issue(f.replicas(), CANDIDATE, objectId, nowNs).orElseThrow();
+    }
+
+    private static PartitionRetirementReplicaRoundRegistry.Challenge issueOther(
+        PartitionRetirementReplicaRoundRegistry registry, Fixture f, Key key, long objectId
+    ) {
+        PartitionRegistration other = new PartitionRegistration.Builder()
+            .setReplicas(new int[] {4, 5})
+            .setDirectories(DirectoryId.unassignedArray(2))
+            .setIsr(new int[] {4, 5})
+            .setLeader(4)
+            .setLeaderRecoveryState(LeaderRecoveryState.RECOVERED)
+            .setLeaderEpoch(7)
+            .setPartitionEpoch(11)
+            .build();
+        when(f.replicas().getPartition(key.topicId(), key.partitionId())).thenReturn(other);
+        Candidate source = new Candidate(key, 4, 104L, Uuid.randomUuid(), 7, 11, -1L, 20L, 50L);
+        return registry.issue(f.replicas(), source, objectId, NOW_NS).orElseThrow();
     }
 
     private static void recordAll(

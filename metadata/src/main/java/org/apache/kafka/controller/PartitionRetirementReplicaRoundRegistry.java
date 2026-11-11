@@ -105,7 +105,11 @@ final class PartitionRetirementReplicaRoundRegistry {
         if (!hasCapacity(candidate.brokerId())) {
             return Optional.empty();
         }
-        Challenge challenge = new Challenge(Uuid.randomUuid(), candidate, objectId, assigned);
+        Uuid nonce;
+        do {
+            nonce = Uuid.randomUuid();
+        } while (Uuid.ZERO_UUID.equals(nonce) || pending.containsKey(nonce));
+        Challenge challenge = new Challenge(nonce, candidate, objectId, assigned);
         pending.put(challenge.roundId(), new Pending(challenge, nowNs, new HashMap<>()));
         return Optional.of(challenge);
     }
@@ -253,7 +257,67 @@ final class PartitionRetirementReplicaRoundRegistry {
             challenge.objectId(), challenge.roundId(), evidence));
     }
 
-    /** Controller leadership loss must invalidate every unconsumed volatile round. */
+    /**
+     * Revoke every unfinished round that includes the changed Broker,
+     * including out-of-ISR assigned replicas. Do not limit this to the
+     * original source leader. Invoke only AFTER successful KRaft replay on
+     * the serialized Controller event queue.
+     */
+    void invalidateBroker(int brokerId) {
+        if (brokerId < 0) {
+            throw new IllegalArgumentException("Broker ID must be nonnegative");
+        }
+        pending.entrySet().removeIf(entry ->
+            entry.getValue().challenge().assignedReplicas().contains(brokerId));
+    }
+
+    /** Topic IDs, rather than human-readable topic names, fence delete/recreate ABA. */
+    void invalidateTopic(Uuid topicId) {
+        Objects.requireNonNull(topicId, "topicId");
+        pending.entrySet().removeIf(entry ->
+            entry.getValue().challenge().candidate().key().topicId().equals(topicId));
+    }
+
+    /**
+     * Revoke only the exact Topic ID / partition after a metadata mutation
+     * or an authority CAS advance. Other partitions remain independent.
+     */
+    void invalidatePartition(Uuid topicId, int partitionId) {
+        Objects.requireNonNull(topicId, "topicId");
+        if (partitionId < 0) {
+            throw new IllegalArgumentException("Partition ID must be nonnegative");
+        }
+        pending.entrySet().removeIf(entry -> {
+            Key key = entry.getValue().challenge().candidate().key();
+            return key.topicId().equals(topicId) && key.partitionId() == partitionId;
+        });
+    }
+
+    /**
+     * Only the uniquely authenticated original source may consume a round
+     * through the Controller event queue. Foreign/anonymous requests cannot
+     * consume or burn the owner's pending observations.
+     */
+    Optional<Finding> consumeAuthenticated(
+        Uuid roundId,
+        ControllerRequestContext context,
+        PartitionRetirementBrokerPrincipalPolicy policy,
+        ReplicationControlManager replicationControl,
+        ClusterControlManager clusterControl,
+        long nowNs
+    ) {
+        Objects.requireNonNull(roundId, "roundId");
+        Objects.requireNonNull(context, "context");
+        Objects.requireNonNull(policy, "policy");
+        Pending state = pending.get(roundId);
+        if (state == null
+            || !trustedIngress(context, policy, state.challenge().candidate().brokerId())) {
+            return Optional.empty();
+        }
+        return consume(roundId, replicationControl, clusterControl, nowNs);
+    }
+
+    /** A leadership transition or feature negotiation invalidates all volatile evidence. */
     void invalidateAll() {
         pending.clear();
     }

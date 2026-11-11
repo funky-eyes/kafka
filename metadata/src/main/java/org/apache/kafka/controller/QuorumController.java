@@ -873,6 +873,69 @@ public final class QuorumController implements Controller {
         return inspectRetirementSourceProbe(context, candidate, challenge, claim);
     }
 
+    /**
+     * Start an ephemeral full-replica diagnostic only from the Controller
+     * event queue with a directly authenticated, uniquely mapped Broker.
+     * Default production principal policy is deny-all; there is no network
+     * route for this method, no persisted fence and no KRaft record emitted.
+     */
+    CompletableFuture<Optional<PartitionRetirementReplicaRoundRegistry.Challenge>> beginRetirementReplicaRound(
+        ControllerRequestContext context,
+        PartitionRetirementCandidatePrecheck.Candidate candidate,
+        long objectId
+    ) {
+        Objects.requireNonNull(context, "context");
+        Objects.requireNonNull(candidate, "candidate");
+        return appendWriteEvent("beginRetirementReplicaRound", context.deadlineNs(), () -> {
+            Optional<PartitionRetirementReplicaRoundRegistry.Challenge> issued = Optional.empty();
+            if (context.isDirectAuthenticatedBrokerChannel()
+                && PartitionRetirementHeartbeatReportGate.isVersionThreeHeartbeat(context)
+                && retirementBrokerPrincipalPolicy.matches(context.principal(), candidate.brokerId())
+                && PartitionRetirementCandidatePrecheck.assess(
+                    featureControl, clusterControl, replicationControl, partitionRetirementControl,
+                    candidate, offsetControl.nextWriteOffset()
+                ) == PartitionRetirementCandidatePrecheck.Finding.SOURCE_LOG_START_NOT_VERIFIED) {
+                issued = retirementReplicaRoundRegistry.issue(
+                    replicationControl, candidate, objectId, time.nanoseconds());
+            }
+            return ControllerResult.of(List.of(), issued);
+        });
+    }
+
+    /** Record one untrusted report after direct Broker identity and live KRaft preflight. */
+    CompletableFuture<Boolean> recordRetirementReplicaRoundReport(
+        ControllerRequestContext context,
+        Uuid roundId,
+        PartitionRetirementReplicaQuiescencePrecheck.Report report
+    ) {
+        Objects.requireNonNull(context, "context");
+        Objects.requireNonNull(roundId, "roundId");
+        Objects.requireNonNull(report, "report");
+        return appendWriteEvent("recordRetirementReplicaRoundReport", context.deadlineNs(), () ->
+            ControllerResult.of(List.of(), retirementReplicaRoundRegistry.recordAuthenticated(
+                roundId, report, context, retirementBrokerPrincipalPolicy,
+                replicationControl, clusterControl, time.nanoseconds()
+            ))
+        );
+    }
+
+    /**
+     * Read and burn one source-owned diagnostic Round. Only a caller with
+     * a direct authenticated Broker principal can consume this value.
+     * Even MATCHED_UNTRUSTED is not a durable KRaft authorization.
+     */
+    CompletableFuture<Optional<PartitionRetirementReplicaQuiescencePrecheck.Finding>>
+        inspectRetirementReplicaRound(ControllerRequestContext context, Uuid roundId) {
+        Objects.requireNonNull(context, "context");
+        Objects.requireNonNull(roundId, "roundId");
+        return appendWriteEvent("inspectRetirementReplicaRound", context.deadlineNs(), () ->
+            ControllerResult.of(List.of(), retirementReplicaRoundRegistry.consumeAuthenticated(
+                roundId, context, retirementBrokerPrincipalPolicy,
+                replicationControl, clusterControl, time.nanoseconds()
+            ))
+        );
+    }
+
     // Visible for testing
     ConfigurationControlManager configurationControl() {
         return configurationControl;
@@ -1262,6 +1325,7 @@ public final class QuorumController implements Controller {
                         log.warn("We were the leader in epoch {}, and are still the leader " +
                                 "in the new epoch {}.", curClaimEpoch, newLeader.epoch());
                         retirementSourceProbeRegistry.invalidateAll();
+                        retirementReplicaRoundRegistry.invalidateAll();
                         curClaimEpoch = newLeader.epoch();
                     } else {
                         log.warn("Renouncing the leadership due to a metadata log event. " +
@@ -1314,6 +1378,7 @@ public final class QuorumController implements Controller {
                         "active controller.");
             }
             retirementSourceProbeRegistry.invalidateAll();
+            retirementReplicaRoundRegistry.invalidateAll();
             curClaimEpoch = epoch;
             offsetControl.activate(newNextWriteOffset);
             clusterControl.activate();
@@ -1365,6 +1430,7 @@ public final class QuorumController implements Controller {
                         "current leader.");
             }
             retirementSourceProbeRegistry.invalidateAll();
+            retirementReplicaRoundRegistry.invalidateAll();
             raftClient.resign(curClaimEpoch);
             curClaimEpoch = -1;
             deferredEventQueue.failAll(ControllerExceptions.
@@ -1400,18 +1466,23 @@ public final class QuorumController implements Controller {
             case REGISTER_BROKER_RECORD:
                 clusterControl.replay((RegisterBrokerRecord) message, offset);
                 retirementSourceProbeRegistry.invalidateBroker(((RegisterBrokerRecord) message).brokerId());
+                retirementReplicaRoundRegistry.invalidateBroker(((RegisterBrokerRecord) message).brokerId());
                 break;
             case UNREGISTER_BROKER_RECORD:
                 clusterControl.replay((UnregisterBrokerRecord) message);
                 retirementSourceProbeRegistry.invalidateBroker(((UnregisterBrokerRecord) message).brokerId());
+                retirementReplicaRoundRegistry.invalidateBroker(((UnregisterBrokerRecord) message).brokerId());
                 break;
             case TOPIC_RECORD:
                 replicationControl.replay((TopicRecord) message);
                 retirementSourceProbeRegistry.invalidateTopic(((TopicRecord) message).topicId());
+                retirementReplicaRoundRegistry.invalidateTopic(((TopicRecord) message).topicId());
                 break;
             case PARTITION_RECORD:
                 replicationControl.replay((PartitionRecord) message);
                 retirementSourceProbeRegistry.invalidatePartition(
+                    ((PartitionRecord) message).topicId(), ((PartitionRecord) message).partitionId());
+                retirementReplicaRoundRegistry.invalidatePartition(
                     ((PartitionRecord) message).topicId(), ((PartitionRecord) message).partitionId());
                 break;
             case PARTITION_RETIREMENT_AUTHORITY_RECORD:
@@ -1424,18 +1495,23 @@ public final class QuorumController implements Controller {
                 replicationControl.replay((PartitionChangeRecord) message);
                 retirementSourceProbeRegistry.invalidatePartition(
                     ((PartitionChangeRecord) message).topicId(), ((PartitionChangeRecord) message).partitionId());
+                retirementReplicaRoundRegistry.invalidatePartition(
+                    ((PartitionChangeRecord) message).topicId(), ((PartitionChangeRecord) message).partitionId());
                 break;
             case FENCE_BROKER_RECORD:
                 clusterControl.replay((FenceBrokerRecord) message);
                 retirementSourceProbeRegistry.invalidateBroker(((FenceBrokerRecord) message).id());
+                retirementReplicaRoundRegistry.invalidateBroker(((FenceBrokerRecord) message).id());
                 break;
             case UNFENCE_BROKER_RECORD:
                 clusterControl.replay((UnfenceBrokerRecord) message);
                 retirementSourceProbeRegistry.invalidateBroker(((UnfenceBrokerRecord) message).id());
+                retirementReplicaRoundRegistry.invalidateBroker(((UnfenceBrokerRecord) message).id());
                 break;
             case REMOVE_TOPIC_RECORD:
                 replicationControl.replay((RemoveTopicRecord) message);
                 retirementSourceProbeRegistry.invalidateTopic(((RemoveTopicRecord) message).topicId());
+                retirementReplicaRoundRegistry.invalidateTopic(((RemoveTopicRecord) message).topicId());
                 break;
             case FEATURE_LEVEL_RECORD:
                 featureControl.replay((FeatureLevelRecord) message);
@@ -1443,6 +1519,7 @@ public final class QuorumController implements Controller {
                 // preflight, including authority v1 and metadata.version.
                 // Revoke only after successful replay.
                 retirementSourceProbeRegistry.invalidateAll();
+                retirementReplicaRoundRegistry.invalidateAll();
                 break;
             case CLIENT_QUOTA_RECORD:
                 clientQuotaControlManager.replay((ClientQuotaRecord) message);
@@ -1453,6 +1530,7 @@ public final class QuorumController implements Controller {
             case BROKER_REGISTRATION_CHANGE_RECORD:
                 clusterControl.replay((BrokerRegistrationChangeRecord) message);
                 retirementSourceProbeRegistry.invalidateBroker(((BrokerRegistrationChangeRecord) message).brokerId());
+                retirementReplicaRoundRegistry.invalidateBroker(((BrokerRegistrationChangeRecord) message).brokerId());
                 break;
             case ACCESS_CONTROL_ENTRY_RECORD:
                 aclControlManager.replay((AccessControlEntryRecord) message);
@@ -1515,6 +1593,7 @@ public final class QuorumController implements Controller {
         // tied to the previous write position is now stale, regardless of
         // which Broker or leader produced it.
         retirementSourceProbeRegistry.invalidatePartition(record.topicId(), record.partitionId());
+        retirementReplicaRoundRegistry.invalidatePartition(record.topicId(), record.partitionId());
     }
 
     /**
@@ -1644,6 +1723,12 @@ public final class QuorumController implements Controller {
     private final PartitionRetirementSourceProbeRegistry retirementSourceProbeRegistry;
 
     /**
+     * Controller-event-queue-only, non-authorizing full replica round
+     * diagnostics. Never replays into KRaft or enables physical deletion.
+     */
+    private final PartitionRetirementReplicaRoundRegistry retirementReplicaRoundRegistry;
+
+    /**
      * Manages SCRAM credentials, if there are any.
      */
     private final ScramControlManager scramControlManager;
@@ -1746,6 +1831,7 @@ public final class QuorumController implements Controller {
         this.snapshotRegistry = new SnapshotRegistry(logContext);
         this.partitionRetirementControl = new PartitionRetirementControlManager(snapshotRegistry);
         this.retirementSourceProbeRegistry = new PartitionRetirementSourceProbeRegistry(clusterId);
+        this.retirementReplicaRoundRegistry = new PartitionRetirementReplicaRoundRegistry();
         this.retirementBrokerPrincipalPolicy = Objects.requireNonNull(
             retirementBrokerPrincipalPolicy, "retirementBrokerPrincipalPolicy"
         );

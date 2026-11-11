@@ -599,6 +599,12 @@ REQUIRED_TESTS = {
         "changedPartitionEpochInvalidatesOneTimeChallengeWithoutLeaderChange",
     ),
     "org.apache.kafka.controller.PartitionRetirementReplicaRoundRegistryTest": (
+        "outOfIsrAssignedBrokerRegistrationChangeRevokesCollectedRound",
+        "brokerRevocationDoesNotBurnUnrelatedReplicaSet",
+        "topicRevocationUsesImmutableTopicIdAcrossAllItsPartitions",
+        "authorityCasAndPartitionReplayRevokeOnlyExactTopicPartition",
+        "foreignPrincipalCannotBurnSourceOwnedRoundOnConsume",
+        "malformedInvalidationCoordinatesFailClosedWithoutClearingOtherRounds",
         "fullAssignedReplicaRoundCanOnlyProduceOneUntrustedDiagnostic",
         "reissueRevokesOldRoundAndDuplicatesCannotOverwriteReceipt",
         "incompleteOrForeignBrokerReceiptsFailClosedAndBurnRound",

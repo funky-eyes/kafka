@@ -3712,3 +3712,65 @@ Batch 308 17-workflow CI must be green before the batch is stable.
 PR #2 remains Draft, frozen MinIO GA remains
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889`, and COMMITTED
 physical GC remains disabled.
+
+
+## Batch 309 — Controller event-queue lifecycle for full-replica drain rounds
+
+**Stable parent:** Batch 308 at
+`0cc2691da55120a69d35f291647860a1b1fef547` passed all
+17 GitHub Actions, including the acks=1 RF1 SIGKILL gate.
+No production COMMITTED physical deletion is enabled.
+
+Previously the package-private `PartitionRetirementReplicaRoundRegistry`
+could collect reports and return `MATCHED_UNTRUSTED`, but its rounds
+were not owned by the actual QuorumController event queue, and only
+`invalidateAll()` existed. It was possible to retain a volatile
+diagnostic after an assigned out-of-ISR Broker changed registration,
+even though `consume()` would eventually check registration again.
+
+A Controller-owned registry now lives alongside the existing
+Source/WAL probe registry. A deliberately **internal, non-emitting**
+event API allows a uniquely mapped, directly authenticated source
+Broker to issue a round after the existing feature/CAS/candidate
+precheck; an actual direct Broker context is required to record
+individual replica reports. The source Broker alone can consume
+the round via a new `consumeAuthenticated` guard, which rejects
+foreign/unmapped/version-incompatible principals without burning
+the owner's pending round. The value returned is diagnostic only,
+never a KRaft record or remote GC permit. No network handler
+for replica drain reports is installed, and the default production
+principal policy remains DENY_ALL.
+
+The QuorumController now eagerly invalidates full-replica diagnostic
+rounds after **successful KRaft replay** on the same paths as the
+existing source probe: Broker registration/unregistration, fencing
+and registration changes (including assigned non-ISR replicas);
+TopicRecord/RemoveTopicRecord; PartitionRecord/PartitionChangeRecord;
+feature-level transitions; and retirement authority CAS changes.
+Claiming, renouncing and transitioning Controller leadership also
+clear all volatile replica rounds. Independent topics/partitions
+and unrelated Broker sets remain unaffected by selective revocation.
+
+Round issuance additionally retries its random UUID generation
+on reserved ZERO_UUID or already-live nonce collisions, matching
+the Source/WAL nonce registry's defensive behavior. It does not
+persist observations across failover.
+
+Six extra mandatory Java 25 JUnit regressions cover out-of-ISR
+follower invalidation, unrelated assigned-replica set independence,
+immutable Topic ID fencing, exact topic/partition invalidation,
+source-owned non-destructive authentication on consume, and malformed
+revocation coordinates. Mandatory anti-skip inventory grows
+**750 -> 756**, with Python checker assertions updated. No
+test is skipped, no Native Image compilation is added during
+development.
+
+**Security limit:** all observations remain ephemeral, in-process,
+and unsupported by a durable KRaft full-replica certificate.
+Neither matching `MATCHED_UNTRUSTED` values nor metadata replay
+invalidation establish durable no-reader/no-writer claims, global
+KSO2 range closure, or physical DELETE authorization. PR #2
+remains Draft; frozen MinIO GA stays
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`;
+COMMITTED physical GC stays OFF. Treat this commit as unverified
+until all 17 exact-SHA workflows finish successfully.
