@@ -616,6 +616,9 @@ REQUIRED_TESTS = {
         "plaintextForwardedTokenSyntheticAndWrongVersionCannotEnterRound",
         "brokerIncarnationAndKraftTopologyMustBeCurrentAtIngress",
         "monotonicClockWrapAcceptsShortElapsedButRejectsExactTtl",
+        "rawReportsCannotBeUpgradedByAuthenticatedSourceConsumption",
+        "fullyAuthenticatedReceiptsRemainDiagnosticAndOneUse",
+        "foreignSourceCannotBurnMixedProvenanceRound",
     ),
     "org.apache.kafka.controller.PartitionRetirementReplicaQuiescencePrecheckTest": (
         "allAssignedReplicasIncludingOutOfIsrAreRequired",
