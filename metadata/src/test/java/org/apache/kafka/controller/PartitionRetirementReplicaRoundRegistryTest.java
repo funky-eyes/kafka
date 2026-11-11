@@ -365,6 +365,53 @@ class PartitionRetirementReplicaRoundRegistryTest {
     }
 
     @Test
+    void rawReportsCannotBeUpgradedByAuthenticatedSourceConsumption() {
+        Fixture f = fixture();
+        PartitionRetirementReplicaRoundRegistry rounds = new PartitionRetirementReplicaRoundRegistry();
+        PartitionRetirementReplicaRoundRegistry.Challenge challenge = issue(rounds, f, OBJECT_ID, NOW_NS);
+        assertTrue(rounds.recordReport(challenge.roundId(), report(challenge, 1), NOW_NS));
+        assertFalse(recordAuthenticated(rounds, f, challenge, report(challenge, 1), trusted(1), NOW_NS));
+        assertTrue(recordAuthenticated(rounds, f, challenge, report(challenge, 2), trusted(2), NOW_NS));
+        assertTrue(recordAuthenticated(rounds, f, challenge, report(challenge, 3), trusted(3), NOW_NS));
+        assertEquals(Optional.of(Finding.MISSING_OR_FOREIGN_REPLICA_REPORT),
+            rounds.consumeAuthenticated(challenge.roundId(), trusted(1), BOUND,
+                f.replicas(), f.cluster(), NOW_NS));
+        assertEquals(0, rounds.pendingCount());
+        assertTrue(rounds.consume(challenge.roundId(), f.replicas(), f.cluster(), NOW_NS).isEmpty());
+    }
+
+    @Test
+    void fullyAuthenticatedReceiptsRemainDiagnosticAndOneUse() {
+        Fixture f = fixture();
+        PartitionRetirementReplicaRoundRegistry rounds = new PartitionRetirementReplicaRoundRegistry();
+        PartitionRetirementReplicaRoundRegistry.Challenge challenge = issue(rounds, f, OBJECT_ID, NOW_NS);
+        for (int id = 1; id <= 3; id++) {
+            assertTrue(recordAuthenticated(rounds, f, challenge, report(challenge, id), trusted(id), NOW_NS));
+        }
+        assertEquals(Optional.of(Finding.MATCHED_UNTRUSTED),
+            rounds.consumeAuthenticated(challenge.roundId(), trusted(1), BOUND,
+                f.replicas(), f.cluster(), NOW_NS));
+        assertTrue(rounds.consumeAuthenticated(challenge.roundId(), trusted(1), BOUND,
+            f.replicas(), f.cluster(), NOW_NS).isEmpty());
+    }
+
+    @Test
+    void foreignSourceCannotBurnMixedProvenanceRound() {
+        Fixture f = fixture();
+        PartitionRetirementReplicaRoundRegistry rounds = new PartitionRetirementReplicaRoundRegistry();
+        PartitionRetirementReplicaRoundRegistry.Challenge challenge = issue(rounds, f, OBJECT_ID, NOW_NS);
+        assertTrue(rounds.recordReport(challenge.roundId(), report(challenge, 1), NOW_NS));
+        assertTrue(recordAuthenticated(rounds, f, challenge, report(challenge, 2), trusted(2), NOW_NS));
+        assertTrue(recordAuthenticated(rounds, f, challenge, report(challenge, 3), trusted(3), NOW_NS));
+        assertTrue(rounds.consumeAuthenticated(challenge.roundId(), trusted(2), BOUND,
+            f.replicas(), f.cluster(), NOW_NS).isEmpty());
+        assertEquals(1, rounds.pendingCount());
+        assertEquals(Optional.of(Finding.MISSING_OR_FOREIGN_REPLICA_REPORT),
+            rounds.consumeAuthenticated(challenge.roundId(), trusted(1), BOUND,
+                f.replicas(), f.cluster(), NOW_NS));
+    }
+
+    @Test
     void malformedInvalidationCoordinatesFailClosedWithoutClearingOtherRounds() {
         Fixture f = fixture();
         PartitionRetirementReplicaRoundRegistry rounds = new PartitionRetirementReplicaRoundRegistry();
