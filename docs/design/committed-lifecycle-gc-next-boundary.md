@@ -3572,3 +3572,43 @@ The PR remains Draft, COMMITTED physical GC remains OFF and MinIO GA base
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889` is frozen.
 This commit must pass all 17 exact-SHA workflows before it is considered
 a verified development base.
+
+
+## Batch 306 — primary AND alternate physical read-reference negative fence
+
+The existing `RemoteObjectIndex.referencesObject()` reports primary
+selected logical references only. The object reader can still recover an
+equivalent committed copy from the bounded `alternates` map following an
+S3 read failure. An object not selected as primary is therefore NOT
+necessarily an unreferenced physical object.
+
+Add a separate synchronized `referencesObjectIncludingAlternates()`
+read-only scanner that includes primary and fallback paths under the
+existing add/restore lock. Preserve the established primary-only
+`referencesObject()` contract for its current callers; an evicted third
+copy must not be confused with the retained alternate. The scanner
+rejects invalid Object IDs and never mutates the index.
+
+Add `CommittedObjectReplicaReferenceClosurePrecheck.assessWithLocalReadIndex()`.
+It runs the existing exact COMMITTED descriptor, every packed range's
+durable LogStart, replay-offset and distinct-partition diagnostic
+checks first, then returns `LOCAL_READ_INDEX_REFERENCE_ACTIVE`
+if the object remains selectable through either primary or alternate
+local read references. This is a NEGATIVE-only veto against a local
+read path, not a cross-Broker quiescence certificate: the local index
+may be incomplete, behind metadata replay, or updated after the check.
+Even if the index has no reference, the best finding remains
+`MATCHED_UNTRUSTED`; no physical deletion is authorized.
+
+Six additional unskipped Java 25 JUnit methods cover retained fallback
+versus discarded third copies, packed multi-partition indices and invalid
+object IDs, a primary reference veto, an alternate-only reference veto,
+unrelated object independence, and stale metadata unable to bypass
+the veto. Mandatory JUnit inventory grows **737 -> 743** with fixed
+Python anti-skip assertions updated.
+
+No native Kafka replication, ISR/HW, COMMITTED KRaft authority, S3
+object DELETE or metadata tombstone behavior is changed. MinIO GA
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889` remains
+frozen and PR #2 stays Draft. All 17 exact-SHA workflows must pass
+before this batch can become a stable development baseline.

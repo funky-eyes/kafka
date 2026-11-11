@@ -292,6 +292,43 @@ public final class RemoteObjectIndex {
     }
 
     /**
+     * Conservative, read-only scan for any locally indexed physical read path.
+     *
+     * <p>Unlike {@link #referencesObject(long)}, which reports only the
+     * selected primary read reference, this method includes the bounded
+     * equivalent-object fallback retained in {@code alternates}. A physical
+     * object outside the primary map can still be read after S3 failure of
+     * the preferred copy. It must not be treated as unreferenced merely
+     * because the primary index chose another object ID.</p>
+     *
+     * <p>The check is synchronized against index add/restore to observe both
+     * maps consistently. Absence proves nothing about remote Brokers, late
+     * metadata replay, in-flight Range GETs or durable reference retirement.
+     * This method NEVER authorizes deleting COMMITTED physical objects.</p>
+     */
+    public synchronized boolean referencesObjectIncludingAlternates(long objectId) {
+        if (objectId <= 0L) {
+            throw new IllegalArgumentException("objectId must be positive");
+        }
+        return containsObjectReference(byPartition, objectId)
+            || containsObjectReference(alternates, objectId);
+    }
+
+    private static boolean containsObjectReference(
+        Map<SharedPartitionId, ? extends NavigableMap<Long, RangeReference>> references,
+        long objectId
+    ) {
+        for (NavigableMap<Long, RangeReference> partition : references.values()) {
+            for (RangeReference candidate : partition.values()) {
+                if (candidate.objectId() == objectId) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
      * Returns a per-partition generation that advances whenever the logical remote read view changes.
      *
      * <p>Callers can snapshot this while constructing a local logical view and later determine whether authoritative

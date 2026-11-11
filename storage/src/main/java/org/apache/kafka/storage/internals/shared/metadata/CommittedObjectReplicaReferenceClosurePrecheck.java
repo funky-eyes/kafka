@@ -53,6 +53,7 @@ public final class CommittedObjectReplicaReferenceClosurePrecheck {
         REPORT_DESCRIPTOR_MISMATCH,
         REPORT_REPLAY_OFFSET_MISMATCH,
         READER_WRITER_OR_REFERENCE_ACTIVE,
+        LOCAL_READ_INDEX_REFERENCE_ACTIVE,
         MATCHED_UNTRUSTED
     }
 
@@ -113,6 +114,32 @@ public final class CommittedObjectReplicaReferenceClosurePrecheck {
             return Finding.UNTRACKED_METADATA_REPLAY;
         }
         return assessReports(object, evidence.lastConsumedMetadataOffset(), reports);
+    }
+
+    /**
+     * Augments the existing advisory closure check with a live local index
+     * negative guard for BOTH selected and equivalent fallback read paths.
+     *
+     * <p>For a packed KSO2 object, no local reader should still be able to
+     * resolve any of its bytes via the primary or alternate physical index.
+     * This is deliberately a veto only: an empty local index is NOT evidence
+     * of other Brokers being quiescent, complete metadata replay, or durable
+     * removal of references. A new commit may race with this observation.
+     * The strongest possible result remains MATCHED_UNTRUSTED.</p>
+     */
+    public static Finding assessWithLocalReadIndex(
+        SharedObjectMetadata object,
+        SharedMetadataImage image,
+        Collection<PartitionReport> reports,
+        RemoteObjectIndex localReadIndex
+    ) {
+        Objects.requireNonNull(localReadIndex, "localReadIndex");
+        Finding reported = assess(object, image, reports);
+        if (reported != Finding.MATCHED_UNTRUSTED) {
+            return reported;
+        }
+        return localReadIndex.referencesObjectIncludingAlternates(object.objectId())
+            ? Finding.LOCAL_READ_INDEX_REFERENCE_ACTIVE : Finding.MATCHED_UNTRUSTED;
     }
 
     private static Finding assessReports(

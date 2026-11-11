@@ -24,6 +24,7 @@ import java.util.Map;
 
 import static org.apache.kafka.storage.internals.shared.metadata.CommittedObjectReplicaReferenceClosurePrecheck.Finding;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -143,6 +144,81 @@ class CommittedObjectReplicaReferenceClosurePrecheckTest {
         assertThrows(IllegalArgumentException.class, () ->
             new CommittedObjectReplicaReferenceClosurePrecheck.PartitionReport(
                 A, packed, 1L, " ", true, true, true));
+    }
+
+    @Test
+    void primaryLocalReadIndexReferenceBlocksReportedRetirement() {
+        SharedObjectMetadata packed = packed();
+        SharedMetadataImage image = image(packed, Map.of(A, 10L, B, 40L, RECREATED, 10L));
+        long offset = snapshotOffset(image, packed);
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(packed);
+
+        assertEquals(Finding.MATCHED_UNTRUSTED,
+            assess(packed, image, allReports(packed, offset)),
+            "Caller-supplied reports alone do not observe a local read index");
+        assertEquals(Finding.LOCAL_READ_INDEX_REFERENCE_ACTIVE,
+            CommittedObjectReplicaReferenceClosurePrecheck.assessWithLocalReadIndex(
+                packed, image, allReports(packed, offset), index));
+        assertTrue(index.referencesObject(packed.objectId()));
+        assertTrue(image.committedObject(packed.objectId()).isPresent());
+    }
+
+    @Test
+    void alternateFallbackReferenceBlocksEvenWhenPrimaryScanIsFalse() {
+        SharedObjectMetadata packed = packed();
+        SharedMetadataImage image = image(packed, Map.of(A, 10L, B, 40L, RECREATED, 10L));
+        long offset = snapshotOffset(image, packed);
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        SharedObjectMetadata preferred = new SharedObjectMetadata(
+            900L, packed.objectSize(), packed.objectChecksum(), packed.ranges());
+        index.add(preferred);
+        index.add(packed);
+
+        assertFalse(index.referencesObject(packed.objectId()),
+            "The object is not the preferred physical copy on any packed range");
+        assertTrue(index.referencesObjectIncludingAlternates(packed.objectId()),
+            "The packed object is still usable as a read fallback");
+        assertEquals(Finding.LOCAL_READ_INDEX_REFERENCE_ACTIVE,
+            CommittedObjectReplicaReferenceClosurePrecheck.assessWithLocalReadIndex(
+                packed, image, allReports(packed, offset), index));
+    }
+
+    @Test
+    void unrelatedLocalIndexReferenceCannotInventGcAuthority() {
+        SharedObjectMetadata packed = packed();
+        SharedMetadataImage image = image(packed, Map.of(A, 10L, B, 40L, RECREATED, 10L));
+        long offset = snapshotOffset(image, packed);
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(object(999L, range(A, 100L, 110L, 0L)));
+
+        assertFalse(index.referencesObjectIncludingAlternates(packed.objectId()));
+        assertEquals(Finding.MATCHED_UNTRUSTED,
+            CommittedObjectReplicaReferenceClosurePrecheck.assessWithLocalReadIndex(
+                packed, image, allReports(packed, offset), index),
+            "No local indexed reference is still not Controller deletion authority");
+        assertTrue(image.committedObject(packed.objectId()).isPresent());
+    }
+
+    @Test
+    void localIndexAbsenceCannotOverrideStaleOrIncompleteMetadata() {
+        SharedObjectMetadata packed = packed();
+        RemoteObjectIndex empty = new RemoteObjectIndex();
+        SharedMetadataImage incomplete = image(packed, Map.of(A, 10L, B, 39L, RECREATED, 10L));
+        long offset = snapshotOffset(incomplete, packed);
+
+        assertEquals(Finding.LOGICAL_RANGES_NOT_RETIRED,
+            CommittedObjectReplicaReferenceClosurePrecheck.assessWithLocalReadIndex(
+                packed, incomplete, allReports(packed, offset), empty));
+
+        SharedMetadataImage complete = image(packed, Map.of(A, 10L, B, 40L, RECREATED, 10L));
+        long completeOffset = snapshotOffset(complete, packed);
+        assertEquals(Finding.REPORT_REPLAY_OFFSET_MISMATCH,
+            CommittedObjectReplicaReferenceClosurePrecheck.assessWithLocalReadIndex(
+                packed, complete, allReports(packed, completeOffset + 1L), empty));
+        assertThrows(NullPointerException.class,
+            () -> CommittedObjectReplicaReferenceClosurePrecheck.assessWithLocalReadIndex(
+                packed, complete, allReports(packed, completeOffset), null));
     }
 
     private static SharedObjectMetadata packed() {

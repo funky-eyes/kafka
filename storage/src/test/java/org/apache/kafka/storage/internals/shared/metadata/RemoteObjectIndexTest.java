@@ -423,6 +423,47 @@ class RemoteObjectIndexTest {
         assertEquals(10, index.find(OTHER_PARTITION, 50).orElseThrow().objectId());
     }
 
+    @Test
+    void readReferenceScanIncludesFallbackButNotDiscardedThirdCopy() {
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(object(40L, 0L, 100L, 777L));
+        index.add(object(20L, 0L, 100L, 777L));
+        index.add(object(10L, 0L, 100L, 777L));
+
+        RemoteObjectIndex.RangeReference preferred = index.find(PARTITION, 50L).orElseThrow();
+        assertEquals(10L, preferred.objectId());
+        assertEquals(20L, index.findEquivalentAlternative(preferred).orElseThrow().objectId());
+
+        assertTrue(index.referencesObjectIncludingAlternates(10L));
+        assertFalse(index.referencesObject(20L),
+            "The legacy primary-only API must preserve its established semantics");
+        assertTrue(index.referencesObjectIncludingAlternates(20L),
+            "The fallback object can still be read after primary S3 failure");
+        assertFalse(index.referencesObjectIncludingAlternates(40L),
+            "The third physical copy is not retained as a bounded read fallback");
+    }
+
+    @Test
+    void readReferenceScanIncludesAllPackedPartitionsAndRejectsInvalidId() {
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        SharedObjectMetadata packed = new SharedObjectMetadata(
+            41L, 200L, 777L,
+            List.of(
+                new SharedObjectRange(PARTITION, new OffsetRange(0L, 100L),
+                    3, 0L, 100, 777L),
+                new SharedObjectRange(OTHER_PARTITION, new OffsetRange(10L, 110L),
+                    3, 100L, 100, 888L)
+            )
+        );
+        index.add(packed);
+
+        assertTrue(index.referencesObjectIncludingAlternates(41L));
+        assertFalse(index.referencesObjectIncludingAlternates(42L));
+        assertThrows(IllegalArgumentException.class,
+            () -> index.referencesObjectIncludingAlternates(0L));
+        assertEquals(41L, index.find(OTHER_PARTITION, 20L).orElseThrow().objectId());
+    }
+
     private static SharedObjectMetadata object(long objectId, long start, long end, long checksum) {
         return object(objectId, PARTITION, start, end, checksum);
     }
