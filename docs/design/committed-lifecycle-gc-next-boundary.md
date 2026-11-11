@@ -3664,3 +3664,51 @@ the final read. A positive result is still named `MATCHED_UNTRUSTED`;
 COMMITTED physical GC remains DISABLED. No Kafka native ISR/HW,
 replica durability, MinIO GA `9a28c11b6d97ecacafe1b8566cde5cc34d604889`
 or PR Draft state is modified.
+
+
+## Batch 308 — fail-fast, bounded RF1 initial topic-ID placement retry
+
+**Parent:** Batch 307 at
+`55a3ecff339f9713f70be0fdc8fe20fea80be419`.
+The exact-SHA 17-workflow gate reached 16 successes, with the sole
+`acks=1` RF1 SIGKILL job failing **before any SIGKILL** when the
+producer's first record received
+`UnknownTopicIdException: This server does not host this topic ID`.
+RF2/RF3 passed. This is a genuine protocol response during topic
+initialization, not the earlier Gradle or MinIO download outage.
+
+The RF1 test's Admin topic readiness check already requires a
+valid leader and full ISR, but Controller metadata visibility does
+not necessarily prove that the chosen Broker has applied its current
+Topic ID. `produceOne()` had an existing, bounded 30-second retry
+for `NotLeaderOrFollowerException` only, creating a fresh producer
+for each retry.
+
+Extend that *initial-production-only* retry classifier to exactly
+`UnknownTopicIdException` and `NotLeaderOrFollowerException`.
+Only an unacknowledged initial produce can be retried; failure after
+30 seconds, or any other error, still fails the durability test.
+Use elapsed `System.nanoTime()` subtraction to handle signed-long
+origin wraparound. Do not change producer `acks=1`, `retries=0`,
+expected first offset 0, the pre-crash high-watermark and full-ISR
+checks, physical MinIO assertions, RF1 original-disk restart, or
+RF2/RF3 failover assertions. No post-crash error is retried.
+
+A new pure JUnit method in the *same* integration test class checks
+both permitted placement errors, 30-second expiry, clock reversal
+and denial for unrelated errors. This class is selected explicitly
+by the existing `Shared Storage acks=1 Durability Matrix` workflow
+for RF1/RF2/RF3, so the policy and SIGKILL proofs run together.
+The storage/metadata strict anti-skip inventory stays **750**;
+there are no disabled or skipped test methods.
+
+**Not a production fault fix:** this patch changes only a Kafka
+integration-test startup retry, not Broker behavior or Kafka's
+replication protocol. It cannot be used to excuse a prolonged
+`UNKNOWN_TOPIC_ID` response, lost record, unexpected WAL behavior,
+failed HW progression, or incomplete replica recovery. The exact-SHA
+Batch 308 17-workflow CI must be green before the batch is stable.
+
+PR #2 remains Draft, frozen MinIO GA remains
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`, and COMMITTED
+physical GC remains disabled.

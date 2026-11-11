@@ -31,6 +31,7 @@ import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.config.TopicConfig;
 import org.apache.kafka.common.errors.NotLeaderOrFollowerException;
+import org.apache.kafka.common.errors.UnknownTopicIdException;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
@@ -88,6 +89,20 @@ public class SharedStorageAcksOneReplicatedSigkillTest {
 
     @TempDir
     Path tempDir;
+
+    @Test
+    public void initialProduceRetryPolicyIsRestrictedToTopicPlacement() {
+        long timeout = TimeUnit.SECONDS.toNanos(30);
+        assertTrue(retryInitialTopicPlacement(new NotLeaderOrFollowerException("election"), 0L));
+        assertTrue(retryInitialTopicPlacement(new UnknownTopicIdException("broker image is behind"), 0L));
+        assertTrue(retryInitialTopicPlacement(new UnknownTopicIdException("startup"), timeout - 1L));
+        assertFalse(retryInitialTopicPlacement(new UnknownTopicIdException("stale"), timeout),
+            "A persistent missing topic ID must still fail this durability gate");
+        assertFalse(retryInitialTopicPlacement(new UnknownTopicIdException("clock reversed"), -1L));
+        assertFalse(retryInitialTopicPlacement(new IllegalStateException("fatal"), 0L),
+            "Unrelated producer failures must not be masked by a startup retry");
+        assertFalse(retryInitialTopicPlacement(null, 0L));
+    }
 
     @Test
     public void replicatedAcksOneRecordSurvivesLeaderSigkill() throws Exception {
@@ -444,7 +459,7 @@ public class SharedStorageAcksOneReplicatedSigkillTest {
     }
 
     private static RecordMetadata produceOne(String bootstrapServers) throws Exception {
-        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        long startedNanos = System.nanoTime();
         int attempt = 0;
         while (true) {
             attempt++;
@@ -459,8 +474,7 @@ public class SharedStorageAcksOneReplicatedSigkillTest {
                 }
                 return metadata;
             } catch (ExecutionException e) {
-                if (!(e.getCause() instanceof NotLeaderOrFollowerException) ||
-                    System.nanoTime() >= deadlineNanos) {
+                if (!retryInitialTopicPlacement(e.getCause(), System.nanoTime() - startedNanos)) {
                     throw e;
                 }
                 System.out.println(
@@ -473,6 +487,25 @@ public class SharedStorageAcksOneReplicatedSigkillTest {
 
             Thread.sleep(250L);
         }
+    }
+
+    /**
+     * Only the initial placement of a newly created topic may be retried.
+     * Admin's leader/ISR view can precede the serving Broker's Topic ID
+     * application. A rejected produce carrying UNKNOWN_TOPIC_ID or
+     * NOT_LEADER_OR_FOLLOWER did not acknowledge a record, so a fresh
+     * producer may retry before the crash portion of this test begins.
+     *
+     * <p>Do not broaden this policy to arbitrary errors, post-SIGKILL
+     * writes or acknowledgements. A permanent placement failure must still
+     * fail within 30 seconds. Subtract elapsed nanoTime values to avoid
+     * signed-long origin wraparound.</p>
+     */
+    private static boolean retryInitialTopicPlacement(Throwable failure, long elapsedNanos) {
+        boolean placementError = failure instanceof NotLeaderOrFollowerException
+            || failure instanceof UnknownTopicIdException;
+        return placementError && elapsedNanos >= 0L
+            && elapsedNanos < TimeUnit.SECONDS.toNanos(30);
     }
 
     private static KafkaProducer<String, String> producer(String bootstrapServers) {
