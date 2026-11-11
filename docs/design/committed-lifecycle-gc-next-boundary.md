@@ -3851,3 +3851,45 @@ and neither source probes nor full-replica diagnostics permit
 physical object deletion. PR #2 remains Draft; frozen MinIO GA
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889` is unchanged.
 Require **17/17** exact-SHA CI before declaring Batch 311 stable.
+
+
+## Batch 312 — keep authenticated replica ingress separate from raw diagnostic receipts
+
+**Parent:** Batch 311 `5ec70470b08a24c178d681bb4cb4df3c8486f158`
+has **17/17 exact-SHA GitHub Actions SUCCESS**.
+
+The volatile `PartitionRetirementReplicaRoundRegistry` previously stored
+package-local `recordReport` observations and independently authenticated
+`recordAuthenticated` observations in the same `Map<Integer, Report>`.
+Although both paths currently return nonauthorizing diagnostics, a future
+serialized Controller writer must never treat an authenticated *source's*
+consumption of that map as proof that every assigned Broker supplied its
+report through an authenticated ingress channel.
+
+Batch 312 adds an immutable per-receipt provenance bit:
+- `recordReport` always stores `authenticatedIngress=false`; it cannot
+  overwrite an existing authenticated receipt.
+- `recordAuthenticated` stores `authenticatedIngress=true` only after
+  the existing direct authenticated Broker channel, unique principal,
+  current Broker epoch/incarnation, round, and KRaft topology checks.
+- `consumeAuthenticated` rejects and consumes any round containing even
+  one raw receipt, returning `MISSING_OR_FOREIGN_REPLICA_REPORT`.
+  Foreign/anonymous source callers cannot burn that round.
+- The existing package-local `consume` still reports only
+  `MATCHED_UNTRUSTED`, never a durability or physical GC permit.
+- Three new JUnit regressions cover raw-to-authenticated upgrade denial,
+  a fully authenticated one-use diagnostic, and foreign-source isolation.
+  Strict named Java/Scala inventory **756 -> 759**.
+
+**Unimplemented:** A durable Controller-epoch-fenced, KRaft-replayed
+per-Broker WAL replica confirmation record; verified complete WAL offset
+coverage and quorum durability at produce acknowledgement; authenticated
+cross-partition KSO2 reference closure; durable reference retirement and
+physical object DELETE. This batch is an ingress provenance hardening
+step, **not** the persisted replica confirmation state machine.
+Production principal policy stays `DENY_ALL`. **COMMITTED physical GC
+remains DISABLED**. The frozen MinIO GA baseline
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889` is untouched.
+PR #2 remains Draft. Require exact-HEAD Java 25, Controller JUnit,
+static manifest and three-Broker MinIO CI before calling this checkpoint
+validated.
