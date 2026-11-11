@@ -3774,3 +3774,42 @@ remains Draft; frozen MinIO GA stays
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889`;
 COMMITTED physical GC stays OFF. Treat this commit as unverified
 until all 17 exact-SHA workflows finish successfully.
+
+
+## Batch 310 — retain Controller replay invalidation while meeting Checkstyle NCSS
+
+**Parent:** Batch 309 at
+`b82167534bb853a05553fbab57f56848132ba5b0` finished
+**16/17** GitHub Actions SUCCESS. The Java 25 `Shared Storage` job
+failed in `:metadata:checkstyleMain` before JUnit: QuorumController's
+`replay(ApiMessage, Optional<OffsetAndEpoch>, long)` reached
+JavaNCSS **109**, exceeding the configured maximum **100**.
+The separate real-MinIO three-Broker E2E job succeeded.
+
+Extract the paired Source/WAL and full-replica diagnostic invalidations
+into four short, centralized Controller helpers:
+`invalidateRetirementDiagnosticsBroker`,
+`invalidateRetirementDiagnosticsTopic`,
+`invalidateRetirementDiagnosticsPartition`, and
+`invalidateRetirementDiagnosticsAll`.
+All **14** paired call sites (five Broker, two Topic, three Partition,
+four All) now call one helper after successful metadata replay, or at
+the same Controller leadership transition as before. The helpers
+invalidate BOTH volatile registries. Neither the order of replay nor
+the underlying registration, source/WAL probe, or full-replica round
+transition is altered. This reduces the NCSS in the hot replay method
+without loosening the rule, skipping Checkstyle, or dropping any
+fail-closed Broker/Topic/Partition/feature/authority CAS invalidation.
+
+No new tests are invented merely to change an equivalent private
+method boundary; the existing **756** required Java/Scala test
+inventory remains enforced, including six negative-first
+full-replica revocation tests added in Batch 309. Java 25, MinIO,
+Controller HA, native replication, Ring WAL and WAL Crash CI gates
+remain intact. The exact-SHA 17/17 result is required before the
+batch is stable.
+
+PR #2 stays Draft. The frozen MinIO GA baseline
+`9a28c11b6d97ecacafe1b8566cde5cc34d604889`
+is unchanged, Controller full-replica diagnostics are still volatile
+and non-authorizing, and **COMMITTED physical GC remains DISABLED**.

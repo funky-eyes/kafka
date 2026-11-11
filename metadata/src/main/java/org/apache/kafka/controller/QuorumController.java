@@ -1324,8 +1324,7 @@ public final class QuorumController implements Controller {
                     if (newLeader.isLeader(nodeId)) {
                         log.warn("We were the leader in epoch {}, and are still the leader " +
                                 "in the new epoch {}.", curClaimEpoch, newLeader.epoch());
-                        retirementSourceProbeRegistry.invalidateAll();
-                        retirementReplicaRoundRegistry.invalidateAll();
+                        invalidateRetirementDiagnosticsAll();
                         curClaimEpoch = newLeader.epoch();
                     } else {
                         log.warn("Renouncing the leadership due to a metadata log event. " +
@@ -1377,8 +1376,7 @@ public final class QuorumController implements Controller {
                 throw new RuntimeException("Cannot claim leadership because we are already the " +
                         "active controller.");
             }
-            retirementSourceProbeRegistry.invalidateAll();
-            retirementReplicaRoundRegistry.invalidateAll();
+            invalidateRetirementDiagnosticsAll();
             curClaimEpoch = epoch;
             offsetControl.activate(newNextWriteOffset);
             clusterControl.activate();
@@ -1429,8 +1427,7 @@ public final class QuorumController implements Controller {
                 throw new RuntimeException("Cannot renounce leadership because we are not the " +
                         "current leader.");
             }
-            retirementSourceProbeRegistry.invalidateAll();
-            retirementReplicaRoundRegistry.invalidateAll();
+            invalidateRetirementDiagnosticsAll();
             raftClient.resign(curClaimEpoch);
             curClaimEpoch = -1;
             deferredEventQueue.failAll(ControllerExceptions.
@@ -1441,6 +1438,33 @@ public final class QuorumController implements Controller {
         } catch (Throwable e) {
             fatalFaultHandler.handleFault("exception while renouncing leadership", e);
         }
+    }
+
+    /**
+     * Keep the volatile source probe and all-assigned-replica round fences
+     * consistent. Only called on the serialized Controller event queue.
+     * Replay callers invoke these helpers AFTER a successful KRaft apply;
+     * leadership transitions revoke everything before accepting new work.
+     * Neither registry grants COMMITTED physical GC authority.
+     */
+    private void invalidateRetirementDiagnosticsBroker(int brokerId) {
+        retirementSourceProbeRegistry.invalidateBroker(brokerId);
+        retirementReplicaRoundRegistry.invalidateBroker(brokerId);
+    }
+
+    private void invalidateRetirementDiagnosticsTopic(Uuid topicId) {
+        retirementSourceProbeRegistry.invalidateTopic(topicId);
+        retirementReplicaRoundRegistry.invalidateTopic(topicId);
+    }
+
+    private void invalidateRetirementDiagnosticsPartition(Uuid topicId, int partitionId) {
+        retirementSourceProbeRegistry.invalidatePartition(topicId, partitionId);
+        retirementReplicaRoundRegistry.invalidatePartition(topicId, partitionId);
+    }
+
+    private void invalidateRetirementDiagnosticsAll() {
+        retirementSourceProbeRegistry.invalidateAll();
+        retirementReplicaRoundRegistry.invalidateAll();
     }
 
     /**
@@ -1465,24 +1489,19 @@ public final class QuorumController implements Controller {
         switch (type) {
             case REGISTER_BROKER_RECORD:
                 clusterControl.replay((RegisterBrokerRecord) message, offset);
-                retirementSourceProbeRegistry.invalidateBroker(((RegisterBrokerRecord) message).brokerId());
-                retirementReplicaRoundRegistry.invalidateBroker(((RegisterBrokerRecord) message).brokerId());
+                invalidateRetirementDiagnosticsBroker(((RegisterBrokerRecord) message).brokerId());
                 break;
             case UNREGISTER_BROKER_RECORD:
                 clusterControl.replay((UnregisterBrokerRecord) message);
-                retirementSourceProbeRegistry.invalidateBroker(((UnregisterBrokerRecord) message).brokerId());
-                retirementReplicaRoundRegistry.invalidateBroker(((UnregisterBrokerRecord) message).brokerId());
+                invalidateRetirementDiagnosticsBroker(((UnregisterBrokerRecord) message).brokerId());
                 break;
             case TOPIC_RECORD:
                 replicationControl.replay((TopicRecord) message);
-                retirementSourceProbeRegistry.invalidateTopic(((TopicRecord) message).topicId());
-                retirementReplicaRoundRegistry.invalidateTopic(((TopicRecord) message).topicId());
+                invalidateRetirementDiagnosticsTopic(((TopicRecord) message).topicId());
                 break;
             case PARTITION_RECORD:
                 replicationControl.replay((PartitionRecord) message);
-                retirementSourceProbeRegistry.invalidatePartition(
-                    ((PartitionRecord) message).topicId(), ((PartitionRecord) message).partitionId());
-                retirementReplicaRoundRegistry.invalidatePartition(
+                invalidateRetirementDiagnosticsPartition(
                     ((PartitionRecord) message).topicId(), ((PartitionRecord) message).partitionId());
                 break;
             case PARTITION_RETIREMENT_AUTHORITY_RECORD:
@@ -1493,33 +1512,27 @@ public final class QuorumController implements Controller {
                 break;
             case PARTITION_CHANGE_RECORD:
                 replicationControl.replay((PartitionChangeRecord) message);
-                retirementSourceProbeRegistry.invalidatePartition(
-                    ((PartitionChangeRecord) message).topicId(), ((PartitionChangeRecord) message).partitionId());
-                retirementReplicaRoundRegistry.invalidatePartition(
+                invalidateRetirementDiagnosticsPartition(
                     ((PartitionChangeRecord) message).topicId(), ((PartitionChangeRecord) message).partitionId());
                 break;
             case FENCE_BROKER_RECORD:
                 clusterControl.replay((FenceBrokerRecord) message);
-                retirementSourceProbeRegistry.invalidateBroker(((FenceBrokerRecord) message).id());
-                retirementReplicaRoundRegistry.invalidateBroker(((FenceBrokerRecord) message).id());
+                invalidateRetirementDiagnosticsBroker(((FenceBrokerRecord) message).id());
                 break;
             case UNFENCE_BROKER_RECORD:
                 clusterControl.replay((UnfenceBrokerRecord) message);
-                retirementSourceProbeRegistry.invalidateBroker(((UnfenceBrokerRecord) message).id());
-                retirementReplicaRoundRegistry.invalidateBroker(((UnfenceBrokerRecord) message).id());
+                invalidateRetirementDiagnosticsBroker(((UnfenceBrokerRecord) message).id());
                 break;
             case REMOVE_TOPIC_RECORD:
                 replicationControl.replay((RemoveTopicRecord) message);
-                retirementSourceProbeRegistry.invalidateTopic(((RemoveTopicRecord) message).topicId());
-                retirementReplicaRoundRegistry.invalidateTopic(((RemoveTopicRecord) message).topicId());
+                invalidateRetirementDiagnosticsTopic(((RemoveTopicRecord) message).topicId());
                 break;
             case FEATURE_LEVEL_RECORD:
                 featureControl.replay((FeatureLevelRecord) message);
                 // Feature negotiation can invalidate every outstanding source
                 // preflight, including authority v1 and metadata.version.
                 // Revoke only after successful replay.
-                retirementSourceProbeRegistry.invalidateAll();
-                retirementReplicaRoundRegistry.invalidateAll();
+                invalidateRetirementDiagnosticsAll();
                 break;
             case CLIENT_QUOTA_RECORD:
                 clientQuotaControlManager.replay((ClientQuotaRecord) message);
@@ -1529,8 +1542,7 @@ public final class QuorumController implements Controller {
                 break;
             case BROKER_REGISTRATION_CHANGE_RECORD:
                 clusterControl.replay((BrokerRegistrationChangeRecord) message);
-                retirementSourceProbeRegistry.invalidateBroker(((BrokerRegistrationChangeRecord) message).brokerId());
-                retirementReplicaRoundRegistry.invalidateBroker(((BrokerRegistrationChangeRecord) message).brokerId());
+                invalidateRetirementDiagnosticsBroker(((BrokerRegistrationChangeRecord) message).brokerId());
                 break;
             case ACCESS_CONTROL_ENTRY_RECORD:
                 aclControlManager.replay((AccessControlEntryRecord) message);
@@ -1592,8 +1604,7 @@ public final class QuorumController implements Controller {
         // The authoritative generation CAS changed. A still-live diagnostic
         // tied to the previous write position is now stale, regardless of
         // which Broker or leader produced it.
-        retirementSourceProbeRegistry.invalidatePartition(record.topicId(), record.partitionId());
-        retirementReplicaRoundRegistry.invalidatePartition(record.topicId(), record.partitionId());
+        invalidateRetirementDiagnosticsPartition(record.topicId(), record.partitionId());
     }
 
     /**
