@@ -54,6 +54,8 @@ public final class CommittedObjectReplicaReferenceClosurePrecheck {
         REPORT_REPLAY_OFFSET_MISMATCH,
         READER_WRITER_OR_REFERENCE_ACTIVE,
         LOCAL_READ_INDEX_REFERENCE_ACTIVE,
+        LOCAL_READ_INDEX_CHANGED_DURING_ASSESSMENT,
+        METADATA_REPLAY_CHANGED_DURING_ASSESSMENT,
         MATCHED_UNTRUSTED
     }
 
@@ -124,8 +126,12 @@ public final class CommittedObjectReplicaReferenceClosurePrecheck {
      * resolve any of its bytes via the primary or alternate physical index.
      * This is deliberately a veto only: an empty local index is NOT evidence
      * of other Brokers being quiescent, complete metadata replay, or durable
-     * removal of references. A new commit may race with this observation.
-     * The strongest possible result remains MATCHED_UNTRUSTED.</p>
+     * removal of references. The check double-reads metadata replay
+     * provenance and the physical read view's publication generation;
+     * a publication or replay observed during the check fails closed.
+     * This is NOT an atomic cross-subsystem fence: a later commit may
+     * still race after the final observation. The strongest possible
+     * result remains MATCHED_UNTRUSTED.</p>
      */
     public static Finding assessWithLocalReadIndex(
         SharedObjectMetadata object,
@@ -133,12 +139,28 @@ public final class CommittedObjectReplicaReferenceClosurePrecheck {
         Collection<PartitionReport> reports,
         RemoteObjectIndex localReadIndex
     ) {
+        Objects.requireNonNull(object, "object");
+        Objects.requireNonNull(image, "image");
         Objects.requireNonNull(localReadIndex, "localReadIndex");
+        // Optimistic local observations: no joint metadata/index lock exists.
+        // Treat changes during assessment as negative results, not GC grants.
+        Optional<SharedMetadataImage.CommittedObjectEvidence> initialEvidence =
+            image.committedObjectRetirementEvidence(object.objectId());
+        RemoteObjectIndex.PhysicalReadReferenceSnapshot initialIndex =
+            localReadIndex.physicalReadReferenceSnapshot(object.objectId());
         Finding reported = assess(object, image, reports);
         if (reported != Finding.MATCHED_UNTRUSTED) {
             return reported;
         }
-        return localReadIndex.referencesObjectIncludingAlternates(object.objectId())
+        if (!initialEvidence.equals(image.committedObjectRetirementEvidence(object.objectId()))) {
+            return Finding.METADATA_REPLAY_CHANGED_DURING_ASSESSMENT;
+        }
+        RemoteObjectIndex.PhysicalReadReferenceSnapshot finalIndex =
+            localReadIndex.physicalReadReferenceSnapshot(object.objectId());
+        if (initialIndex.publicationGeneration() != finalIndex.publicationGeneration()) {
+            return Finding.LOCAL_READ_INDEX_CHANGED_DURING_ASSESSMENT;
+        }
+        return finalIndex.referenced()
             ? Finding.LOCAL_READ_INDEX_REFERENCE_ACTIVE : Finding.MATCHED_UNTRUSTED;
     }
 

@@ -464,6 +464,71 @@ class RemoteObjectIndexTest {
         assertEquals(41L, index.find(OTHER_PARTITION, 20L).orElseThrow().objectId());
     }
 
+    @Test
+    void alternateOnlyPublicationAdvancesPhysicalReadGenerationWithoutPrimaryRevision() {
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        RemoteObjectIndex.PhysicalReadReferenceSnapshot absent =
+            index.physicalReadReferenceSnapshot(20L);
+        assertEquals(0L, absent.publicationGeneration());
+        assertFalse(absent.referenced());
+
+        index.add(object(10L, 0L, 100L, 777L));
+        long primaryRevision = index.revision(PARTITION);
+        RemoteObjectIndex.PhysicalReadReferenceSnapshot beforeAlternate =
+            index.physicalReadReferenceSnapshot(20L);
+        assertFalse(beforeAlternate.referenced());
+
+        index.add(object(20L, 0L, 100L, 777L));
+        RemoteObjectIndex.PhysicalReadReferenceSnapshot afterAlternate =
+            index.physicalReadReferenceSnapshot(20L);
+        assertTrue(afterAlternate.referenced());
+        assertTrue(afterAlternate.publicationGeneration() > beforeAlternate.publicationGeneration());
+        assertEquals(primaryRevision, index.revision(PARTITION),
+            "An alternate-only publication must not alter the primary read revision");
+        assertFalse(index.referencesObject(20L));
+    }
+
+    @Test
+    void duplicateReplayAndRejectedConflictDoNotAdvancePhysicalReadGeneration() {
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        SharedObjectMetadata first = object(10L, 0L, 100L, 777L);
+        index.add(first);
+        RemoteObjectIndex.PhysicalReadReferenceSnapshot stable =
+            index.physicalReadReferenceSnapshot(10L);
+        index.add(first);
+        assertEquals(stable, index.physicalReadReferenceSnapshot(10L),
+            "Identical COMMITTED metadata replay must not create a false read-view change");
+        assertThrows(RemoteMetadataConflictException.class,
+            () -> index.add(object(11L, 0L, 100L, 778L)));
+        assertEquals(stable, index.physicalReadReferenceSnapshot(10L),
+            "Failed conflict staging must not advance the published physical read generation");
+
+        index.add(object(20L, 0L, 100L, 777L));
+        RemoteObjectIndex.PhysicalReadReferenceSnapshot newView =
+            index.physicalReadReferenceSnapshot(10L);
+        assertTrue(newView.publicationGeneration() > stable.publicationGeneration());
+    }
+
+    @Test
+    void physicalReadViewSnapshotIncludesAllPackedPrimaryAndFallbackPaths() {
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        SharedObjectMetadata packed = new SharedObjectMetadata(
+            41L, 200L, 777L, List.of(
+                new SharedObjectRange(PARTITION, new OffsetRange(0L, 100L), 3, 0L, 100, 777L),
+                new SharedObjectRange(OTHER_PARTITION, new OffsetRange(0L, 100L), 3, 100L, 100, 888L)
+            )
+        );
+        index.add(packed);
+        assertTrue(index.physicalReadReferenceSnapshot(41L).referenced());
+        RemoteObjectIndex.PhysicalReadReferenceSnapshot unreferenced =
+            index.physicalReadReferenceSnapshot(42L);
+        assertFalse(unreferenced.referenced());
+        assertEquals(index.physicalReadReferenceSnapshot(41L).publicationGeneration(),
+            unreferenced.publicationGeneration());
+        assertThrows(IllegalArgumentException.class,
+            () -> index.physicalReadReferenceSnapshot(-1L));
+    }
+
     private static SharedObjectMetadata object(long objectId, long start, long end, long checksum) {
         return object(objectId, PARTITION, start, end, checksum);
     }

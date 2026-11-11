@@ -18,7 +18,10 @@ package org.apache.kafka.storage.internals.shared.metadata;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.AbstractCollection;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
@@ -221,6 +224,82 @@ class CommittedObjectReplicaReferenceClosurePrecheckTest {
                 packed, complete, allReports(packed, completeOffset), null));
     }
 
+    @Test
+    void alternateOnlyPublicationDuringClosureAssessmentFailsClosed() {
+        SharedObjectMetadata packed = packed();
+        SharedMetadataImage image = image(packed, Map.of(A, 10L, B, 40L, RECREATED, 10L));
+        long offset = snapshotOffset(image, packed);
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        SharedObjectMetadata preferred = new SharedObjectMetadata(
+            900L, packed.objectSize(), packed.objectChecksum(), packed.ranges());
+        index.add(preferred);
+        long primaryRevision = index.revision(A);
+
+        Collection<CommittedObjectReplicaReferenceClosurePrecheck.PartitionReport> reports =
+            mutateOnIteration(allReports(packed, offset), () -> index.add(packed));
+        assertEquals(Finding.LOCAL_READ_INDEX_CHANGED_DURING_ASSESSMENT,
+            CommittedObjectReplicaReferenceClosurePrecheck.assessWithLocalReadIndex(
+                packed, image, reports, index));
+        assertEquals(primaryRevision, index.revision(A),
+            "Alternate-only publication must be detected without a primary revision increment");
+        assertFalse(index.referencesObject(packed.objectId()));
+        assertTrue(index.referencesObjectIncludingAlternates(packed.objectId()));
+        assertEquals(Finding.LOCAL_READ_INDEX_REFERENCE_ACTIVE,
+            CommittedObjectReplicaReferenceClosurePrecheck.assessWithLocalReadIndex(
+                packed, image, allReports(packed, offset), index));
+    }
+
+    @Test
+    void unrelatedIndexPublicationDuringClosureAssessmentFailsClosed() {
+        SharedObjectMetadata packed = packed();
+        SharedMetadataImage image = image(packed, Map.of(A, 10L, B, 40L, RECREATED, 10L));
+        long offset = snapshotOffset(image, packed);
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        Collection<CommittedObjectReplicaReferenceClosurePrecheck.PartitionReport> reports =
+            mutateOnIteration(allReports(packed, offset), () ->
+                index.add(object(999L, range(A, 100L, 110L, 0L))));
+
+        assertEquals(Finding.LOCAL_READ_INDEX_CHANGED_DURING_ASSESSMENT,
+            CommittedObjectReplicaReferenceClosurePrecheck.assessWithLocalReadIndex(
+                packed, image, reports, index));
+        assertFalse(index.referencesObjectIncludingAlternates(packed.objectId()),
+            "An unrelated reference should still force a retry after read-view publication");
+    }
+
+    @Test
+    void metadataReplayDuringClosureAssessmentFailsClosed() {
+        SharedObjectMetadata packed = packed();
+        SharedMetadataImage image = image(packed, Map.of(A, 10L, B, 40L, RECREATED, 10L));
+        long offset = snapshotOffset(image, packed);
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        Collection<CommittedObjectReplicaReferenceClosurePrecheck.PartitionReport> reports =
+            mutateOnIteration(allReports(packed, offset), () ->
+                image.applyFromMetadataLog(
+                    SharedMetadataRecordCodec.partitionLogStartKey(FOREIGN),
+                    SharedMetadataRecordCodec.partitionLogStartValue(1L),
+                    offset + 1L));
+
+        assertEquals(Finding.METADATA_REPLAY_CHANGED_DURING_ASSESSMENT,
+            CommittedObjectReplicaReferenceClosurePrecheck.assessWithLocalReadIndex(
+                packed, image, reports, index));
+        assertEquals(offset + 1L, snapshotOffset(image, packed));
+        assertFalse(index.referencesObjectIncludingAlternates(packed.objectId()));
+    }
+
+    @Test
+    void stableMetadataAndPhysicalReadViewRemainOnlyUntrustedDiagnostics() {
+        SharedObjectMetadata packed = packed();
+        SharedMetadataImage image = image(packed, Map.of(A, 10L, B, 40L, RECREATED, 10L));
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(object(999L, range(A, 100L, 110L, 0L)));
+        long offset = snapshotOffset(image, packed);
+        assertEquals(Finding.MATCHED_UNTRUSTED,
+            CommittedObjectReplicaReferenceClosurePrecheck.assessWithLocalReadIndex(
+                packed, image, allReports(packed, offset), index));
+        assertTrue(image.committedObject(packed.objectId()).isPresent(),
+            "Even stable local diagnostics do not retire COMMITTED metadata");
+    }
+
     private static SharedObjectMetadata packed() {
         return object(901L, range(A, 0L, 10L, 0L),
             range(B, 20L, 40L, 10L), range(RECREATED, 0L, 10L, 30L));
@@ -235,6 +314,29 @@ class CommittedObjectReplicaReferenceClosurePrecheckTest {
     ) {
         return new SharedObjectRange(partition,
             new OffsetRange(start, end), 3, position, Math.toIntExact(end - start), 99L);
+    }
+
+    private static Collection<CommittedObjectReplicaReferenceClosurePrecheck.PartitionReport> mutateOnIteration(
+        List<CommittedObjectReplicaReferenceClosurePrecheck.PartitionReport> reports,
+        Runnable mutation
+    ) {
+        return new AbstractCollection<>() {
+            private boolean mutated;
+
+            @Override
+            public Iterator<CommittedObjectReplicaReferenceClosurePrecheck.PartitionReport> iterator() {
+                if (!mutated) {
+                    mutated = true;
+                    mutation.run();
+                }
+                return reports.iterator();
+            }
+
+            @Override
+            public int size() {
+                return reports.size();
+            }
+        };
     }
 
     private static SharedMetadataImage image(

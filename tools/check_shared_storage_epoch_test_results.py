@@ -22,6 +22,9 @@ from xml.etree import ElementTree as ET
 
 REQUIRED_TESTS = {
     "org.apache.kafka.storage.internals.shared.metadata.RemoteObjectIndexTest": (
+        "alternateOnlyPublicationAdvancesPhysicalReadGenerationWithoutPrimaryRevision",
+        "duplicateReplayAndRejectedConflictDoNotAdvancePhysicalReadGeneration",
+        "physicalReadViewSnapshotIncludesAllPackedPrimaryAndFallbackPaths",
         "readReferenceScanIncludesFallbackButNotDiscardedThirdCopy",
         "readReferenceScanIncludesAllPackedPartitionsAndRejectsInvalidId",
         "physicalDuplicateReplayOrderConvergesAcrossReplicasWithoutGrantingGc",
@@ -33,6 +36,10 @@ REQUIRED_TESTS = {
         "laterPackedLengthConflictCannotPublishAnEarlierLowerObjectId",
     ),
     "org.apache.kafka.storage.internals.shared.metadata.CommittedObjectReplicaReferenceClosurePrecheckTest": (
+        "alternateOnlyPublicationDuringClosureAssessmentFailsClosed",
+        "unrelatedIndexPublicationDuringClosureAssessmentFailsClosed",
+        "metadataReplayDuringClosureAssessmentFailsClosed",
+        "stableMetadataAndPhysicalReadViewRemainOnlyUntrustedDiagnostics",
         "primaryLocalReadIndexReferenceBlocksReportedRetirement",
         "alternateFallbackReferenceBlocksEvenWhenPrimaryScanIsFalse",
         "unrelatedLocalIndexReferenceCannotInventGcAuthority",

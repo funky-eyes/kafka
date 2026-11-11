@@ -50,6 +50,10 @@ public final class RemoteObjectIndex {
     private final ConcurrentHashMap<SharedPartitionId, PartitionRemoteCoverage> coverage = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<SharedPartitionId, AtomicLong> revisions = new ConcurrentHashMap<>();
 
+    // Guarded by the same monitor as add/restore and physical reference snapshots.
+    // Includes alternate-only publications, unlike primary-only revision(partition).
+    private long physicalReadViewGeneration;
+
     /**
      * Validates every range in an object before publishing any of them.
      *
@@ -116,6 +120,9 @@ public final class RemoteObjectIndex {
         }
         for (SharedPartitionId partition : changedPartitions) {
             revisions.computeIfAbsent(partition, ignored -> new AtomicLong()).incrementAndGet();
+        }
+        if (!updates.isEmpty() || !alternateUpdates.isEmpty()) {
+            physicalReadViewGeneration++;
         }
         return !changedPartitions.isEmpty();
     }
@@ -307,11 +314,30 @@ public final class RemoteObjectIndex {
      * This method NEVER authorizes deleting COMMITTED physical objects.</p>
      */
     public synchronized boolean referencesObjectIncludingAlternates(long objectId) {
+        return physicalReadReferenceSnapshot(objectId).referenced();
+    }
+
+    /**
+     * Capture primary AND bounded-fallback reference state at one local
+     * publication generation, serialized against add/restore.
+     *
+     * <p>The generation increments even for alternate-only publication,
+     * unlike {@link #revision(SharedPartitionId)}. An identical replay
+     * that changes neither read map does not advance the generation.
+     * Comparing two observations can reject a concurrent local publication,
+     * but it cannot prevent a later publication or prove another Broker's
+     * read view has drained. This is never a COMMITTED deletion grant.</p>
+     */
+    public synchronized PhysicalReadReferenceSnapshot physicalReadReferenceSnapshot(long objectId) {
         if (objectId <= 0L) {
             throw new IllegalArgumentException("objectId must be positive");
         }
-        return containsObjectReference(byPartition, objectId)
+        boolean referenced = containsObjectReference(byPartition, objectId)
             || containsObjectReference(alternates, objectId);
+        return new PhysicalReadReferenceSnapshot(objectId, physicalReadViewGeneration, referenced);
+    }
+
+    public record PhysicalReadReferenceSnapshot(long objectId, long publicationGeneration, boolean referenced) {
     }
 
     private static boolean containsObjectReference(

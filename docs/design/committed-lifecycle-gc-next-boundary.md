@@ -3612,3 +3612,55 @@ object DELETE or metadata tombstone behavior is changed. MinIO GA
 `9a28c11b6d97ecacafe1b8566cde5cc34d604889` remains
 frozen and PR #2 stays Draft. All 17 exact-SHA workflows must pass
 before this batch can become a stable development baseline.
+
+
+## Batch 307 — optimistic local publication/replay generation validation
+
+**Stable parent:** Batch 306 at
+`4f1388d2b42dcde4b37370ee838f4f774dea0432` passed all
+**17/17** exact-SHA GitHub Actions, including Java 25, real MinIO,
+KRaft Controller HA and replica durability. This batch does not
+depend on any production COMMITTED-GC or remote deletion feature.
+
+The previous `assessWithLocalReadIndex` inspected one immutable
+`SharedMetadataImage.CommittedObjectEvidence` snapshot and a separate
+`RemoteObjectIndex` primary+fallback view. A concurrently published
+COMMITTED range could change the fallback map or metadata replay point
+while the diagnostic was checking the old reports. The two subsystems
+do not share an atomic lock, so a one-time scan cannot establish even
+an observation-stable local result.
+
+Add a synchronized, object-scoped
+`RemoteObjectIndex.PhysicalReadReferenceSnapshot` containing the
+primary+alternate reference flag and a global local physical-read-view
+publication generation. Advance that generation on successful primary
+**or alternate-only** publication; preserve the existing
+`revision(SharedPartitionId)` primary-only contract and do not advance
+the physical generation for a byte-identical replay or rejected
+conflicting range. Snapshots share the same add/restore monitor that
+protects atomic physical publication.
+
+The closure diagnostic now reads the metadata evidence and local index
+generation before evaluating reports, then rereads both afterward.
+Any metadata replay change is classified as
+`METADATA_REPLAY_CHANGED_DURING_ASSESSMENT`, and any local index
+publication as `LOCAL_READ_INDEX_CHANGED_DURING_ASSESSMENT`.
+Either is a failure to prove even local observation stability.
+Any actual primary/fallback Object ID reference still yields
+`LOCAL_READ_INDEX_REFERENCE_ACTIVE`.
+
+Seven mandatory tests cover alternate-only generation, idempotent
+replay and rejected conflicts, packed primary/fallback snapshots,
+deterministic alternate-only and unrelated index publication
+interleavings, metadata-log replay during report enumeration, and
+stable local diagnostic behavior. The Java 25 anti-skip method inventory
+increases **743 -> 750** with the Python expected count updated.
+
+This is an optimistic negative-only observation, **not** a joint
+metadata/index lock, persistent cross-Broker fencing, Controller
+challenge authentication, global reference closure, or safe S3
+deletion authorization. New publications can occur immediately after
+the final read. A positive result is still named `MATCHED_UNTRUSTED`;
+COMMITTED physical GC remains DISABLED. No Kafka native ISR/HW,
+replica durability, MinIO GA `9a28c11b6d97ecacafe1b8566cde5cc34d604889`
+or PR Draft state is modified.
