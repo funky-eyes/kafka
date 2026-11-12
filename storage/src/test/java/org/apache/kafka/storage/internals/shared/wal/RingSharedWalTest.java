@@ -208,6 +208,19 @@ class RingSharedWalTest {
             assertEquals(130L, secondResult.offset());
             assertEquals(100, secondResult.length());
             assertRecordEquals(second, wal.read(location(second, secondResult)));
+
+            // A Ring WAL may have a perfectly valid CRC at the indexed
+            // address while the index carries stale Kafka coordinates.
+            WalLocation correct = location(second, secondResult);
+            assertThrows(WalCorruptionException.class, () -> wal.read(new WalLocation(
+                correct.walOffset(), correct.length(), correct.payloadLength(),
+                correct.leaderEpoch() + 1, correct.firstOffset(), correct.lastOffset())));
+            assertThrows(WalCorruptionException.class, () -> wal.read(new WalLocation(
+                correct.walOffset(), correct.length(), correct.payloadLength(),
+                correct.leaderEpoch(), correct.firstOffset() + 1, correct.lastOffset() + 1)));
+            assertThrows(WalCorruptionException.class, () -> wal.read(new WalLocation(
+                correct.walOffset(), correct.length(), correct.payloadLength(),
+                correct.leaderEpoch(), correct.firstOffset(), correct.lastOffset() + 1)));
         }
 
         try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
