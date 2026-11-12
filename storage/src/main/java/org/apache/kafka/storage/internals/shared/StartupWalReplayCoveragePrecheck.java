@@ -19,6 +19,8 @@ package org.apache.kafka.storage.internals.shared;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 import org.apache.kafka.storage.internals.shared.wal.WalLocation;
 
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 
@@ -43,7 +45,9 @@ public final class StartupWalReplayCoveragePrecheck {
         KAFKA_BATCH_GAP_OR_OVERLAP,
         SOURCE_END_SPLITS_BATCH,
         POST_START_WAL_BATCH,
-        SOURCE_WINDOW_NOT_RECOVERED
+        SOURCE_WINDOW_NOT_RECOVERED,
+        REPLAYED_DATA_COUNT_INSUFFICIENT,
+        OVERLAPPING_WAL_ADDRESSES
     }
 
     public static Finding assess(
@@ -89,7 +93,33 @@ public final class StartupWalReplayCoveragePrecheck {
         }
         // Validate every supplied entry; an extra batch beyond the native
         // source end must never be accepted by an early successful return.
-        return nextKafkaOffset == sourceHighWatermark
-            ? Finding.RECOVERED_BATCH_WINDOW : Finding.SOURCE_WINDOW_NOT_RECOVERED;
+        if (nextKafkaOffset != sourceHighWatermark) {
+            return Finding.SOURCE_WINDOW_NOT_RECOVERED;
+        }
+        return assessReplayByteIntervals(indexedBatches, recovered.get().dataRecords());
+    }
+
+    /**
+     * Maximum replayed WAL end and contiguous Kafka offsets are not proof
+     * that distinct batches were recovered from distinct WAL byte ranges.
+     * Keep these independent negative checks outside the Kafka offset
+     * walk to preserve strict Checkstyle complexity without relaxing it.
+     */
+    private static Finding assessReplayByteIntervals(List<WalLocation> indexedBatches, long dataRecords) {
+        if (indexedBatches.size() > dataRecords) {
+            return Finding.REPLAYED_DATA_COUNT_INSUFFICIENT;
+        }
+        // Valid Kafka offset order need not be WAL append order (after
+        // truncation/recovery), so sort a copy by logical WAL address.
+        List<WalLocation> byWalAddress = new ArrayList<>(indexedBatches);
+        byWalAddress.sort(Comparator.comparingLong(WalLocation::walOffset));
+        for (int i = 1; i < byWalAddress.size(); i++) {
+            WalLocation previous = byWalAddress.get(i - 1);
+            WalLocation current = byWalAddress.get(i);
+            if (current.walOffset() < previous.walOffset() + previous.length()) {
+                return Finding.OVERLAPPING_WAL_ADDRESSES;
+            }
+        }
+        return Finding.RECOVERED_BATCH_WINDOW;
     }
 }
