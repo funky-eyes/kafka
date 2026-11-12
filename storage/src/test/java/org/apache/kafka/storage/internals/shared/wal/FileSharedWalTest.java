@@ -55,6 +55,16 @@ class FileSharedWalTest {
                 dataLocation.segmentId(), dataLocation.position(), dataLocation.length(), 3, 10, 19));
             assertEquals(WalRecordType.DATA, randomRead.type());
             assertArrayEquals(new byte[]{1, 2, 3}, bytes(randomRead.payload()));
+
+            // A stale or misdirected index may point at the same valid WAL
+            // bytes but claim another Kafka range or leader generation.
+            // A valid record checksum alone cannot authenticate that claim.
+            assertThrows(WalCorruptionException.class, () -> wal.read(new WalLocation(
+                dataLocation.segmentId(), dataLocation.position(), dataLocation.length(), 4, 10, 19)));
+            assertThrows(WalCorruptionException.class, () -> wal.read(new WalLocation(
+                dataLocation.segmentId(), dataLocation.position(), dataLocation.length(), 3, 11, 19)));
+            assertThrows(WalCorruptionException.class, () -> wal.read(new WalLocation(
+                dataLocation.segmentId(), dataLocation.position(), dataLocation.length(), 3, 10, 20)));
         }
 
         List<WalRecord> records = new ArrayList<>();
