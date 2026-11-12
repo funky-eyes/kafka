@@ -456,7 +456,7 @@ public final class FileSharedWal implements SharedWal {
             for (int i = 0; i < groups.size(); i++) {
                 PendingAppend group = groups.get(i);
                 long groupBytes = group.totalBytes();
-                if (currentUsedBytes + plannedBytes + groupBytes > capacityBytes) {
+                if (!fitsWithinCapacity(currentUsedBytes, plannedBytes, groupBytes, capacityBytes)) {
                     firstRejected = i;
                     break;
                 }
@@ -499,6 +499,21 @@ public final class FileSharedWal implements SharedWal {
                 completed.future.complete(completed.results);
             }
         }
+    }
+
+    /**
+     * Capacity admission must never add potentially unbounded logical WAL
+     * counters before checking the limit: signed overflow would otherwise
+     * admit writes after capacity is exhausted. Check only remaining space.
+     * Visible for overflow regressions without allocating a giant WAL file.
+     */
+    static boolean fitsWithinCapacity(long used, long planned, long groupBytes, long capacity) {
+        if (used < 0L || planned < 0L || groupBytes <= 0L || capacity < 0L
+            || used > capacity) {
+            return false;
+        }
+        long available = capacity - used;
+        return planned <= available && groupBytes <= available - planned;
     }
 
     private void ensureWritableSegment(int recordLength) throws IOException {
