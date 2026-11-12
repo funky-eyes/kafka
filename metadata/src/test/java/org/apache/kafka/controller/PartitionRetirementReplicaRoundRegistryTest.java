@@ -346,7 +346,9 @@ class PartitionRetirementReplicaRoundRegistryTest {
         Fixture f = fixture();
         PartitionRetirementReplicaRoundRegistry rounds = new PartitionRetirementReplicaRoundRegistry();
         PartitionRetirementReplicaRoundRegistry.Challenge challenge = issue(rounds, f, OBJECT_ID, NOW_NS);
-        recordAll(rounds, challenge, NOW_NS);
+        for (int id = 1; id <= 3; id++) {
+            assertTrue(recordAuthenticated(rounds, f, challenge, report(challenge, id), trusted(id), NOW_NS));
+        }
 
         assertTrue(rounds.consumeAuthenticated(challenge.roundId(), trusted(2), BOUND,
             f.replicas(), f.cluster(), NOW_NS).isEmpty());
