@@ -19,6 +19,8 @@ package org.apache.kafka.storage.internals.shared;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 import org.apache.kafka.storage.internals.shared.wal.WalLocation;
 
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 
@@ -43,7 +45,9 @@ public final class StartupWalReplayCoveragePrecheck {
         KAFKA_BATCH_GAP_OR_OVERLAP,
         SOURCE_END_SPLITS_BATCH,
         POST_START_WAL_BATCH,
-        SOURCE_WINDOW_NOT_RECOVERED
+        SOURCE_WINDOW_NOT_RECOVERED,
+        REPLAYED_DATA_COUNT_INSUFFICIENT,
+        OVERLAPPING_WAL_ADDRESSES
     }
 
     public static Finding assess(
@@ -89,7 +93,27 @@ public final class StartupWalReplayCoveragePrecheck {
         }
         // Validate every supplied entry; an extra batch beyond the native
         // source end must never be accepted by an early successful return.
-        return nextKafkaOffset == sourceHighWatermark
-            ? Finding.RECOVERED_BATCH_WINDOW : Finding.SOURCE_WINDOW_NOT_RECOVERED;
+        if (nextKafkaOffset != sourceHighWatermark) {
+            return Finding.SOURCE_WINDOW_NOT_RECOVERED;
+        }
+        // The maximum recovered WAL end is not evidence for arbitrarily
+        // many Kafka batches. A fabricated index cannot reuse the bytes of
+        // one DATA record to claim multiple nonoverlapping Kafka ranges.
+        if (indexedBatches.size() > recovered.get().dataRecords()) {
+            return Finding.REPLAYED_DATA_COUNT_INSUFFICIENT;
+        }
+        // Valid Kafka offset order need not be WAL append order (after
+        // truncation/recovery), so sort a copy by logical WAL address.
+        // Distinct Kafka batches must not claim the same physical WAL bytes.
+        List<WalLocation> byWalAddress = new ArrayList<>(indexedBatches);
+        byWalAddress.sort(Comparator.comparingLong(WalLocation::walOffset));
+        for (int i = 1; i < byWalAddress.size(); i++) {
+            WalLocation previous = byWalAddress.get(i - 1);
+            WalLocation current = byWalAddress.get(i);
+            if (current.walOffset() < previous.walOffset() + previous.length()) {
+                return Finding.OVERLAPPING_WAL_ADDRESSES;
+            }
+        }
+        return Finding.RECOVERED_BATCH_WINDOW;
     }
 }
