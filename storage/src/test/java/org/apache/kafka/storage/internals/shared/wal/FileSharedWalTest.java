@@ -156,6 +156,17 @@ class FileSharedWalTest {
 
     @Test
     void shouldRemainHealthyAfterRejectingAnOversizedCapacityAdmission() throws Exception {
+        // A mathematically overflowing sum must not be mistaken for free
+        // capacity. These cases exercise the actual writer admission guard.
+        assertFalse(FileSharedWal.fitsWithinCapacity(
+            Long.MAX_VALUE - 10L, 20L, 20L, Long.MAX_VALUE));
+        assertFalse(FileSharedWal.fitsWithinCapacity(
+            Long.MAX_VALUE - 10L, 5L, 6L, Long.MAX_VALUE));
+        assertTrue(FileSharedWal.fitsWithinCapacity(
+            Long.MAX_VALUE - 10L, 5L, 5L, Long.MAX_VALUE));
+        assertFalse(FileSharedWal.fitsWithinCapacity(256L, 0L, 1L, 255L));
+        assertFalse(FileSharedWal.fitsWithinCapacity(0L, -1L, 1L, 255L));
+
         Path walDir = tempDir.resolve("wal-capacity-recovery");
         long usedAfterFirstAppend;
         try (FileSharedWal wal = new FileSharedWal(walDir, 512, 512)) {
