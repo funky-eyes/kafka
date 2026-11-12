@@ -30,6 +30,7 @@ import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -114,6 +115,55 @@ class FileSharedWalCrashWindowTest {
             assertFalse(Files.exists(caseDir.resolve("wal-00000000000000000001.log")));
             assertFalse(Files.exists(caseDir.resolve("wal-00000000000000000002.log")));
         }
+
+        // Each individually committed group fills its own segment. Erasing
+        // the middle segment models a permanently lost WAL extent rather
+        // than an ordinary, safe prefix reclamation.
+        long isolatedSegmentBytes = 512L;
+        int payloadSize = Math.toIntExact(isolatedSegmentBytes - 2L * WalRecordCodec.HEADER_BYTES - 1L);
+        Path complete = tempDir.resolve("contiguous-committed-segments");
+        try (FileSharedWal wal = new FileSharedWal(complete, CAPACITY_BYTES, isolatedSegmentBytes)) {
+            for (int i = 0; i < 3; i++) {
+                wal.append(data(10L * i, new byte[payloadSize])).get(10, TimeUnit.SECONDS);
+            }
+        }
+        Path firstSegment = Path.of("wal-00000000000000000000.log");
+        Path missingSegment = Path.of("wal-00000000000000000001.log");
+        Path lastSegment = Path.of("wal-00000000000000000002.log");
+        assertTrue(Files.exists(complete.resolve(firstSegment)));
+        assertTrue(Files.exists(complete.resolve(missingSegment)));
+        assertTrue(Files.exists(complete.resolve(lastSegment)));
+
+        Path missingMiddle = tempDir.resolve("missing-middle-committed-segment");
+        copyWal(complete, missingMiddle);
+        Files.delete(missingMiddle.resolve(missingSegment));
+        assertThrows(WalCorruptionException.class, () -> {
+            try (FileSharedWal wal = new FileSharedWal(missingMiddle, CAPACITY_BYTES, isolatedSegmentBytes)) {
+                wal.replay((record, location) -> { });
+            }
+        });
+        assertTrue(Files.exists(missingMiddle.resolve(firstSegment)));
+        assertTrue(Files.exists(missingMiddle.resolve(lastSegment)),
+            "fail-closed recovery must not delete surviving durable segments");
+
+        // Revalidate on explicit replay too: disk loss after opening the
+        // writer must be rejected before exposing even the intact prefix.
+        Path lostWhileOpen = tempDir.resolve("segment-lost-while-open");
+        copyWal(complete, lostWhileOpen);
+        try (FileSharedWal wal = new FileSharedWal(lostWhileOpen, CAPACITY_BYTES, isolatedSegmentBytes)) {
+            Files.delete(lostWhileOpen.resolve(missingSegment));
+            List<WalRecord> exposed = new ArrayList<>();
+            assertThrows(WalCorruptionException.class,
+                () -> wal.replay((record, location) -> exposed.add(record)));
+            assertTrue(exposed.isEmpty(), "missing intermediate segment cannot expose a partial history");
+        }
+
+        // By contrast a contiguous suffix after reclaiming the oldest
+        // segment remains recoverable, even when its first ID is nonzero.
+        Path reclaimedPrefix = tempDir.resolve("reclaimed-oldest-prefix");
+        copyWal(complete, reclaimedPrefix);
+        Files.delete(reclaimedPrefix.resolve(firstSegment));
+        assertEquals(List.of(10L, 20L), dataOffsets(replay(reclaimedPrefix, isolatedSegmentBytes)));
     }
 
     private CandidateLayout writePristineSingleSegmentWal(Path walDir) throws Exception {

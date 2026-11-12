@@ -251,7 +251,9 @@ public final class FileSharedWal implements SharedWal {
     public void replay(WalReplayConsumer consumer) throws IOException {
         Objects.requireNonNull(consumer, "consumer");
         List<ReplayEntry> pendingGroup = new ArrayList<>();
-        for (Path segment : segmentFiles()) {
+        List<Path> segments = segmentFiles();
+        requireContiguousSegments(segments);
+        for (Path segment : segments) {
             long segmentId = parseSegmentId(segment);
             try (WalIoBackend.Handle handle = ioBackend.openRead(segment)) {
                 long position = 0;
@@ -533,6 +535,7 @@ public final class FileSharedWal implements SharedWal {
 
     private RecoveryState recoverSegments() throws IOException {
         List<Path> segments = segmentFiles();
+        requireContiguousSegments(segments);
         RecoveryScan scan = scanSegments(segments);
         if (scan.truncateFrom() != null) {
             truncateIncompleteTail(segments, scan.truncateFrom());
@@ -547,6 +550,24 @@ public final class FileSharedWal implements SharedWal {
             summary.lastSegmentId() + 1,
             scan.maxGroupId() + 1
         );
+    }
+
+    /**
+     * Reclaim removes only an immutable oldest-prefix of File WAL segments,
+     * so the first surviving segment need not be zero. Missing segments
+     * *inside* the surviving suffix imply lost durable WAL bytes and must
+     * never be silently interpreted as one contiguous recovery history.
+     */
+    private static void requireContiguousSegments(List<Path> segments) throws WalCorruptionException {
+        long previousId = -1L;
+        for (Path path : segments) {
+            long id = parseSegmentId(path);
+            if (previousId >= 0L && id - previousId != 1L) {
+                throw new WalCorruptionException(
+                    "File WAL lost an intermediate segment: previous=" + previousId + ", next=" + id);
+            }
+            previousId = id;
+        }
     }
 
     private RecoveryScan scanSegments(List<Path> segments) throws IOException {
