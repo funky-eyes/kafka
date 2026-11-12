@@ -197,6 +197,26 @@ class CurrentLocalWalCoveragePrecheckTest {
                 secondRestarted.localDurableWindowCoverage(FIRST, 0L, 20L));
             assertEquals(0L, secondRestarted.liveWalDurabilityObservation(FIRST).dataBatches());
         }
+
+        // Model a permanently lost follower disk replaced by an empty disk
+        // while the surviving Broker reopens its original durable WAL.
+        // A matching TopicId/partition must not import another Broker's
+        // replayed WAL coverage into the replacement's local evidence.
+        Path replacementDisk = tempDir.resolve("replica-b-replacement-disk");
+        try (
+            SharedStorageEngine survivingBroker = new SharedStorageEngine(
+                new FileSharedWal(firstBrokerDir, 1024 * 1024, 4096));
+            SharedStorageEngine replacementBroker = new SharedStorageEngine(
+                new FileSharedWal(replacementDisk, 1024 * 1024, 4096))
+        ) {
+            assertEquals(2L, survivingBroker.startupWalReplayEvidence().replayedRecords());
+            assertEquals(Finding.INDEXED_BATCH_WINDOW,
+                survivingBroker.localDurableWindowCoverage(FIRST, 0L, 20L));
+            assertEquals(0L, replacementBroker.startupWalReplayEvidence().replayedRecords());
+            assertEquals(Finding.NO_INDEXED_DATA,
+                replacementBroker.localDurableWindowCoverage(FIRST, 0L, 20L));
+            assertEquals(0L, replacementBroker.liveWalDurabilityObservation(FIRST).dataBatches());
+        }
     }
 
     @Test
