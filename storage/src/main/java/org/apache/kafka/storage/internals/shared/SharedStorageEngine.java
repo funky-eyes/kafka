@@ -516,7 +516,18 @@ public final class SharedStorageEngine implements AutoCloseable {
     public List<WalRecord> readUploadCandidates(List<UploadCandidate> candidates) throws IOException {
         Objects.requireNonNull(candidates, "candidates");
         synchronized (walMaintenanceLock) {
-            List<WalLocation> locations = candidates.stream().map(UploadCandidate::location).toList();
+            List<WalLocation> locations = new ArrayList<>(candidates.size());
+            for (UploadCandidate candidate : candidates) {
+                if (candidate == null || candidate.partition() == null
+                    || candidate.location() == null || candidate.offsets() == null) {
+                    throw new WalCorruptionException("WAL upload candidate lacks partition or indexed range");
+                }
+                if (candidate.offsets().startOffset() != candidate.location().firstOffset()
+                    || candidate.offsets().endOffset() - 1L != candidate.location().lastOffset()) {
+                    throw new WalCorruptionException("WAL upload candidate offsets disagree with indexed batch");
+                }
+                locations.add(candidate.location());
+            }
             List<WalRecord> records = wal.readBatch(locations);
             if (records.size() != candidates.size()) {
                 throw new WalCorruptionException("WAL upload candidate read count does not match selection");
