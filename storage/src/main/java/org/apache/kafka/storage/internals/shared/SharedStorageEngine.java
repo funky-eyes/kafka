@@ -26,10 +26,12 @@ import org.apache.kafka.storage.internals.shared.wal.PartitionWalIndex;
 import org.apache.kafka.storage.internals.shared.wal.RemoteCoverageWalReclaimPolicy;
 import org.apache.kafka.storage.internals.shared.wal.SharedWal;
 import org.apache.kafka.storage.internals.shared.wal.WalAppendResult;
+import org.apache.kafka.storage.internals.shared.wal.WalCorruptionException;
 import org.apache.kafka.storage.internals.shared.wal.WalDurabilityStats;
 import org.apache.kafka.storage.internals.shared.wal.WalLocation;
 import org.apache.kafka.storage.internals.shared.wal.WalPartitionKey;
 import org.apache.kafka.storage.internals.shared.wal.WalRecord;
+import org.apache.kafka.storage.internals.shared.wal.WalRecordType;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -233,7 +235,9 @@ public final class SharedStorageEngine implements AutoCloseable {
             if (location.isEmpty()) {
                 return Optional.empty();
             }
-            return Optional.of(wal.read(location.get()));
+            WalRecord record = wal.read(location.get());
+            requireLocalDataIdentity(partition, location.get(), record);
+            return Optional.of(record);
         }
     }
 
@@ -396,12 +400,55 @@ public final class SharedStorageEngine implements AutoCloseable {
                 return new LocalReadResult(selection.firstBatchOffset(), List.of(), 0, selection.firstBatchIncomplete());
             }
             List<WalRecord> records = wal.readBatch(selection.locations());
+            requireLocalBatchIdentity(partition, selection.locations(), records);
             return new LocalReadResult(
                 selection.firstBatchOffset(),
                 records,
                 selection.sizeInBytes(),
                 selection.firstBatchIncomplete()
             );
+        }
+    }
+
+    /**
+     * A valid WAL CRC, physical address and Kafka batch offset do not prove
+     * that an index points to the requested TopicId/partition. Reject
+     * cross-partition aliases before serving Kafka reads or remote uploads.
+     * This is a local data-integrity check, not replica durability authority.
+     */
+    static void requireLocalDataIdentity(
+        SharedPartitionId partition,
+        WalLocation location,
+        WalRecord record
+    ) throws WalCorruptionException {
+        Objects.requireNonNull(partition, "partition");
+        Objects.requireNonNull(location, "location");
+        if (record == null || record.type() != WalRecordType.DATA) {
+            throw new WalCorruptionException("Expected a local WAL DATA record for " + partition);
+        }
+        if (record.topicIdHigh() != partition.topicIdHigh()
+            || record.topicIdLow() != partition.topicIdLow()
+            || record.partition() != partition.partition()) {
+            throw new WalCorruptionException("Local WAL record belongs to another partition: " + partition);
+        }
+        if (record.leaderEpoch() != location.leaderEpoch()
+            || record.firstOffset() != location.firstOffset()
+            || record.lastOffset() != location.lastOffset()
+            || record.payload().remaining() != location.payloadLength()) {
+            throw new WalCorruptionException("Local WAL record differs from indexed Kafka batch: " + location);
+        }
+    }
+
+    private static void requireLocalBatchIdentity(
+        SharedPartitionId partition,
+        List<WalLocation> locations,
+        List<WalRecord> records
+    ) throws WalCorruptionException {
+        if (records.size() != locations.size()) {
+            throw new WalCorruptionException("Local WAL batch read count does not match selection");
+        }
+        for (int i = 0; i < records.size(); i++) {
+            requireLocalDataIdentity(partition, locations.get(i), records.get(i));
         }
     }
 
@@ -470,7 +517,14 @@ public final class SharedStorageEngine implements AutoCloseable {
         Objects.requireNonNull(candidates, "candidates");
         synchronized (walMaintenanceLock) {
             List<WalLocation> locations = candidates.stream().map(UploadCandidate::location).toList();
-            return wal.readBatch(locations);
+            List<WalRecord> records = wal.readBatch(locations);
+            if (records.size() != candidates.size()) {
+                throw new WalCorruptionException("WAL upload candidate read count does not match selection");
+            }
+            for (int i = 0; i < records.size(); i++) {
+                requireLocalDataIdentity(candidates.get(i).partition(), locations.get(i), records.get(i));
+            }
+            return records;
         }
     }
 
