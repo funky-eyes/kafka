@@ -53,6 +53,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -169,6 +170,15 @@ public class SharedStorageIndependentProcessSigkillTest {
                 assertFalse(victim.process().isAlive());
                 System.out.println("MATRIX_SIGKILL rf=" + scenario.replicationFactor() +
                     " brokerId=" + oldLeader + " pid=" + victimPid);
+
+                if (scenario.replicationFactor() >= 2) {
+                    // Permanent loss of the leader's local WAL must not
+                    // invalidate acks=all data already held by other ISR
+                    // members. Keep KRaft metadata storage untouched.
+                    int removedFiles = eraseDeadBrokerWalDisk(oldLeader);
+                    System.out.println("MATRIX_PERMANENT_WAL_LOSS rf=" + scenario.replicationFactor() +
+                        " brokerId=" + oldLeader + " removedFiles=" + removedFiles);
+                }
 
                 if (scenario.replicationFactor() == 1) {
                     runSingleReplicaRecovery(
@@ -443,6 +453,36 @@ public class SharedStorageIndependentProcessSigkillTest {
             log,
             config
         );
+    }
+
+    /**
+     * Simulate a permanently failed Broker WAL disk, not a process restart.
+     * This targets only this test's isolated temporary WAL directory, after
+     * SIGKILL has completed. Preserve the separate Kafka/KRaft log.dirs
+     * so the remaining two Controllers can continue holding quorum.
+     */
+    private int eraseDeadBrokerWalDisk(int brokerId) throws IOException {
+        if (brokerId < 1 || brokerId > 3) {
+            throw new IllegalArgumentException("Expected a test Broker ID in [1, 3]");
+        }
+        Path root = tempDir.toAbsolutePath().normalize();
+        Path walDir = root.resolve("node-" + brokerId).resolve("wal").normalize();
+        assertTrue(walDir.startsWith(root) && Files.isDirectory(walDir),
+            "Only the stopped test Broker's WAL directory may be destroyed");
+        List<Path> entries;
+        try (Stream<Path> stream = Files.walk(walDir)) {
+            entries = stream.sorted(Comparator.reverseOrder()).toList();
+        }
+        long fileCount = entries.stream().filter(Files::isRegularFile).count();
+        assertTrue(fileCount > 0L, "The killed leader must have WAL bytes to erase");
+        for (Path path : entries) {
+            Files.delete(path);
+        }
+        Files.createDirectories(walDir);
+        try (Stream<Path> stream = Files.list(walDir)) {
+            assertEquals(0L, stream.count(), "Replacement WAL must start on a blank disk");
+        }
+        return Math.toIntExact(fileCount);
     }
 
     private void restartBroker(
