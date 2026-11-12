@@ -509,6 +509,35 @@ class PartitionWalIndexTest {
     }
 
     @Test
+    void overlappingWalAdmissionsRequireEveryFutureToFinish() {
+        PartitionWalIndex index = new PartitionWalIndex();
+        WalPartitionKey key = new WalPartitionKey(1L, 2L, 3);
+        CompletableFuture<Void> first = new CompletableFuture<>();
+        CompletableFuture<Void> second = new CompletableFuture<>();
+        CompletableFuture<Void> firstTracked = index.trackDurableWrite(key, () -> first);
+        CompletableFuture<Void> secondTracked = index.trackDurableWrite(key, () -> second);
+
+        assertEquals(-1L, index.walAdmissionRevision(key));
+        first.complete(null);
+        firstTracked.join();
+        assertEquals(-1L, index.walAdmissionRevision(key));
+
+        second.complete(null);
+        secondTracked.join();
+        assertEquals(4L, index.walAdmissionRevision(key));
+        assertEquals(0L, index.mutationRevision(key));
+    }
+
+    @Test
+    void synchronousNullWalFutureFailsClosedAndReleasesAdmission() {
+        PartitionWalIndex index = new PartitionWalIndex();
+        WalPartitionKey key = new WalPartitionKey(1L, 2L, 3);
+        assertThrows(NullPointerException.class, () -> index.trackDurableWrite(key, () -> null));
+        assertEquals(2L, index.walAdmissionRevision(key));
+        assertEquals(0L, index.mutationRevision(key));
+    }
+
+    @Test
     void shouldWalkPartitionRangesWithoutMaterializingBacklog() {
         PartitionWalIndex index = new PartitionWalIndex();
         WalPartitionKey key = new WalPartitionKey(1L, 2L, 3);

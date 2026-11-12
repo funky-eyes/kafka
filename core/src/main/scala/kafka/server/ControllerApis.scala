@@ -611,8 +611,11 @@ class ControllerApis(
   def handleBrokerHeartBeatRequest(request: RequestChannel.Request): CompletableFuture[Unit] = {
     val heartbeatRequest = request.body[BrokerHeartbeatRequest]
     authHelper.authorizeClusterOperation(request, CLUSTER_ACTION)
-    val context = new ControllerRequestContext(request.context.header.data, request.context.principal,
-      requestTimeoutMsToDeadlineNs(time, config.brokerHeartbeatIntervalMs / 2))
+    // Carry the actual network security protocol and forwarding state to
+    // the Controller: the principal alone cannot attest a Broker channel.
+    val context = new ControllerRequestContext(request.context,
+      requestTimeoutMsToDeadlineNs(time, config.brokerHeartbeatIntervalMs / 2),
+      request.isForwarded)
     controller.processBrokerHeartbeat(context, heartbeatRequest.data).handle[Unit] { (reply, e) =>
       def createResponseCallback(requestThrottleMs: Int,
                                  reply: BrokerHeartbeatReply,
@@ -627,7 +630,8 @@ class ControllerApis(
             setErrorCode(NONE.code).
             setIsCaughtUp(reply.isCaughtUp).
             setIsFenced(reply.isFenced).
-            setShouldShutDown(reply.shouldShutDown))
+            setShouldShutDown(reply.shouldShutDown).
+            setSourceWalProbeChallenge(ControllerApis.sourceWalProbeChallenge(reply, request.context.apiVersion)))
         }
       }
       requestHelper.sendResponseMaybeThrottle(request,
@@ -1103,5 +1107,36 @@ class ControllerApis(
   def handleUpdateRaftVoter(request: RequestChannel.Request): CompletableFuture[Unit] = {
     authHelper.authorizeClusterOperation(request, CLUSTER_ACTION)
     handleRaftRequest(request, response => new UpdateRaftVoterResponse(response.asInstanceOf[UpdateRaftVoterResponseData]))
+  }
+}
+
+/**
+ * Stable brokers always receive the unchanged v0-v2 heartbeat response.
+ * The v3 tagged field can only carry an immutable Challenge selected in
+ * the active Controller event. It is diagnostic and never GC authority.
+ */
+object ControllerApis {
+  private[server] def sourceWalProbeChallenge(
+    reply: BrokerHeartbeatReply,
+    apiVersion: Int
+  ): BrokerHeartbeatResponseData.SourceWalProbeChallenge = {
+    val request = reply.sourceWalProbeChallenge()
+    if (apiVersion != 3 || request == null || reply.isFenced ||
+        reply.inControlledShutdown || reply.shouldShutDown) {
+      null
+    } else {
+      new BrokerHeartbeatResponseData.SourceWalProbeChallenge()
+        .setNonce(request.nonce())
+        .setClusterId(request.clusterId())
+        .setTopicId(request.topicId())
+        .setPartitionId(request.partitionId())
+        .setBrokerId(request.brokerId())
+        .setBrokerEpoch(request.brokerEpoch())
+        .setBrokerIncarnationId(request.brokerIncarnationId())
+        .setSourceLeaderEpoch(request.sourceLeaderEpoch())
+        .setExpectedPreviousAuthorityOffset(request.expectedPreviousAuthorityOffset())
+        .setNextAuthorityOffset(request.nextAuthorityOffset())
+        .setClaimedLogStartOffset(request.claimedLogStartOffset())
+    }
   }
 }

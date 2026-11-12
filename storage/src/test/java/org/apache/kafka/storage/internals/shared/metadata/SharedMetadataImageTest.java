@@ -20,6 +20,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -28,6 +29,29 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SharedMetadataImageTest {
+    @Test
+    void targetedCommittedObjectLookupRequiresReadyAndRejectsHistoricalTombstones() {
+        SharedMetadataImage image = new SharedMetadataImage();
+        long oldId = BrokerObjectId.compose(1, 131L);
+        SharedObjectMetadata old = metadata(oldId, 1_131L);
+        byte[] key = SharedMetadataRecordCodec.objectKey(oldId);
+        image.apply(key, SharedMetadataRecordCodec.committedObjectValue(old));
+        assertThrows(IllegalStateException.class, () -> image.committedObject(oldId));
+        image.apply(key, null);
+        image.markReady();
+        assertTrue(image.committedObject(oldId).isEmpty());
+
+        long liveId = BrokerObjectId.compose(1, 132L);
+        SharedObjectMetadata live = metadata(liveId, 1_132L);
+        image.apply(
+            SharedMetadataRecordCodec.objectKey(liveId),
+            SharedMetadataRecordCodec.committedObjectValue(live)
+        );
+        assertEquals(live, image.committedObject(liveId).orElseThrow());
+        image.markFailed(new IllegalStateException("metadata replay stopped"));
+        assertThrows(IllegalStateException.class, () -> image.committedObject(liveId));
+    }
+
     @Test
     void staysFailClosedUntilInitialReplayIsMarkedReady() {
         SharedMetadataImage image = new SharedMetadataImage();
@@ -67,11 +91,20 @@ class SharedMetadataImageTest {
 
         byte[] committedValue = SharedMetadataRecordCodec.committedObjectValue(committed);
         image.apply(key, committedValue);
+        assertTrue(observed.isEmpty(), "Initial replay must not publish a transient COMMIT");
+
+        image.apply(key, committedValue);
+        image.markReady();
+        image.markReady();
         assertEquals(List.of(committed), observed);
 
-        // Replaying an identical COMMIT record is idempotent and must not duplicate the observer side effect.
-        image.apply(key, committedValue);
-        assertEquals(List.of(committed), observed);
+        long liveId = BrokerObjectId.compose(1, 15L);
+        SharedObjectMetadata live = metadata(liveId, 115L);
+        image.apply(
+            SharedMetadataRecordCodec.objectKey(liveId),
+            SharedMetadataRecordCodec.committedObjectValue(live)
+        );
+        assertEquals(List.of(committed, live), observed);
     }
 
     @Test
@@ -92,7 +125,9 @@ class SharedMetadataImageTest {
             SharedMetadataRecordCodec.committedObjectValue(second)
         );
 
-        assertEquals(List.of(first, second), observed);
+        image.markReady();
+        assertEquals(2, observed.size());
+        assertEquals(Set.of(first, second), Set.copyOf(observed));
     }
 
     @Test
@@ -103,13 +138,11 @@ class SharedMetadataImageTest {
         });
         long objectId = BrokerObjectId.compose(1, 12L);
 
-        RuntimeException error = assertThrows(
-            RuntimeException.class,
-            () -> image.apply(
-                SharedMetadataRecordCodec.objectKey(objectId),
-                SharedMetadataRecordCodec.committedObjectValue(metadata(objectId, 112L))
-            )
+        image.apply(
+            SharedMetadataRecordCodec.objectKey(objectId),
+            SharedMetadataRecordCodec.committedObjectValue(metadata(objectId, 112L))
         );
+        RuntimeException error = assertThrows(RuntimeException.class, image::markReady);
         assertSame(observerFailure, error);
         assertEquals(SharedMetadataImage.State.FAILED, image.state());
         assertSame(observerFailure, image.failure().orElseThrow());
@@ -200,20 +233,89 @@ class SharedMetadataImageTest {
         byte[] key = SharedMetadataRecordCodec.objectKey(objectId);
 
         image.apply(key, SharedMetadataRecordCodec.preparedObjectValue(500L));
-        image.markReady();
-        assertEquals(
-            List.of(new ObjectMetadataStore.PreparedObject(objectId, 500L)),
-            image.preparedObjects()
-        );
-
         SharedObjectMetadata committed = metadata(objectId, 202L);
         image.apply(key, SharedMetadataRecordCodec.committedObjectValue(committed));
-        assertTrue(image.preparedObjects().isEmpty());
-        assertEquals(List.of(committed), image.committedObjects());
-
+        // Historical object tombstones are accepted during initial replay.
         image.apply(key, null);
+        image.markReady();
         assertTrue(image.committedObjects().isEmpty());
         assertTrue(image.preparedObjects().isEmpty());
+    }
+
+
+    @Test
+    void historicalCommittedTombstoneDoesNotLeakIntoRebuiltRemoteIndex() {
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        SharedMetadataImage image = new SharedMetadataImage(index::add);
+        long objectId = BrokerObjectId.compose(7, 101L);
+        SharedObjectMetadata committed = metadata(objectId, 1_101L);
+        byte[] key = SharedMetadataRecordCodec.objectKey(objectId);
+        SharedPartitionId partition = committed.ranges().get(0).partition();
+
+        image.apply(key, SharedMetadataRecordCodec.committedObjectValue(committed));
+        assertTrue(index.find(partition, 5L).isEmpty(), "Initial replay must not publish a transient COMMIT");
+        image.apply(key, null);
+        image.markReady();
+
+        assertTrue(image.committedObjects().isEmpty());
+        assertTrue(index.find(partition, 5L).isEmpty(),
+            "A later historical tombstone must not leave a remote read index reference");
+    }
+
+    @Test
+    void liveCommittedObjectTombstoneFailsClosedWithoutRevokingRemoteReference() {
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        SharedMetadataImage image = new SharedMetadataImage(index::add);
+        long objectId = BrokerObjectId.compose(7, 102L);
+        SharedObjectMetadata committed = metadata(objectId, 1_102L);
+        SharedPartitionId partition = committed.ranges().get(0).partition();
+        byte[] key = SharedMetadataRecordCodec.objectKey(objectId);
+        image.apply(key, SharedMetadataRecordCodec.committedObjectValue(committed));
+        image.markReady();
+        assertEquals(objectId, index.find(partition, 5L).orElseThrow().objectId());
+
+        IllegalStateException failure = assertThrows(
+            IllegalStateException.class,
+            () -> image.applyFromMetadataLog(key, null, 10L)
+        );
+        assertTrue(failure.getMessage().contains("KRaft retirement authority"));
+        assertEquals(SharedMetadataImage.State.FAILED, image.state());
+        assertSame(failure, image.failure().orElseThrow());
+        assertThrows(IllegalStateException.class, image::committedObjects);
+        assertEquals(objectId, index.find(partition, 5L).orElseThrow().objectId());
+    }
+
+    @Test
+    void unknownLiveObjectTombstoneAlsoFailsClosed() {
+        SharedMetadataImage image = new SharedMetadataImage();
+        image.markReady();
+        long objectId = BrokerObjectId.compose(7, 103L);
+        IllegalStateException failure = assertThrows(
+            IllegalStateException.class,
+            () -> image.apply(SharedMetadataRecordCodec.objectKey(objectId), null)
+        );
+        assertTrue(failure.getMessage().contains("KRaft retirement authority"));
+        assertEquals(SharedMetadataImage.State.FAILED, image.state());
+    }
+
+    @Test
+    void liveCommittedListenerFailurePermanentlyFailsImageClosed() {
+        RuntimeException listenerFailure = new IllegalStateException("Remote index rejected live COMMIT");
+        SharedMetadataImage image = new SharedMetadataImage(ignored -> {
+            throw listenerFailure;
+        });
+        image.markReady();
+        long objectId = BrokerObjectId.compose(7, 104L);
+        RuntimeException failure = assertThrows(
+            RuntimeException.class,
+            () -> image.apply(
+                SharedMetadataRecordCodec.objectKey(objectId),
+                SharedMetadataRecordCodec.committedObjectValue(metadata(objectId, 1_104L))
+            )
+        );
+        assertSame(listenerFailure, failure);
+        assertEquals(SharedMetadataImage.State.FAILED, image.state());
+        assertSame(listenerFailure, image.failure().orElseThrow());
     }
 
     @Test
@@ -300,6 +402,72 @@ class SharedMetadataImageTest {
         assertTrue(image.committedObjects().isEmpty());
         assertTrue(image.cleanupClaimedObjects().isEmpty());
         assertTrue(image.cleanupFenced(objectId, createdTimeMs));
+    }
+
+    @Test
+    void targetedCleanupCompletionDistinguishesClaimedDeletedAndAbsentObjects() {
+        SharedMetadataImage image = new SharedMetadataImage();
+        long claimed = BrokerObjectId.compose(7, 101L);
+        long deleted = BrokerObjectId.compose(7, 102L);
+        long prepared = BrokerObjectId.compose(7, 103L);
+        long committed = BrokerObjectId.compose(7, 104L);
+        long unknown = BrokerObjectId.compose(7, 105L);
+
+        image.apply(
+            SharedMetadataRecordCodec.objectCleanupKey(claimed),
+            SharedMetadataRecordCodec.cleanupClaimedValue(500L)
+        );
+        image.apply(
+            SharedMetadataRecordCodec.objectCleanupKey(deleted),
+            SharedMetadataRecordCodec.cleanupDeletedValue(600L)
+        );
+        image.apply(
+            SharedMetadataRecordCodec.objectKey(prepared),
+            SharedMetadataRecordCodec.preparedObjectValue(700L)
+        );
+        image.apply(
+            SharedMetadataRecordCodec.objectKey(committed),
+            SharedMetadataRecordCodec.committedObjectValue(metadata(committed, 804L))
+        );
+        image.markReady();
+
+        assertEquals(
+            new SharedMetadataImage.CleanupCompletionEvidence(
+                SharedMetadataImage.CleanupCompletionStatus.CLAIMED, 500L
+            ),
+            image.cleanupCompletionEvidence(claimed)
+        );
+        assertEquals(
+            new SharedMetadataImage.CleanupCompletionEvidence(
+                SharedMetadataImage.CleanupCompletionStatus.DELETED, 600L
+            ),
+            image.cleanupCompletionEvidence(deleted)
+        );
+        var absent = new SharedMetadataImage.CleanupCompletionEvidence(
+            SharedMetadataImage.CleanupCompletionStatus.ABSENT, -1L
+        );
+        assertEquals(absent, image.cleanupCompletionEvidence(prepared));
+        assertEquals(absent, image.cleanupCompletionEvidence(committed));
+        assertEquals(absent, image.cleanupCompletionEvidence(unknown));
+        assertThrows(IllegalArgumentException.class, () -> image.cleanupCompletionEvidence(0L));
+    }
+
+    @Test
+    void cleanupCompletionEvidenceRequiresReadyNonFailedMetadataReplay() {
+        SharedMetadataImage image = new SharedMetadataImage();
+        long objectId = BrokerObjectId.compose(7, 106L);
+        assertThrows(IllegalStateException.class, () -> image.cleanupCompletionEvidence(objectId));
+        image.apply(
+            SharedMetadataRecordCodec.objectCleanupKey(objectId),
+            SharedMetadataRecordCodec.cleanupClaimedValue(800L)
+        );
+        image.markReady();
+        assertEquals(
+            SharedMetadataImage.CleanupCompletionStatus.CLAIMED,
+            image.cleanupCompletionEvidence(objectId).status()
+        );
+        image.markFailed(new IllegalStateException("consumer stopped"));
+        assertThrows(IllegalStateException.class, () -> image.cleanupCompletionEvidence(objectId));
     }
 
     @Test

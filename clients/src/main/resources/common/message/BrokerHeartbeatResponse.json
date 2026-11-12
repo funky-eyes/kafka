@@ -15,11 +15,12 @@
 
 // Version 1 is the same as version 0 (new field in request).
 // Version 2 is the same as version 0 (new field in request).
+// Version 3 adds a Controller-issued, non-authorizing diagnostic challenge (unstable).
 {
   "apiKey": 63,
   "type": "response",
   "name": "BrokerHeartbeatResponse",
-  "validVersions": "0-2",
+  "validVersions": "0-3",
   "flexibleVersions": "0+",
   "fields": [
     { "name": "ThrottleTimeMs", "type": "int32", "versions": "0+",
@@ -31,6 +32,24 @@
     { "name": "IsFenced", "type": "bool", "versions": "0+", "default": "true",
       "about": "True if the broker is fenced." },
     { "name": "ShouldShutDown", "type": "bool", "versions": "0+",
-      "about": "True if the broker should proceed with its shutdown." }
+      "about": "True if the broker should proceed with its shutdown." },
+    { "name": "SourceWalProbeChallenge", "type": "SourceWalProbeChallenge",
+      "versions": "3+", "taggedVersions": "3+", "tag": 0,
+      "nullableVersions": "3+", "default": "null",
+      "about": "Optional, single-use source sampling challenge; not permission to retire COMMITTED objects.",
+      "fields": [
+        { "name": "Nonce", "type": "uuid", "versions": "3+" },
+        { "name": "ClusterId", "type": "string", "versions": "3+" },
+        { "name": "TopicId", "type": "uuid", "versions": "3+" },
+        { "name": "PartitionId", "type": "int32", "versions": "3+" },
+        { "name": "BrokerId", "type": "int32", "versions": "3+", "entityType": "brokerId" },
+        { "name": "BrokerEpoch", "type": "int64", "versions": "3+" },
+        { "name": "BrokerIncarnationId", "type": "uuid", "versions": "3+" },
+        { "name": "SourceLeaderEpoch", "type": "int32", "versions": "3+" },
+        { "name": "SourcePartitionEpoch", "type": "int32", "versions": "3+" },
+        { "name": "ExpectedPreviousAuthorityOffset", "type": "int64", "versions": "3+" },
+        { "name": "NextAuthorityOffset", "type": "int64", "versions": "3+" },
+        { "name": "ClaimedLogStartOffset", "type": "int64", "versions": "3+" }
+      ]}
   ]
 }

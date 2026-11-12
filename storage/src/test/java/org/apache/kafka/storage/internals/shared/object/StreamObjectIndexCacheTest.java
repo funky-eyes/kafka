@@ -28,11 +28,22 @@ import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class StreamObjectIndexCacheTest {
     private static final SharedPartitionId PARTITION = new SharedPartitionId(51, 61, 0);
@@ -53,12 +64,93 @@ class StreamObjectIndexCacheTest {
         CompletableFuture<java.util.Optional<StreamObjectIndexReader.IndexSnapshot>> first = cache.get(reference, loader);
         CompletableFuture<java.util.Optional<StreamObjectIndexReader.IndexSnapshot>> second = cache.get(reference, loader);
 
-        assertSame(first, second);
-        first.get(10, TimeUnit.SECONDS);
+        assertNotSame(first, second, "Independent callers must not share a cancellable Future");
+        assertSame(first.get(10, TimeUnit.SECONDS).orElseThrow(), second.get(10, TimeUnit.SECONDS).orElseThrow());
         assertEquals(3, store.readCount());
         cache.get(reference, loader).get(10, TimeUnit.SECONDS);
         assertEquals(3, store.readCount());
         assertEquals(1, cache.size());
+    }
+
+    @Test
+    void cancelledIndexCacheWaiterDoesNotPoisonCoalescedReader() throws Exception {
+        PackedObject packed = packObject(928L);
+        CountingObjectStore delegate = new CountingObjectStore();
+        delegate.install(packed.metadata().objectId(), packed.bytes());
+        CompletableFuture<ByteBuffer> pendingHeader = new CompletableFuture<>();
+        AtomicInteger requests = new AtomicInteger();
+        ObjectStore delayed = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                requests.incrementAndGet();
+                return position == 0L ? pendingHeader : delegate.rangeRead(objectId, position, length);
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+        };
+        StreamObjectIndexCache cache = new StreamObjectIndexCache(4);
+        StreamObjectIndexReader loader = new StreamObjectIndexReader(delayed);
+        RemoteObjectIndex.RangeReference ref = reference(packed.metadata());
+
+        CompletableFuture<Optional<StreamObjectIndexReader.IndexSnapshot>> cancelled = cache.get(ref, loader);
+        CompletableFuture<Optional<StreamObjectIndexReader.IndexSnapshot>> surviving = cache.get(ref, loader);
+        assertNotSame(cancelled, surviving);
+        assertEquals(2, requests.get(), "One shared Header/Footer load must serve both readers");
+        assertTrue(cancelled.cancel(true));
+        assertFalse(pendingHeader.isCancelled(), "Cancelling one reader must not cancel the pending Header GET");
+        assertFalse(surviving.isDone());
+        assertEquals(1, cache.size(), "One caller cancellation cannot evict a live shared load");
+
+        pendingHeader.complete(delegate.rangeRead(ref.objectId(), 0, StreamObjectFormat.OBJECT_HEADER_BYTES).join());
+        StreamObjectIndexReader.IndexSnapshot expected = surviving.get(10, TimeUnit.SECONDS).orElseThrow();
+        assertTrue(cancelled.isCancelled());
+        assertEquals(3, requests.get(), "The index load must continue after one caller cancels");
+        assertSame(expected, cache.get(ref, loader).get(10, TimeUnit.SECONDS).orElseThrow());
+        assertEquals(3, requests.get(), "A verified descriptor must remain reusable");
+        assertEquals(1, cache.size());
+    }
+
+    @Test
+    void disablingIndexCacheStillIsolatesCallerCancellationFromSourceGet() throws Exception {
+        PackedObject packed = packObject(929L);
+        CountingObjectStore delegate = new CountingObjectStore();
+        delegate.install(packed.metadata().objectId(), packed.bytes());
+        CompletableFuture<ByteBuffer> pendingHeader = new CompletableFuture<>();
+        ObjectStore delayed = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                return position == 0L ? pendingHeader : delegate.rangeRead(objectId, position, length);
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+        };
+        StreamObjectIndexCache cache = new StreamObjectIndexCache(0);
+        CompletableFuture<Optional<StreamObjectIndexReader.IndexSnapshot>> abandoned =
+            cache.get(reference(packed.metadata()), new StreamObjectIndexReader(delayed));
+        assertTrue(abandoned.cancel(true));
+        assertFalse(pendingHeader.isCancelled());
+        pendingHeader.complete(delegate.rangeRead(
+            packed.metadata().objectId(), 0, StreamObjectFormat.OBJECT_HEADER_BYTES
+        ).join());
+        assertTrue(abandoned.isCancelled());
+        assertEquals(3, delegate.readCount(), "Bypassed caching must not cancel the source index read");
+        assertEquals(0, cache.size());
     }
 
     @Test
@@ -115,6 +207,124 @@ class StreamObjectIndexCacheTest {
 
         assertEquals(0, store.readCount());
         assertEquals(0, cache.size());
+    }
+
+    @Test
+    void blockingRangeGetCannotHoldTheSharedIndexCacheMonitor() throws Exception {
+        PackedObject slow = packObject(925L);
+        PackedObject fast = packObject(926L);
+        CountingObjectStore slowDelegate = new CountingObjectStore();
+        slowDelegate.install(slow.metadata().objectId(), slow.bytes());
+        CountingObjectStore fastStore = new CountingObjectStore();
+        fastStore.install(fast.metadata().objectId(), fast.bytes());
+
+        CountDownLatch firstHeaderEntered = new CountDownLatch(1);
+        CountDownLatch releaseFirstHeader = new CountDownLatch(1);
+        AtomicInteger slowHeaderCalls = new AtomicInteger();
+        ObjectStore blockingStore = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                if (position == 0L) {
+                    slowHeaderCalls.incrementAndGet();
+                    firstHeaderEntered.countDown();
+                    try {
+                        if (!releaseFirstHeader.await(10L, TimeUnit.SECONDS)) {
+                            return CompletableFuture.failedFuture(
+                                new IllegalStateException("Timed out releasing first Header GET"));
+                        }
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        return CompletableFuture.failedFuture(interrupted);
+                    }
+                }
+                return slowDelegate.rangeRead(objectId, position, length);
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+        };
+        StreamObjectIndexCache cache = new StreamObjectIndexCache(4);
+        StreamObjectIndexReader slowLoader = new StreamObjectIndexReader(blockingStore);
+        StreamObjectIndexReader fastLoader = new StreamObjectIndexReader(fastStore);
+        RemoteObjectIndex.RangeReference slowRef = reference(slow.metadata());
+        RemoteObjectIndex.RangeReference fastRef = reference(fast.metadata());
+        ExecutorService workers = Executors.newFixedThreadPool(3);
+        try {
+            Future<CompletableFuture<Optional<StreamObjectIndexReader.IndexSnapshot>>> first =
+                workers.submit(() -> cache.get(slowRef, slowLoader));
+            assertTrue(firstHeaderEntered.await(5L, TimeUnit.SECONDS));
+            Future<CompletableFuture<Optional<StreamObjectIndexReader.IndexSnapshot>>> duplicate =
+                workers.submit(() -> cache.get(slowRef, slowLoader));
+            CompletableFuture<Optional<StreamObjectIndexReader.IndexSnapshot>> same =
+                duplicate.get(5L, TimeUnit.SECONDS);
+            assertFalse(same.isDone(), "Concurrent same-object load must share its pending Future");
+
+            Future<Optional<StreamObjectIndexReader.IndexSnapshot>> other =
+                workers.submit(() -> cache.get(fastRef, fastLoader).get(5L, TimeUnit.SECONDS));
+            assertTrue(other.get(5L, TimeUnit.SECONDS).isPresent(),
+                "Independent object must not block behind another object's Range GET");
+            assertEquals(3, fastStore.readCount());
+            assertEquals(1, slowHeaderCalls.get(), "Same object must initiate only one Header GET");
+            assertFalse(same.isDone());
+
+            releaseFirstHeader.countDown();
+            CompletableFuture<Optional<StreamObjectIndexReader.IndexSnapshot>> original =
+                first.get(5L, TimeUnit.SECONDS);
+            assertNotSame(same, original, "Shared loading must not share a caller cancellation handle");
+            assertSame(same.get(5L, TimeUnit.SECONDS).orElseThrow(),
+                original.get(5L, TimeUnit.SECONDS).orElseThrow());
+            assertEquals(3, slowDelegate.readCount());
+            assertEquals(2, cache.size());
+        } finally {
+            releaseFirstHeader.countDown();
+            workers.shutdownNow();
+        }
+    }
+
+    @Test
+    void synchronouslyThrowingObjectStoreDoesNotPoisonIndexCache() throws Exception {
+        PackedObject packed = packObject(927L);
+        CountingObjectStore delegate = new CountingObjectStore();
+        delegate.install(packed.metadata().objectId(), packed.bytes());
+        AtomicInteger requests = new AtomicInteger();
+        IllegalStateException injected = new IllegalStateException("synchronous Range GET rejected");
+        ObjectStore store = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                if (requests.getAndIncrement() == 0) {
+                    throw injected;
+                }
+                return delegate.rangeRead(objectId, position, length);
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+        };
+        StreamObjectIndexCache cache = new StreamObjectIndexCache(4);
+        StreamObjectIndexReader loader = new StreamObjectIndexReader(store);
+        RemoteObjectIndex.RangeReference ref = reference(packed.metadata());
+
+        ExecutionException first = assertThrows(ExecutionException.class,
+            () -> cache.get(ref, loader).get(5L, TimeUnit.SECONDS));
+        assertSame(injected, first.getCause());
+        assertEquals(0, cache.size(), "A failed synchronous load must not remain cached");
+        assertTrue(cache.get(ref, loader).get(5L, TimeUnit.SECONDS).isPresent());
+        assertEquals(3, delegate.readCount());
+        assertEquals(1, cache.size());
     }
 
     private PackedObject packObject(long objectId) throws Exception {

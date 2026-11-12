@@ -97,7 +97,7 @@ public final class PartitionRetirementEpochPrecheck {
         if (requestedLogStart < 0L || requiredMetadataOffset < -1L) {
             throw new IllegalArgumentException("Invalid native retirement preflight offsets");
         }
-        return assessNativeSourceWithClassifier(roleListener, sourceLog, partition, observed ->
+        return assessNativeSourceWithClassifier(roleListener, sourceLog, partition, image, observed ->
             PartitionLogStartAdvancePrecheck.assess(
                 image, partition, requestedLogStart, observed, requiredMetadataOffset
             )
@@ -123,7 +123,7 @@ public final class PartitionRetirementEpochPrecheck {
         if (requestedLogStart < 0L || stableEndExclusive < 0L || appliedPositionExclusive < 0L) {
             throw new IllegalArgumentException("Invalid native read-committed retirement preflight offsets");
         }
-        return assessNativeSourceWithClassifier(roleListener, sourceLog, partition, observed ->
+        return assessNativeSourceWithClassifier(roleListener, sourceLog, partition, image, observed ->
             PartitionLogStartAdvancePrecheck.assessReadCommitted(
                 image, partition, requestedLogStart, observed, stableEndExclusive, appliedPositionExclusive
             )
@@ -136,7 +136,8 @@ public final class PartitionRetirementEpochPrecheck {
      * and reclamation may invalidate a local source observation while the
      * read-committed metadata value is being inspected.
      *
-     * <p>This is NOT a WAL fsync certificate, replicated durability barrier,
+     * <p>Both destructive mutations and ordinary WAL admissions are observed.
+     * This is NOT a WAL fsync certificate, replicated durability barrier,
      * Controller epoch check or a retirement/delete permit.</p>
      */
     static Assessment assessNativeSourceReadCommittedWithWalMutationFence(
@@ -159,13 +160,24 @@ public final class PartitionRetirementEpochPrecheck {
         if (before < 0L) {
             return new Assessment(Status.LOCAL_WAL_REVISION_UNKNOWN, Optional.empty());
         }
+        // MutationRevision deliberately ignores ordinary tail writes. Reject
+        // an in-flight durable WAL Future, then fence any write admitted or
+        // completed while source and metadata replay were being classified.
+        long admissionBefore = storage.walAdmissionRevision(partition);
+        if (admissionBefore < 0L) {
+            return new Assessment(Status.LOCAL_WAL_ADMISSION_IN_FLIGHT, Optional.empty());
+        }
         Assessment assessment = assessNativeSourceReadCommitted(
             roleListener, sourceLog, partition, image, requestedLogStart,
             stableEndExclusive, appliedPositionExclusive
         );
+        long admissionAfter = storage.walAdmissionRevision(partition);
         long after = storage.walMutationRevision(partition);
         if (after < 0L || after != before) {
             return new Assessment(Status.LOCAL_WAL_REVISION_CHANGED, Optional.empty());
+        }
+        if (admissionAfter < 0L || admissionAfter != admissionBefore) {
+            return new Assessment(Status.LOCAL_WAL_ADMISSION_CHANGED, Optional.empty());
         }
         return assessment;
     }
@@ -174,17 +186,23 @@ public final class PartitionRetirementEpochPrecheck {
         SharedPartitionRoleListener roleListener,
         SharedUnifiedLog sourceLog,
         SharedPartitionId partition,
+        SharedMetadataImage image,
         LongFunction<PartitionLogStartAdvancePrecheck.Finding> classify
     ) throws IOException {
         Objects.requireNonNull(roleListener, "roleListener");
         Objects.requireNonNull(sourceLog, "sourceLog");
         Objects.requireNonNull(partition, "partition");
+        Objects.requireNonNull(image, "image");
         Objects.requireNonNull(classify, "classify");
         var captured = SourceLogStartObservation.capture(roleListener, sourceLog, partition);
         if (captured.isEmpty()) {
             return new Assessment(Status.NATIVE_SOURCE_WINDOW_UNKNOWN, Optional.empty());
         }
         SourceLogStartObservation.LocalObservation source = captured.get();
+        // A classifier may race with unrelated metadata replay as well as
+        // a change in the target partition's watermark. Pin the local image
+        // generation before classifying and recheck it after native capture.
+        SharedMetadataImage.PartitionLogStartEvidence metadataBefore = image.partitionLogStartEvidence(partition);
         PartitionLogStartAdvancePrecheck.Finding value = classify.apply(source.offsets().logStartOffset());
         // Metadata replay may race with Kafka demotion, reassignment or removal.
         // The previously captured local generation must not be reused.
@@ -206,8 +224,15 @@ public final class PartitionRetirementEpochPrecheck {
             || current.localGeneration() != source.localGeneration()) {
             return new Assessment(Status.LOCAL_ROLE_CHANGED_DURING_METADATA_CHECK, Optional.empty());
         }
-        if (current.offsets().logStartOffset() != source.offsets().logStartOffset()) {
+        if (current.offsets().logStartOffset() != source.offsets().logStartOffset()
+            || current.offsets().highWatermark() < source.offsets().highWatermark()
+            || current.offsets().logEndOffset() < source.offsets().logEndOffset()) {
+            // A source truncate/rebase can preserve LogStart and leadership
+            // while lowering HW or LEO. The original sample is then stale.
             return new Assessment(Status.NATIVE_SOURCE_WINDOW_STALE, Optional.empty());
+        }
+        if (!metadataBefore.equals(image.partitionLogStartEvidence(partition))) {
+            return new Assessment(Status.METADATA_REPLAY_CHANGED_DURING_SOURCE_CHECK, Optional.empty());
         }
         return new Assessment(Status.LOCAL_EPOCH_OBSERVATION_MATCH, Optional.of(value));
     }
@@ -220,8 +245,11 @@ public final class PartitionRetirementEpochPrecheck {
         NATIVE_SOURCE_WINDOW_UNKNOWN,
         NATIVE_SOURCE_WINDOW_STALE,
         LOCAL_ROLE_CHANGED_DURING_METADATA_CHECK,
+        METADATA_REPLAY_CHANGED_DURING_SOURCE_CHECK,
         LOCAL_WAL_REVISION_UNKNOWN,
-        LOCAL_WAL_REVISION_CHANGED
+        LOCAL_WAL_REVISION_CHANGED,
+        LOCAL_WAL_ADMISSION_IN_FLIGHT,
+        LOCAL_WAL_ADMISSION_CHANGED
     }
 
     /** The value classification exists only for matching local epoch evidence. */

@@ -21,10 +21,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentNavigableMap;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Supplier;
 
 /**
  * In-memory logical index from Kafka partition offsets to broker-wide logical WAL addresses.
@@ -365,6 +367,41 @@ public final class PartitionWalIndex {
         return gate == null ? 0L : gate.observedRevision();
     }
 
+    /**
+     * Separately observes WAL admissions and completions, including tail appends
+     * that deliberately leave the destructive mutation revision unchanged.
+     * -1 means a write is in flight or the observation raced a transition.
+     *
+     * <p>This is a broker-local advisory fence, NOT fsync or KRaft authority.</p>
+     */
+    public long walAdmissionRevision(WalPartitionKey key) {
+        Objects.requireNonNull(key, "key");
+        MutationGate gate = mutationRevisions.get(key);
+        return gate == null ? 0L : gate.observedAdmissionRevision();
+    }
+
+    /**
+     * Tracks the WAL future AND its index-publication continuation. Completion
+     * never grabs the WAL maintenance lock or the index's monitor; File/Ring WAL
+     * may invoke this callback while its writer I/O lock is still held.
+     */
+    public <T> CompletableFuture<T> trackDurableWrite(
+        WalPartitionKey key,
+        Supplier<CompletableFuture<T>> operation
+    ) {
+        Objects.requireNonNull(key, "key");
+        Objects.requireNonNull(operation, "operation");
+        MutationGate gate = gate(key);
+        gate.beginAdmission();
+        try {
+            return Objects.requireNonNull(operation.get(), "WAL write future")
+                .whenComplete((ignored, error) -> gate.completeAdmission());
+        } catch (RuntimeException | Error failure) {
+            gate.completeAdmission();
+            throw failure;
+        }
+    }
+
     private MutationGate gate(WalPartitionKey key) {
         return mutationRevisions.computeIfAbsent(key, ignored -> new MutationGate());
     }
@@ -376,6 +413,47 @@ public final class PartitionWalIndex {
      */
     static final class MutationGate {
         private final AtomicLong sequence = new AtomicLong();
+        // One CAS represents BOTH the monotonic generation and the pending
+        // count. Separate atomics leave a window in which a source probe can
+        // observe zero pending writes with the previous generation.
+        // 16 low bits permit up to 65,535 concurrent WAL writes/partition.
+        private static final long PENDING_MASK = 0xffffL;
+        private static final long GENERATION_STEP = 1L << 16;
+        private final AtomicLong admissionState = new AtomicLong();
+
+        void beginAdmission() {
+            while (true) {
+                long prior = admissionState.get();
+                long pending = prior & PENDING_MASK;
+                // Reserve capacity to complete every accepted write without
+                // wrapping the generation. Exhaustion fails closed.
+                long reserved = (pending + 2L) * GENERATION_STEP + 1L;
+                if (prior < 0L || pending == PENDING_MASK || prior > Long.MAX_VALUE - reserved) {
+                    throw new IllegalStateException("Local WAL admission generation capacity exhausted");
+                }
+                if (admissionState.compareAndSet(prior, prior + GENERATION_STEP + 1L)) {
+                    return;
+                }
+            }
+        }
+
+        void completeAdmission() {
+            while (true) {
+                long prior = admissionState.get();
+                if (prior < 0L || (prior & PENDING_MASK) == 0L) {
+                    throw new IllegalStateException("Local WAL admission completed without an owner");
+                }
+                if (admissionState.compareAndSet(prior, prior + GENERATION_STEP - 1L)) {
+                    return;
+                }
+            }
+        }
+
+        long observedAdmissionRevision() {
+            long snapshot = admissionState.get();
+            return snapshot < 0L || (snapshot & PENDING_MASK) != 0L
+                ? -1L : snapshot >>> 16;
+        }
 
         long observedRevision() {
             long observed = sequence.get();

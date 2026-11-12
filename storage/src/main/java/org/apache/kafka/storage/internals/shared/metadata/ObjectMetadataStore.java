@@ -24,6 +24,18 @@ public interface ObjectMetadataStore extends AutoCloseable {
 
     CompletableFuture<Void> commit(SharedObjectMetadata metadata);
 
+    /**
+     * Reserved for a future Controller/KRaft-authorized COMMITTED object
+     * retirement transition. A broker-local read-index decision is never
+     * sufficient: another Kafka replica may still read this physical object.
+     *
+     * <p>Current implementations must reject this operation without publishing
+     * a compacted metadata tombstone. PREPARED orphan cleanup instead uses
+     * {@link #claimCleanup(long, long)} and retains its durable cleanup fence.
+     * Historical object tombstones remain replayable during initial recovery
+     * only. Live object tombstones without KRaft authority fail closed,
+     * preventing silent removal of cross-replica read references.</p>
+     */
     CompletableFuture<Void> delete(long objectId);
 
     /**
@@ -35,7 +47,8 @@ public interface ObjectMetadataStore extends AutoCloseable {
 
     /**
      * Marks a successfully deleted cleanup claim complete. Implementations must retain a terminal fence so a delayed
-     * COMMIT can never resurrect an object that has already been physically deleted.
+     * COMMIT can never resurrect an object that has already been physically deleted. A previously DELETED claim is
+     * idempotent; absent, PREPARED or COMMITTED objects must not be reported as successfully completed.
      */
     CompletableFuture<Void> completeCleanup(long objectId);
 
