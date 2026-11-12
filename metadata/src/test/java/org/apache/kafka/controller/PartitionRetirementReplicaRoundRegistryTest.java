@@ -258,6 +258,43 @@ class PartitionRetirementReplicaRoundRegistryTest {
     }
 
     @Test
+    void authenticatedRoundRejectsBrokerIncarnationChangeAfterCollection() {
+        Fixture f = fixture();
+        PartitionRetirementReplicaRoundRegistry rounds = new PartitionRetirementReplicaRoundRegistry();
+        PartitionRetirementReplicaRoundRegistry.Challenge challenge = issue(rounds, f, OBJECT_ID, NOW_NS);
+        for (int id = 1; id <= 3; id++) {
+            assertTrue(recordAuthenticated(rounds, f, challenge, report(challenge, id), trusted(id), NOW_NS));
+        }
+        when(f.cluster().registration(2)).thenReturn(broker(2, 103L, Uuid.randomUuid()));
+        assertEquals(Optional.of(Finding.BROKER_IDENTITY_MISMATCH),
+            rounds.consumeAuthenticated(challenge.roundId(), trusted(1), BOUND,
+                f.replicas(), f.cluster(), NOW_NS));
+        assertEquals(0, rounds.pendingCount());
+        assertTrue(rounds.consumeAuthenticated(challenge.roundId(), trusted(1), BOUND,
+            f.replicas(), f.cluster(), NOW_NS).isEmpty());
+    }
+
+    @Test
+    void controllerLeadershipResetBurnsAuthenticatedReplicaReceipts() {
+        Fixture f = fixture();
+        PartitionRetirementReplicaRoundRegistry rounds = new PartitionRetirementReplicaRoundRegistry();
+        PartitionRetirementReplicaRoundRegistry.Challenge challenge = issue(rounds, f, OBJECT_ID, NOW_NS);
+        for (int id = 1; id <= 3; id++) {
+            assertTrue(recordAuthenticated(rounds, f, challenge, report(challenge, id), trusted(id), NOW_NS));
+        }
+        rounds.invalidateAll();
+        assertEquals(0, rounds.pendingCount());
+        assertFalse(recordAuthenticated(rounds, f, challenge, report(challenge, 1), trusted(1), NOW_NS));
+        assertTrue(rounds.consumeAuthenticated(challenge.roundId(), trusted(1), BOUND,
+            f.replicas(), f.cluster(), NOW_NS).isEmpty());
+        PartitionRetirementReplicaRoundRegistry.Challenge newRound =
+            issue(rounds, f, OBJECT_ID, NOW_NS + 1L);
+        assertNotEquals(challenge.roundId(), newRound.roundId());
+        assertFalse(recordAuthenticated(rounds, f, newRound, report(challenge, 2),
+            trusted(2), NOW_NS + 1L));
+    }
+
+    @Test
     void monotonicClockWrapAcceptsShortElapsedButRejectsExactTtl() {
         Fixture f = fixture();
         PartitionRetirementReplicaRoundRegistry rounds = new PartitionRetirementReplicaRoundRegistry();
