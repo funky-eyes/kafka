@@ -565,13 +565,21 @@ public final class FileSharedWal implements SharedWal {
      * *inside* the surviving suffix imply lost durable WAL bytes and must
      * never be silently interpreted as one contiguous recovery history.
      */
-    private static void requireContiguousSegments(List<Path> segments) throws WalCorruptionException {
+    private void requireContiguousSegments(List<Path> segments) throws IOException {
         long previousId = -1L;
-        for (Path path : segments) {
+        for (int i = 0; i < segments.size(); i++) {
+            Path path = segments.get(i);
             long id = parseSegmentId(path);
             if (previousId >= 0L && id - previousId != 1L) {
                 throw new WalCorruptionException(
                     "File WAL lost an intermediate segment: previous=" + previousId + ", next=" + id);
+            }
+            // A zero-length final segment is safe after a crash before the
+            // next append. An empty *middle* segment is not: its filename
+            // cannot prove the acknowledged groups that used to occupy it
+            // survived while later committed WAL bytes are still present.
+            if (i < segments.size() - 1 && ioBackend.size(path) == 0L) {
+                throw new WalCorruptionException("File WAL lost an empty intermediate segment: " + id);
             }
             previousId = id;
         }
