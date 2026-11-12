@@ -619,6 +619,8 @@ REQUIRED_TESTS = {
         "rawReportsCannotBeUpgradedByAuthenticatedSourceConsumption",
         "fullyAuthenticatedReceiptsRemainDiagnosticAndOneUse",
         "foreignSourceCannotBurnMixedProvenanceRound",
+        "authenticatedRoundRejectsBrokerIncarnationChangeAfterCollection",
+        "controllerLeadershipResetBurnsAuthenticatedReplicaReceipts",
     ),
     "org.apache.kafka.controller.PartitionRetirementReplicaQuiescencePrecheckTest": (
         "allAssignedReplicasIncludingOutOfIsrAreRequired",
