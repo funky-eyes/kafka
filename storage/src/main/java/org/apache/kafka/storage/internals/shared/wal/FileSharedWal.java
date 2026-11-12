@@ -634,10 +634,16 @@ public final class FileSharedWal implements SharedWal {
             throw new WalCorruptionException("WAL location length mismatch: expected=" + location.length() +
                 ", actual=" + result.length());
         }
-        if (result.record().type() == WalRecordType.GROUP_COMMIT) {
+        WalRecord record = result.record();
+        if (record.type() == WalRecordType.GROUP_COMMIT) {
             throw new WalCorruptionException("WAL data location unexpectedly points to GROUP_COMMIT: " + location);
         }
-        return result.record();
+        if (record.leaderEpoch() != location.leaderEpoch()
+            || record.firstOffset() != location.firstOffset()
+            || record.lastOffset() != location.lastOffset()) {
+            throw new WalCorruptionException("WAL index Kafka coordinates do not match stored record: " + location);
+        }
+        return record;
     }
 
     private List<Path> segmentFiles() throws IOException {
