@@ -253,14 +253,21 @@ public final class FileSharedWal implements SharedWal {
         List<ReplayEntry> pendingGroup = new ArrayList<>();
         List<Path> segments = segmentFiles();
         requireContiguousSegments(segments);
-        for (Path segment : segments) {
+        for (int segmentIndex = 0; segmentIndex < segments.size(); segmentIndex++) {
+            Path segment = segments.get(segmentIndex);
             long segmentId = parseSegmentId(segment);
             try (WalIoBackend.Handle handle = ioBackend.openRead(segment)) {
                 long position = 0;
                 while (true) {
                     WalRecordCodec.ReadResult result = WalRecordCodec.read(handle, position);
-                    if (result.status() == WalRecordCodec.ReadStatus.EOF ||
-                        result.status() == WalRecordCodec.ReadStatus.PARTIAL) {
+                    if (result.status() == WalRecordCodec.ReadStatus.EOF) {
+                        break;
+                    }
+                    if (result.status() == WalRecordCodec.ReadStatus.PARTIAL) {
+                        if (segmentIndex < segments.size() - 1) {
+                            throw new WalCorruptionException(
+                                "Partial WAL record in nonterminal segment " + segmentId);
+                        }
                         break;
                     }
                     WalRecord record = result.record();
@@ -574,6 +581,14 @@ public final class FileSharedWal implements SharedWal {
         RecoveryAccumulator accumulator = new RecoveryAccumulator();
         for (int segmentIndex = 0; segmentIndex < segments.size(); segmentIndex++) {
             if (scanSegment(segments.get(segmentIndex), segmentIndex, accumulator)) {
+                // Only a partial record in the final segment can be an
+                // incomplete crash tail. A partial earlier segment may
+                // hide already acknowledged data in subsequent segments.
+                if (segmentIndex < segments.size() - 1) {
+                    throw new WalCorruptionException(
+                        "Partial WAL record in nonterminal segment " +
+                            parseSegmentId(segments.get(segmentIndex)));
+                }
                 break;
             }
         }
