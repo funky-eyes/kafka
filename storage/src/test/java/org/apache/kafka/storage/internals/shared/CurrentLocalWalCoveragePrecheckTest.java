@@ -269,6 +269,24 @@ class CurrentLocalWalCoveragePrecheckTest {
                 secondReopened.localDurableWindowCoverage(FIRST, 0L, 20L));
             assertEquals(0L, secondReopened.liveWalDurabilityObservation(FIRST).dataBatches());
         }
+
+        // A replacement Ring WAL cannot borrow the surviving Broker's
+        // previously durable batches merely because the partition matches.
+        Path replacementPath = tempDir.resolve("replica-b-replacement-ring.wal");
+        try (
+            SharedStorageEngine survivor = new SharedStorageEngine(
+                new RingSharedWal(firstBrokerPath, 1024L * 1024L));
+            SharedStorageEngine replacement = new SharedStorageEngine(
+                new RingSharedWal(replacementPath, 1024L * 1024L))
+        ) {
+            assertEquals(2L, survivor.startupWalReplayEvidence().replayedRecords());
+            assertEquals(Finding.INDEXED_BATCH_WINDOW,
+                survivor.localDurableWindowCoverage(FIRST, 0L, 20L));
+            assertEquals(0L, replacement.startupWalReplayEvidence().replayedRecords());
+            assertEquals(Finding.NO_INDEXED_DATA,
+                replacement.localDurableWindowCoverage(FIRST, 0L, 20L));
+            assertEquals(0L, replacement.liveWalDurabilityObservation(FIRST).dataBatches());
+        }
     }
 
     @Test
