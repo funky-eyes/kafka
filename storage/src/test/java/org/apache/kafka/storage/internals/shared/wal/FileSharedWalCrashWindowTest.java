@@ -201,6 +201,41 @@ class FileSharedWalCrashWindowTest {
             assertTrue(exposed.isEmpty(), "missing intermediate segment cannot expose a partial history");
         }
 
+        // A disk can retain the middle segment filename while losing
+        // every byte in it. Contiguous filenames must not be mistaken for
+        // the three acknowledged groups present in the pristine WAL.
+        Path emptiedMiddle = tempDir.resolve("zero-length-middle-segment");
+        copyWal(complete, emptiedMiddle);
+        truncate(emptiedMiddle.resolve(missingSegment), 0L);
+        assertThrows(WalCorruptionException.class, () -> {
+            try (FileSharedWal wal = new FileSharedWal(emptiedMiddle, CAPACITY_BYTES, isolatedSegmentBytes)) {
+                wal.replay((record, location) -> { });
+            }
+        });
+        assertEquals(0L, Files.size(emptiedMiddle.resolve(missingSegment)));
+        assertTrue(Files.exists(emptiedMiddle.resolve(lastSegment)),
+            "an invalid empty middle segment must not erase later committed groups");
+
+        // Explicit replay must also reject a newly emptied middle file
+        // before delivering any apparently intact earlier records.
+        Path emptiedWhileOpen = tempDir.resolve("zero-middle-while-open");
+        copyWal(complete, emptiedWhileOpen);
+        try (FileSharedWal wal = new FileSharedWal(emptiedWhileOpen, CAPACITY_BYTES, isolatedSegmentBytes)) {
+            truncate(emptiedWhileOpen.resolve(missingSegment), 0L);
+            List<WalRecord> delivered = new ArrayList<>();
+            assertThrows(WalCorruptionException.class,
+                () -> wal.replay((record, location) -> delivered.add(record)));
+            assertTrue(delivered.isEmpty(), "partial WAL history must not reach the replay callback");
+        }
+
+        // A zero-length *final* segment is a legitimate crash window before
+        // the next append. Its presence must not revoke earlier committed
+        // groups or require deleting valid prior WAL files.
+        Path emptyFinal = tempDir.resolve("empty-final-segment");
+        copyWal(complete, emptyFinal);
+        Files.createFile(emptyFinal.resolve("wal-00000000000000000003.log"));
+        assertEquals(List.of(0L, 10L, 20L), dataOffsets(replay(emptyFinal, isolatedSegmentBytes)));
+
         // By contrast a contiguous suffix after reclaiming the oldest
         // segment remains recoverable, even when its first ID is nonzero.
         Path reclaimedPrefix = tempDir.resolve("reclaimed-oldest-prefix");
