@@ -115,7 +115,14 @@ public final class CommittedObjectReplicaReferenceClosurePrecheck {
         if (evidence.lastConsumedMetadataOffset() < 0L) {
             return Finding.UNTRACKED_METADATA_REPLAY;
         }
-        return assessReports(object, evidence.lastConsumedMetadataOffset(), reports);
+        Finding reported = assessReports(object, evidence.lastConsumedMetadataOffset(), reports);
+        // A caller-controlled report collection can execute after the snapshot
+        // and race new KRaft replay. Even the raw diagnostic must not describe
+        // receipts from one metadata generation as matching another.
+        if (!snapshot.equals(image.committedObjectRetirementEvidence(object.objectId()))) {
+            return Finding.METADATA_REPLAY_CHANGED_DURING_ASSESSMENT;
+        }
+        return reported;
     }
 
     /**

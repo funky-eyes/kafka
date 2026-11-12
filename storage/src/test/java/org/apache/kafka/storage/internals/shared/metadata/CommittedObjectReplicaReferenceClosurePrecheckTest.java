@@ -284,6 +284,19 @@ class CommittedObjectReplicaReferenceClosurePrecheckTest {
                 packed, image, reports, index));
         assertEquals(offset + 1L, snapshotOffset(image, packed));
         assertFalse(index.referencesObjectIncludingAlternates(packed.objectId()));
+
+        // The direct advisory API must also detect a replay interleaving;
+        // a report collection cannot turn an old snapshot into a match.
+        SharedMetadataImage direct = image(packed, Map.of(A, 10L, B, 40L, RECREATED, 10L));
+        long directOffset = snapshotOffset(direct, packed);
+        Collection<CommittedObjectReplicaReferenceClosurePrecheck.PartitionReport> rawReports =
+            mutateOnIteration(allReports(packed, directOffset), () ->
+                direct.applyFromMetadataLog(
+                    SharedMetadataRecordCodec.partitionLogStartKey(FOREIGN),
+                    SharedMetadataRecordCodec.partitionLogStartValue(1L),
+                    directOffset + 1L));
+        assertEquals(Finding.METADATA_REPLAY_CHANGED_DURING_ASSESSMENT,
+            CommittedObjectReplicaReferenceClosurePrecheck.assess(packed, direct, rawReports));
     }
 
     @Test
