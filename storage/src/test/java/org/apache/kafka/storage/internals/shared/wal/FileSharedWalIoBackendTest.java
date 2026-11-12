@@ -26,10 +26,12 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class FileSharedWalIoBackendTest {
@@ -70,6 +72,29 @@ class FileSharedWalIoBackendTest {
                 bytes(wal.read(location).payload())
             );
         }
+
+        // If fsync/force fails, no Kafka durability ACK may be released.
+        // The writer must fence subsequent appends rather than continuing
+        // after a failed durability barrier. Replaying unacknowledged bytes
+        // later is possible and is not by itself a durability violation.
+        BlockingForceBackend failedBackend = new BlockingForceBackend(true);
+        Path failedDir = tempDir.resolve("failed-durability");
+        try (FileSharedWal wal = new FileSharedWal(failedDir, 1024 * 1024, 64 * 1024, failedBackend)) {
+            WalRecord pending = WalRecord.data(1L, 2L, 0, 3, 11L, 11L,
+                ByteBuffer.wrap("not-acked".getBytes(StandardCharsets.UTF_8)));
+            CompletableFuture<List<WalAppendResult>> failedAppend = wal.appendBatch(List.of(pending));
+            assertTrue(failedBackend.forceEntered.await(10, TimeUnit.SECONDS));
+            assertFalse(failedAppend.isDone(), "no ACK before the failing force barrier");
+            failedBackend.allowForce.countDown();
+            ExecutionException firstFailure = assertThrows(ExecutionException.class,
+                () -> failedAppend.get(10, TimeUnit.SECONDS));
+            assertTrue(firstFailure.getCause() instanceof IOException,
+                "force failure must propagate to caller");
+            ExecutionException nextFailure = assertThrows(ExecutionException.class,
+                () -> wal.append(pending).get(10, TimeUnit.SECONDS));
+            assertTrue(nextFailure.getCause() instanceof IllegalStateException,
+                "a failed WAL writer must reject subsequent appends");
+        }
     }
 
     private static byte[] bytes(ByteBuffer buffer) {
@@ -83,6 +108,15 @@ class FileSharedWalIoBackendTest {
         private final FileChannelWalIoBackend delegate = new FileChannelWalIoBackend();
         private final CountDownLatch forceEntered = new CountDownLatch(1);
         private final CountDownLatch allowForce = new CountDownLatch(1);
+        private final boolean failForce;
+
+        private BlockingForceBackend() {
+            this(false);
+        }
+
+        private BlockingForceBackend(boolean failForce) {
+            this.failForce = failForce;
+        }
 
         @Override
         public Handle openRead(Path path) throws IOException {
@@ -141,6 +175,9 @@ class FileSharedWalIoBackendTest {
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
                         throw new IOException("Interrupted at test durability barrier", e);
+                    }
+                    if (failForce) {
+                        throw new IOException("Injected WAL force failure");
                     }
                     delegateHandle.force();
                 }
