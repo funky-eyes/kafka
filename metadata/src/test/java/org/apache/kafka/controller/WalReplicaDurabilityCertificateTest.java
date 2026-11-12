@@ -1,6 +1,6 @@
 /*
  * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with
+ * contributor license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright ownership.
  * The ASF licenses this file to You under the Apache License, Version 2.0
  * (the "License"); you may not use this file except in compliance with
@@ -82,5 +82,11 @@ class WalReplicaDurabilityCertificateTest {
             new WalReplicaDurabilityCertificate.Coordinate(Uuid.randomUuid(), 0, 0, 0, 200, 200, 0, 0));
         assertThrows(IllegalArgumentException.class, () ->
             new WalReplicaDurabilityCertificate.Receipt(1, -1, Uuid.randomUuid(), 1, 200, true, true));
+        assertThrows(IllegalArgumentException.class, () ->
+            new WalReplicaDurabilityCertificate.Coordinate(Uuid.ZERO_UUID, 0, 0, 0, 0, 1, 0, 0));
+        assertThrows(IllegalArgumentException.class, () ->
+            new WalReplicaDurabilityCertificate.Receipt(1, 1, Uuid.ZERO_UUID, 1, 200, true, true));
+        assertThrows(IllegalArgumentException.class, () ->
+            new WalReplicaDurabilityCertificate.Receipt(1, 1, Uuid.randomUuid(), 0, 200, true, true));
     }
 }
