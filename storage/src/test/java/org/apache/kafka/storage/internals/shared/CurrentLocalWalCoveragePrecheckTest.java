@@ -53,6 +53,14 @@ class CurrentLocalWalCoveragePrecheckTest {
     void contiguousKafkaBatchesMayHaveInterleavedPhysicalWalAddresses() {
         assertEquals(Finding.INDEXED_BATCH_WINDOW, assess(
             List.of(location(1L, 0L, 9L), location(150L, 10L, 19L)), 0L, 20L));
+        // Kafka index order is allowed to differ from physical WAL order.
+        assertEquals(Finding.INDEXED_BATCH_WINDOW, assess(
+            List.of(location(150L, 0L, 9L), location(1L, 10L, 19L)), 0L, 20L));
+        // Distinct Kafka batch offsets must never borrow the same WAL bytes.
+        assertEquals(Finding.OVERLAPPING_WAL_ADDRESSES, assess(
+            List.of(location(1L, 0L, 9L), location(1L, 10L, 19L)), 0L, 20L));
+        assertEquals(Finding.OVERLAPPING_WAL_ADDRESSES, assess(
+            List.of(location(50L, 0L, 9L), location(1L, 10L, 19L)), 0L, 20L));
     }
 
     @Test

@@ -18,6 +18,8 @@ package org.apache.kafka.storage.internals.shared;
 
 import org.apache.kafka.storage.internals.shared.wal.WalLocation;
 
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 
@@ -39,7 +41,8 @@ public final class CurrentLocalWalCoveragePrecheck {
         NO_INDEXED_DATA,
         KAFKA_BATCH_GAP_OR_OVERLAP,
         SOURCE_END_SPLITS_BATCH,
-        SOURCE_WINDOW_NOT_INDEXED
+        SOURCE_WINDOW_NOT_INDEXED,
+        OVERLAPPING_WAL_ADDRESSES
     }
 
     static Finding assess(List<WalLocation> batches, long logStart, long highWatermark) {
@@ -66,7 +69,28 @@ public final class CurrentLocalWalCoveragePrecheck {
             }
             next = location.lastOffset() + 1L;
         }
-        return next == highWatermark
-            ? Finding.INDEXED_BATCH_WINDOW : Finding.SOURCE_WINDOW_NOT_INDEXED;
+        if (next != highWatermark) {
+            return Finding.SOURCE_WINDOW_NOT_INDEXED;
+        }
+        return verifyDistinctWalBytes(batches);
+    }
+
+    /**
+     * Kafka offset continuity alone cannot prove that two DATA batches have
+     * distinct, recoverable WAL bytes. Use a defensive copy because the index
+     * is ordered by Kafka offset, not necessarily by WAL write address.
+     * This is a local negative diagnostic only, never replica ACK authority.
+     */
+    private static Finding verifyDistinctWalBytes(List<WalLocation> batches) {
+        List<WalLocation> byWalAddress = new ArrayList<>(batches);
+        byWalAddress.sort(Comparator.comparingLong(WalLocation::walOffset));
+        for (int i = 1; i < byWalAddress.size(); i++) {
+            WalLocation previous = byWalAddress.get(i - 1);
+            WalLocation current = byWalAddress.get(i);
+            if (current.walOffset() < previous.walOffset() + previous.length()) {
+                return Finding.OVERLAPPING_WAL_ADDRESSES;
+            }
+        }
+        return Finding.INDEXED_BATCH_WINDOW;
     }
 }
