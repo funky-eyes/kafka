@@ -96,15 +96,21 @@ public final class StartupWalReplayCoveragePrecheck {
         if (nextKafkaOffset != sourceHighWatermark) {
             return Finding.SOURCE_WINDOW_NOT_RECOVERED;
         }
-        // The maximum recovered WAL end is not evidence for arbitrarily
-        // many Kafka batches. A fabricated index cannot reuse the bytes of
-        // one DATA record to claim multiple nonoverlapping Kafka ranges.
-        if (indexedBatches.size() > recovered.get().dataRecords()) {
+        return assessReplayByteIntervals(indexedBatches, recovered.get().dataRecords());
+    }
+
+    /**
+     * Maximum replayed WAL end and contiguous Kafka offsets are not proof
+     * that distinct batches were recovered from distinct WAL byte ranges.
+     * Keep these independent negative checks outside the Kafka offset
+     * walk to preserve strict Checkstyle complexity without relaxing it.
+     */
+    private static Finding assessReplayByteIntervals(List<WalLocation> indexedBatches, long dataRecords) {
+        if (indexedBatches.size() > dataRecords) {
             return Finding.REPLAYED_DATA_COUNT_INSUFFICIENT;
         }
         // Valid Kafka offset order need not be WAL append order (after
         // truncation/recovery), so sort a copy by logical WAL address.
-        // Distinct Kafka batches must not claim the same physical WAL bytes.
         List<WalLocation> byWalAddress = new ArrayList<>(indexedBatches);
         byWalAddress.sort(Comparator.comparingLong(WalLocation::walOffset));
         for (int i = 1; i < byWalAddress.size(); i++) {
