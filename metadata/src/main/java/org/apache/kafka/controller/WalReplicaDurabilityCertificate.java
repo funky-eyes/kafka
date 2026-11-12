@@ -1,6 +1,6 @@
 /*
  * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with
+ * contributor license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright ownership.
  * The ASF licenses this file to You under the Apache License, Version 2.0
  * (the "License"); you may not use this file except in compliance with
@@ -16,11 +16,12 @@
  */
 package org.apache.kafka.controller;
 
+import org.apache.kafka.common.Uuid;
+
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
-import org.apache.kafka.common.Uuid;
 
 /**
  * Pure, fail-closed validation of a proposed WAL replica durability certificate.
@@ -31,8 +32,11 @@ final class WalReplicaDurabilityCertificate {
                       long startOffset, long endOffset, long controllerEpoch, long kraftOffset) {
         Coordinate {
             Objects.requireNonNull(topicId);
-            if (partition < 0 || leaderEpoch < 0 || partitionEpoch < 0
-                || startOffset < 0 || endOffset <= startOffset
+            if (Uuid.ZERO_UUID.equals(topicId)
+                || partition < 0 || leaderEpoch < 0 || partitionEpoch < 0) {
+                throw new IllegalArgumentException("invalid WAL durability identity");
+            }
+            if (startOffset < 0 || endOffset <= startOffset
                 || controllerEpoch < 0 || kraftOffset < 0) {
                 throw new IllegalArgumentException("invalid WAL durability coordinate");
             }
@@ -44,8 +48,12 @@ final class WalReplicaDurabilityCertificate {
                    boolean checksumVerified) {
         Receipt {
             Objects.requireNonNull(incarnationId);
-            if (brokerId < 0 || brokerEpoch < 0 || storageGeneration < 0 || durableEndOffset < 0) {
-                throw new IllegalArgumentException("invalid replica identity or durability boundary");
+            if (Uuid.ZERO_UUID.equals(incarnationId)
+                || brokerId < 0 || brokerEpoch < 0 || storageGeneration <= 0) {
+                throw new IllegalArgumentException("invalid replica identity");
+            }
+            if (durableEndOffset < 0) {
+                throw new IllegalArgumentException("invalid replica durability boundary");
             }
         }
     }
@@ -60,16 +68,19 @@ final class WalReplicaDurabilityCertificate {
      */
     static boolean hasIndependentCompleteReceipts(Coordinate coordinate, List<Receipt> receipts,
                                                    Set<Integer> currentIsr, int requiredReplicas) {
-        if (coordinate == null || receipts == null || currentIsr == null
-            || requiredReplicas < 2 || currentIsr.size() < requiredReplicas
+        if (coordinate == null || receipts == null || currentIsr == null) {
+            return false;
+        }
+        if (requiredReplicas < 2 || currentIsr.size() < requiredReplicas
             || receipts.size() < requiredReplicas) {
             return false;
         }
         Set<Integer> seen = new HashSet<>();
         for (Receipt receipt : receipts) {
-            if (receipt == null || !receipt.authenticated() || !receipt.checksumVerified()
-                || !currentIsr.contains(receipt.brokerId())
-                || !seen.add(receipt.brokerId())
+            if (receipt == null || !receipt.authenticated() || !receipt.checksumVerified()) {
+                return false;
+            }
+            if (!currentIsr.contains(receipt.brokerId()) || !seen.add(receipt.brokerId())
                 || receipt.durableEndOffset() < coordinate.endOffset()) {
                 return false;
             }
