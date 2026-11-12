@@ -84,6 +84,49 @@ class FileSharedWalCrashWindowTest {
 
         List<WalRecord> replayed = replay(walDir, SEGMENT_BYTES);
         assertEquals(List.of(0L, 10L, 11L), dataOffsets(replayed));
+
+        // Three independent, fully committed groups occupy segments 0, 1
+        // and 2. A partial record in middle segment 1 must never trigger
+        // silent truncation of itself and later already committed segment 2.
+        long bytesPerSegment = 512L;
+        int payloadBytes = Math.toIntExact(bytesPerSegment - 2L * WalRecordCodec.HEADER_BYTES - 1L);
+        Path pristine = tempDir.resolve("three-complete-segments");
+        try (FileSharedWal wal = new FileSharedWal(pristine, CAPACITY_BYTES, bytesPerSegment)) {
+            for (int i = 0; i < 3; i++) {
+                wal.append(data(10L * i, new byte[payloadBytes])).get(10, TimeUnit.SECONDS);
+            }
+        }
+        Path middleName = Path.of("wal-00000000000000000001.log");
+        Path lastName = Path.of("wal-00000000000000000002.log");
+        Path corrupted = tempDir.resolve("corrupted-middle-tail");
+        copyWal(pristine, corrupted);
+        Path middleFile = corrupted.resolve(middleName);
+        long originalSize = Files.size(middleFile);
+        assertTrue(originalSize > WalRecordCodec.HEADER_BYTES);
+        assertTrue(Files.exists(corrupted.resolve(lastName)));
+        truncate(middleFile, originalSize - 1L);
+
+        assertThrows(WalCorruptionException.class, () -> {
+            try (FileSharedWal wal = new FileSharedWal(corrupted, CAPACITY_BYTES, bytesPerSegment)) {
+                wal.replay((record, location) -> { });
+            }
+        });
+        assertEquals(originalSize - 1L, Files.size(middleFile),
+            "unsafe recovery must not truncate a corrupt nonfinal segment");
+        assertTrue(Files.exists(corrupted.resolve(lastName)),
+            "unsafe recovery must not delete later durably committed groups");
+
+        // Also fence an explicit replay after a segment is damaged while
+        // the WAL is already open. A safe prefix callback is not a durable
+        // certificate for subsequent missing/corrupt records.
+        Path damagedWhileOpen = tempDir.resolve("middle-tail-damaged-while-open");
+        copyWal(pristine, damagedWhileOpen);
+        try (FileSharedWal wal = new FileSharedWal(damagedWhileOpen, CAPACITY_BYTES, bytesPerSegment)) {
+            Path segment = damagedWhileOpen.resolve(middleName);
+            truncate(segment, Files.size(segment) - 1L);
+            assertThrows(WalCorruptionException.class,
+                () -> wal.replay((record, location) -> { }));
+        }
     }
 
     @Test
