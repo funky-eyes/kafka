@@ -178,6 +178,12 @@ class SharedStorageEngineTest {
             assertThrows(WalCorruptionException.class, () ->
                 SharedStorageEngine.requireLocalDataIdentity(PARTITION, indexed,
                     WalRecord.truncate(1, 2, 0, 4, 100)));
+
+            // This mandatory regression must also reject a candidate
+            // selected before its indexed WAL location was truncated.
+            followerThatBecomesLeader.truncate(PARTITION, 4, 100).get(10, TimeUnit.SECONDS);
+            assertThrows(WalCorruptionException.class, () ->
+                followerThatBecomesLeader.readUploadCandidates(candidates));
         }
     }
 
