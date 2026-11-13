@@ -74,6 +74,69 @@ final class WalReplicaDurabilityCertificate {
         }
     }
 
+    /**
+     * Coordinates supplied by a trusted KRaft record or snapshot reader and
+     * the current Controller's committed metadata log horizon. Both horizons
+     * are exclusive. -1 selects the absent replay source; exactly one of
+     * logRecordOffset and snapshotNextOffset must be present.
+     *
+     * Constructing this value cannot authenticate a KRaft source. Callers
+     * must obtain these fields from Controller-owned replay state.
+     */
+    record KRaftReplayContext(
+        Uuid topicId,
+        int partition,
+        int leaderEpoch,
+        int partitionEpoch,
+        long currentControllerEpoch,
+        long committedNextOffset,
+        long logRecordOffset,
+        long snapshotNextOffset
+    ) {
+        KRaftReplayContext {
+            requireValidPartitionIdentity(topicId, partition, leaderEpoch, partitionEpoch);
+            requireValidReplayHorizon(currentControllerEpoch, committedNextOffset,
+                logRecordOffset, snapshotNextOffset);
+            requireExclusiveReplaySource(committedNextOffset, logRecordOffset, snapshotNextOffset);
+        }
+
+        private static void requireValidPartitionIdentity(
+            Uuid topicId, int partition, int leaderEpoch, int partitionEpoch
+        ) {
+            Objects.requireNonNull(topicId);
+            if (Uuid.ZERO_UUID.equals(topicId) || partition < 0
+                || leaderEpoch < 0 || partitionEpoch < 0) {
+                throw new IllegalArgumentException("invalid replay partition identity");
+            }
+        }
+
+        private static void requireValidReplayHorizon(
+            long currentControllerEpoch, long committedNextOffset, long logRecordOffset, long snapshotNextOffset
+        ) {
+            if (currentControllerEpoch < 0 || committedNextOffset <= 0
+                || logRecordOffset < -1 || snapshotNextOffset < -1) {
+                throw new IllegalArgumentException("invalid KRaft replay horizon");
+            }
+        }
+
+        private static void requireExclusiveReplaySource(
+            long committedNextOffset, long logRecordOffset, long snapshotNextOffset
+        ) {
+            boolean logReplay = logRecordOffset >= 0;
+            boolean snapshotReplay = snapshotNextOffset >= 0;
+            if (logReplay == snapshotReplay) {
+                throw new IllegalArgumentException("exactly one KRaft replay source is required");
+            }
+            if (logReplay && logRecordOffset >= committedNextOffset) {
+                throw new IllegalArgumentException("uncommitted KRaft record offset");
+            }
+            if (snapshotReplay && (snapshotNextOffset == 0
+                || snapshotNextOffset > committedNextOffset)) {
+                throw new IllegalArgumentException("snapshot is beyond committed KRaft horizon");
+            }
+        }
+    }
+
     private WalReplicaDurabilityCertificate() {
     }
 
@@ -133,6 +196,43 @@ final class WalReplicaDurabilityCertificate {
             }
         }
         return true;
+    }
+
+    /**
+     * Checks structural conditions for matching a candidate to current KRaft
+     * replay provenance. Log replay must match the exact record offset; a
+     * snapshot replay may only contain an earlier offset than its exclusive
+     * snapshot boundary. The claimed offset must be committed in either case.
+     *
+     * This is a necessary precheck, not a KRaft writer, certificate verifier,
+     * authoritative replay event or producer ACK permission. In particular,
+     * the supplied context must be independently verified and authenticated.
+     */
+    static boolean hasKRaftReplayPreconditions(
+        Coordinate coordinate,
+        List<Receipt> receipts,
+        Set<Integer> currentIsr,
+        Map<Integer, CurrentRegistration> registrations,
+        KRaftReplayContext replay,
+        int requiredReplicas
+    ) {
+        if (replay == null || !hasCurrentRegisteredCompleteReceipts(
+            coordinate, receipts, currentIsr, registrations, requiredReplicas)) {
+            return false;
+        }
+        if (coordinate.controllerEpoch() != replay.currentControllerEpoch()
+            || coordinate.kraftOffset() >= replay.committedNextOffset()) {
+            return false;
+        }
+        if (!coordinate.topicId().equals(replay.topicId())
+            || coordinate.partition() != replay.partition()
+            || coordinate.leaderEpoch() != replay.leaderEpoch()
+            || coordinate.partitionEpoch() != replay.partitionEpoch()) {
+            return false;
+        }
+        return replay.logRecordOffset() >= 0
+            ? coordinate.kraftOffset() == replay.logRecordOffset()
+            : coordinate.kraftOffset() < replay.snapshotNextOffset();
     }
 
     private static boolean matchesCurrentRegistration(Receipt receipt, CurrentRegistration current) {
