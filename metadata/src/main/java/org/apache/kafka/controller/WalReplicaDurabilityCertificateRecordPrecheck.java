@@ -22,9 +22,11 @@ import org.apache.kafka.server.common.MetadataVersion;
 import org.apache.kafka.server.common.OffsetAndEpoch;
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Structural precheck for a not-yet-emittable experimental KRaft record.
@@ -69,6 +71,7 @@ final class WalReplicaDurabilityCertificateRecordPrecheck {
             throw new IllegalArgumentException("missing or excessive WAL certificate replicas");
         }
         Map<Integer, Long> durableEnds = new HashMap<>();
+        Set<Uuid> incarnations = new HashSet<>();
         int previousBroker = -1;
         for (WalReplicaDurabilityCertificateRecord.ReplicaReceipt receipt : receipts) {
             if (receipt == null || receipt.brokerId() <= previousBroker) {
@@ -77,7 +80,8 @@ final class WalReplicaDurabilityCertificateRecordPrecheck {
             if (receipt.brokerEpoch() < 0 || receipt.storageGeneration() <= 0
                 || receipt.durableEndOffset() < endOffset
                 || receipt.incarnationId() == null
-                || Uuid.ZERO_UUID.equals(receipt.incarnationId())) {
+                || Uuid.ZERO_UUID.equals(receipt.incarnationId())
+                || !incarnations.add(receipt.incarnationId())) {
                 throw new IllegalArgumentException("invalid WAL replica identity or durable end");
             }
             previousBroker = receipt.brokerId();
