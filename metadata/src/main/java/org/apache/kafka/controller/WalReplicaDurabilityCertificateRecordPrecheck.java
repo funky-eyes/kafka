@@ -168,7 +168,7 @@ final class WalReplicaDurabilityCertificateRecordPrecheck {
         }
         try {
             requireWellFormedUntrustedRecord(record);
-        } catch (IllegalArgumentException ex) {
+        } catch (IllegalArgumentException | NullPointerException ex) {
             return false;
         }
         if (record.kRaftOffset() >= committedNextOffset) {
