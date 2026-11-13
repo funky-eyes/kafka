@@ -17,6 +17,9 @@
 package org.apache.kafka.controller;
 
 import org.apache.kafka.common.metadata.WalReplicaDurabilityCertificateRecord;
+import org.apache.kafka.raft.Batch;
+import org.apache.kafka.server.common.ApiMessageAndVersion;
+import org.apache.kafka.server.common.OffsetAndEpoch;
 import org.apache.kafka.server.common.MetadataVersion;
 import org.apache.kafka.timeline.SnapshotRegistry;
 import org.apache.kafka.timeline.TimelineHashMap;
@@ -95,6 +98,33 @@ final class WalReplicaDurabilityV1ReplayState {
             requireMonotonic(previous, next);
         }
         return next;
+    }
+
+    /**
+     * Replace only this isolated UNTRUSTED diagnostic timeline with a
+     * validated *complete* snapshot plan. The caller must supply all batches
+     * from one trusted KRaft SnapshotReader, not a prefix or a Broker claim.
+     *
+     * Preflight validates every checkpoint, its wire version, snapshot bounds
+     * and per-partition uniqueness BEFORE clearing prior state. A malformed
+     * late checkpoint cannot partially overwrite earlier diagnostics.
+     *
+     * Neither this isolated replay state nor the plan is connected to
+     * production QuorumController, MetadataImage, Producer ACK or GC.
+     */
+    void restoreUntrustedSnapshot(
+        List<Batch<ApiMessageAndVersion>> completeSnapshotBatches,
+        MetadataVersion metadataVersion,
+        boolean negotiatedExperimentalFeature,
+        OffsetAndEpoch trustedSnapshotId
+    ) {
+        var plan = WalReplicaDurabilityV1SnapshotBatchPreflight.planUntrusted(
+            completeSnapshotBatches, metadataVersion,
+            negotiatedExperimentalFeature, trustedSnapshotId);
+        state.clear();
+        for (UntrustedEvidence evidence : plan.checkpoints()) {
+            state.put(evidence.key(), evidence);
+        }
     }
 
     /** Untrusted diagnostic only: never a durable receipt or ACK/GC permit. */
