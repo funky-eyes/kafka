@@ -55,8 +55,8 @@ final class WalReplicaDurabilityCertificateRecordPrecheck {
     }
 
     private static void requireCoordinates(WalReplicaDurabilityCertificateRecord record) {
-        if (record == null) {
-            throw new IllegalArgumentException("missing WAL certificate KRaft record");
+        if (record == null || record.topicId() == null) {
+            throw new IllegalArgumentException("missing WAL certificate KRaft record topic identity");
         }
         new WalReplicaDurabilityCertificate.Coordinate(
             record.topicId(), record.partitionId(), record.leaderEpoch(), record.partitionEpoch(),
@@ -168,7 +168,7 @@ final class WalReplicaDurabilityCertificateRecordPrecheck {
         }
         try {
             requireWellFormedUntrustedRecord(record);
-        } catch (IllegalArgumentException | NullPointerException ex) {
+        } catch (IllegalArgumentException ex) {
             return false;
         }
         if (record.kRaftOffset() >= committedNextOffset) {
