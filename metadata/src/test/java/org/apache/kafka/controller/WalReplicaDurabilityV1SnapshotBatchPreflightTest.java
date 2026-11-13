@@ -19,6 +19,7 @@ package org.apache.kafka.controller;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.metadata.FeatureLevelRecord;
 import org.apache.kafka.common.metadata.NoOpRecord;
+import org.apache.kafka.common.metadata.WalReplicaDurabilityCertificateRecord;
 import org.apache.kafka.common.metadata.WalReplicaDurabilityV1CheckpointRecord;
 import org.apache.kafka.raft.Batch;
 import org.apache.kafka.server.common.ApiMessageAndVersion;
@@ -119,6 +120,12 @@ class WalReplicaDurabilityV1SnapshotBatchPreflightTest {
         var unsupported = new ApiMessageAndVersion(checkpoint(Uuid.randomUuid(), 1200), (short) 1);
         assertThrows(IllegalArgumentException.class, () ->
             plan(List.of(batch(0, valid), batch(1, unsupported))));
+        // An incremental V1 certificate is NOT a snapshot checkpoint:
+        // its pseudo-offset cannot recover the source's assigned log offset.
+        var incremental = new ApiMessageAndVersion(
+            new WalReplicaDurabilityCertificateRecord(), (short) 1);
+        assertThrows(IllegalStateException.class, () ->
+            plan(List.of(batch(0, valid), batch(1, incremental))));
     }
 
     @Test
