@@ -57,7 +57,7 @@ class WalReplicaDurabilityRangePrecheckTest {
     ) {
         return new WalReplicaDurabilityRangePrecheck.Span(
             receipt.brokerId(), receipt.brokerEpoch(), receipt.incarnationId(), receipt.storageGeneration(),
-            COORDINATE.topicId(), COORDINATE.partition(), COORDINATE.leaderEpoch(), start, end, true);
+            COORDINATE.topicId(), COORDINATE.partition(), COORDINATE.leaderEpoch(), COORDINATE.partitionEpoch(), start, end, true);
     }
 
     private static Map<Integer, List<WalReplicaDurabilityRangePrecheck.Span>> validSpans() {
@@ -94,27 +94,31 @@ class WalReplicaDurabilityRangePrecheckTest {
     void foreignPartitionOrReplacedDiskCannotSupplySpan() {
         var foreignTopic = new WalReplicaDurabilityRangePrecheck.Span(
             FIRST.brokerId(), FIRST.brokerEpoch(), FIRST.incarnationId(), 1,
-            Uuid.randomUuid(), COORDINATE.partition(), COORDINATE.leaderEpoch(), 100, 200, true);
+            Uuid.randomUuid(), COORDINATE.partition(), COORDINATE.leaderEpoch(), COORDINATE.partitionEpoch(), 100, 200, true);
         var wrongPartition = new WalReplicaDurabilityRangePrecheck.Span(
             FIRST.brokerId(), FIRST.brokerEpoch(), FIRST.incarnationId(), 1,
-            COORDINATE.topicId(), COORDINATE.partition() + 1, COORDINATE.leaderEpoch(), 100, 200, true);
+            COORDINATE.topicId(), COORDINATE.partition() + 1, COORDINATE.leaderEpoch(), COORDINATE.partitionEpoch(), 100, 200, true);
         var staleLeader = new WalReplicaDurabilityRangePrecheck.Span(
             FIRST.brokerId(), FIRST.brokerEpoch(), FIRST.incarnationId(), 1,
-            COORDINATE.topicId(), COORDINATE.partition(), COORDINATE.leaderEpoch() - 1, 100, 200, true);
+            COORDINATE.topicId(), COORDINATE.partition(), COORDINATE.leaderEpoch() - 1, COORDINATE.partitionEpoch(), 100, 200, true);
+        var stalePartitionEpoch = new WalReplicaDurabilityRangePrecheck.Span(
+            FIRST.brokerId(), FIRST.brokerEpoch(), FIRST.incarnationId(), 1,
+            COORDINATE.topicId(), COORDINATE.partition(), COORDINATE.leaderEpoch(),
+            COORDINATE.partitionEpoch() - 1, 100, 200, true);
         var replacedDisk = new WalReplicaDurabilityRangePrecheck.Span(
             FIRST.brokerId(), FIRST.brokerEpoch(), FIRST.incarnationId(), 2,
-            COORDINATE.topicId(), COORDINATE.partition(), COORDINATE.leaderEpoch(), 100, 200, true);
+            COORDINATE.topicId(), COORDINATE.partition(), COORDINATE.leaderEpoch(), COORDINATE.partitionEpoch(), 100, 200, true);
         var replayedEpoch = new WalReplicaDurabilityRangePrecheck.Span(
             FIRST.brokerId(), FIRST.brokerEpoch() - 1, FIRST.incarnationId(), 1,
-            COORDINATE.topicId(), COORDINATE.partition(), COORDINATE.leaderEpoch(), 100, 200, true);
+            COORDINATE.topicId(), COORDINATE.partition(), COORDINATE.leaderEpoch(), COORDINATE.partitionEpoch(), 100, 200, true);
         var wrongIncarnation = new WalReplicaDurabilityRangePrecheck.Span(
             FIRST.brokerId(), FIRST.brokerEpoch(), Uuid.randomUuid(), 1,
-            COORDINATE.topicId(), COORDINATE.partition(), COORDINATE.leaderEpoch(), 100, 200, true);
+            COORDINATE.topicId(), COORDINATE.partition(), COORDINATE.leaderEpoch(), COORDINATE.partitionEpoch(), 100, 200, true);
         var borrowedBroker = new WalReplicaDurabilityRangePrecheck.Span(
             SECOND.brokerId(), FIRST.brokerEpoch(), FIRST.incarnationId(), 1,
-            COORDINATE.topicId(), COORDINATE.partition(), COORDINATE.leaderEpoch(), 100, 200, true);
-        for (var invalid : List.of(foreignTopic, wrongPartition, staleLeader, replacedDisk,
-            replayedEpoch, wrongIncarnation, borrowedBroker)) {
+            COORDINATE.topicId(), COORDINATE.partition(), COORDINATE.leaderEpoch(), COORDINATE.partitionEpoch(), 100, 200, true);
+        for (var invalid : List.of(foreignTopic, wrongPartition, staleLeader, stalePartitionEpoch,
+            replacedDisk, replayedEpoch, wrongIncarnation, borrowedBroker)) {
             assertFalse(verify(Map.of(1, List.of(invalid), 2, List.of(span(SECOND, 100, 200)))));
         }
     }
@@ -127,7 +131,7 @@ class WalReplicaDurabilityRangePrecheckTest {
             2, List.of(span(SECOND, 100, 200)), 3, List.of(span(SECOND, 100, 200)))));
         var unverified = new WalReplicaDurabilityRangePrecheck.Span(
             FIRST.brokerId(), FIRST.brokerEpoch(), FIRST.incarnationId(), 1,
-            COORDINATE.topicId(), COORDINATE.partition(), COORDINATE.leaderEpoch(), 100, 200, false);
+            COORDINATE.topicId(), COORDINATE.partition(), COORDINATE.leaderEpoch(), COORDINATE.partitionEpoch(), 100, 200, false);
         assertFalse(verify(Map.of(1, List.of(unverified), 2, List.of(span(SECOND, 100, 200)))));
         var unauthenticated = new WalReplicaDurabilityCertificate.Receipt(
             FIRST.brokerId(), FIRST.brokerEpoch(), FIRST.incarnationId(), 1, 200, false, true);
@@ -141,13 +145,13 @@ class WalReplicaDurabilityRangePrecheckTest {
     void invalidOrExcessiveSpanInventoryFailsClosed() {
         assertThrows(IllegalArgumentException.class, () ->
             new WalReplicaDurabilityRangePrecheck.Span(1, 101, FIRST.incarnationId(), 1,
-                COORDINATE.topicId(), 0, 7, 100, 100, true));
+                COORDINATE.topicId(), 0, 7, COORDINATE.partitionEpoch(), 100, 100, true));
         assertThrows(IllegalArgumentException.class, () ->
             new WalReplicaDurabilityRangePrecheck.Span(1, 101, Uuid.ZERO_UUID, 1,
-                COORDINATE.topicId(), 0, 7, 100, 200, true));
+                COORDINATE.topicId(), 0, 7, COORDINATE.partitionEpoch(), 100, 200, true));
         assertThrows(IllegalArgumentException.class, () ->
             new WalReplicaDurabilityRangePrecheck.Span(1, 101, FIRST.incarnationId(), 0,
-                COORDINATE.topicId(), 0, 7, 100, 200, true));
+                COORDINATE.topicId(), 0, 7, COORDINATE.partitionEpoch(), 100, 200, true));
         List<WalReplicaDurabilityRangePrecheck.Span> tooMany = Collections.nCopies(
             WalReplicaDurabilityRangePrecheck.MAX_SPANS_PER_REPLICA + 1, span(FIRST, 100, 200));
         assertFalse(verify(Map.of(1, tooMany, 2, List.of(span(SECOND, 100, 200)))));
