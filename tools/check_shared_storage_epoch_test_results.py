@@ -598,6 +598,14 @@ REQUIRED_TESTS = {
         "claimedAuthorityGenerationCannotBeChangedAcrossWireConversion",
         "changedPartitionEpochInvalidatesOneTimeChallengeWithoutLeaderChange",
     ),
+    "org.apache.kafka.controller.WalReplicaDurabilityCertificateTest": (
+        "distinctAuthenticatedCurrentIsrReceiptsCanPassNecessaryPrecheck",
+        "duplicateBrokerCannotCountAsIndependentReplica",
+        "missingDurableCoverageFailsClosed",
+        "unauthenticatedAndUnverifiedReceiptsFailClosed",
+        "foreignIsrAndInsufficientQuorumFailClosed",
+        "invalidOffsetsAndIdentityAreRejectedAtConstruction",
+    ),
     "org.apache.kafka.controller.PartitionRetirementReplicaRoundRegistryTest": (
         "outOfIsrAssignedBrokerRegistrationChangeRevokesCollectedRound",
         "brokerRevocationDoesNotBurnUnrelatedReplicaSet",
