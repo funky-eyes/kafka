@@ -37,8 +37,9 @@ import static org.apache.kafka.controller.WalReplicaDurabilityCertificateReplayS
  *
  * Unlike the legacy V0 timeline, the stored KRaft offset is supplied by an
  * externally verified committed batch, not copied from the wire payload.
- * There is no QuorumController replay registration, metadata image writer,
- * Producer ACK consumer or COMMITTED physical GC authorization.
+ * Standby QuorumController observes actual committed batches for untrusted
+ * diagnostics only; there is no active Controller Writer, metadata image
+ * serialization, Producer ACK consumer or COMMITTED physical GC authority.
  *
  * SnapshotRegistry supports speculative-state rollback; durable Kafka
  * snapshot serialization and restoration are NOT implemented here.
