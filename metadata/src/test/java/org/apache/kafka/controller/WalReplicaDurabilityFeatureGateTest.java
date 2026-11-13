@@ -43,6 +43,13 @@ class WalReplicaDurabilityFeatureGateTest {
 
     @Test
     void negotiatedWalCertificateFeatureNeedsMetadataVersionFourFourAndCanBeRevoked() {
+        // The metadata-version upgrade alone must NEVER enable certificates,
+        // even though Feature.defaultLevel(4.4) describes experimental v1.
+        FeatureControlManager withoutFinalizedFeature = manager(true);
+        withoutFinalizedFeature.replay(
+            feature(MetadataVersion.FEATURE_NAME, MetadataVersion.IBP_4_4_IV0.featureLevel()));
+        assertFalse(withoutFinalizedFeature.isWalReplicaDurabilityEnabled());
+
         FeatureControlManager manager = manager(true);
         manager.replay(feature(MetadataVersion.FEATURE_NAME, MetadataVersion.IBP_4_3_IV0.featureLevel()));
         manager.replay(feature(WalReplicaDurabilityVersion.FEATURE_NAME, (short) 1));
