@@ -64,14 +64,8 @@ final class WalReplicaDurabilityV1PositionPrecheck {
         long trustedRecordOffset,
         long trustedPreviousCertificateOffset
     ) {
-        // The actual schema version comes from KRaft's ApiMessageAndVersion,
-        // not from the mutable generated record. V0 with an offset of zero
-        // would otherwise be indistinguishable from a V1 default field.
-        if (trustedWireVersion != 1 || record == null || metadataVersion == null
-            || trustedCommittedBatch == null || !negotiatedExperimentalFeature) {
-            return false;
-        }
-        if (!metadataVersion.isAtLeast(MetadataVersion.IBP_4_4_IV0)) {
+        if (!isNegotiatedV1Context(record, trustedWireVersion, metadataVersion,
+            negotiatedExperimentalFeature, trustedCommittedBatch)) {
             return false;
         }
         try {
@@ -79,19 +73,46 @@ final class WalReplicaDurabilityV1PositionPrecheck {
         } catch (IllegalArgumentException | NullPointerException ex) {
             return false;
         }
-        if (trustedPreviousCertificateOffset < -1
-            || record.expectedPreviousKRaftOffset() != trustedPreviousCertificateOffset
-            || trustedPreviousCertificateOffset >= trustedRecordOffset) {
+        return matchesPreviousCertificateCas(record, trustedRecordOffset, trustedPreviousCertificateOffset)
+            && matchesCommittedBatch(record, trustedCommittedBatch, trustedRecordOffset);
+    }
+
+    private static boolean isNegotiatedV1Context(
+        WalReplicaDurabilityCertificateRecord record,
+        short trustedWireVersion,
+        MetadataVersion metadataVersion,
+        boolean negotiatedExperimentalFeature,
+        CommitBatch batch
+    ) {
+        // The version must be read from KRaft's ApiMessageAndVersion, never
+        // inferred from the mutable record or a V0 field defaulting to zero.
+        if (trustedWireVersion != 1 || record == null || metadataVersion == null) {
             return false;
         }
-        // V0's self-claimed KRaftOffset is absent from the V1 wire image.
-        // Fail closed for in-memory objects carrying an inconsistent V0 claim.
-        if (record.kRaftOffset() != 0
-            || record.controllerEpoch() != trustedCommittedBatch.raftEpoch()) {
+        return batch != null && negotiatedExperimentalFeature
+            && metadataVersion.isAtLeast(MetadataVersion.IBP_4_4_IV0);
+    }
+
+    private static boolean matchesPreviousCertificateCas(
+        WalReplicaDurabilityCertificateRecord record,
+        long recordOffset,
+        long previousOffset
+    ) {
+        return previousOffset >= -1
+            && record.expectedPreviousKRaftOffset() == previousOffset
+            && previousOffset < recordOffset;
+    }
+
+    private static boolean matchesCommittedBatch(
+        WalReplicaDurabilityCertificateRecord record,
+        CommitBatch batch,
+        long recordOffset
+    ) {
+        // V0's self-claimed KRaftOffset must not reappear in V1.
+        if (record.kRaftOffset() != 0 || record.controllerEpoch() != batch.raftEpoch()) {
             return false;
         }
-        return trustedRecordOffset >= trustedCommittedBatch.baseOffset()
-            && trustedRecordOffset <= trustedCommittedBatch.lastOffset()
-            && trustedRecordOffset < trustedCommittedBatch.committedNextOffset();
+        return recordOffset >= batch.baseOffset() && recordOffset <= batch.lastOffset()
+            && recordOffset < batch.committedNextOffset();
     }
 }
