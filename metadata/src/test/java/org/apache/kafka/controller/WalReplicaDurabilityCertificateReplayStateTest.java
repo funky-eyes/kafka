@@ -77,7 +77,7 @@ class WalReplicaDurabilityCertificateReplayStateTest {
         WalReplicaDurabilityCertificateReplayState manager,
         WalReplicaDurabilityCertificateRecord record
     ) {
-        manager.replayFromKRaft(record, MetadataVersion.IBP_4_4_IV0, true,
+        manager.replayFromKRaft(record, (short) 0, MetadataVersion.IBP_4_4_IV0, true,
             Optional.empty(), record.kRaftOffset(), record.kRaftOffset() + 2);
     }
 
@@ -113,15 +113,21 @@ class WalReplicaDurabilityCertificateReplayStateTest {
         replay(manager, record(TOPIC, 7, 11, 200, 1000, 3));
         var original = manager.getUntrusted(key(TOPIC));
         var newer = record(TOPIC, 7, 11, 210, 1001, 3);
-        assertThrows(IllegalStateException.class, () -> manager.replayFromKRaft(newer,
+        assertThrows(IllegalStateException.class, () -> manager.replayFromKRaft(newer, (short) 0,
             MetadataVersion.IBP_4_4_IV0, false, Optional.empty(), 1001, 1003));
-        assertThrows(IllegalStateException.class, () -> manager.replayFromKRaft(newer,
+        assertThrows(IllegalStateException.class, () -> manager.replayFromKRaft(newer, (short) 0,
             MetadataVersion.LATEST_PRODUCTION, true, Optional.empty(), 1001, 1003));
-        assertThrows(IllegalStateException.class, () -> manager.replayFromKRaft(newer,
+        assertThrows(IllegalStateException.class, () -> manager.replayFromKRaft(newer, (short) 0,
             MetadataVersion.IBP_4_4_IV0, true, Optional.empty(), 1000, 1003));
-        assertThrows(IllegalStateException.class, () -> manager.replayFromKRaft(newer,
+        assertThrows(IllegalStateException.class, () -> manager.replayFromKRaft(newer, (short) 0,
             MetadataVersion.IBP_4_4_IV0, true, Optional.empty(), 1001, 1001));
         assertEquals(original, manager.getUntrusted(key(TOPIC)));
+        // Even a plausible record at the first KRaft log position must not
+        // enter the V0 diagnostic timeline if the wire version is V1.
+        var firstOffset = record(Uuid.randomUuid(), 0, 0, 120, 0, 3);
+        assertThrows(IllegalStateException.class, () -> manager.replayFromKRaft(
+            firstOffset, (short) 1, MetadataVersion.IBP_4_4_IV0, true,
+            Optional.empty(), 0, 1));
     }
 
     @Test
@@ -164,7 +170,7 @@ class WalReplicaDurabilityCertificateReplayStateTest {
         WalReplicaDurabilityCertificateReplayState manager =
             manager(new SnapshotRegistry(new LogContext()));
         var historical = record(TOPIC, 7, 11, 200, 1000, 3);
-        manager.replayFromKRaft(historical, MetadataVersion.IBP_4_4_IV0, true,
+        manager.replayFromKRaft(historical, (short) 0, MetadataVersion.IBP_4_4_IV0, true,
             Optional.of(new OffsetAndEpoch(1001, 9)), 999, 1001);
         assertEquals(200L, manager.getUntrusted(key(TOPIC)).endOffset());
         Uuid newTopic = Uuid.randomUuid();
@@ -176,7 +182,7 @@ class WalReplicaDurabilityCertificateReplayStateTest {
 
         WalReplicaDurabilityCertificateReplayState failed =
             manager(new SnapshotRegistry(new LogContext()));
-        assertThrows(IllegalStateException.class, () -> failed.replayFromKRaft(historical,
+        assertThrows(IllegalStateException.class, () -> failed.replayFromKRaft(historical, (short) 0,
             MetadataVersion.IBP_4_4_IV0, true,
             Optional.of(new OffsetAndEpoch(1000, 9)), 999, 1001));
         assertNull(failed.getUntrusted(key(TOPIC)));
