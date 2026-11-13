@@ -15,13 +15,15 @@
 
 // Experimental, non-emitting KRaft WAL replica certificate envelope.
 // Neither this record format nor its replay makes WAL bytes authoritative.
-// Requires future metadata.version >= 4.4 and an independent negotiated
-// certificate feature before any Controller is allowed to emit this record.
+// V0 retains the un-emittable self-referential claimed KRaftOffset for binary
+// compatibility; V1 instead carries the previously accepted certificate
+// offset as a pre-append CAS, and learns its own offset ONLY from trusted KRaft
+// commit batch coordinates. No Controller writer or ACK grant is enabled.
 {
   "apiKey": 30,
   "type": "metadata",
   "name": "WalReplicaDurabilityCertificateRecord",
-  "validVersions": "0",
+  "validVersions": "0-1",
   "flexibleVersions": "0+",
   "fields": [
     { "name": "TopicId", "type": "uuid", "versions": "0+",
@@ -38,8 +40,11 @@
       "about": "Exclusive Kafka end offset of the claimed durable range." },
     { "name": "ControllerEpoch", "type": "int64", "versions": "0+",
       "about": "Controller generation that originally proposed the record." },
-    { "name": "KRaftOffset", "type": "int64", "versions": "0+",
-      "about": "Claimed KRaft append offset; readers must independently verify it." },
+    { "name": "KRaftOffset", "type": "int64", "versions": "0",
+      "about": "Legacy V0 self-claimed offset; NEVER use as a pre-append authority." },
+    { "name": "ExpectedPreviousKRaftOffset", "type": "int64", "versions": "1+",
+      "default": "-1",
+      "about": "V1 pre-append CAS of the last accepted certificate; -1 for first. This is NOT the actual append offset." },
     { "name": "ReplicaReceipts", "type": "[]ReplicaReceipt", "versions": "0+",
       "about": "Untrusted claims for independently identified durable replicas.",
       "fields": [

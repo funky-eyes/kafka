@@ -76,6 +76,7 @@ final class WalReplicaDurabilityCertificateReplayState {
      */
     void replayFromKRaft(
         WalReplicaDurabilityCertificateRecord record,
+        short trustedWireVersion,
         MetadataVersion metadataVersion,
         boolean negotiatedExperimentalFeature,
         Optional<OffsetAndEpoch> snapshotId,
@@ -83,7 +84,7 @@ final class WalReplicaDurabilityCertificateReplayState {
         long committedNextOffset
     ) {
         if (!WalReplicaDurabilityCertificateRecordPrecheck.hasCommittedReplayOrigin(
-            record, metadataVersion, negotiatedExperimentalFeature,
+            record, trustedWireVersion, metadataVersion, negotiatedExperimentalFeature,
             snapshotId, observedRecordOffset, committedNextOffset)) {
             throw new IllegalStateException("untrusted or uncommitted WAL certificate replay source");
         }
