@@ -134,6 +134,11 @@ final class WalReplicaDurabilityV1ReplayState {
             || next.endOffset() < previous.endOffset()) {
             throw new IllegalStateException("V1 WAL certificate regressed Controller generation or WAL end");
         }
+        // A later certificate cannot skip an unproven Kafka-offset interval
+        // between the previous durable end and its claimed starting offset.
+        if (next.startOffset() > previous.endOffset()) {
+            throw new IllegalStateException("V1 WAL certificate leaves a gap after prior durable range");
+        }
         if (next.leaderEpoch() < previous.leaderEpoch()
             || next.partitionEpoch() < previous.partitionEpoch()) {
             throw new IllegalStateException("V1 WAL certificate regressed partition generation");
