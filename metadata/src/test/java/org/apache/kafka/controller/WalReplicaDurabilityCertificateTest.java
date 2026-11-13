@@ -25,6 +25,7 @@ import java.util.Set;
 
 import static org.apache.kafka.controller.WalReplicaDurabilityCertificate.hasCurrentRegisteredCompleteReceipts;
 import static org.apache.kafka.controller.WalReplicaDurabilityCertificate.hasIndependentCompleteReceipts;
+import static org.apache.kafka.controller.WalReplicaDurabilityCertificate.hasKRaftReplayPreconditions;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -45,6 +46,18 @@ class WalReplicaDurabilityCertificateTest {
             receipt.brokerEpoch(), receipt.incarnationId(), receipt.storageGeneration(), false, false);
     }
 
+    private static WalReplicaDurabilityCertificate.KRaftReplayContext replay(
+        long controllerEpoch,
+        long committedNextOffset,
+        long logRecordOffset,
+        long snapshotNextOffset
+    ) {
+        return new WalReplicaDurabilityCertificate.KRaftReplayContext(
+            COORDINATE.topicId(), COORDINATE.partition(),
+            COORDINATE.leaderEpoch(), COORDINATE.partitionEpoch(),
+            controllerEpoch, committedNextOffset, logRecordOffset, snapshotNextOffset);
+    }
+
     @Test
     void distinctAuthenticatedCurrentIsrReceiptsCanPassNecessaryPrecheck() {
         var first = receipt(1, 200);
@@ -54,6 +67,12 @@ class WalReplicaDurabilityCertificateTest {
         assertTrue(hasCurrentRegisteredCompleteReceipts(COORDINATE,
             List.of(first, second), Set.of(1, 2, 3),
             Map.of(1, current(first), 2, current(second)), 2));
+        Map<Integer, WalReplicaDurabilityCertificate.CurrentRegistration> registrations =
+            Map.of(1, current(first), 2, current(second));
+        assertTrue(hasKRaftReplayPreconditions(COORDINATE, List.of(first, second),
+            Set.of(1, 2, 3), registrations, replay(3, 1001, 1000, -1), 2));
+        assertTrue(hasKRaftReplayPreconditions(COORDINATE, List.of(first, second),
+            Set.of(1, 2, 3), registrations, replay(3, 1001, -1, 1001), 2));
     }
 
     @Test
@@ -80,6 +99,9 @@ class WalReplicaDurabilityCertificateTest {
         assertFalse(hasCurrentRegisteredCompleteReceipts(COORDINATE,
             List.of(first, incomplete), Set.of(1, 2),
             Map.of(1, current(first), 2, current(incomplete)), 2));
+        assertFalse(hasKRaftReplayPreconditions(COORDINATE, List.of(first, incomplete),
+            Set.of(1, 2), Map.of(1, current(first), 2, current(incomplete)),
+            replay(3, 1001, 1000, -1), 2));
     }
 
     @Test
@@ -119,6 +141,8 @@ class WalReplicaDurabilityCertificateTest {
                 "identity-only stale receipts pass the old necessary count precheck");
             assertFalse(hasCurrentRegisteredCompleteReceipts(COORDINATE,
                 List.of(first, stale), Set.of(1, 2), current, 2));
+            assertFalse(hasKRaftReplayPreconditions(COORDINATE, List.of(first, stale),
+                Set.of(1, 2), current, replay(3, 1001, 1000, -1), 2));
         }
     }
 
@@ -148,6 +172,31 @@ class WalReplicaDurabilityCertificateTest {
         assertFalse(hasCurrentRegisteredCompleteReceipts(COORDINATE,
             List.of(first, second), Set.of(1, 2),
             Map.of(1, current(first), 2, shuttingDown), 2));
+
+        Map<Integer, WalReplicaDurabilityCertificate.CurrentRegistration> registrations =
+            Map.of(1, current(first), 2, current(second));
+        assertFalse(hasKRaftReplayPreconditions(COORDINATE, List.of(first, second),
+            Set.of(1, 2), registrations, null, 2));
+        // An old controller epoch may never silently authorize previously
+        // replayed receipts on a newly elected controller.
+        assertFalse(hasKRaftReplayPreconditions(COORDINATE, List.of(first, second),
+            Set.of(1, 2), registrations, replay(4, 1001, 1000, -1), 2));
+        // Exact KRaft log-source offset and exclusive snapshot horizon matter.
+        assertFalse(hasKRaftReplayPreconditions(COORDINATE, List.of(first, second),
+            Set.of(1, 2), registrations, replay(3, 1001, 999, -1), 2));
+        assertFalse(hasKRaftReplayPreconditions(COORDINATE, List.of(first, second),
+            Set.of(1, 2), registrations, replay(3, 1001, -1, 1000), 2));
+
+        var wrongTopic = new WalReplicaDurabilityCertificate.KRaftReplayContext(
+            Uuid.randomUuid(), COORDINATE.partition(), COORDINATE.leaderEpoch(),
+            COORDINATE.partitionEpoch(), 3, 1001, 1000, -1);
+        var wrongPartitionEpoch = new WalReplicaDurabilityCertificate.KRaftReplayContext(
+            COORDINATE.topicId(), COORDINATE.partition(), COORDINATE.leaderEpoch(),
+            COORDINATE.partitionEpoch() + 1, 3, 1001, 1000, -1);
+        assertFalse(hasKRaftReplayPreconditions(COORDINATE, List.of(first, second),
+            Set.of(1, 2), registrations, wrongTopic, 2));
+        assertFalse(hasKRaftReplayPreconditions(COORDINATE, List.of(first, second),
+            Set.of(1, 2), registrations, wrongPartitionEpoch, 2));
     }
 
     @Test
@@ -168,5 +217,14 @@ class WalReplicaDurabilityCertificateTest {
             new WalReplicaDurabilityCertificate.CurrentRegistration(1, Uuid.ZERO_UUID, 1, false, false));
         assertThrows(IllegalArgumentException.class, () ->
             new WalReplicaDurabilityCertificate.CurrentRegistration(1, Uuid.randomUuid(), 0, false, false));
+
+        // Neither a missing source nor two competing sources can supply
+        // trusted KRaft replay position.
+        assertThrows(IllegalArgumentException.class, () -> replay(3, 1001, -1, -1));
+        assertThrows(IllegalArgumentException.class, () -> replay(3, 1001, 1000, 1001));
+        assertThrows(IllegalArgumentException.class, () -> replay(3, 1000, 1000, -1));
+        assertThrows(IllegalArgumentException.class, () -> replay(3, 1001, -1, 1002));
+        assertThrows(IllegalArgumentException.class, () -> replay(3, 1001, -1, 0));
+        assertThrows(IllegalArgumentException.class, () -> replay(-1, 1001, 1000, -1));
     }
 }
