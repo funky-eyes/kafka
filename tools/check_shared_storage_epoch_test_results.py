@@ -630,6 +630,13 @@ REQUIRED_TESTS = {
         "speculativeOrUncommittedKRaftPositionMustFailClosed",
         "malformedFeatureOrForgedBrokerClaimsCannotAuthorizeV1Position",
     ),
+    "org.apache.kafka.controller.WalReplicaDurabilityV1ReplayStateTest": (
+        "trustedAssignedOffsetNotMutableWireClaimAdvancesV1Cas",
+        "uncommittedWrongVersionAndStalePreviousCasFailClosed",
+        "staleControllerAndPartitionGenerationsNeverOverwriteTimeline",
+        "snapshotRegistryRollbackRestoresPreviousV1Cas",
+        "nestedMutableReceiptsAndTopicRecreationRemainIsolated",
+    ),
     "org.apache.kafka.controller.WalReplicaDurabilityCertificateReplayStateTest": (
         "committedLogReplayFreezesGeneratedRecordAndItsNestedMutableEntries",
         "untrustedOrUncommittedSourceCannotOverwriteExistingReplayState",
