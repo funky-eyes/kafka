@@ -127,14 +127,20 @@ final class WalReplicaDurabilityCertificate {
         Set<Uuid> seenIncarnations = new HashSet<>();
         for (Receipt receipt : receipts) {
             CurrentRegistration current = registrations.get(receipt.brokerId());
-            if (current == null || current.fenced() || current.inControlledShutdown()
-                || current.brokerEpoch() != receipt.brokerEpoch()
-                || !current.incarnationId().equals(receipt.incarnationId())
-                || current.storageGeneration() != receipt.storageGeneration()
+            if (!matchesCurrentRegistration(receipt, current)
                 || !seenIncarnations.add(receipt.incarnationId())) {
                 return false;
             }
         }
         return true;
+    }
+
+    private static boolean matchesCurrentRegistration(Receipt receipt, CurrentRegistration current) {
+        if (current == null || current.fenced() || current.inControlledShutdown()) {
+            return false;
+        }
+        return current.brokerEpoch() == receipt.brokerEpoch()
+            && current.incarnationId().equals(receipt.incarnationId())
+            && current.storageGeneration() == receipt.storageGeneration();
     }
 }
