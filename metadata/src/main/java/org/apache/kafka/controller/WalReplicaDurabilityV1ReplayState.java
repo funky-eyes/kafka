@@ -84,7 +84,7 @@ final class WalReplicaDurabilityV1ReplayState {
         try {
             WalReplicaDurabilityCertificateRecordPrecheck.requireWellFormedUntrustedRecord(record);
             return new Key(record.topicId(), record.partitionId());
-        } catch (IllegalArgumentException | NullPointerException ex) {
+        } catch (IllegalArgumentException ex) {
             throw new IllegalStateException("malformed V1 WAL certificate record", ex);
         }
     }
