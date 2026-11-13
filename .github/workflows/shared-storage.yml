@@ -73,11 +73,14 @@ on:
       - 'metadata/src/test/java/org/apache/kafka/image/PartitionRetirementAuthorityImageTest.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/PartitionRetirementControlManagerTest.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/PartitionRetirementFeatureGateTest.java'
+      - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityFeatureGateTest.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementCandidatePrecheck.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/PartitionRetirementCandidatePrecheckTest.java'
       - 'server-common/src/main/java/org/apache/kafka/server/common/PartitionRetirementAuthorityVersion.java'
       - 'server-common/src/main/java/org/apache/kafka/server/common/Feature.java'
       - 'server-common/src/test/java/org/apache/kafka/server/common/PartitionRetirementAuthorityVersionTest.java'
+      - 'server-common/src/main/java/org/apache/kafka/server/common/WalReplicaDurabilityVersion.java'
+      - 'server-common/src/test/java/org/apache/kafka/server/common/WalReplicaDurabilityVersionTest.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/FeatureControlManager.java'
       - 'metadata/src/main/java/org/apache/kafka/image/FeaturesImage.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/**'
@@ -165,11 +168,14 @@ on:
       - 'metadata/src/test/java/org/apache/kafka/image/PartitionRetirementAuthorityImageTest.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/PartitionRetirementControlManagerTest.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/PartitionRetirementFeatureGateTest.java'
+      - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityFeatureGateTest.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementCandidatePrecheck.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/PartitionRetirementCandidatePrecheckTest.java'
       - 'server-common/src/main/java/org/apache/kafka/server/common/PartitionRetirementAuthorityVersion.java'
       - 'server-common/src/main/java/org/apache/kafka/server/common/Feature.java'
       - 'server-common/src/test/java/org/apache/kafka/server/common/PartitionRetirementAuthorityVersionTest.java'
+      - 'server-common/src/main/java/org/apache/kafka/server/common/WalReplicaDurabilityVersion.java'
+      - 'server-common/src/test/java/org/apache/kafka/server/common/WalReplicaDurabilityVersionTest.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/FeatureControlManager.java'
       - 'metadata/src/main/java/org/apache/kafka/image/FeaturesImage.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/**'
@@ -472,6 +478,7 @@ jobs:
             --tests 'org.apache.kafka.controller.PartitionRetirementControlManagerTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementCandidatePrecheckTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementFeatureGateTest' \
+            --tests 'org.apache.kafka.controller.WalReplicaDurabilityFeatureGateTest' \
             --tests 'org.apache.kafka.metadata.PartitionRetirementAuthorityStateTest' \
             --tests 'org.apache.kafka.image.PartitionRetirementAuthorityImageTest' \
             2>&1 | tee shared-storage-controller-retirement-test.log
@@ -482,6 +489,7 @@ jobs:
           set -o pipefail
           ./gradlew :server-common:test --no-scan \
             --tests 'org.apache.kafka.server.common.PartitionRetirementAuthorityVersionTest' \
+            --tests 'org.apache.kafka.server.common.WalReplicaDurabilityVersionTest' \
             2>&1 | tee shared-storage-retirement-feature-test.log
 
       - name: Require leadership and epoch JUnit evidence

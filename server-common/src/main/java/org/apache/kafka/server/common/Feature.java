@@ -52,6 +52,11 @@ public enum Feature {
         PartitionRetirementAuthorityVersion.values(),
         PartitionRetirementAuthorityVersion.LATEST_PRODUCTION
     ),
+    WAL_REPLICA_DURABILITY_VERSION(
+        WalReplicaDurabilityVersion.FEATURE_NAME,
+        WalReplicaDurabilityVersion.values(),
+        WalReplicaDurabilityVersion.LATEST_PRODUCTION
+    ),
     STREAMS_VERSION(StreamsVersion.FEATURE_NAME, StreamsVersion.values(), StreamsVersion.LATEST_PRODUCTION),
 
     /**
