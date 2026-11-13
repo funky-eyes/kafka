@@ -66,7 +66,8 @@ class WalReplicaDurabilityV1PositionPrecheckTest {
         WalReplicaDurabilityCertificateRecord record, long observed, long previous
     ) {
         return hasAssignedCommittedPosition(
-            record, MetadataVersion.IBP_4_4_IV0, true, committed(), observed, previous);
+            record, (short) 1, MetadataVersion.IBP_4_4_IV0,
+            true, committed(), observed, previous);
     }
 
     @Test
@@ -96,7 +97,13 @@ class WalReplicaDurabilityV1PositionPrecheckTest {
         readBack.read(new ByteBufferAccessor(buffer), (short) 0);
         assertEquals(1000L, readBack.kRaftOffset());
         assertEquals(-1L, readBack.expectedPreviousKRaftOffset());
-        assertFalse(accepts(readBack, 1000, -1));
+        assertFalse(hasAssignedCommittedPosition(readBack, (short) 0,
+            MetadataVersion.IBP_4_4_IV0, true, committed(), 1000, -1));
+        // V0 at offset zero is especially dangerous: the V0 field's value
+        // alone cannot distinguish a V1 default without KRaft's wire version.
+        readBack.setKRaftOffset(0);
+        assertFalse(hasAssignedCommittedPosition(readBack, (short) 0,
+            MetadataVersion.IBP_4_4_IV0, true, committed(), 1000, -1));
     }
 
     @Test
@@ -114,7 +121,7 @@ class WalReplicaDurabilityV1PositionPrecheckTest {
     void speculativeOrUncommittedKRaftPositionMustFailClosed() {
         assertFalse(accepts(v1(-1), 999, -1));
         assertFalse(accepts(v1(-1), 1004, -1));
-        assertFalse(hasAssignedCommittedPosition(v1(-1), MetadataVersion.IBP_4_4_IV0,
+        assertFalse(hasAssignedCommittedPosition(v1(-1), (short) 1, MetadataVersion.IBP_4_4_IV0,
             true, new CommitBatch(1000, 1003, 9, 1004), 2000, -1));
         assertThrows(IllegalArgumentException.class, () -> new CommitBatch(1000, 1003, 9, 1003));
         assertThrows(IllegalArgumentException.class, () -> new CommitBatch(1003, 1000, 9, 1004));
@@ -125,13 +132,13 @@ class WalReplicaDurabilityV1PositionPrecheckTest {
     @Test
     void malformedFeatureOrForgedBrokerClaimsCannotAuthorizeV1Position() {
         var record = v1(-1);
-        assertFalse(hasAssignedCommittedPosition(record, MetadataVersion.LATEST_PRODUCTION,
+        assertFalse(hasAssignedCommittedPosition(record, (short) 1, MetadataVersion.LATEST_PRODUCTION,
             true, committed(), 1000, -1));
-        assertFalse(hasAssignedCommittedPosition(record, MetadataVersion.IBP_4_4_IV0,
+        assertFalse(hasAssignedCommittedPosition(record, (short) 1, MetadataVersion.IBP_4_4_IV0,
             false, committed(), 1000, -1));
-        assertFalse(hasAssignedCommittedPosition(record, MetadataVersion.IBP_4_4_IV0,
+        assertFalse(hasAssignedCommittedPosition(record, (short) 1, MetadataVersion.IBP_4_4_IV0,
             true, null, 1000, -1));
-        assertFalse(hasAssignedCommittedPosition(null, MetadataVersion.IBP_4_4_IV0,
+        assertFalse(hasAssignedCommittedPosition(null, (short) 1, MetadataVersion.IBP_4_4_IV0,
             true, committed(), 1000, -1));
         record.replicaReceipts().get(1).setIncarnationId(
             record.replicaReceipts().get(0).incarnationId());
