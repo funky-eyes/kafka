@@ -70,7 +70,7 @@ final class WalReplicaDurabilityV1PositionPrecheck {
         }
         try {
             WalReplicaDurabilityCertificateRecordPrecheck.requireWellFormedUntrustedRecord(record);
-        } catch (IllegalArgumentException | NullPointerException ex) {
+        } catch (IllegalArgumentException ex) {
             return false;
         }
         return matchesPreviousCertificateCas(record, trustedRecordOffset, trustedPreviousCertificateOffset)
