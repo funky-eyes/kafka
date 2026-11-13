@@ -74,6 +74,7 @@ import org.apache.kafka.common.metadata.NoOpRecord;
 import org.apache.kafka.common.metadata.PartitionChangeRecord;
 import org.apache.kafka.common.metadata.PartitionRecord;
 import org.apache.kafka.common.metadata.PartitionRetirementAuthorityRecord;
+import org.apache.kafka.common.metadata.WalReplicaDurabilityCertificateRecord;
 import org.apache.kafka.common.metadata.ProducerIdsRecord;
 import org.apache.kafka.common.metadata.RegisterBrokerRecord;
 import org.apache.kafka.common.metadata.RegisterControllerRecord;
@@ -1237,21 +1238,7 @@ public final class QuorumController implements Controller {
                                 log.debug("Replaying commits from the active node up to " +
                                     "offset {} and epoch {}.", offset, epoch);
                             }
-                            int recordIndex = 0;
-                            for (ApiMessageAndVersion message : messages) {
-                                long recordOffset = batch.baseOffset() + recordIndex;
-                                try {
-                                    replay(message.message(), Optional.empty(), recordOffset);
-                                } catch (Throwable e) {
-                                    String failureMessage = String.format("Unable to apply %s " +
-                                        "record at offset %d on standby controller, from the " +
-                                        "batch with baseOffset %d",
-                                        message.message().getClass().getSimpleName(),
-                                        recordOffset, batch.baseOffset());
-                                    throw fatalFaultHandler.handleFault(failureMessage, e);
-                                }
-                                recordIndex++;
-                            }
+                            replayStandbyCommittedBatch(batch);
                             offsetControl.handleCommitBatch(batch);
                         }
                     }
@@ -1259,6 +1246,50 @@ public final class QuorumController implements Controller {
                     reader.close();
                 }
             });
+        }
+
+        /**
+         * Process an actual KRaft committed standby batch. A V1 certificate
+         * is diagnostic only and never enters the ordinary metadata-image
+         * replay switch. A bad late certificate fails the complete preflight
+         * before any ordinary metadata is applied or diagnostics installed.
+         */
+        private void replayStandbyCommittedBatch(Batch<ApiMessageAndVersion> batch) {
+            List<WalReplicaDurabilityCertificateReplayState.UntrustedEvidence> untrustedPlan;
+            try {
+                boolean hasCertificate = batch.records().stream().anyMatch(
+                    record -> record.message() instanceof WalReplicaDurabilityCertificateRecord);
+                untrustedPlan = hasCertificate
+                    ? WalReplicaDurabilityV1BatchPreflight.planUntrusted(
+                        batch, featureControl.metadataVersionOrThrow(),
+                        featureControl.isWalReplicaDurabilityEnabled(),
+                        walReplicaDurabilityV1Diagnostics)
+                    : List.of();
+            } catch (Throwable e) {
+                throw fatalFaultHandler.handleFault(
+                    "Unable to preflight committed WAL certificate batch at base offset " +
+                        batch.baseOffset(), e);
+            }
+            int recordIndex = 0;
+            for (ApiMessageAndVersion message : batch.records()) {
+                long recordOffset = batch.baseOffset() + recordIndex;
+                try {
+                    if (!(message.message() instanceof WalReplicaDurabilityCertificateRecord)) {
+                        replay(message.message(), Optional.empty(), recordOffset);
+                    }
+                } catch (Throwable e) {
+                    String failureMessage = String.format("Unable to apply %s " +
+                        "record at offset %d on standby controller, from the " +
+                        "batch with baseOffset %d",
+                        message.message().getClass().getSimpleName(),
+                        recordOffset, batch.baseOffset());
+                    throw fatalFaultHandler.handleFault(failureMessage, e);
+                }
+                recordIndex++;
+            }
+            // Only after the whole KRaft batch passes and ordinary replay
+            // succeeds may untrusted diagnostics advance in this time line.
+            walReplicaDurabilityV1Diagnostics.applyPrevalidatedCommittedBatch(untrustedPlan);
         }
 
         @Override
@@ -1724,6 +1755,12 @@ public final class QuorumController implements Controller {
     private final PartitionRetirementControlManager partitionRetirementControl;
 
     /**
+     * Standby-only, UNTRUSTED WAL certificate diagnostic timeline. This never
+     * authorizes ACK/HW/GC and the active Controller has no V1 record Writer.
+     */
+    private final WalReplicaDurabilityV1ReplayState walReplicaDurabilityV1Diagnostics;
+
+    /**
      * Deny-all in production. A package-private Builder seam permits tests
      * to exercise uniquely authenticated broker identities; ordinary
      * Controller startup must never install a shared inter-broker principal.
@@ -1841,6 +1878,7 @@ public final class QuorumController implements Controller {
         this.controllerMetrics = controllerMetrics;
         this.snapshotRegistry = new SnapshotRegistry(logContext);
         this.partitionRetirementControl = new PartitionRetirementControlManager(snapshotRegistry);
+        this.walReplicaDurabilityV1Diagnostics = new WalReplicaDurabilityV1ReplayState(snapshotRegistry);
         this.retirementSourceProbeRegistry = new PartitionRetirementSourceProbeRegistry(clusterId);
         this.retirementReplicaRoundRegistry = new PartitionRetirementReplicaRoundRegistry();
         this.retirementBrokerPrincipalPolicy = Objects.requireNonNull(
