@@ -148,6 +148,8 @@ class WalReplicaDurabilityCertificateRecordPrecheckTest {
         // that wire version through the older V0 replay-origin check.
         assertFalse(hasCommittedReplayOrigin(record, (short) 1, MetadataVersion.IBP_4_4_IV0, true,
             Optional.empty(), 1000, 1001));
+        assertFalse(hasCommittedReplayOrigin(valid().setTopicId(null), (short) 0,
+            MetadataVersion.IBP_4_4_IV0, true, Optional.empty(), 1000, 1001));
     }
 
     @Test
