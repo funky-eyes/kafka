@@ -22,9 +22,12 @@ import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectRange;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 import org.apache.kafka.storage.internals.shared.wal.FileSharedWal;
+import org.apache.kafka.storage.internals.shared.wal.SharedWal;
+import org.apache.kafka.storage.internals.shared.wal.WalAppendResult;
 import org.apache.kafka.storage.internals.shared.wal.WalCorruptionException;
 import org.apache.kafka.storage.internals.shared.wal.WalLocation;
 import org.apache.kafka.storage.internals.shared.wal.WalRecord;
+import org.apache.kafka.storage.internals.shared.wal.WalReplayConsumer;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -34,6 +37,7 @@ import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -360,6 +364,86 @@ class SharedStorageEngineTest {
             engine.commitRemoteObject(object(10, 100, 110, 111));
             assertEquals(0, engine.checkpointCommittedRemoteObjects());
             assertTrue(engine.remoteIndex().coverage(PARTITION).covers(new OffsetRange(100, 110)));
+        }
+    }
+
+    @Test
+    void concurrentTruncateDuringLocalReadCannotReturnStaleWalBatch() throws Exception {
+        ReadMutationWal backend = new ReadMutationWal(
+            new FileSharedWal(tempDir.resolve("read-race"), 1024 * 1024, 4096));
+        try (SharedStorageEngine engine = new SharedStorageEngine(backend)) {
+            append(engine, 100, 109, 1);
+            assertEquals(100L, engine.readLocal(PARTITION, 100).orElseThrow().firstOffset());
+            assertEquals(1, engine.readLocalBatches(PARTITION, 100, 1024, true).records().size());
+
+            // Backend returns a CRC-valid old record after another durable
+            // TRUNCATE already removed it from the current partition index.
+            backend.afterNextRead(() -> engine.truncate(PARTITION, 4, 100).join());
+            assertThrows(WalCorruptionException.class, () -> engine.readLocal(PARTITION, 100));
+            assertTrue(engine.readLocal(PARTITION, 100).isEmpty());
+
+            // A new WAL generation at the exact same Kafka offset must not
+            // make a concurrently truncated batch from the old read valid.
+            engine.appendData(PARTITION, 5, 100, 109, ByteBuffer.wrap(new byte[]{2}))
+                .get(10, TimeUnit.SECONDS);
+            assertEquals(1, engine.readLocalBatches(PARTITION, 100, 1024, true).records().size());
+            backend.afterNextRead(() -> engine.truncate(PARTITION, 6, 100).join());
+            assertThrows(WalCorruptionException.class, () ->
+                engine.readLocalBatches(PARTITION, 100, 1024, true));
+            assertTrue(engine.readLocal(PARTITION, 100).isEmpty());
+        }
+    }
+
+    /**
+     * Deterministic read/commit interleaving without timing sleeps or
+     * weakening the File WAL's real append/force durability semantics.
+     */
+    private static final class ReadMutationWal implements SharedWal {
+        private final SharedWal delegate;
+        private Runnable onNextRead;
+
+        private ReadMutationWal(SharedWal delegate) {
+            this.delegate = delegate;
+        }
+
+        private void afterNextRead(Runnable hook) {
+            this.onNextRead = hook;
+        }
+
+        @Override
+        public CompletableFuture<List<WalAppendResult>> appendBatch(List<WalRecord> records) {
+            return delegate.appendBatch(records);
+        }
+
+        @Override
+        public WalRecord read(WalLocation location) throws IOException {
+            WalRecord record = delegate.read(location);
+            Runnable hook = onNextRead;
+            onNextRead = null;
+            if (hook != null) {
+                hook.run();
+            }
+            return record;
+        }
+
+        @Override
+        public void replay(WalReplayConsumer consumer) throws IOException {
+            delegate.replay(consumer);
+        }
+
+        @Override
+        public long usedBytes() {
+            return delegate.usedBytes();
+        }
+
+        @Override
+        public long capacityBytes() {
+            return delegate.capacityBytes();
+        }
+
+        @Override
+        public void close() throws IOException {
+            delegate.close();
         }
     }
 
