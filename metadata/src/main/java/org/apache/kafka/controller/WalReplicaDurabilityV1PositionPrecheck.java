@@ -68,8 +68,10 @@ final class WalReplicaDurabilityV1PositionPrecheck {
         // not from the mutable generated record. V0 with an offset of zero
         // would otherwise be indistinguishable from a V1 default field.
         if (trustedWireVersion != 1 || record == null || metadataVersion == null
-            || trustedCommittedBatch == null || !negotiatedExperimentalFeature
-            || !metadataVersion.isAtLeast(MetadataVersion.IBP_4_4_IV0)) {
+            || trustedCommittedBatch == null || !negotiatedExperimentalFeature) {
+            return false;
+        }
+        if (!metadataVersion.isAtLeast(MetadataVersion.IBP_4_4_IV0)) {
             return false;
         }
         try {
