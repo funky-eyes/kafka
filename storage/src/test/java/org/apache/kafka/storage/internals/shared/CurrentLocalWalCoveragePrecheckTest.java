@@ -53,6 +53,14 @@ class CurrentLocalWalCoveragePrecheckTest {
     void contiguousKafkaBatchesMayHaveInterleavedPhysicalWalAddresses() {
         assertEquals(Finding.INDEXED_BATCH_WINDOW, assess(
             List.of(location(1L, 0L, 9L), location(150L, 10L, 19L)), 0L, 20L));
+        // Kafka index order is allowed to differ from physical WAL order.
+        assertEquals(Finding.INDEXED_BATCH_WINDOW, assess(
+            List.of(location(150L, 0L, 9L), location(1L, 10L, 19L)), 0L, 20L));
+        // Distinct Kafka batch offsets must never borrow the same WAL bytes.
+        assertEquals(Finding.OVERLAPPING_WAL_ADDRESSES, assess(
+            List.of(location(1L, 0L, 9L), location(1L, 10L, 19L)), 0L, 20L));
+        assertEquals(Finding.OVERLAPPING_WAL_ADDRESSES, assess(
+            List.of(location(50L, 0L, 9L), location(1L, 10L, 19L)), 0L, 20L));
     }
 
     @Test
@@ -197,6 +205,26 @@ class CurrentLocalWalCoveragePrecheckTest {
                 secondRestarted.localDurableWindowCoverage(FIRST, 0L, 20L));
             assertEquals(0L, secondRestarted.liveWalDurabilityObservation(FIRST).dataBatches());
         }
+
+        // Model a permanently lost follower disk replaced by an empty disk
+        // while the surviving Broker reopens its original durable WAL.
+        // A matching TopicId/partition must not import another Broker's
+        // replayed WAL coverage into the replacement's local evidence.
+        Path replacementDisk = tempDir.resolve("replica-b-replacement-disk");
+        try (
+            SharedStorageEngine survivingBroker = new SharedStorageEngine(
+                new FileSharedWal(firstBrokerDir, 1024 * 1024, 4096));
+            SharedStorageEngine replacementBroker = new SharedStorageEngine(
+                new FileSharedWal(replacementDisk, 1024 * 1024, 4096))
+        ) {
+            assertEquals(2L, survivingBroker.startupWalReplayEvidence().replayedRecords());
+            assertEquals(Finding.INDEXED_BATCH_WINDOW,
+                survivingBroker.localDurableWindowCoverage(FIRST, 0L, 20L));
+            assertEquals(0L, replacementBroker.startupWalReplayEvidence().replayedRecords());
+            assertEquals(Finding.NO_INDEXED_DATA,
+                replacementBroker.localDurableWindowCoverage(FIRST, 0L, 20L));
+            assertEquals(0L, replacementBroker.liveWalDurabilityObservation(FIRST).dataBatches());
+        }
     }
 
     @Test
@@ -248,6 +276,24 @@ class CurrentLocalWalCoveragePrecheckTest {
             assertEquals(Finding.SOURCE_WINDOW_NOT_INDEXED,
                 secondReopened.localDurableWindowCoverage(FIRST, 0L, 20L));
             assertEquals(0L, secondReopened.liveWalDurabilityObservation(FIRST).dataBatches());
+        }
+
+        // A replacement Ring WAL cannot borrow the surviving Broker's
+        // previously durable batches merely because the partition matches.
+        Path replacementPath = tempDir.resolve("replica-b-replacement-ring.wal");
+        try (
+            SharedStorageEngine survivor = new SharedStorageEngine(
+                new RingSharedWal(firstBrokerPath, 1024L * 1024L));
+            SharedStorageEngine replacement = new SharedStorageEngine(
+                new RingSharedWal(replacementPath, 1024L * 1024L))
+        ) {
+            assertEquals(2L, survivor.startupWalReplayEvidence().replayedRecords());
+            assertEquals(Finding.INDEXED_BATCH_WINDOW,
+                survivor.localDurableWindowCoverage(FIRST, 0L, 20L));
+            assertEquals(0L, replacement.startupWalReplayEvidence().replayedRecords());
+            assertEquals(Finding.NO_INDEXED_DATA,
+                replacement.localDurableWindowCoverage(FIRST, 0L, 20L));
+            assertEquals(0L, replacement.liveWalDurabilityObservation(FIRST).dataBatches());
         }
     }
 

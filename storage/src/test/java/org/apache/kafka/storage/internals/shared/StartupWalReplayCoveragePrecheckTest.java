@@ -118,6 +118,21 @@ class StartupWalReplayCoveragePrecheckTest {
         ));
         assertEquals(Finding.RECOVERED_BATCH_WINDOW, assess(replay, FIRST,
             List.of(location(0L, 0L, 9L), location(122L, 10L, 19L)), 0L, 20L));
+
+        // Logical Kafka offsets are contiguous, but both purported batches
+        // claim overlapping WAL bytes. One physical record cannot satisfy
+        // two independently recoverable Kafka batches.
+        assertEquals(Finding.OVERLAPPING_WAL_ADDRESSES, assess(replay, FIRST,
+            List.of(location(0L, 0L, 9L), location(10L, 10L, 19L)), 0L, 20L));
+
+        // A late replayed DATA record for this partition can raise its
+        // highest WAL end past unrelated records. That maximum alone cannot
+        // justify two indexed Kafka batches when only one was replayed.
+        var oneRecovered = replayed(List.of(
+            data(SECOND, 0L, 9L), data(SECOND, 10L, 19L), data(FIRST, 0L, 9L)
+        ));
+        assertEquals(Finding.REPLAYED_DATA_COUNT_INSUFFICIENT, assess(oneRecovered, FIRST,
+            List.of(location(0L, 0L, 9L), location(61L, 10L, 19L)), 0L, 20L));
     }
 
     @Test

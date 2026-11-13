@@ -65,6 +65,15 @@ final class PartitionRetirementReplicaRoundRegistry {
             if (Uuid.ZERO_UUID.equals(roundId) || objectId <= 0L || assignedReplicas.isEmpty()) {
                 throw new IllegalArgumentException("A challenge requires a round, object, and assigned replicas");
             }
+            if (assignedReplicas.size() > MAX_ASSIGNED_REPLICAS
+                || !assignedReplicas.contains(candidate.brokerId())) {
+                throw new IllegalArgumentException("A challenge must include the assigned source broker");
+            }
+            for (Integer brokerId : assignedReplicas) {
+                if (brokerId == null || brokerId < 0) {
+                    throw new IllegalArgumentException("A challenge needs valid assigned Broker IDs");
+                }
+            }
             assignedReplicas = Set.copyOf(assignedReplicas);
         }
     }

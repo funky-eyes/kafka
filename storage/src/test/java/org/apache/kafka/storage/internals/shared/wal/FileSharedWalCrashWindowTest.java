@@ -30,6 +30,7 @@ import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -83,6 +84,49 @@ class FileSharedWalCrashWindowTest {
 
         List<WalRecord> replayed = replay(walDir, SEGMENT_BYTES);
         assertEquals(List.of(0L, 10L, 11L), dataOffsets(replayed));
+
+        // Three independent, fully committed groups occupy segments 0, 1
+        // and 2. A partial record in middle segment 1 must never trigger
+        // silent truncation of itself and later already committed segment 2.
+        long bytesPerSegment = 512L;
+        int payloadBytes = Math.toIntExact(bytesPerSegment - 2L * WalRecordCodec.HEADER_BYTES - 1L);
+        Path pristine = tempDir.resolve("three-complete-segments");
+        try (FileSharedWal wal = new FileSharedWal(pristine, CAPACITY_BYTES, bytesPerSegment)) {
+            for (int i = 0; i < 3; i++) {
+                wal.append(data(10L * i, new byte[payloadBytes])).get(10, TimeUnit.SECONDS);
+            }
+        }
+        Path middleName = Path.of("wal-00000000000000000001.log");
+        Path lastName = Path.of("wal-00000000000000000002.log");
+        Path corrupted = tempDir.resolve("corrupted-middle-tail");
+        copyWal(pristine, corrupted);
+        Path middleFile = corrupted.resolve(middleName);
+        long originalSize = Files.size(middleFile);
+        assertTrue(originalSize > WalRecordCodec.HEADER_BYTES);
+        assertTrue(Files.exists(corrupted.resolve(lastName)));
+        truncate(middleFile, originalSize - 1L);
+
+        assertThrows(WalCorruptionException.class, () -> {
+            try (FileSharedWal wal = new FileSharedWal(corrupted, CAPACITY_BYTES, bytesPerSegment)) {
+                wal.replay((record, location) -> { });
+            }
+        });
+        assertEquals(originalSize - 1L, Files.size(middleFile),
+            "unsafe recovery must not truncate a corrupt nonfinal segment");
+        assertTrue(Files.exists(corrupted.resolve(lastName)),
+            "unsafe recovery must not delete later durably committed groups");
+
+        // Also fence an explicit replay after a segment is damaged while
+        // the WAL is already open. A safe prefix callback is not a durable
+        // certificate for subsequent missing/corrupt records.
+        Path damagedWhileOpen = tempDir.resolve("middle-tail-damaged-while-open");
+        copyWal(pristine, damagedWhileOpen);
+        try (FileSharedWal wal = new FileSharedWal(damagedWhileOpen, CAPACITY_BYTES, bytesPerSegment)) {
+            Path segment = damagedWhileOpen.resolve(middleName);
+            truncate(segment, Files.size(segment) - 1L);
+            assertThrows(WalCorruptionException.class,
+                () -> wal.replay((record, location) -> { }));
+        }
     }
 
     @Test
@@ -114,6 +158,90 @@ class FileSharedWalCrashWindowTest {
             assertFalse(Files.exists(caseDir.resolve("wal-00000000000000000001.log")));
             assertFalse(Files.exists(caseDir.resolve("wal-00000000000000000002.log")));
         }
+
+        // Each individually committed group fills its own segment. Erasing
+        // the middle segment models a permanently lost WAL extent rather
+        // than an ordinary, safe prefix reclamation.
+        long isolatedSegmentBytes = 512L;
+        int payloadSize = Math.toIntExact(isolatedSegmentBytes - 2L * WalRecordCodec.HEADER_BYTES - 1L);
+        Path complete = tempDir.resolve("contiguous-committed-segments");
+        try (FileSharedWal wal = new FileSharedWal(complete, CAPACITY_BYTES, isolatedSegmentBytes)) {
+            for (int i = 0; i < 3; i++) {
+                wal.append(data(10L * i, new byte[payloadSize])).get(10, TimeUnit.SECONDS);
+            }
+        }
+        Path firstSegment = Path.of("wal-00000000000000000000.log");
+        Path missingSegment = Path.of("wal-00000000000000000001.log");
+        Path lastSegment = Path.of("wal-00000000000000000002.log");
+        assertTrue(Files.exists(complete.resolve(firstSegment)));
+        assertTrue(Files.exists(complete.resolve(missingSegment)));
+        assertTrue(Files.exists(complete.resolve(lastSegment)));
+
+        Path missingMiddle = tempDir.resolve("missing-middle-committed-segment");
+        copyWal(complete, missingMiddle);
+        Files.delete(missingMiddle.resolve(missingSegment));
+        assertThrows(WalCorruptionException.class, () -> {
+            try (FileSharedWal wal = new FileSharedWal(missingMiddle, CAPACITY_BYTES, isolatedSegmentBytes)) {
+                wal.replay((record, location) -> { });
+            }
+        });
+        assertTrue(Files.exists(missingMiddle.resolve(firstSegment)));
+        assertTrue(Files.exists(missingMiddle.resolve(lastSegment)),
+            "fail-closed recovery must not delete surviving durable segments");
+
+        // Revalidate on explicit replay too: disk loss after opening the
+        // writer must be rejected before exposing even the intact prefix.
+        Path lostWhileOpen = tempDir.resolve("segment-lost-while-open");
+        copyWal(complete, lostWhileOpen);
+        try (FileSharedWal wal = new FileSharedWal(lostWhileOpen, CAPACITY_BYTES, isolatedSegmentBytes)) {
+            Files.delete(lostWhileOpen.resolve(missingSegment));
+            List<WalRecord> exposed = new ArrayList<>();
+            assertThrows(WalCorruptionException.class,
+                () -> wal.replay((record, location) -> exposed.add(record)));
+            assertTrue(exposed.isEmpty(), "missing intermediate segment cannot expose a partial history");
+        }
+
+        // A disk can retain the middle segment filename while losing
+        // every byte in it. Contiguous filenames must not be mistaken for
+        // the three acknowledged groups present in the pristine WAL.
+        Path emptiedMiddle = tempDir.resolve("zero-length-middle-segment");
+        copyWal(complete, emptiedMiddle);
+        truncate(emptiedMiddle.resolve(missingSegment), 0L);
+        assertThrows(WalCorruptionException.class, () -> {
+            try (FileSharedWal wal = new FileSharedWal(emptiedMiddle, CAPACITY_BYTES, isolatedSegmentBytes)) {
+                wal.replay((record, location) -> { });
+            }
+        });
+        assertEquals(0L, Files.size(emptiedMiddle.resolve(missingSegment)));
+        assertTrue(Files.exists(emptiedMiddle.resolve(lastSegment)),
+            "an invalid empty middle segment must not erase later committed groups");
+
+        // Explicit replay must also reject a newly emptied middle file
+        // before delivering any apparently intact earlier records.
+        Path emptiedWhileOpen = tempDir.resolve("zero-middle-while-open");
+        copyWal(complete, emptiedWhileOpen);
+        try (FileSharedWal wal = new FileSharedWal(emptiedWhileOpen, CAPACITY_BYTES, isolatedSegmentBytes)) {
+            truncate(emptiedWhileOpen.resolve(missingSegment), 0L);
+            List<WalRecord> delivered = new ArrayList<>();
+            assertThrows(WalCorruptionException.class,
+                () -> wal.replay((record, location) -> delivered.add(record)));
+            assertTrue(delivered.isEmpty(), "partial WAL history must not reach the replay callback");
+        }
+
+        // A zero-length *final* segment is a legitimate crash window before
+        // the next append. Its presence must not revoke earlier committed
+        // groups or require deleting valid prior WAL files.
+        Path emptyFinal = tempDir.resolve("empty-final-segment");
+        copyWal(complete, emptyFinal);
+        Files.createFile(emptyFinal.resolve("wal-00000000000000000003.log"));
+        assertEquals(List.of(0L, 10L, 20L), dataOffsets(replay(emptyFinal, isolatedSegmentBytes)));
+
+        // By contrast a contiguous suffix after reclaiming the oldest
+        // segment remains recoverable, even when its first ID is nonzero.
+        Path reclaimedPrefix = tempDir.resolve("reclaimed-oldest-prefix");
+        copyWal(complete, reclaimedPrefix);
+        Files.delete(reclaimedPrefix.resolve(firstSegment));
+        assertEquals(List.of(10L, 20L), dataOffsets(replay(reclaimedPrefix, isolatedSegmentBytes)));
     }
 
     private CandidateLayout writePristineSingleSegmentWal(Path walDir) throws Exception {

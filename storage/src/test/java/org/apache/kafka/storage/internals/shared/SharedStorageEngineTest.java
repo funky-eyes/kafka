@@ -22,6 +22,9 @@ import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectRange;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 import org.apache.kafka.storage.internals.shared.wal.FileSharedWal;
+import org.apache.kafka.storage.internals.shared.wal.WalCorruptionException;
+import org.apache.kafka.storage.internals.shared.wal.WalLocation;
+import org.apache.kafka.storage.internals.shared.wal.WalRecord;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -128,6 +131,53 @@ class SharedStorageEngineTest {
             assertEquals(1, candidates.size());
             assertEquals(new OffsetRange(100, 110), candidates.get(0).offsets());
             assertTrue(followerThatBecomesLeader.readLocal(PARTITION, 110).isEmpty());
+
+            // The local WAL index is only an address hint. A CRC-valid
+            // record from another topic, partition, epoch or Kafka range
+            // must not be served or published as this partition's data.
+            WalLocation indexed = followerThatBecomesLeader.localLocations(PARTITION, 100, 110).get(0);
+            WalRecord valid = followerThatBecomesLeader.readLocal(PARTITION, 100).orElseThrow();
+            SharedStorageEngine.requireLocalDataIdentity(PARTITION, indexed, valid);
+            assertEquals(1, followerThatBecomesLeader.readLocalBatches(
+                PARTITION, 100, 1024, true).records().size());
+            assertEquals(1, followerThatBecomesLeader.readUploadCandidates(candidates).size());
+
+            // UploadCandidate is public. It must not upload a correct WAL
+            // DATA record under a forged shorter Kafka offset interval.
+            SharedStorageEngine.UploadCandidate candidate = candidates.get(0);
+            assertThrows(WalCorruptionException.class, () ->
+                followerThatBecomesLeader.readUploadCandidates(List.of(
+                    new SharedStorageEngine.UploadCandidate(
+                        PARTITION, new OffsetRange(101, 110), candidate.location()))));
+            assertThrows(WalCorruptionException.class, () ->
+                followerThatBecomesLeader.readUploadCandidates(List.of(
+                    new SharedStorageEngine.UploadCandidate(
+                        PARTITION, new OffsetRange(100, 109), candidate.location()))));
+            assertThrows(WalCorruptionException.class, () ->
+                followerThatBecomesLeader.readUploadCandidates(List.of(
+                    new SharedStorageEngine.UploadCandidate(null, candidate.offsets(), candidate.location()))));
+
+            assertThrows(WalCorruptionException.class, () ->
+                SharedStorageEngine.requireLocalDataIdentity(
+                    new SharedPartitionId(9, 2, 0), indexed, valid));
+            assertThrows(WalCorruptionException.class, () ->
+                SharedStorageEngine.requireLocalDataIdentity(
+                    new SharedPartitionId(1, 9, 0), indexed, valid));
+            assertThrows(WalCorruptionException.class, () ->
+                SharedStorageEngine.requireLocalDataIdentity(
+                    new SharedPartitionId(1, 2, 1), indexed, valid));
+            assertThrows(WalCorruptionException.class, () ->
+                SharedStorageEngine.requireLocalDataIdentity(PARTITION, indexed,
+                    WalRecord.data(1, 2, 0, 4, 100, 109, new byte[]{1})));
+            assertThrows(WalCorruptionException.class, () ->
+                SharedStorageEngine.requireLocalDataIdentity(PARTITION, indexed,
+                    WalRecord.data(1, 2, 0, 3, 101, 109, new byte[]{1})));
+            assertThrows(WalCorruptionException.class, () ->
+                SharedStorageEngine.requireLocalDataIdentity(PARTITION, indexed,
+                    WalRecord.data(1, 2, 0, 3, 100, 109, new byte[]{1, 2})));
+            assertThrows(WalCorruptionException.class, () ->
+                SharedStorageEngine.requireLocalDataIdentity(PARTITION, indexed,
+                    WalRecord.truncate(1, 2, 0, 4, 100)));
         }
     }
 

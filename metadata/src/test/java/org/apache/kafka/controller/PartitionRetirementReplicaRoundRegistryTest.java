@@ -32,8 +32,10 @@ import org.apache.kafka.metadata.PartitionRegistration;
 import org.apache.kafka.metadata.PartitionRetirementAuthorityState.Key;
 import org.junit.jupiter.api.Test;
 
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.Optional;
 import java.util.OptionalLong;
 
@@ -161,6 +163,25 @@ class PartitionRetirementReplicaRoundRegistryTest {
         PartitionRetirementReplicaRoundRegistry registry = new PartitionRetirementReplicaRoundRegistry();
         assertThrows(IllegalArgumentException.class, () ->
             registry.issue(f.replicas(), CANDIDATE, 0L, NOW_NS));
+        assertThrows(IllegalArgumentException.class, () ->
+            new PartitionRetirementReplicaRoundRegistry.Challenge(
+                Uuid.randomUuid(), CANDIDATE, OBJECT_ID, Set.of(2, 3)));
+        assertThrows(IllegalArgumentException.class, () ->
+            new PartitionRetirementReplicaRoundRegistry.Challenge(
+                Uuid.randomUuid(), CANDIDATE, OBJECT_ID, Set.of(1, -1)));
+        Set<Integer> excessive = new HashSet<>();
+        for (int id = 1; id <= PartitionRetirementReplicaRoundRegistry.MAX_ASSIGNED_REPLICAS + 1; id++) {
+            excessive.add(id);
+        }
+        assertThrows(IllegalArgumentException.class, () ->
+            new PartitionRetirementReplicaRoundRegistry.Challenge(
+                Uuid.randomUuid(), CANDIDATE, OBJECT_ID, excessive));
+        Set<Integer> mutable = new HashSet<>(Set.of(1, 2));
+        PartitionRetirementReplicaRoundRegistry.Challenge snapshot =
+            new PartitionRetirementReplicaRoundRegistry.Challenge(
+                Uuid.randomUuid(), CANDIDATE, OBJECT_ID, mutable);
+        mutable.add(3);
+        assertEquals(Set.of(1, 2), snapshot.assignedReplicas());
         for (int i = 0; i < PartitionRetirementReplicaRoundRegistry.MAX_PENDING_PER_SOURCE; i++) {
             assertTrue(registry.issue(f.replicas(), CANDIDATE, OBJECT_ID + i, NOW_NS).isPresent());
         }

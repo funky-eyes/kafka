@@ -55,6 +55,16 @@ class FileSharedWalTest {
                 dataLocation.segmentId(), dataLocation.position(), dataLocation.length(), 3, 10, 19));
             assertEquals(WalRecordType.DATA, randomRead.type());
             assertArrayEquals(new byte[]{1, 2, 3}, bytes(randomRead.payload()));
+
+            // A stale or misdirected index may point at the same valid WAL
+            // bytes but claim another Kafka range or leader generation.
+            // A valid record checksum alone cannot authenticate that claim.
+            assertThrows(WalCorruptionException.class, () -> wal.read(new WalLocation(
+                dataLocation.segmentId(), dataLocation.position(), dataLocation.length(), 4, 10, 19)));
+            assertThrows(WalCorruptionException.class, () -> wal.read(new WalLocation(
+                dataLocation.segmentId(), dataLocation.position(), dataLocation.length(), 3, 11, 19)));
+            assertThrows(WalCorruptionException.class, () -> wal.read(new WalLocation(
+                dataLocation.segmentId(), dataLocation.position(), dataLocation.length(), 3, 10, 20)));
         }
 
         List<WalRecord> records = new ArrayList<>();
@@ -156,6 +166,17 @@ class FileSharedWalTest {
 
     @Test
     void shouldRemainHealthyAfterRejectingAnOversizedCapacityAdmission() throws Exception {
+        // A mathematically overflowing sum must not be mistaken for free
+        // capacity. These cases exercise the actual writer admission guard.
+        assertFalse(FileSharedWal.fitsWithinCapacity(
+            Long.MAX_VALUE - 10L, 20L, 20L, Long.MAX_VALUE));
+        assertFalse(FileSharedWal.fitsWithinCapacity(
+            Long.MAX_VALUE - 10L, 5L, 6L, Long.MAX_VALUE));
+        assertTrue(FileSharedWal.fitsWithinCapacity(
+            Long.MAX_VALUE - 10L, 5L, 5L, Long.MAX_VALUE));
+        assertFalse(FileSharedWal.fitsWithinCapacity(256L, 0L, 1L, 255L));
+        assertFalse(FileSharedWal.fitsWithinCapacity(0L, -1L, 1L, 255L));
+
         Path walDir = tempDir.resolve("wal-capacity-recovery");
         long usedAfterFirstAppend;
         try (FileSharedWal wal = new FileSharedWal(walDir, 512, 512)) {

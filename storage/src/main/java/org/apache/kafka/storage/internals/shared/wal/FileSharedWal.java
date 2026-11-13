@@ -251,14 +251,23 @@ public final class FileSharedWal implements SharedWal {
     public void replay(WalReplayConsumer consumer) throws IOException {
         Objects.requireNonNull(consumer, "consumer");
         List<ReplayEntry> pendingGroup = new ArrayList<>();
-        for (Path segment : segmentFiles()) {
+        List<Path> segments = segmentFiles();
+        requireContiguousSegments(segments);
+        for (int segmentIndex = 0; segmentIndex < segments.size(); segmentIndex++) {
+            Path segment = segments.get(segmentIndex);
             long segmentId = parseSegmentId(segment);
             try (WalIoBackend.Handle handle = ioBackend.openRead(segment)) {
                 long position = 0;
                 while (true) {
                     WalRecordCodec.ReadResult result = WalRecordCodec.read(handle, position);
-                    if (result.status() == WalRecordCodec.ReadStatus.EOF ||
-                        result.status() == WalRecordCodec.ReadStatus.PARTIAL) {
+                    if (result.status() == WalRecordCodec.ReadStatus.EOF) {
+                        break;
+                    }
+                    if (result.status() == WalRecordCodec.ReadStatus.PARTIAL) {
+                        if (segmentIndex < segments.size() - 1) {
+                            throw new WalCorruptionException(
+                                "Partial WAL record in nonterminal segment " + segmentId);
+                        }
                         break;
                     }
                     WalRecord record = result.record();
@@ -456,7 +465,7 @@ public final class FileSharedWal implements SharedWal {
             for (int i = 0; i < groups.size(); i++) {
                 PendingAppend group = groups.get(i);
                 long groupBytes = group.totalBytes();
-                if (currentUsedBytes + plannedBytes + groupBytes > capacityBytes) {
+                if (!fitsWithinCapacity(currentUsedBytes, plannedBytes, groupBytes, capacityBytes)) {
                     firstRejected = i;
                     break;
                 }
@@ -501,6 +510,21 @@ public final class FileSharedWal implements SharedWal {
         }
     }
 
+    /**
+     * Capacity admission must never add potentially unbounded logical WAL
+     * counters before checking the limit: signed overflow would otherwise
+     * admit writes after capacity is exhausted. Check only remaining space.
+     * Visible for overflow regressions without allocating a giant WAL file.
+     */
+    static boolean fitsWithinCapacity(long used, long planned, long groupBytes, long capacity) {
+        if (used < 0L || planned < 0L || groupBytes <= 0L || capacity < 0L
+            || used > capacity) {
+            return false;
+        }
+        long available = capacity - used;
+        return planned <= available && groupBytes <= available - planned;
+    }
+
     private void ensureWritableSegment(int recordLength) throws IOException {
         if (activeSegment == null) {
             activeSegment = createSegment(nextSegmentId++);
@@ -518,6 +542,7 @@ public final class FileSharedWal implements SharedWal {
 
     private RecoveryState recoverSegments() throws IOException {
         List<Path> segments = segmentFiles();
+        requireContiguousSegments(segments);
         RecoveryScan scan = scanSegments(segments);
         if (scan.truncateFrom() != null) {
             truncateIncompleteTail(segments, scan.truncateFrom());
@@ -534,10 +559,44 @@ public final class FileSharedWal implements SharedWal {
         );
     }
 
+    /**
+     * Reclaim removes only an immutable oldest-prefix of File WAL segments,
+     * so the first surviving segment need not be zero. Missing segments
+     * *inside* the surviving suffix imply lost durable WAL bytes and must
+     * never be silently interpreted as one contiguous recovery history.
+     */
+    private void requireContiguousSegments(List<Path> segments) throws IOException {
+        long previousId = -1L;
+        for (int i = 0; i < segments.size(); i++) {
+            Path path = segments.get(i);
+            long id = parseSegmentId(path);
+            if (previousId >= 0L && id - previousId != 1L) {
+                throw new WalCorruptionException(
+                    "File WAL lost an intermediate segment: previous=" + previousId + ", next=" + id);
+            }
+            // A zero-length final segment is safe after a crash before the
+            // next append. An empty *middle* segment is not: its filename
+            // cannot prove the acknowledged groups that used to occupy it
+            // survived while later committed WAL bytes are still present.
+            if (i < segments.size() - 1 && ioBackend.size(path) == 0L) {
+                throw new WalCorruptionException("File WAL lost an empty intermediate segment: " + id);
+            }
+            previousId = id;
+        }
+    }
+
     private RecoveryScan scanSegments(List<Path> segments) throws IOException {
         RecoveryAccumulator accumulator = new RecoveryAccumulator();
         for (int segmentIndex = 0; segmentIndex < segments.size(); segmentIndex++) {
             if (scanSegment(segments.get(segmentIndex), segmentIndex, accumulator)) {
+                // Only a partial record in the final segment can be an
+                // incomplete crash tail. A partial earlier segment may
+                // hide already acknowledged data in subsequent segments.
+                if (segmentIndex < segments.size() - 1) {
+                    throw new WalCorruptionException(
+                        "Partial WAL record in nonterminal segment " +
+                            parseSegmentId(segments.get(segmentIndex)));
+                }
                 break;
             }
         }
@@ -619,10 +678,16 @@ public final class FileSharedWal implements SharedWal {
             throw new WalCorruptionException("WAL location length mismatch: expected=" + location.length() +
                 ", actual=" + result.length());
         }
-        if (result.record().type() == WalRecordType.GROUP_COMMIT) {
+        WalRecord record = result.record();
+        if (record.type() == WalRecordType.GROUP_COMMIT) {
             throw new WalCorruptionException("WAL data location unexpectedly points to GROUP_COMMIT: " + location);
         }
-        return result.record();
+        if (record.leaderEpoch() != location.leaderEpoch()
+            || record.firstOffset() != location.firstOffset()
+            || record.lastOffset() != location.lastOffset()) {
+            throw new WalCorruptionException("WAL index Kafka coordinates do not match stored record: " + location);
+        }
+        return record;
     }
 
     private List<Path> segmentFiles() throws IOException {
