@@ -73,6 +73,7 @@ REQUIRED_TESTS = {
         "restoredEngineRefusesUnverifiedLocalCheckpointAfterMetadataReplay",
         "shouldNeverRecoverLeaderOnlyAcksOneTailFromAnotherBroker",
         "truncatedOldEpochTailMustNotBecomeUploadable",
+        "concurrentTruncateDuringLocalReadCannotReturnStaleWalBatch",
     ),
     "org.apache.kafka.storage.internals.shared.metadata.LocalRemoteObjectCheckpointTest": (
         "targetedCheckpointLookupResolvesEachPackedPhysicalObjectOnlyOnce",
