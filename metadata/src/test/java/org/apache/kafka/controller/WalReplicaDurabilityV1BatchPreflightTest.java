@@ -115,6 +115,12 @@ class WalReplicaDurabilityV1BatchPreflightTest {
         var prior = diagnostics.getUntrusted(key(topic));
         assertThrows(IllegalStateException.class, () -> plan(batch(1000,
             v1(topic, 210, 900), v1(topic, 220, 999)), diagnostics));
+        // A newer certificate must not jump over offsets not covered by its
+        // predecessor, even if the new individual WAL span is contiguous.
+        var gap = certificate(topic, 400, 900, 9).setStartOffset(250);
+        gap.walSpans().forEach(span -> span.setStartOffset(250));
+        assertThrows(IllegalStateException.class, () -> plan(batch(1002,
+            new ApiMessageAndVersion(gap, (short) 1)), diagnostics));
         assertEquals(prior, diagnostics.getUntrusted(key(topic)));
         assertEquals(900L, diagnostics.getUntrusted(key(topic)).kraftOffset());
     }
