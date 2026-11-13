@@ -644,6 +644,13 @@ REQUIRED_TESTS = {
         "nullNegativeAndOverflowingKRaftBatchCoordinatesFailClosed",
         "observedBatchPositionCanOnlyPopulateUntrustedDiagnosticReplay",
     ),
+    "org.apache.kafka.controller.WalReplicaDurabilityV1BatchPreflightTest": (
+        "multipleSamePartitionCertificatesUseStagedCasWithoutMutatingTimeline",
+        "invalidLateCertificateCannotPartiallyApplyEarlierBatchEvidence",
+        "mixedFeatureAndReplicaIdentityChangesRequirePerRecordControllerReplay",
+        "revokedFeatureOldWireAndWrongRaftEpochFailBeforeAnyMutation",
+        "separateTopicsKeepIndependentCasAndFreezeMutableSourceData",
+    ),
     "org.apache.kafka.controller.WalReplicaDurabilityCertificateReplayStateTest": (
         "committedLogReplayFreezesGeneratedRecordAndItsNestedMutableEntries",
         "untrustedOrUncommittedSourceCannotOverwriteExistingReplayState",
