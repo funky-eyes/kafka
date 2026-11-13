@@ -37,6 +37,8 @@ on:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/**'
       - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityCertificate.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityCertificateTest.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityRangePrecheck.java'
+      - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityRangePrecheckTest.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementControllerPrecheck.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/PartitionRetirementControllerPrecheckTest.java'
       - 'metadata/src/main/resources/common/metadata/PartitionRetirementAuthorityRecord.json'
@@ -122,6 +124,8 @@ on:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/**'
       - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityCertificate.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityCertificateTest.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityRangePrecheck.java'
+      - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityRangePrecheckTest.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementControllerPrecheck.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/PartitionRetirementControllerPrecheckTest.java'
       - 'metadata/src/main/resources/common/metadata/PartitionRetirementAuthorityRecord.json'
@@ -452,6 +456,7 @@ jobs:
             --tests 'org.apache.kafka.controller.PartitionRetirementReplicaQuiescencePrecheckTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementReplicaRoundRegistryTest' \
             --tests 'org.apache.kafka.controller.WalReplicaDurabilityCertificateTest' \
+            --tests 'org.apache.kafka.controller.WalReplicaDurabilityRangePrecheckTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementControlManagerTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementCandidatePrecheckTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementFeatureGateTest' \
