@@ -609,6 +609,13 @@ REQUIRED_TESTS = {
         "foreignIsrAndInsufficientQuorumFailClosed",
         "invalidOffsetsAndIdentityAreRejectedAtConstruction",
     ),
+    "org.apache.kafka.controller.WalReplicaDurabilityRangePrecheckTest": (
+        "authenticatedCurrentReplicasNeedContiguousWalSpans",
+        "gapOverlapAndReorderedSpanFailClosed",
+        "foreignPartitionOrReplacedDiskCannotSupplySpan",
+        "missingOrUnverifiedReplicaSpanFailsClosed",
+        "invalidOrExcessiveSpanInventoryFailsClosed",
+    ),
     "org.apache.kafka.controller.PartitionRetirementReplicaRoundRegistryTest": (
         "outOfIsrAssignedBrokerRegistrationChangeRevokesCollectedRound",
         "brokerRevocationDoesNotBurnUnrelatedReplicaSet",
