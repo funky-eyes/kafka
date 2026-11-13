@@ -53,6 +53,8 @@ on:
       - 'metadata/src/main/resources/common/metadata/WalReplicaDurabilityV1CheckpointRecord.json'
       - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityV1SnapshotCheckpointPrecheck.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityV1SnapshotCheckpointPrecheckTest.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityV1SnapshotBatchPreflight.java'
+      - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityV1SnapshotBatchPreflightTest.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityCertificateReplayState.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityCertificateReplayStateTest.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementControllerPrecheck.java'
@@ -159,6 +161,8 @@ on:
       - 'metadata/src/main/resources/common/metadata/WalReplicaDurabilityV1CheckpointRecord.json'
       - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityV1SnapshotCheckpointPrecheck.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityV1SnapshotCheckpointPrecheckTest.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityV1SnapshotBatchPreflight.java'
+      - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityV1SnapshotBatchPreflightTest.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityCertificateReplayState.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityCertificateReplayStateTest.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementControllerPrecheck.java'
@@ -501,6 +505,7 @@ jobs:
             --tests 'org.apache.kafka.controller.WalReplicaDurabilityV1CommittedBatchOriginTest' \
             --tests 'org.apache.kafka.controller.WalReplicaDurabilityV1BatchPreflightTest' \
             --tests 'org.apache.kafka.controller.WalReplicaDurabilityV1SnapshotCheckpointPrecheckTest' \
+            --tests 'org.apache.kafka.controller.WalReplicaDurabilityV1SnapshotBatchPreflightTest' \
             --tests 'org.apache.kafka.controller.WalReplicaDurabilityCertificateReplayStateTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementControlManagerTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementCandidatePrecheckTest' \
