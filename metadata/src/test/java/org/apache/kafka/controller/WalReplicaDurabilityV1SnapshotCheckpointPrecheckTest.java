@@ -118,13 +118,12 @@ class WalReplicaDurabilityV1SnapshotCheckpointPrecheckTest {
 
     @Test
     void foreignOrMalformedReplicaAndWalClaimsCannotBecomeCheckpointEvidence() {
-        var record = checkpoint(Uuid.randomUuid());
-        record.replicaReceipts().get(1)
-            .setIncarnationId(record.replicaReceipts().get(0).incarnationId());
-        assertThrows(IllegalArgumentException.class, () -> inspect(record));
-        record = checkpoint(Uuid.randomUuid());
-        record.walSpans().get(0).setCrc32c(-1);
-        var badCrc = record;
+        var duplicateIncarnation = checkpoint(Uuid.randomUuid());
+        duplicateIncarnation.replicaReceipts().get(1)
+            .setIncarnationId(duplicateIncarnation.replicaReceipts().get(0).incarnationId());
+        assertThrows(IllegalArgumentException.class, () -> inspect(duplicateIncarnation));
+        var badCrc = checkpoint(Uuid.randomUuid());
+        badCrc.walSpans().get(0).setCrc32c(-1);
         assertThrows(IllegalArgumentException.class, () -> inspect(badCrc));
         var missingIdentity = checkpoint(Uuid.ZERO_UUID);
         assertThrows(IllegalArgumentException.class, () -> inspect(missingIdentity));
