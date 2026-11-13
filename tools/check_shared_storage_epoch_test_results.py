@@ -616,6 +616,13 @@ REQUIRED_TESTS = {
         "missingOrUnverifiedReplicaSpanFailsClosed",
         "invalidOrExcessiveSpanInventoryFailsClosed",
     ),
+    "org.apache.kafka.controller.WalReplicaDurabilityCertificateRecordPrecheckTest": (
+        "experimentalMetadataRecordV0RetainsReplicaAndSpanFieldsOnBinaryRoundTrip",
+        "reservedTopicAndReplayedBrokerIncarnationsAreRejected",
+        "holesOverlapsAndForeignBrokerSpansCannotBecomeCertificates",
+        "experimentalFeatureAndCommittedKRaftReplayOriginAreNecessary",
+        "invalidChecksumsDurableEndsAndOversizedListsFailClosed",
+    ),
     "org.apache.kafka.controller.PartitionRetirementReplicaRoundRegistryTest": (
         "outOfIsrAssignedBrokerRegistrationChangeRevokesCollectedRound",
         "brokerRevocationDoesNotBurnUnrelatedReplicaSet",
