@@ -637,6 +637,13 @@ REQUIRED_TESTS = {
         "snapshotRegistryRollbackRestoresPreviousV1Cas",
         "nestedMutableReceiptsAndTopicRecreationRemainIsolated",
     ),
+    "org.apache.kafka.controller.WalReplicaDurabilityV1CommittedBatchOriginTest": (
+        "assignsExactOffsetsAcrossMixedMetadataRecords",
+        "nonCertificateMetadataNeverCreatesReplayAuthority",
+        "legacyV0AndUnknownWireVersionsAreRejectedEvenAtOffsetZero",
+        "nullNegativeAndOverflowingKRaftBatchCoordinatesFailClosed",
+        "observedBatchPositionCanOnlyPopulateUntrustedDiagnosticReplay",
+    ),
     "org.apache.kafka.controller.WalReplicaDurabilityCertificateReplayStateTest": (
         "committedLogReplayFreezesGeneratedRecordAndItsNestedMutableEntries",
         "untrustedOrUncommittedSourceCannotOverwriteExistingReplayState",
