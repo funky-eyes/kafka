@@ -74,7 +74,6 @@ import org.apache.kafka.common.metadata.NoOpRecord;
 import org.apache.kafka.common.metadata.PartitionChangeRecord;
 import org.apache.kafka.common.metadata.PartitionRecord;
 import org.apache.kafka.common.metadata.PartitionRetirementAuthorityRecord;
-import org.apache.kafka.common.metadata.WalReplicaDurabilityCertificateRecord;
 import org.apache.kafka.common.metadata.ProducerIdsRecord;
 import org.apache.kafka.common.metadata.RegisterBrokerRecord;
 import org.apache.kafka.common.metadata.RegisterControllerRecord;
@@ -1249,47 +1248,22 @@ public final class QuorumController implements Controller {
         }
 
         /**
-         * Process an actual KRaft committed standby batch. A V1 certificate
-         * is diagnostic only and never enters the ordinary metadata-image
-         * replay switch. A bad late certificate fails the complete preflight
-         * before any ordinary metadata is applied or diagnostics installed.
+         * Genuine standby KRaft commit callback, never speculative append.
+         * No V1 certificate writer or Producer ACK/physical GC integration.
          */
         private void replayStandbyCommittedBatch(Batch<ApiMessageAndVersion> batch) {
-            List<WalReplicaDurabilityCertificateReplayState.UntrustedEvidence> untrustedPlan;
             try {
-                boolean hasCertificate = batch.records().stream().anyMatch(
-                    record -> record.message() instanceof WalReplicaDurabilityCertificateRecord);
-                untrustedPlan = hasCertificate
-                    ? WalReplicaDurabilityV1BatchPreflight.planUntrusted(
-                        batch, featureControl.metadataVersionOrThrow(),
-                        featureControl.isWalReplicaDurabilityEnabled(),
-                        walReplicaDurabilityV1Diagnostics)
-                    : List.of();
+                WalReplicaDurabilityV1StandbyCommitReplay.replayCommittedBatch(
+                    batch,
+                    featureControl::metadataVersionOrThrow,
+                    featureControl::isWalReplicaDurabilityEnabled,
+                    walReplicaDurabilityV1Diagnostics,
+                    (message, offset) -> replay(message.message(), Optional.empty(), offset));
             } catch (Throwable e) {
                 throw fatalFaultHandler.handleFault(
-                    "Unable to preflight committed WAL certificate batch at base offset " +
+                    "Unable to apply committed KRaft standby batch at base offset " +
                         batch.baseOffset(), e);
             }
-            int recordIndex = 0;
-            for (ApiMessageAndVersion message : batch.records()) {
-                long recordOffset = batch.baseOffset() + recordIndex;
-                try {
-                    if (!(message.message() instanceof WalReplicaDurabilityCertificateRecord)) {
-                        replay(message.message(), Optional.empty(), recordOffset);
-                    }
-                } catch (Throwable e) {
-                    String failureMessage = String.format("Unable to apply %s " +
-                        "record at offset %d on standby controller, from the " +
-                        "batch with baseOffset %d",
-                        message.message().getClass().getSimpleName(),
-                        recordOffset, batch.baseOffset());
-                    throw fatalFaultHandler.handleFault(failureMessage, e);
-                }
-                recordIndex++;
-            }
-            // Only after the whole KRaft batch passes and ordinary replay
-            // succeeds may untrusted diagnostics advance in this time line.
-            walReplicaDurabilityV1Diagnostics.applyPrevalidatedCommittedBatch(untrustedPlan);
         }
 
         @Override
