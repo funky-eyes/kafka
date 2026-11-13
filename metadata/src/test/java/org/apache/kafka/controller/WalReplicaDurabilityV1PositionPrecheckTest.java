@@ -52,7 +52,7 @@ class WalReplicaDurabilityV1PositionPrecheckTest {
             .setTopicId(Uuid.randomUuid()).setPartitionId(0)
             .setLeaderEpoch(7).setPartitionEpoch(11)
             .setStartOffset(100).setEndOffset(200)
-            .setControllerEpoch(3)
+            .setControllerEpoch(9)
             .setExpectedPreviousKRaftOffset(previousOffset)
             .setReplicaReceipts(List.of(receipt(1), receipt(2)))
             .setWalSpans(List.of(span(1), span(2)));
@@ -115,6 +115,7 @@ class WalReplicaDurabilityV1PositionPrecheckTest {
         assertFalse(accepts(v1(1004), 1002, 1004));
         assertFalse(accepts(v1(-2), 1002, -2));
         assertFalse(accepts(v1(999), 999, 999));
+        assertFalse(accepts(v1(-1).setControllerEpoch(8), 1000, -1));
     }
 
     @Test
