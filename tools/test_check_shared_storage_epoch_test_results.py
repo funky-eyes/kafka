@@ -73,7 +73,6 @@ class EpochEvidenceCheckerTest(unittest.TestCase):
             verify(self.root)
 
     def test_three_module_evidence_isolation(self):
-        feature = "org.apache.kafka.server.common.PartitionRetirementAuthorityVersionTest"
         with tempfile.TemporaryDirectory() as metadata_dir:
             with tempfile.TemporaryDirectory() as server_dir:
                 metadata = Path(metadata_dir)
@@ -81,7 +80,7 @@ class EpochEvidenceCheckerTest(unittest.TestCase):
                 for suite in REQUIRED_TESTS:
                     filename = "TEST-" + suite + ".xml"
                     source = self.root / filename
-                    if suite == feature:
+                    if suite.startswith("org.apache.kafka.server.common."):
                         (server / filename).write_bytes(source.read_bytes())
                         source.unlink()
                     elif suite.startswith((
