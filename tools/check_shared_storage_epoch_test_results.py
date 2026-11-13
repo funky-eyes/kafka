@@ -71,6 +71,8 @@ REQUIRED_TESTS = {
     "org.apache.kafka.storage.internals.shared.SharedStorageEngineTest": (
         "restoredEngineTargetedAuthorityBarrierUsesOnlyCheckpointObjects",
         "restoredEngineRefusesUnverifiedLocalCheckpointAfterMetadataReplay",
+        "shouldNeverRecoverLeaderOnlyAcksOneTailFromAnotherBroker",
+        "truncatedOldEpochTailMustNotBecomeUploadable",
     ),
     "org.apache.kafka.storage.internals.shared.metadata.LocalRemoteObjectCheckpointTest": (
         "targetedCheckpointLookupResolvesEachPackedPhysicalObjectOnlyOnce",

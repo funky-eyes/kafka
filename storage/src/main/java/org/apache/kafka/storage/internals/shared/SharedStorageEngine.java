@@ -528,6 +528,9 @@ public final class SharedStorageEngine implements AutoCloseable {
                 }
                 locations.add(candidate.location());
             }
+            // The caller may be holding a cursor result from a WAL generation
+            // that was truncated, replaced or reclaimed after selection.
+            requireCurrentUploadLocations(candidates);
             List<WalRecord> records = wal.readBatch(locations);
             if (records.size() != candidates.size()) {
                 throw new WalCorruptionException("WAL upload candidate read count does not match selection");
@@ -535,7 +538,20 @@ public final class SharedStorageEngine implements AutoCloseable {
             for (int i = 0; i < records.size(); i++) {
                 requireLocalDataIdentity(candidates.get(i).partition(), locations.get(i), records.get(i));
             }
+            // A concurrent WAL index mutation can invalidate a candidate
+            // during backend I/O. Never return records from such a selection.
+            requireCurrentUploadLocations(candidates);
             return records;
+        }
+    }
+
+    private void requireCurrentUploadLocations(List<UploadCandidate> candidates) throws WalCorruptionException {
+        for (UploadCandidate candidate : candidates) {
+            Optional<WalLocation> current =
+                walIndex.find(walKey(candidate.partition()), candidate.offsets().startOffset());
+            if (current.isEmpty() || !current.get().equals(candidate.location())) {
+                throw new WalCorruptionException("WAL upload candidate is no longer indexed as current");
+            }
         }
     }
 

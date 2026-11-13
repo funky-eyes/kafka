@@ -178,6 +178,12 @@ class SharedStorageEngineTest {
             assertThrows(WalCorruptionException.class, () ->
                 SharedStorageEngine.requireLocalDataIdentity(PARTITION, indexed,
                     WalRecord.truncate(1, 2, 0, 4, 100)));
+
+            // This mandatory regression must also reject a candidate
+            // selected before its indexed WAL location was truncated.
+            followerThatBecomesLeader.truncate(PARTITION, 4, 100).get(10, TimeUnit.SECONDS);
+            assertThrows(WalCorruptionException.class, () ->
+                followerThatBecomesLeader.readUploadCandidates(candidates));
         }
     }
 
@@ -186,12 +192,31 @@ class SharedStorageEngineTest {
         try (SharedStorageEngine engine = engine("truncate")) {
             append(engine, 100, 109, 1);
             append(engine, 110, 119, 2);
+            List<SharedStorageEngine.UploadCandidate> beforeTruncate =
+                engine.uploadCandidates(PARTITION, 100, 120);
+            assertEquals(2, beforeTruncate.size());
+            SharedStorageEngine.UploadCandidate staleTail = beforeTruncate.get(1);
+
             engine.truncate(PARTITION, 4, 110).get(10, TimeUnit.SECONDS);
 
             assertEquals(List.of(new OffsetRange(100, 110)),
                 engine.uploadCandidates(PARTITION, 100, 120).stream()
                     .map(SharedStorageEngine.UploadCandidate::offsets).toList());
             assertTrue(engine.readLocal(PARTITION, 110).isEmpty());
+            assertThrows(WalCorruptionException.class, () ->
+                engine.readUploadCandidates(List.of(staleTail)),
+                "a truncated WAL location must never be uploaded");
+
+            // Reusing the same Kafka range under a newer leader epoch does
+            // not reauthorize a candidate from the superseded WAL address.
+            engine.appendData(PARTITION, 5, 110, 119, ByteBuffer.wrap(new byte[]{7}))
+                .get(10, TimeUnit.SECONDS);
+            assertThrows(WalCorruptionException.class, () ->
+                engine.readUploadCandidates(List.of(staleTail)));
+            List<SharedStorageEngine.UploadCandidate> current =
+                engine.uploadCandidates(PARTITION, 100, 120);
+            assertEquals(2, current.size());
+            assertEquals(1, engine.readUploadCandidates(List.of(current.get(1))).size());
         }
     }
 
