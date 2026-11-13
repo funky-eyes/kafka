@@ -57,14 +57,18 @@ final class WalReplicaDurabilityV1PositionPrecheck {
      */
     static boolean hasAssignedCommittedPosition(
         WalReplicaDurabilityCertificateRecord record,
+        short trustedWireVersion,
         MetadataVersion metadataVersion,
         boolean negotiatedExperimentalFeature,
         CommitBatch trustedCommittedBatch,
         long trustedRecordOffset,
         long trustedPreviousCertificateOffset
     ) {
-        if (record == null || metadataVersion == null || trustedCommittedBatch == null
-            || !negotiatedExperimentalFeature
+        // The actual schema version comes from KRaft's ApiMessageAndVersion,
+        // not from the mutable generated record. V0 with an offset of zero
+        // would otherwise be indistinguishable from a V1 default field.
+        if (trustedWireVersion != 1 || record == null || metadataVersion == null
+            || trustedCommittedBatch == null || !negotiatedExperimentalFeature
             || !metadataVersion.isAtLeast(MetadataVersion.IBP_4_4_IV0)) {
             return false;
         }
