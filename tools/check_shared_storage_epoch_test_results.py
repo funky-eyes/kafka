@@ -738,6 +738,11 @@ REQUIRED_TESTS = {
         "finalizedFeatureDisableRevokesSnapshotEligibility",
         "unsupportedFeatureIsNotAdvertisedByProductionQuorum",
     ),
+    "org.apache.kafka.controller.WalReplicaDurabilityFeatureGateTest": (
+        "productionControllerCannotReplayExperimentalWalCertificateFeature",
+        "negotiatedWalCertificateFeatureNeedsMetadataVersionFourFourAndCanBeRevoked",
+        "productionQuorumNeverAdvertisesExperimentalWalCertificateLevel",
+    ),
     "org.apache.kafka.controller.PartitionRetirementControlManagerTest": (
         "controllerReplayRetainsTheHighestWatermarkAcrossEpochHandover",
         "controllerReplayRejectsLateFormerBroker",
@@ -809,6 +814,13 @@ REQUIRED_TESTS = {
         "featureLevelOneRequiresUnstableMetadataVersion",
         "featureNameIsRegisteredWithTheStandardKafkaFeatureSystem",
         "featureLevelZeroRemainsBackwardCompatible",
+    ),
+    "org.apache.kafka.server.common.WalReplicaDurabilityVersionTest": (
+        "productionBuildMustNotAdvertiseExperimentalCertificateFeatureLevelOne",
+        "productionMetadataVersionDefaultsToDisabledWalCertificateFeature",
+        "experimentalWalCertificateLevelRequiresUnstableMetadataVersion",
+        "walCertificateFeatureNameIsRegisteredWithStandardKafkaNegotiation",
+        "disabledWalCertificateFeatureLevelRemainsBackwardCompatible",
     ),
     "org.apache.kafka.storage.internals.shared.metadata.PartitionRetirementAuthorityModelTest": (
         "initialStateHasNeitherImplicitZeroNorAnAuthoritativeLeader",
