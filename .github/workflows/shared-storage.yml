@@ -42,6 +42,8 @@ on:
       - 'metadata/src/main/resources/common/metadata/WalReplicaDurabilityCertificateRecord.json'
       - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityCertificateRecordPrecheck.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityCertificateRecordPrecheckTest.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityV1PositionPrecheck.java'
+      - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityV1PositionPrecheckTest.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityCertificateReplayState.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityCertificateReplayStateTest.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementControllerPrecheck.java'
@@ -137,6 +139,8 @@ on:
       - 'metadata/src/main/resources/common/metadata/WalReplicaDurabilityCertificateRecord.json'
       - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityCertificateRecordPrecheck.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityCertificateRecordPrecheckTest.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityV1PositionPrecheck.java'
+      - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityV1PositionPrecheckTest.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityCertificateReplayState.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityCertificateReplayStateTest.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/PartitionRetirementControllerPrecheck.java'
@@ -474,6 +478,7 @@ jobs:
             --tests 'org.apache.kafka.controller.WalReplicaDurabilityCertificateTest' \
             --tests 'org.apache.kafka.controller.WalReplicaDurabilityRangePrecheckTest' \
             --tests 'org.apache.kafka.controller.WalReplicaDurabilityCertificateRecordPrecheckTest' \
+            --tests 'org.apache.kafka.controller.WalReplicaDurabilityV1PositionPrecheckTest' \
             --tests 'org.apache.kafka.controller.WalReplicaDurabilityCertificateReplayStateTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementControlManagerTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementCandidatePrecheckTest' \

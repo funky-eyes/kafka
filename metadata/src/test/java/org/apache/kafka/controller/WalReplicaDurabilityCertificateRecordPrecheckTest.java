@@ -128,22 +128,28 @@ class WalReplicaDurabilityCertificateRecordPrecheckTest {
     @Test
     void experimentalFeatureAndCommittedKRaftReplayOriginAreNecessary() {
         WalReplicaDurabilityCertificateRecord record = valid();
-        assertFalse(hasCommittedReplayOrigin(record, MetadataVersion.LATEST_PRODUCTION, true,
+        assertFalse(hasCommittedReplayOrigin(record, (short) 0, MetadataVersion.LATEST_PRODUCTION, true,
             Optional.empty(), 1000, 1001));
-        assertFalse(hasCommittedReplayOrigin(record, MetadataVersion.IBP_4_4_IV0, false,
+        assertFalse(hasCommittedReplayOrigin(record, (short) 0, MetadataVersion.IBP_4_4_IV0, false,
             Optional.empty(), 1000, 1001));
-        assertTrue(hasCommittedReplayOrigin(record, MetadataVersion.IBP_4_4_IV0, true,
+        assertTrue(hasCommittedReplayOrigin(record, (short) 0, MetadataVersion.IBP_4_4_IV0, true,
             Optional.empty(), 1000, 1001));
-        assertFalse(hasCommittedReplayOrigin(record, MetadataVersion.IBP_4_4_IV0, true,
+        assertFalse(hasCommittedReplayOrigin(record, (short) 0, MetadataVersion.IBP_4_4_IV0, true,
             Optional.empty(), 999, 1001));
-        assertFalse(hasCommittedReplayOrigin(record, MetadataVersion.IBP_4_4_IV0, true,
+        assertFalse(hasCommittedReplayOrigin(record, (short) 0, MetadataVersion.IBP_4_4_IV0, true,
             Optional.empty(), 1000, 1000));
-        assertTrue(hasCommittedReplayOrigin(record, MetadataVersion.IBP_4_4_IV0, true,
+        assertTrue(hasCommittedReplayOrigin(record, (short) 0, MetadataVersion.IBP_4_4_IV0, true,
             Optional.of(new OffsetAndEpoch(1001, 9)), 3000, 1001));
-        assertFalse(hasCommittedReplayOrigin(record, MetadataVersion.IBP_4_4_IV0, true,
+        assertFalse(hasCommittedReplayOrigin(record, (short) 0, MetadataVersion.IBP_4_4_IV0, true,
             Optional.of(new OffsetAndEpoch(1000, 9)), 3000, 1001));
-        assertFalse(hasCommittedReplayOrigin(record, MetadataVersion.IBP_4_4_IV0, true,
+        assertFalse(hasCommittedReplayOrigin(record, (short) 0, MetadataVersion.IBP_4_4_IV0, true,
             Optional.of(new OffsetAndEpoch(1002, 9)), 3000, 1001));
+        // A V1 record does not self-claim its append position. Never parse
+        // that wire version through the older V0 replay-origin check.
+        assertFalse(hasCommittedReplayOrigin(record, (short) 1, MetadataVersion.IBP_4_4_IV0, true,
+            Optional.empty(), 1000, 1001));
+        assertFalse(hasCommittedReplayOrigin(valid().setTopicId(null), (short) 0,
+            MetadataVersion.IBP_4_4_IV0, true, Optional.empty(), 1000, 1001));
     }
 
     @Test
