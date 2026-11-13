@@ -237,6 +237,9 @@ public final class SharedStorageEngine implements AutoCloseable {
             }
             WalRecord record = wal.read(location.get());
             requireLocalDataIdentity(partition, location.get(), record);
+            // A concurrently durable TRUNCATE or replacement may update
+            // the partition index while the backend reads WAL bytes.
+            requireCurrentLocalLocation(partition, location.get());
             return Optional.of(record);
         }
     }
@@ -401,6 +404,9 @@ public final class SharedStorageEngine implements AutoCloseable {
             }
             List<WalRecord> records = wal.readBatch(selection.locations());
             requireLocalBatchIdentity(partition, selection.locations(), records);
+            for (WalLocation location : selection.locations()) {
+                requireCurrentLocalLocation(partition, location);
+            }
             return new LocalReadResult(
                 selection.firstBatchOffset(),
                 records,
@@ -436,6 +442,20 @@ public final class SharedStorageEngine implements AutoCloseable {
             || record.lastOffset() != location.lastOffset()
             || record.payload().remaining() != location.payloadLength()) {
             throw new WalCorruptionException("Local WAL record differs from indexed Kafka batch: " + location);
+        }
+    }
+
+    /**
+     * Fail closed when a backend read completed against a WAL address that
+     * the partition index stopped admitting while the read was in flight.
+     * This is a post-read consistency check, not a global lock preventing
+     * subsequent Kafka leader changes or future truncations.
+     */
+    private void requireCurrentLocalLocation(SharedPartitionId partition, WalLocation selected)
+        throws WalCorruptionException {
+        Optional<WalLocation> current = walIndex.find(walKey(partition), selected.firstOffset());
+        if (current.isEmpty() || !current.get().equals(selected)) {
+            throw new WalCorruptionException("Local WAL read selection is no longer indexed as current");
         }
     }
 
