@@ -623,6 +623,13 @@ REQUIRED_TESTS = {
         "experimentalFeatureAndCommittedKRaftReplayOriginAreNecessary",
         "invalidChecksumsDurableEndsAndOversizedListsFailClosed",
     ),
+    "org.apache.kafka.controller.WalReplicaDurabilityCertificateReplayStateTest": (
+        "committedLogReplayFreezesGeneratedRecordAndItsNestedMutableEntries",
+        "untrustedOrUncommittedSourceCannotOverwriteExistingReplayState",
+        "snapshotRegistryRollbackRestoresPriorFrozenCertificate",
+        "staleControllerLeaderAndPartitionGenerationsNeverReplaceNewerEvidence",
+        "topicRecreationAndSnapshotReplayNeverBorrowAnotherPartitionsEvidence",
+    ),
     "org.apache.kafka.controller.PartitionRetirementReplicaRoundRegistryTest": (
         "outOfIsrAssignedBrokerRegistrationChangeRevokesCollectedRound",
         "brokerRevocationDoesNotBurnUnrelatedReplicaSet",
