@@ -142,6 +142,21 @@ class SharedStorageEngineTest {
                 PARTITION, 100, 1024, true).records().size());
             assertEquals(1, followerThatBecomesLeader.readUploadCandidates(candidates).size());
 
+            // UploadCandidate is public. It must not upload a correct WAL
+            // DATA record under a forged shorter Kafka offset interval.
+            SharedStorageEngine.UploadCandidate candidate = candidates.get(0);
+            assertThrows(WalCorruptionException.class, () ->
+                followerThatBecomesLeader.readUploadCandidates(List.of(
+                    new SharedStorageEngine.UploadCandidate(
+                        PARTITION, new OffsetRange(101, 110), candidate.location()))));
+            assertThrows(WalCorruptionException.class, () ->
+                followerThatBecomesLeader.readUploadCandidates(List.of(
+                    new SharedStorageEngine.UploadCandidate(
+                        PARTITION, new OffsetRange(100, 109), candidate.location()))));
+            assertThrows(WalCorruptionException.class, () ->
+                followerThatBecomesLeader.readUploadCandidates(List.of(
+                    new SharedStorageEngine.UploadCandidate(null, candidate.offsets(), candidate.location()))));
+
             assertThrows(WalCorruptionException.class, () ->
                 SharedStorageEngine.requireLocalDataIdentity(
                     new SharedPartitionId(9, 2, 0), indexed, valid));
