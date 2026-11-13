@@ -32,6 +32,7 @@ import org.apache.kafka.server.common.Feature;
 import org.apache.kafka.server.common.KRaftVersion;
 import org.apache.kafka.server.common.MetadataVersion;
 import org.apache.kafka.server.common.PartitionRetirementAuthorityVersion;
+import org.apache.kafka.server.common.WalReplicaDurabilityVersion;
 import org.apache.kafka.server.mutable.BoundedList;
 import org.apache.kafka.timeline.SnapshotRegistry;
 import org.apache.kafka.timeline.TimelineHashMap;
@@ -480,6 +481,17 @@ public class FeatureControlManager {
             && finalizedVersions.getOrDefault(
                 PartitionRetirementAuthorityVersion.FEATURE_NAME, (short) 0
             ) >= PartitionRetirementAuthorityVersion.PRAV_1.featureLevel();
+    }
+
+    /**
+     * Feature negotiation only. This does not enable Controller WAL certificate
+     * record emission, producer ACK authorization or COMMITTED physical GC.
+     */
+    boolean isWalReplicaDurabilityEnabled() {
+        return metadataVersionOrThrow().isAtLeast(MetadataVersion.IBP_4_4_IV0)
+            && finalizedVersions.getOrDefault(
+                WalReplicaDurabilityVersion.FEATURE_NAME, (short) 0
+            ) >= WalReplicaDurabilityVersion.WRDV_1.featureLevel();
     }
 
     boolean isElrFeatureEnabled() {
