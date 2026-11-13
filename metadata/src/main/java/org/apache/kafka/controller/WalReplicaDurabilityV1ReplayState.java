@@ -101,6 +101,21 @@ final class WalReplicaDurabilityV1ReplayState {
     }
 
     /**
+     * Install an already preflighted committed KRaft batch's immutable
+     * UNTRUSTED diagnostics, only AFTER every ordinary metadata message
+     * in that same batch was replayed successfully by the standby Controller.
+     * This must be called exclusively on the Controller event queue.
+     *
+     * These diagnostic records cannot grant Producer ACK, advance HW or
+     * allow COMMITTED physical GC. The active Controller has no V1 Writer.
+     */
+    void applyPrevalidatedCommittedBatch(List<UntrustedEvidence> completePlan) {
+        for (UntrustedEvidence evidence : List.copyOf(completePlan)) {
+            state.put(evidence.key(), evidence);
+        }
+    }
+
+    /**
      * Replace only this isolated UNTRUSTED diagnostic timeline with a
      * validated *complete* snapshot plan. The caller must supply all batches
      * from one trusted KRaft SnapshotReader, not a prefix or a Broker claim.
