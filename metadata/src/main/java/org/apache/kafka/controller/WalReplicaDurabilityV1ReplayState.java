@@ -61,7 +61,29 @@ final class WalReplicaDurabilityV1ReplayState {
         long assignedRecordOffset
     ) {
         Key key = requireValidKey(record);
-        UntrustedEvidence previous = state.get(key);
+        UntrustedEvidence next = validateTransition(
+            record, key, trustedWireVersion, metadataVersion, negotiatedExperimentalFeature,
+            committedBatch, assignedRecordOffset, state.get(key));
+        state.put(key, next);
+    }
+
+    /**
+     * Pure, non-mutating transition check reusable by a committed-batch
+     * preflight. A successful result remains untrusted diagnostic data.
+     */
+    static UntrustedEvidence validateTransition(
+        WalReplicaDurabilityCertificateRecord record,
+        Key key,
+        short trustedWireVersion,
+        MetadataVersion metadataVersion,
+        boolean negotiatedExperimentalFeature,
+        WalReplicaDurabilityV1PositionPrecheck.CommitBatch committedBatch,
+        long assignedRecordOffset,
+        UntrustedEvidence previous
+    ) {
+        if (previous != null && !previous.key().equals(key)) {
+            throw new IllegalStateException("foreign previous WAL certificate partition identity");
+        }
         long previousOffset = previous == null ? -1 : previous.kraftOffset();
         if (!WalReplicaDurabilityV1PositionPrecheck.hasAssignedCommittedPosition(
             record, trustedWireVersion, metadataVersion, negotiatedExperimentalFeature,
@@ -72,7 +94,7 @@ final class WalReplicaDurabilityV1ReplayState {
         if (previous != null) {
             requireMonotonic(previous, next);
         }
-        state.put(key, next);
+        return next;
     }
 
     /** Untrusted diagnostic only: never a durable receipt or ACK/GC permit. */
@@ -80,7 +102,7 @@ final class WalReplicaDurabilityV1ReplayState {
         return state.get(key);
     }
 
-    private static Key requireValidKey(WalReplicaDurabilityCertificateRecord record) {
+    static Key requireValidKey(WalReplicaDurabilityCertificateRecord record) {
         try {
             WalReplicaDurabilityCertificateRecordPrecheck.requireWellFormedUntrustedRecord(record);
             return new Key(record.topicId(), record.partitionId());
@@ -111,6 +133,11 @@ final class WalReplicaDurabilityV1ReplayState {
         if (next.controllerEpoch() < previous.controllerEpoch()
             || next.endOffset() < previous.endOffset()) {
             throw new IllegalStateException("V1 WAL certificate regressed Controller generation or WAL end");
+        }
+        // A later certificate cannot skip an unproven Kafka-offset interval
+        // between the previous durable end and its claimed starting offset.
+        if (next.startOffset() > previous.endOffset()) {
+            throw new IllegalStateException("V1 WAL certificate leaves a gap after prior durable range");
         }
         if (next.leaderEpoch() < previous.leaderEpoch()
             || next.partitionEpoch() < previous.partitionEpoch()) {
