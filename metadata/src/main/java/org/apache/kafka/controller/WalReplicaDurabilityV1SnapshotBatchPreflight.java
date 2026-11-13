@@ -75,6 +75,9 @@ final class WalReplicaDurabilityV1SnapshotBatchPreflight {
         if (snapshotBatches == null || metadataVersion == null || trustedSnapshotId == null) {
             throw new IllegalArgumentException("missing trusted WAL snapshot preflight context");
         }
+        if (trustedSnapshotId.offset() <= 0 || trustedSnapshotId.epoch() < 0) {
+            throw new IllegalArgumentException("invalid KRaft snapshot horizon");
+        }
         List<UntrustedEvidence> checkpoints = new ArrayList<>();
         Set<Key> seen = new HashSet<>();
         for (Batch<ApiMessageAndVersion> batch : snapshotBatches) {
