@@ -651,6 +651,13 @@ REQUIRED_TESTS = {
         "revokedFeatureOldWireAndWrongRaftEpochFailBeforeAnyMutation",
         "separateTopicsKeepIndependentCasAndFreezeMutableSourceData",
     ),
+    "org.apache.kafka.controller.WalReplicaDurabilityV1SnapshotCheckpointPrecheckTest": (
+        "snapshotCheckpointV0BinaryRoundTripPreservesAssignedOffsetAndEvidence",
+        "snapshotReaderBoundaryAndExperimentalFeatureAreRequired",
+        "forgedFutureAndRegressedOriginalCertificateOffsetsFailClosed",
+        "foreignOrMalformedReplicaAndWalClaimsCannotBecomeCheckpointEvidence",
+        "immutableDiagnosticCheckpointDoesNotAliasGeneratedMutableRecordOrTopic",
+    ),
     "org.apache.kafka.controller.WalReplicaDurabilityCertificateReplayStateTest": (
         "committedLogReplayFreezesGeneratedRecordAndItsNestedMutableEntries",
         "untrustedOrUncommittedSourceCannotOverwriteExistingReplayState",

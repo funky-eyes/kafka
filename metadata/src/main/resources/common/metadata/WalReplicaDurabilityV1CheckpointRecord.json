@@ -1,0 +1,64 @@
+// Licensed to the Apache Software Foundation (ASF) under one or more
+// contributor license agreements.  See the NOTICE file distributed with
+// this work for additional information regarding copyright ownership.
+// The ASF licenses this file to You under the Apache License, Version 2.0
+// (the "License"); you may not use this file except in compliance with
+// the License.  You may obtain a copy of the License at
+//
+//    http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Experimental, non-emitting, SNAPSHOT-ONLY representation of UNTRUSTED V1
+// certificate diagnostics. A log V1 record carries a *previous* certificate
+// CAS and has no field for its newly assigned KRaft append offset. A snapshot
+// must preserve that accepted position explicitly to resume the CAS chain.
+// This envelope has no producer ACK/physical GC authority, Broker fsync proof,
+// Controller replay dispatch, or production snapshot writer.
+{
+  "apiKey": 31,
+  "type": "metadata",
+  "name": "WalReplicaDurabilityV1CheckpointRecord",
+  "validVersions": "0",
+  "flexibleVersions": "0+",
+  "fields": [
+    { "name": "TopicId", "type": "uuid", "versions": "0+",
+      "about": "Immutable topic incarnation." },
+    { "name": "PartitionId", "type": "int32", "versions": "0+" },
+    { "name": "LeaderEpoch", "type": "int32", "versions": "0+" },
+    { "name": "PartitionEpoch", "type": "int32", "versions": "0+" },
+    { "name": "StartOffset", "type": "int64", "versions": "0+" },
+    { "name": "EndOffset", "type": "int64", "versions": "0+" },
+    { "name": "ControllerEpoch", "type": "int64", "versions": "0+" },
+    { "name": "AcceptedKRaftOffset", "type": "int64", "versions": "0+",
+      "about": "Actual accepted log V1 certificate offset, learned from trusted KRaft commit, NOT from the source payload." },
+    { "name": "PreviousKRaftOffset", "type": "int64", "versions": "0+",
+      "default": "-1",
+      "about": "Previous accepted certificate log offset for audit; -1 for the first." },
+    { "name": "AcceptedRaftEpoch", "type": "int32", "versions": "0+",
+      "about": "Committed KRaft batch leader epoch of the accepted log V1 record." },
+    { "name": "ReplicaReceipts", "type": "[]ReplicaReceipt", "versions": "0+",
+      "about": "Untrusted, immutable-on-restore replica claims, never physical durability evidence.",
+      "fields": [
+        { "name": "BrokerId", "type": "int32", "versions": "0+" },
+        { "name": "BrokerEpoch", "type": "int64", "versions": "0+" },
+        { "name": "IncarnationId", "type": "uuid", "versions": "0+" },
+        { "name": "StorageGeneration", "type": "int64", "versions": "0+" },
+        { "name": "DurableEndOffset", "type": "int64", "versions": "0+" }
+      ]
+    },
+    { "name": "WalSpans", "type": "[]WalSpan", "versions": "0+",
+      "about": "Untrusted per-Broker ranges and claimed CRC32c checksums.",
+      "fields": [
+        { "name": "BrokerId", "type": "int32", "versions": "0+" },
+        { "name": "StartOffset", "type": "int64", "versions": "0+" },
+        { "name": "EndOffset", "type": "int64", "versions": "0+" },
+        { "name": "Crc32c", "type": "int64", "versions": "0+" }
+      ]
+    }
+  ]
+}
