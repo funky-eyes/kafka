@@ -658,6 +658,13 @@ REQUIRED_TESTS = {
         "foreignOrMalformedReplicaAndWalClaimsCannotBecomeCheckpointEvidence",
         "immutableDiagnosticCheckpointDoesNotAliasGeneratedMutableRecordOrTopic",
     ),
+    "org.apache.kafka.controller.WalReplicaDurabilityV1SnapshotBatchPreflightTest": (
+        "immutableCheckpointsAcrossBatchesUseOriginalAcceptedOffsetsNotSnapshotPseudoOffsets",
+        "duplicateTopicPartitionCheckpointsAcrossBatchesRejectEntireSnapshot",
+        "futureOriginalOffsetAndUnsupportedWireVersionRejectEntireSnapshot",
+        "ordinaryMetadataAndEmptyBatchesNeverCreateCheckpointEvidence",
+        "nullMalformedAndRevokedFeatureInputsCannotExposeCheckpointPlan",
+    ),
     "org.apache.kafka.controller.WalReplicaDurabilityCertificateReplayStateTest": (
         "committedLogReplayFreezesGeneratedRecordAndItsNestedMutableEntries",
         "untrustedOrUncommittedSourceCannotOverwriteExistingReplayState",
