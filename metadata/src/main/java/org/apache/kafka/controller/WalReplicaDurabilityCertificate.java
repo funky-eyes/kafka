@@ -20,6 +20,7 @@ import org.apache.kafka.common.Uuid;
 
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
@@ -58,6 +59,21 @@ final class WalReplicaDurabilityCertificate {
         }
     }
 
+    /**
+     * Controller-supplied snapshot of one current Broker registration plus
+     * its independently verified local WAL storage generation. This record
+     * is not itself proof that the Broker flushed any bytes.
+     */
+    record CurrentRegistration(long brokerEpoch, Uuid incarnationId, long storageGeneration,
+                               boolean fenced, boolean inControlledShutdown) {
+        CurrentRegistration {
+            Objects.requireNonNull(incarnationId);
+            if (brokerEpoch < 0 || Uuid.ZERO_UUID.equals(incarnationId) || storageGeneration <= 0) {
+                throw new IllegalArgumentException("invalid current WAL replica registration");
+            }
+        }
+    }
+
     private WalReplicaDurabilityCertificate() {
     }
 
@@ -86,5 +102,45 @@ final class WalReplicaDurabilityCertificate {
             }
         }
         return seen.size() >= requiredReplicas;
+    }
+
+    /**
+     * Stronger necessary precheck against an independently captured current
+     * Broker identity snapshot. In particular, a receipt from an earlier
+     * registration, restarted Broker process or replaced disk cannot be
+     * carried forward merely because its Broker ID remains in ISR.
+     *
+     * This does not prove durable contiguous WAL bytes, a KRaft-committed
+     * certificate, Controller replay validity or Kafka ACK eligibility.
+     */
+    static boolean hasCurrentRegisteredCompleteReceipts(
+        Coordinate coordinate,
+        List<Receipt> receipts,
+        Set<Integer> currentIsr,
+        Map<Integer, CurrentRegistration> registrations,
+        int requiredReplicas
+    ) {
+        if (registrations == null
+            || !hasIndependentCompleteReceipts(coordinate, receipts, currentIsr, requiredReplicas)) {
+            return false;
+        }
+        Set<Uuid> seenIncarnations = new HashSet<>();
+        for (Receipt receipt : receipts) {
+            CurrentRegistration current = registrations.get(receipt.brokerId());
+            if (!matchesCurrentRegistration(receipt, current)
+                || !seenIncarnations.add(receipt.incarnationId())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean matchesCurrentRegistration(Receipt receipt, CurrentRegistration current) {
+        if (current == null || current.fenced() || current.inControlledShutdown()) {
+            return false;
+        }
+        return current.brokerEpoch() == receipt.brokerEpoch()
+            && current.incarnationId().equals(receipt.incarnationId())
+            && current.storageGeneration() == receipt.storageGeneration();
     }
 }
