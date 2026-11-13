@@ -86,7 +86,8 @@ final class WalReplicaDurabilityV1PositionPrecheck {
         }
         // V0's self-claimed KRaftOffset is absent from the V1 wire image.
         // Fail closed for in-memory objects carrying an inconsistent V0 claim.
-        if (record.kRaftOffset() != 0) {
+        if (record.kRaftOffset() != 0
+            || record.controllerEpoch() != trustedCommittedBatch.raftEpoch()) {
             return false;
         }
         return trustedRecordOffset >= trustedCommittedBatch.baseOffset()
