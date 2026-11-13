@@ -144,5 +144,6 @@ class WalReplicaDurabilityV1PositionPrecheckTest {
         record.replicaReceipts().get(1).setIncarnationId(
             record.replicaReceipts().get(0).incarnationId());
         assertFalse(accepts(record, 1000, -1));
+        assertFalse(accepts(v1(-1).setTopicId(null), 1000, -1));
     }
 }
