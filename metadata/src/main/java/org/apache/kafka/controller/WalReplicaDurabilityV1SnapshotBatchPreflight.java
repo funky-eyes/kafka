@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.controller;
 
+import org.apache.kafka.common.metadata.WalReplicaDurabilityCertificateRecord;
 import org.apache.kafka.common.metadata.WalReplicaDurabilityV1CheckpointRecord;
 import org.apache.kafka.raft.Batch;
 import org.apache.kafka.server.common.ApiMessageAndVersion;
@@ -47,6 +48,8 @@ import static org.apache.kafka.controller.WalReplicaDurabilityCertificateReplayS
  */
 final class WalReplicaDurabilityV1SnapshotBatchPreflight {
     private static final short CHECKPOINT_API_KEY = new WalReplicaDurabilityV1CheckpointRecord().apiKey();
+    private static final short INCREMENTAL_CERTIFICATE_API_KEY =
+        new WalReplicaDurabilityCertificateRecord().apiKey();
     private static final int MAX_UNTRUSTED_CHECKPOINTS = 65_536;
 
     record UntrustedSnapshotPlan(OffsetAndEpoch snapshotId, List<UntrustedEvidence> checkpoints) {
@@ -95,6 +98,12 @@ final class WalReplicaDurabilityV1SnapshotBatchPreflight {
         for (ApiMessageAndVersion entry : batch.records()) {
             if (entry == null || entry.message() == null) {
                 throw new IllegalArgumentException("null metadata record within KRaft snapshot");
+            }
+            // An incremental V1 record has no own assigned offset; its
+            // snapshot pseudo-offset cannot reconstruct the old CAS chain.
+            if (entry.message().apiKey() == INCREMENTAL_CERTIFICATE_API_KEY) {
+                throw new IllegalStateException(
+                    "incremental WAL certificate is not a valid snapshot checkpoint");
             }
             if (entry.message().apiKey() != CHECKPOINT_API_KEY) {
                 continue;
