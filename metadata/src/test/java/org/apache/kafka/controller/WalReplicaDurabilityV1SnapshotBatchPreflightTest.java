@@ -153,6 +153,8 @@ class WalReplicaDurabilityV1SnapshotBatchPreflightTest {
         assertThrows(IllegalArgumentException.class, () ->
             planUntrusted(batches, MetadataVersion.IBP_4_4_IV0, true, null));
         assertThrows(IllegalArgumentException.class, () ->
+            planUntrusted(List.of(), MetadataVersion.IBP_4_4_IV0, true, new OffsetAndEpoch(0, 9)));
+        assertThrows(IllegalArgumentException.class, () ->
             planUntrusted(batches, MetadataVersion.IBP_4_4_IV0, false, SNAPSHOT_ID));
         var invalid = wire(checkpoint(Uuid.randomUuid(), 1000).setTopicId(null));
         assertThrows(IllegalArgumentException.class, () -> plan(List.of(batch(0, invalid))));
