@@ -36,7 +36,7 @@ final class WalReplicaDurabilityRangePrecheck {
 
     /** A half-open Kafka interval attributed to one exact Broker/disk generation. */
     record Span(int brokerId, long brokerEpoch, Uuid incarnationId, long storageGeneration,
-                Uuid topicId, int partition, int leaderEpoch, long startOffset,
+                Uuid topicId, int partition, int leaderEpoch, int partitionEpoch, long startOffset,
                 long endOffset, boolean checksumVerified) {
         Span {
             Objects.requireNonNull(incarnationId);
@@ -47,7 +47,10 @@ final class WalReplicaDurabilityRangePrecheck {
             if (Uuid.ZERO_UUID.equals(incarnationId) || Uuid.ZERO_UUID.equals(topicId)) {
                 throw new IllegalArgumentException("reserved WAL span UUID");
             }
-            if (partition < 0 || leaderEpoch < 0 || startOffset < 0 || endOffset <= startOffset) {
+            if (partition < 0 || leaderEpoch < 0 || partitionEpoch < 0) {
+                throw new IllegalArgumentException("invalid WAL span partition epoch");
+            }
+            if (startOffset < 0 || endOffset <= startOffset) {
                 throw new IllegalArgumentException("invalid WAL span coordinates");
             }
         }
@@ -119,6 +122,7 @@ final class WalReplicaDurabilityRangePrecheck {
         }
         return span.topicId().equals(coordinate.topicId())
             && span.partition() == coordinate.partition()
-            && span.leaderEpoch() == coordinate.leaderEpoch();
+            && span.leaderEpoch() == coordinate.leaderEpoch()
+            && span.partitionEpoch() == coordinate.partitionEpoch();
     }
 }
