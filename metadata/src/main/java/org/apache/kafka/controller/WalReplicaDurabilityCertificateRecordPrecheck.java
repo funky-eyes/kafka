@@ -150,15 +150,20 @@ final class WalReplicaDurabilityCertificateRecordPrecheck {
      */
     static boolean hasCommittedReplayOrigin(
         WalReplicaDurabilityCertificateRecord record,
+        short trustedWireVersion,
         MetadataVersion metadataVersion,
         boolean negotiatedExperimentalFeature,
         Optional<OffsetAndEpoch> snapshotId,
         long observedRecordOffset,
         long committedNextOffset
     ) {
-        if (!negotiatedExperimentalFeature || metadataVersion == null
-            || !metadataVersion.isAtLeast(MetadataVersion.IBP_4_4_IV0)
-            || snapshotId == null || committedNextOffset <= 0) {
+        // V0 and V1 have different offset semantics. Never interpret a V1
+        // previous-certificate CAS as V0's own claimed append location.
+        if (trustedWireVersion != 0 || !negotiatedExperimentalFeature
+            || metadataVersion == null || snapshotId == null || committedNextOffset <= 0) {
+            return false;
+        }
+        if (!metadataVersion.isAtLeast(MetadataVersion.IBP_4_4_IV0)) {
             return false;
         }
         try {
