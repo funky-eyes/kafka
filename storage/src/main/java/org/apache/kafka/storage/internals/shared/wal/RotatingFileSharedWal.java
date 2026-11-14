@@ -69,6 +69,13 @@ public final class RotatingFileSharedWal implements SharedWal {
         this(directory, capacityBytes, segmentBytes, DEFAULT_READ_CACHE_BYTES, new FileChannelWalIoBackend());
     }
 
+    /** Selectable physical file I/O without changing the WAL record format. */
+    public RotatingFileSharedWal(
+        Path directory, long capacityBytes, long segmentBytes, WalIoBackend ioBackend
+    ) throws IOException {
+        this(directory, capacityBytes, segmentBytes, DEFAULT_READ_CACHE_BYTES, ioBackend);
+    }
+
     RotatingFileSharedWal(Path directory, long capacityBytes, long segmentBytes, long readCacheBytes) throws IOException {
         this(directory, capacityBytes, segmentBytes, readCacheBytes, new FileChannelWalIoBackend());
     }

@@ -16,7 +16,10 @@
  */
 package org.apache.kafka.storage.internals.shared.kafka;
 
+import org.apache.kafka.storage.internals.shared.wal.AsynchronousFileChannelWalIoBackend;
+import org.apache.kafka.storage.internals.shared.wal.FileChannelWalIoBackend;
 import org.apache.kafka.storage.internals.shared.wal.RingSharedWal;
+import org.apache.kafka.storage.internals.shared.wal.WalIoBackend;
 import org.apache.kafka.storage.internals.shared.wal.RotatingFileSharedWal;
 import org.apache.kafka.storage.internals.shared.wal.SharedWal;
 
@@ -40,20 +43,42 @@ public final class SharedStorageWalFactory {
         return switch (configuration.walEngine()) {
             case RING -> {
                 ensureNoLegacyRotatingWalSegments(configuration.walDir());
-                yield new RingSharedWal(
-                    ringWalPath(configuration.walDir()),
-                    configuration.walCapacityBytes()
-                );
+                WalIoBackend backend = selectBackend(configuration);
+                try {
+                    yield new RingSharedWal(ringWalPath(configuration.walDir()),
+                        configuration.walCapacityBytes(), backend);
+                } catch (IOException | RuntimeException | Error failure) {
+                    closeFailedBackend(backend, failure);
+                    throw failure;
+                }
             }
             case ROTATING_FILE -> {
                 ensureNoRingWalFile(configuration.walDir());
-                yield new RotatingFileSharedWal(
-                    configuration.walDir(),
-                    configuration.walCapacityBytes(),
-                    configuration.walSegmentBytes()
-                );
+                WalIoBackend backend = selectBackend(configuration);
+                try {
+                    yield new RotatingFileSharedWal(configuration.walDir(),
+                        configuration.walCapacityBytes(), configuration.walSegmentBytes(), backend);
+                } catch (IOException | RuntimeException | Error failure) {
+                    closeFailedBackend(backend, failure);
+                    throw failure;
+                }
             }
         };
+    }
+
+    private static WalIoBackend selectBackend(SharedStorageConfiguration config) {
+        return switch (config.walIoMode()) {
+            case NIO -> new FileChannelWalIoBackend();
+            case AIO -> new AsynchronousFileChannelWalIoBackend();
+        };
+    }
+
+    private static void closeFailedBackend(WalIoBackend backend, Throwable failure) {
+        try {
+            backend.close();
+        } catch (IOException closeError) {
+            failure.addSuppressed(closeError);
+        }
     }
 
     static Path ringWalPath(Path walDir) {
