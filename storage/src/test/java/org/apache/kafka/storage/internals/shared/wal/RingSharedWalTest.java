@@ -54,6 +54,8 @@ class RingSharedWalTest {
         try (RingSharedWal wal = new RingSharedWal(path, totalCapacity)) {
             assertEquals(WalDurabilityStats.EMPTY, wal.durabilityStats());
             assertEquals(WalWriteLatencyStats.EMPTY, wal.writeLatencyStats());
+            assertEquals(WalWriteLatencyStats.EMPTY,
+                new WalWriteLatencyStats(0L, 0L, 0L, 0L, 0L, 0L));
 
             wal.appendBatch(List.of(dataRecord(0L, 32), dataRecord(1L, 32))).join();
             WalDurabilityStats first = wal.durabilityStats();
