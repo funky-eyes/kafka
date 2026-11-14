@@ -149,10 +149,13 @@ Source references:
    batch completion duration (total and maximum nanoseconds, no fake p99
    estimate). These are per-process aggregate counters, **not** Producer
    `acks=all` percentiles; expose actual histogram/p99 in a future change.
-2. **Reduce tiny positional writes without extra forces**: benchmark
-   bounded contiguous staging of small WAL fragments (64 KiB candidate),
-   retaining a zero-copy escape route for large buffers and fail-closed
-   write completion. Do not silently copy an entire 128 MiB record.
+2. **Reduce tiny positional writes without extra forces**: prototype
+   `RingWalWriteCoalescer` merges adjacent physical fragments into a
+   temporary buffer no larger than 64 KiB. Large payloads retain their
+   original zero-copy view; logical wraps and physical gaps stop merging.
+   This is a **candidate**, not a measured performance improvement.
+   Compare staged versus submitted request counts, CPU allocation/GC and
+   latency on the six AutoMQ message sizes before rollout.
 3. **Introduce bounded backlog**: cap pending logical groups and bytes by
    memory budget with explicit rejection/backpressure, but never block a
    producer while holding the WAL lifecycle lock. Preserve a consistent
