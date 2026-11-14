@@ -221,20 +221,8 @@ public class SharedStorageIndependentProcessSigkillTest {
                         scenario.replicationFactor() + " oldLeader=" + oldLeader +
                         " newLeader=" + replacementLeader + " range=" + crashRange);
                     if (scenario.replicationFactor() == 3) {
-                        // Native ISR=2 should keep acks=all writes available
-                        // after electing the remaining WAL-backed leader even
-                        // while the entire S3 endpoint is still unavailable.
-                        waitForTopicState(admin, TOPIC, (short) 3, (short) 2,
-                            replacementLeader);
-                        OffsetRange offlinePostCrash = produceRange(
-                            bootstrapServers, PRE_RECOVERY_RECORDS, POST_CRASH_RECORDS);
-                        assertEquals(new OffsetRange(PRE_RECOVERY_RECORDS, TOTAL_RECORDS),
-                            offlinePostCrash);
-                        assertAcknowledgedWalOnlyRangeReadable(bootstrapServers, offlinePostCrash);
-                        assertFalse(allCoverage(bootstrapServers, partition).covers(offlinePostCrash),
-                            "RF3 post-election acks=all writes must remain WAL-only until S3 returns");
-                        System.out.println("MATRIX_RF3_S3_OFFLINE_FAILOVER_WRITABLE leader=" +
-                            replacementLeader + " range=" + offlinePostCrash);
+                        assertRf3S3OfflineFailoverWritable(
+                            admin, bootstrapServers, partition, replacementLeader);
                     }
                     if (scenario.replicationFactor() == 2) {
                         // A separate shared-WAL routed topic avoids poisoning
@@ -270,6 +258,25 @@ public class SharedStorageIndependentProcessSigkillTest {
         }
     }
 
+    private static void assertRf3S3OfflineFailoverWritable(
+        Admin admin,
+        String bootstrapServers,
+        SharedPartitionId partition,
+        int replacementLeader
+    ) throws Exception {
+        // Native ISR=2 must preserve acks=all writes after an old-leader
+        // permanent WAL loss, even before the S3 endpoint is restarted.
+        waitForTopicState(admin, TOPIC, (short) 3, (short) 2, replacementLeader);
+        OffsetRange offlinePostCrash = produceRange(
+            bootstrapServers, PRE_RECOVERY_RECORDS, POST_CRASH_RECORDS);
+        assertEquals(new OffsetRange(PRE_RECOVERY_RECORDS, TOTAL_RECORDS), offlinePostCrash);
+        assertAcknowledgedWalOnlyRangeReadable(bootstrapServers, offlinePostCrash);
+        assertFalse(allCoverage(bootstrapServers, partition).covers(offlinePostCrash),
+            "RF3 post-election acks=all writes must remain WAL-only until S3 returns");
+        System.out.println("MATRIX_RF3_S3_OFFLINE_FAILOVER_WRITABLE leader=" +
+            replacementLeader + " range=" + offlinePostCrash);
+    }
+
     private void runReplicatedFailover(
         Path repositoryRoot,
         Path processRuntime,
@@ -291,13 +298,17 @@ public class SharedStorageIndependentProcessSigkillTest {
             () -> "Replacement leader " + newLeader +
                 " never uploaded the pre-SIGKILL acknowledged range " + crashRange
         );
+        // RF3 has already acknowledged its post-election tail while MinIO
+        // was offline; RF2 cannot write again until its original ISR recovers.
+        int expectedBeforeRestart = scenario.replicationFactor() == 3
+            ? TOTAL_RECORDS : PRE_RECOVERY_RECORDS;
         assertExpectedValues(
-            consumeAll(bootstrapServers, PRE_RECOVERY_RECORDS),
-            PRE_RECOVERY_RECORDS,
+            consumeAll(bootstrapServers, expectedBeforeRestart),
+            expectedBeforeRestart,
             "Acknowledged data must be readable from the replacement leader"
         );
         System.out.println("MATRIX_FAILOVER_READABLE rf=" + scenario.replicationFactor() +
-            " oldLeader=" + oldLeader + " newLeader=" + newLeader + " records=" + PRE_RECOVERY_RECORDS);
+            " oldLeader=" + oldLeader + " newLeader=" + newLeader + " records=" + expectedBeforeRestart);
 
         if (scenario.replicationFactor() == 3) {
             // The post-crash range was already acknowledged, consumed and
