@@ -71,17 +71,19 @@ A failed or uncertain step leaves the durable intent and retries at that state. 
 - For each KSO2 object inspect **all** packed ranges. A normal live range, missing watermark, partially overlapping RecordBatch, alternate reference, unread replica image or uncleared upload => **retain the entire physical object**.
 - Durable `RETIRE_INTENT` must contain original descriptor identity, generation, every partition covered, sealed catalog horizon and retry state. It is an object-scoped intent, not a per-partition-local deletion decision.
 
-### Phase C — distributed reader/producer quiescence
+### Phase C — scalable reader/producer quiescence (batched safe epoch)
 
-- On observing a durable retirement, every broker that could serve an old remote index must install a **no-new-read/no-new-upload** barrier before reporting success. Drain actual physical Range GET Futures, logical cache-hit reads and uploads using their existing lease registries; revoke selected and fallback index references with a controller-authorized generation.
-- The Controller validates the required broker incarnations/epochs and a full set of authenticated drain acknowledgements; disconnected brokers are fenced and must replay the retirement barrier before serving any reads after reboot.
-- Never accept "ISR quorum only" as full reader quiescence: historical/follower remote reads, local checkpoints and recovery readers can exist outside the ISR. A timeout is a GC stall, **not** license to delete.
+- Persist an object-scoped retirement generation `retireEpoch`, but **do not collect one network ACK per object**. Publish batched Controller retirement barriers and require each broker that could serve an old remote index to acknowledge its highest **fully drained epoch** (`drainedEpoch`) for the current authenticated BrokerEpoch/incarnation.
+- Upon observing a barrier, each broker installs **no-new-read/no-new-upload** fences for retired object IDs and excludes them from primary and alternate lookup and replayed local checkpoints. Wait for both physical Range GET Futures and logical cache-hit read leases admitted before the barrier, plus any PUT/multipart/COMMIT work. The existing process-local admission registries can be used only when all actual readers/uploaders share them.
+- The Controller derives a cohort from the real cluster membership **at the barrier**, authenticates each broker's `drainedEpoch` (including incarnation), and permits a physical object only if every required live reader cohort has advanced at or past `retireEpoch`. One epoch report amortizes many object retirements; this is a proposed QSBR/RCU-style improvement, **not** a feature copied from AutoMQ.
+- A disconnected broker is not silently ignored: it must be durably fenced from serving and, on re-registration, complete KRaft retirement replay and rebuild its local remote index before any remote read. The Controller must reject stale incarnation ACKs and heartbeat ABA. Broker removal or reassignment must not revive old readers.
+- Never accept ISR quorum alone as proof of global read quiescence: historical/follower remote reads, local checkpoints and recovery readers may exist outside ISR. A missing broker fence or timed-out drain stalls physical GC, **not** data availability.
 
 ### Phase D — idempotent, durable physical delete
 
 - KRaft commits `DELETE_READY` **after** all verified fences; a worker with a short, generation-fenced task lease executes an idempotent S3/MinIO `DELETE(objectId)`. Worker shutdown, re-election or timeout replays intent and retries without deleting live bytes.
 - Require quiescence of in-flight PUT/multipart completion before delete; a late PUT after DELETE can recreate an object. Object IDs/keys must never be recycled. The delay/grace period is additional defense and cost smoothing, **not** the proof of safety.
-- On successful physical delete and the supported storage contract (including required verification where practical), persist `DELETE_RECORDED` then retire the authoritative catalog entry, retaining a compacted terminal fencing record long enough to prevent stale replay/reupload. If DELETE succeeded but the metadata write failed, retry DELETE.
+- On successful physical delete and the supported storage contract (including required verification where practical), persist `DELETE_RECORDED` then retire the authoritative catalog entry, retaining a compacted terminal fencing record for the whole lifetime in which an old producer or checkpoint could reappear. If DELETE succeeded but the metadata write failed, retry DELETE.
 - Bound object IDs per sweep, concurrent DELETEs, bytes/sec and S3 requests/sec. Apply exponential-jittered retries and persistent dead-letter/alert states; use LIST only for reconciliation and observability, **not** GC eligibility.
 
 ### Phase E — reclaim packed bytes without deleting live ranges
@@ -110,6 +112,14 @@ A failed or uncertain step leaves the durable intent and retries at that state. 
 - S3 DELETE fail, return-success but metadata commit fail, repeated DELETE, MinIO outage/restore.
 - RF2/RF3 producer `acks=all`, ISR/HW and WAL recovery remain unchanged.
 - Bucket with S3 versioning/object lock: default **unsupported for physical reclamation** until version-aware deletion and retention/legal-hold policy are separately tested; a 404 current-version HEAD does not prove old versions were reclaimed.
+
+## Efficiency and risk limits
+
+- Use immutable packed-object descriptors and a derived **live-range set**, not a mutable distributed refcount prone to drift under failures. GC classification must be `O(total packed ranges)` across a bounded cursor; never `O(all stored objects)` for every producer append.
+- Keep Controller work limited to serialized, bounded metadata transitions. Read/merge large object bytes in workers; keep S3 physical DELETE off the Controller event queue.
+- Use a **cohort/batched global safe epoch** rather than `O(retired objects × brokers)` synchronous drain RPCs. Keep the much smaller per-object local I/O lease counters.
+- Prefer one object = one immutable physical owner and one KRaft retirement key. Defer composite index-sharing or aggressive deep-delete semantics.
+- Don't emit a new wire format while rollback-eligible 4.3.1 binaries cannot decode it. Choose a properly versioned upgrade/migration or a separately certified compatibility backport; never silently drop the existing `IBP_4_4_IV0` gate.
 
 ## Explicit exclusions
 
