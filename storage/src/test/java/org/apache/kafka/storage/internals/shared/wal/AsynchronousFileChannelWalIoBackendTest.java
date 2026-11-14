@@ -113,7 +113,7 @@ class AsynchronousFileChannelWalIoBackendTest {
         List<WalRecord> original = new ArrayList<>();
         List<WalRecord> wrapped = new ArrayList<>();
         for (int i = 0; i < 100; i++) {
-            original.add(record(i, "ring-aio-batched-" + i));
+            original.add(record(i, "ring-aio-batched-initial-" + i));
             wrapped.add(record(100 + i, "ring-aio-wrapped-" + i));
         }
         // Each group fits independently, but both groups together exceed the
@@ -123,7 +123,10 @@ class AsynchronousFileChannelWalIoBackendTest {
             path, totalCapacity, new AsynchronousFileChannelWalIoBackend())) {
             assertEquals(original.size(), wal.appendBatch(original).join().size());
             assertTrue(wal.reclaim((record, ignored) -> true) > 0L);
-            assertEquals(wrapped.size(), wal.appendBatch(wrapped).join().size());
+            List<WalAppendResult> wrappedLocations = wal.appendBatch(wrapped).join();
+            assertEquals(wrapped.size(), wrappedLocations.size());
+            assertTrue(wrappedLocations.get(wrappedLocations.size() - 1).offset() >=
+                totalCapacity - RingWalLayout.DATA_START);
         }
         try (RingSharedWal restored = new RingSharedWal(
             path, totalCapacity, new FileChannelWalIoBackend())) {
