@@ -70,6 +70,12 @@ public final class RingSharedWal implements SharedWal {
     private final AtomicLong maxDurabilityDataForceNanos = new AtomicLong();
     private final AtomicLong maxDurabilityCheckpointForceNanos = new AtomicLong();
     private final AtomicLong maxGroupsPerDurabilityBatch = new AtomicLong();
+    private final AtomicLong queuedAppendGroups = new AtomicLong();
+    private final AtomicLong totalQueueNanos = new AtomicLong();
+    private final AtomicLong maxQueueNanos = new AtomicLong();
+    private final AtomicLong physicalWriteCalls = new AtomicLong();
+    private final AtomicLong totalPhysicalWriteNanos = new AtomicLong();
+    private final AtomicLong maxPhysicalWriteNanos = new AtomicLong();
     private final Object lifecycleLock = new Object();
     private final Object ioLock = new Object();
     private final long writerShutdownTimeoutMs;
@@ -383,6 +389,18 @@ public final class RingSharedWal implements SharedWal {
     }
 
     @Override
+    public WalWriteLatencyStats writeLatencyStats() {
+        return new WalWriteLatencyStats(
+            queuedAppendGroups.get(),
+            totalQueueNanos.get(),
+            maxQueueNanos.get(),
+            physicalWriteCalls.get(),
+            totalPhysicalWriteNanos.get(),
+            maxPhysicalWriteNanos.get()
+        );
+    }
+
+    @Override
     public void close() throws IOException {
         if (!closed.compareAndSet(false, true)) {
             return;
@@ -505,6 +523,7 @@ public final class RingSharedWal implements SharedWal {
                         }
                     }
                     recordAppendInterArrivals(drained);
+                    observeQueueLatency(drained);
                     writeDrainedGroups(drained);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
@@ -531,6 +550,16 @@ public final class RingSharedWal implements SharedWal {
                 return;
             }
             drained.add(next);
+        }
+    }
+
+    private void observeQueueLatency(List<PendingAppend> groups) {
+        long now = System.nanoTime();
+        for (PendingAppend group : groups) {
+            long elapsed = Math.max(0L, now - group.enqueuedNanos());
+            queuedAppendGroups.incrementAndGet();
+            totalQueueNanos.addAndGet(elapsed);
+            maxQueueNanos.accumulateAndGet(elapsed, Math::max);
         }
     }
 
@@ -653,7 +682,9 @@ public final class RingSharedWal implements SharedWal {
         if (groups.size() == previousGroupCount) {
             return false;
         }
-        recordAppendInterArrivals(groups.subList(previousGroupCount, groups.size()));
+        List<PendingAppend> newGroups = groups.subList(previousGroupCount, groups.size());
+        recordAppendInterArrivals(newGroups);
+        observeQueueLatency(newGroups);
         return true;
     }
 
@@ -789,7 +820,15 @@ public final class RingSharedWal implements SharedWal {
 
         void flush(long plannedTail) throws IOException {
             if (!requests.isEmpty()) {
-                file.writeBatch(requests, plannedTail);
+                long startedNanos = System.nanoTime();
+                try {
+                    file.writeBatch(requests, plannedTail);
+                } finally {
+                    long elapsed = Math.max(0L, System.nanoTime() - startedNanos);
+                    physicalWriteCalls.incrementAndGet();
+                    totalPhysicalWriteNanos.addAndGet(elapsed);
+                    maxPhysicalWriteNanos.accumulateAndGet(elapsed, Math::max);
+                }
                 requests.clear();
                 bytes = 0L;
             }
