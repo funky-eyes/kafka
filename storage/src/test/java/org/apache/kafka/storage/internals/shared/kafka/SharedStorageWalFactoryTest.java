@@ -54,9 +54,64 @@ class SharedStorageWalFactoryTest {
         try (SharedWal wal = SharedStorageWalFactory.create(configuration)) {
             assertInstanceOf(RingSharedWal.class, wal);
             assertEquals(RING_CAPACITY - 8L * 1024L, wal.capacityBytes());
+            RingSharedWal ring = (RingSharedWal) wal;
+            assertEquals(SharedStorageConfiguration.DEFAULT_WAL_ADMISSION_MAX_GROUPS,
+                ring.admissionStats().maxOutstandingGroups());
+            assertEquals(SharedStorageConfiguration.DEFAULT_WAL_ADMISSION_MAX_BYTES,
+                ring.admissionStats().maxOutstandingBytes());
         }
 
         assertEquals(RING_CAPACITY, Files.size(SharedStorageWalFactory.ringWalPath(walDir)));
+    }
+
+    @Test
+    void honorsRingWalAdmissionLimitsFromBrokerConfiguration() throws Exception {
+        Path logDir = Files.createDirectory(tempDir.resolve("backpressure-kafka"));
+        Path walDir = tempDir.resolve("backpressure-wal");
+        SharedStorageConfiguration config = configuration(logDir, walDir, Map.of(
+            SharedStorageConfiguration.WAL_ADMISSION_MAX_GROUPS_CONFIG, 7,
+            SharedStorageConfiguration.WAL_ADMISSION_MAX_BYTES_CONFIG, 8192L));
+        try (SharedWal wal = SharedStorageWalFactory.create(config)) {
+            RingSharedWal ring = assertInstanceOf(RingSharedWal.class, wal);
+            assertEquals(7, ring.admissionStats().maxOutstandingGroups());
+            assertEquals(8192L, ring.admissionStats().maxOutstandingBytes());
+        }
+    }
+
+    @Test
+    void aioRingWalReopensWithoutFormatMigrationUsingNio() throws Exception {
+        Path logDir = Files.createDirectory(tempDir.resolve("aio-ring-kafka"));
+        Path walDir = tempDir.resolve("aio-ring-shared");
+        SharedStorageConfiguration aio = configuration(logDir, walDir, Map.of(
+            SharedStorageConfiguration.WAL_IO_BACKEND_CONFIG, "aio"));
+        try (SharedWal wal = SharedStorageWalFactory.create(aio)) {
+            assertInstanceOf(RingSharedWal.class, wal);
+        }
+        SharedStorageConfiguration nio = configuration(logDir, walDir, Map.of(
+            SharedStorageConfiguration.WAL_IO_BACKEND_CONFIG, "nio"));
+        try (SharedWal reopened = SharedStorageWalFactory.create(nio)) {
+            assertInstanceOf(RingSharedWal.class, reopened);
+        }
+    }
+
+    @Test
+    void aioRotatingWalReopensWithoutFormatMigrationUsingNio() throws Exception {
+        Path logDir = Files.createDirectory(tempDir.resolve("aio-file-kafka"));
+        Path walDir = tempDir.resolve("aio-file-shared");
+        SharedStorageConfiguration aio = configuration(logDir, walDir, Map.of(
+            SharedStorageConfiguration.WAL_IO_BACKEND_CONFIG, "aio",
+            SharedStorageConfiguration.WAL_ENGINE_CONFIG, "rotating-file",
+            SharedStorageConfiguration.WAL_SEGMENT_BYTES_CONFIG, 16L * 1024L));
+        try (SharedWal wal = SharedStorageWalFactory.create(aio)) {
+            assertInstanceOf(RotatingFileSharedWal.class, wal);
+        }
+        SharedStorageConfiguration nio = configuration(logDir, walDir, Map.of(
+            SharedStorageConfiguration.WAL_IO_BACKEND_CONFIG, "nio",
+            SharedStorageConfiguration.WAL_ENGINE_CONFIG, "rotating-file",
+            SharedStorageConfiguration.WAL_SEGMENT_BYTES_CONFIG, 16L * 1024L));
+        try (SharedWal reopened = SharedStorageWalFactory.create(nio)) {
+            assertInstanceOf(RotatingFileSharedWal.class, reopened);
+        }
     }
 
     @Test

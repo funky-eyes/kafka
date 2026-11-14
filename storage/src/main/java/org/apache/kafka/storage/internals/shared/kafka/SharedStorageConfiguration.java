@@ -33,8 +33,11 @@ import java.util.regex.PatternSyntaxException;
 public final class SharedStorageConfiguration {
     public static final String WAL_DIR_CONFIG = "shared.storage.wal.dir";
     public static final String WAL_ENGINE_CONFIG = "shared.storage.wal.engine";
+    public static final String WAL_IO_BACKEND_CONFIG = "shared.storage.wal.io.backend";
     public static final String WAL_CAPACITY_BYTES_CONFIG = "shared.storage.wal.capacity.bytes";
     public static final String WAL_SEGMENT_BYTES_CONFIG = "shared.storage.wal.segment.bytes";
+    public static final String WAL_ADMISSION_MAX_GROUPS_CONFIG = "shared.storage.wal.admission.max.groups";
+    public static final String WAL_ADMISSION_MAX_BYTES_CONFIG = "shared.storage.wal.admission.max.bytes";
     public static final String OBJECT_TARGET_BYTES_CONFIG = "shared.storage.object.target.bytes";
     public static final String READ_INDEX_CACHE_ENTRIES_CONFIG = "shared.storage.read.index.cache.entries";
     public static final String READ_DATA_BLOCK_CACHE_BYTES_CONFIG = "shared.storage.read.data.block.cache.bytes";
@@ -48,8 +51,11 @@ public final class SharedStorageConfiguration {
     public static final String TOPIC_PATTERN_CONFIG = "shared.storage.topic.pattern";
 
     public static final WalEngine DEFAULT_WAL_ENGINE = WalEngine.RING;
+    public static final WalIoMode DEFAULT_WAL_IO_MODE = WalIoMode.NIO;
     public static final long DEFAULT_WAL_CAPACITY_BYTES = 2L * 1024 * 1024 * 1024;
     public static final long DEFAULT_WAL_SEGMENT_BYTES = 64L * 1024 * 1024;
+    public static final int DEFAULT_WAL_ADMISSION_MAX_GROUPS = 4096;
+    public static final long DEFAULT_WAL_ADMISSION_MAX_BYTES = 256L * 1024 * 1024;
     public static final long DEFAULT_OBJECT_TARGET_BYTES = 32L * 1024 * 1024;
     public static final int DEFAULT_READ_INDEX_CACHE_ENTRIES = 1_024;
     public static final long DEFAULT_READ_DATA_BLOCK_CACHE_BYTES = 64L * 1024 * 1024;
@@ -62,8 +68,11 @@ public final class SharedStorageConfiguration {
 
     private final Path walDir;
     private final WalEngine walEngine;
+    private final WalIoMode walIoMode;
     private final long walCapacityBytes;
     private final long walSegmentBytes;
+    private final int walAdmissionMaxGroups;
+    private final long walAdmissionMaxBytes;
     private final long objectTargetBytes;
     private final int readIndexCacheEntries;
     private final long readDataBlockCacheBytes;
@@ -79,8 +88,11 @@ public final class SharedStorageConfiguration {
     private SharedStorageConfiguration(
         Path walDir,
         WalEngine walEngine,
+        WalIoMode walIoMode,
         long walCapacityBytes,
         long walSegmentBytes,
+        int walAdmissionMaxGroups,
+        long walAdmissionMaxBytes,
         long objectTargetBytes,
         ReadCacheConfiguration readCache,
         UploadConfiguration upload,
@@ -90,8 +102,11 @@ public final class SharedStorageConfiguration {
     ) {
         this.walDir = walDir;
         this.walEngine = walEngine;
+        this.walIoMode = walIoMode;
         this.walCapacityBytes = walCapacityBytes;
         this.walSegmentBytes = walSegmentBytes;
+        this.walAdmissionMaxGroups = walAdmissionMaxGroups;
+        this.walAdmissionMaxBytes = walAdmissionMaxBytes;
         this.objectTargetBytes = objectTargetBytes;
         this.readIndexCacheEntries = readCache.indexEntries();
         this.readDataBlockCacheBytes = readCache.dataBlockBytes();
@@ -114,6 +129,7 @@ public final class SharedStorageConfiguration {
         validateWalDirOutsideKafkaLogRoots(walDir, context);
 
         WalEngine walEngine = WalEngine.parse(context.originals().get(WAL_ENGINE_CONFIG));
+        WalIoMode walIoMode = WalIoMode.parse(context.originals().get(WAL_IO_BACKEND_CONFIG));
         long walCapacityBytes = positiveLong(
             context.originals().get(WAL_CAPACITY_BYTES_CONFIG),
             DEFAULT_WAL_CAPACITY_BYTES,
@@ -123,6 +139,16 @@ public final class SharedStorageConfiguration {
             context.originals().get(WAL_SEGMENT_BYTES_CONFIG),
             DEFAULT_WAL_SEGMENT_BYTES,
             WAL_SEGMENT_BYTES_CONFIG
+        );
+        int walAdmissionMaxGroups = positiveInt(
+            context.originals().get(WAL_ADMISSION_MAX_GROUPS_CONFIG),
+            DEFAULT_WAL_ADMISSION_MAX_GROUPS,
+            WAL_ADMISSION_MAX_GROUPS_CONFIG
+        );
+        long walAdmissionMaxBytes = positiveLong(
+            context.originals().get(WAL_ADMISSION_MAX_BYTES_CONFIG),
+            DEFAULT_WAL_ADMISSION_MAX_BYTES,
+            WAL_ADMISSION_MAX_BYTES_CONFIG
         );
         if (walEngine == WalEngine.ROTATING_FILE && walSegmentBytes > walCapacityBytes) {
             throw new IllegalArgumentException(
@@ -186,8 +212,11 @@ public final class SharedStorageConfiguration {
         return new SharedStorageConfiguration(
             walDir,
             walEngine,
+            walIoMode,
             walCapacityBytes,
             walSegmentBytes,
+            walAdmissionMaxGroups,
+            walAdmissionMaxBytes,
             objectTargetBytes,
             readCache,
             upload,
@@ -230,12 +259,24 @@ public final class SharedStorageConfiguration {
         return walEngine;
     }
 
+    public WalIoMode walIoMode() {
+        return walIoMode;
+    }
+
     public long walCapacityBytes() {
         return walCapacityBytes;
     }
 
     public long walSegmentBytes() {
         return walSegmentBytes;
+    }
+
+    public int walAdmissionMaxGroups() {
+        return walAdmissionMaxGroups;
+    }
+
+    public long walAdmissionMaxBytes() {
+        return walAdmissionMaxBytes;
     }
 
     public long objectTargetBytes() {
@@ -375,6 +416,36 @@ public final class SharedStorageConfiguration {
     }
 
     private record OrphanConfiguration(long cleanupIntervalMs, long graceMs) {
+    }
+
+    /** Physical WAL disk API, independent of Ring or rotating-file layout. */
+    public enum WalIoMode {
+        NIO("nio"),
+        AIO("aio");
+
+        private final String configValue;
+
+        WalIoMode(String configValue) {
+            this.configValue = configValue;
+        }
+
+        public String configValue() {
+            return configValue;
+        }
+
+        private static WalIoMode parse(Object value) {
+            if (value == null || value.toString().isBlank()) {
+                return DEFAULT_WAL_IO_MODE;
+            }
+            String normalized = value.toString().trim().toLowerCase(Locale.ROOT);
+            for (WalIoMode mode : values()) {
+                if (mode.configValue.equals(normalized)) {
+                    return mode;
+                }
+            }
+            throw new IllegalArgumentException(
+                "Invalid " + WAL_IO_BACKEND_CONFIG + ": " + value + "; expected nio or aio");
+        }
     }
 
     public enum WalEngine {
