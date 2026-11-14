@@ -39,6 +39,8 @@ import java.util.Properties;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SharedLogSegmentRecoveryTest {
     private static final SharedPartitionId PARTITION = new SharedPartitionId(1L, 2L, 0);
@@ -192,6 +194,90 @@ class SharedLogSegmentRecoveryTest {
             p0First.close();
             p0Second.close();
             p1.close();
+        }
+    }
+
+
+    @Test
+    void shouldRejectMismatchedKafkaFollowerTailBeforePersistingWal() throws Exception {
+        Path walDir = tempDir.resolve("offset-preflight-empty-wal");
+        File logDir = tempDir.resolve("offset-preflight-empty-topic-0").toFile();
+        Files.createDirectories(logDir.toPath());
+        LogConfig config = new LogConfig(new Properties());
+        MockTime time = new MockTime();
+        MemoryRecords followerBatch = records(0L, 7, 1000L, "a", "b");
+
+        try (SharedStorageEngine engine = engine(walDir)) {
+            SharedLogSegment segment = SharedLogSegment.open(
+                logDir, 0L, config, time, engine, PARTITION, false, "");
+            long before = engine.walUsedBytes();
+            // The actual largest offset is 1. A malformed caller-provided
+            // offset must not make even one WAL group durable.
+            assertThrows(IllegalStateException.class, () -> segment.append(2L, followerBatch));
+            assertEquals(before, engine.walUsedBytes());
+            assertEquals(0, segment.size());
+            assertEquals(0L, segment.readNextOffset());
+            assertTrue(engine.localLocations(PARTITION, 0L, 2L).isEmpty());
+
+            segment.append(1L, followerBatch);
+            assertEquals(2L, segment.readNextOffset());
+            assertEquals(followerBatch.sizeInBytes(), segment.size());
+            segment.close();
+        }
+
+        try (SharedStorageEngine recovered = engine(walDir)) {
+            SharedLogSegment segment = SharedLogSegment.open(
+                logDir, 0L, config, time, recovered, PARTITION, true, "");
+            assertEquals(2L, segment.readNextOffset());
+            assertEquals(followerBatch.sizeInBytes(), segment.size());
+            FetchDataInfo fetched = segment.read(
+                0L, Integer.MAX_VALUE, Optional.of((long) segment.size()), false);
+            assertNotNull(fetched);
+            assertEquals(followerBatch.sizeInBytes(), fetched.records.sizeInBytes());
+            segment.close();
+        }
+    }
+
+    @Test
+    void shouldKeepExistingDurableWalPrefixWhenNextAppendTailIsInvalid() throws Exception {
+        Path walDir = tempDir.resolve("offset-preflight-existing-wal");
+        File logDir = tempDir.resolve("offset-preflight-existing-topic-0").toFile();
+        Files.createDirectories(logDir.toPath());
+        LogConfig config = new LogConfig(new Properties());
+        MockTime time = new MockTime();
+        MemoryRecords first = records(0L, 7, 1000L, "first-a", "first-b");
+        MemoryRecords second = records(2L, 7, 2000L, "second-a", "second-b");
+
+        try (SharedStorageEngine engine = engine(walDir)) {
+            SharedLogSegment segment = SharedLogSegment.open(
+                logDir, 0L, config, time, engine, PARTITION, false, "");
+            segment.append(1L, first);
+            long durableBytes = engine.walUsedBytes();
+            int logicalSize = segment.size();
+
+            // Actual second batch ends at 3. Rejected append must not
+            // persist a phantom suffix or shift Kafka's logical LEO.
+            assertThrows(IllegalStateException.class, () -> segment.append(4L, second));
+            assertEquals(durableBytes, engine.walUsedBytes());
+            assertEquals(logicalSize, segment.size());
+            assertEquals(2L, segment.readNextOffset());
+            assertTrue(engine.localLocations(PARTITION, 2L, 4L).isEmpty());
+
+            segment.append(3L, second);
+            assertEquals(4L, segment.readNextOffset());
+            assertEquals(first.sizeInBytes() + second.sizeInBytes(), segment.size());
+            segment.close();
+        }
+
+        try (SharedStorageEngine recovered = engine(walDir)) {
+            SharedLogSegment segment = SharedLogSegment.open(
+                logDir, 0L, config, time, recovered, PARTITION, true, "");
+            assertEquals(4L, segment.readNextOffset());
+            FetchDataInfo fetched = segment.read(
+                0L, Integer.MAX_VALUE, Optional.of((long) segment.size()), false);
+            assertNotNull(fetched);
+            assertEquals(first.sizeInBytes() + second.sizeInBytes(), fetched.records.sizeInBytes());
+            segment.close();
         }
     }
 

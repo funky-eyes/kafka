@@ -108,6 +108,14 @@ public interface SharedWal extends AutoCloseable {
         return WalDurabilityStats.EMPTY;
     }
 
+    /**
+     * Cumulative queue and physical-write latency diagnostics. This does not
+     * include Kafka replica acknowledgement latency.
+     */
+    default WalWriteLatencyStats writeLatencyStats() {
+        return WalWriteLatencyStats.EMPTY;
+    }
+
     @Override
     void close() throws IOException;
 }

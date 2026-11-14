@@ -78,6 +78,10 @@ final class WalReplicaDurabilityV1SnapshotReaderObserver {
         if (key != CHECKPOINT_API_KEY) {
             return false;
         }
+        return captureCheckpointEntry(entry);
+    }
+
+    private boolean captureCheckpointEntry(ApiMessageAndVersion entry) {
         if (!(entry.message() instanceof WalReplicaDurabilityV1CheckpointRecord checkpoint)) {
             throw new IllegalArgumentException("snapshot V1 checkpoint API key and record type mismatch");
         }

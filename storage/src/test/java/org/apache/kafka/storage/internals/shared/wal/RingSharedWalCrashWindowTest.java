@@ -42,6 +42,39 @@ class RingSharedWalCrashWindowTest {
     @TempDir
     Path tempDir;
 
+
+    @Test
+    void dataForceFailureCannotAcknowledgeOrLosePreviouslyCommittedPrefix() throws Exception {
+        Path path = tempDir.resolve("data-force-failure.wal");
+        long capacity = RingWalLayout.DATA_START + 1024L;
+        FailingCheckpointBackend backend = new FailingCheckpointBackend();
+        WalRecord confirmed = dataRecord(0L, 24);
+        WalRecord rejected = dataRecord(1L, 24);
+
+        try (RingSharedWal wal = new RingSharedWal(path, capacity, backend)) {
+            wal.appendBatch(List.of(confirmed)).join();
+            backend.failNextDataForce();
+
+            CompletionException failed = assertThrows(CompletionException.class,
+                () -> wal.appendBatch(List.of(rejected)).join());
+            assertInstanceOf(IOException.class, failed.getCause(),
+                "a failed data force must fail the durable append future, not ACK it");
+
+            CompletionException fenced = assertThrows(CompletionException.class,
+                () -> wal.appendBatch(List.of(dataRecord(2L, 24))).join());
+            assertInstanceOf(IllegalStateException.class, fenced.getCause(),
+                "a WAL writer with a failed force must not accept later replica writes");
+        }
+
+        try (RingSharedWal recovered = new RingSharedWal(path, capacity)) {
+            List<WalRecord> replayed = new ArrayList<>();
+            recovered.replay((record, ignored) -> replayed.add(record));
+            assertEquals(1, replayed.size(),
+                "an unforced suffix cannot become a committed WAL group on cold replay");
+            assertRecordEquals(confirmed, replayed.get(0));
+        }
+    }
+
     @Test
     void recoversPreviousWindowWhenCheckpointWriteFailsAfterDataForce() throws Exception {
         Path path = tempDir.resolve("checkpoint-failure.wal");
@@ -205,9 +238,14 @@ class RingSharedWalCrashWindowTest {
     private static final class FailingCheckpointBackend implements WalIoBackend {
         private final WalIoBackend delegate = new FileChannelWalIoBackend();
         private final AtomicBoolean failNextSuperblockWrite = new AtomicBoolean(false);
+        private final AtomicBoolean failNextDataForce = new AtomicBoolean(false);
 
         void failNextSuperblockWrite() {
             failNextSuperblockWrite.set(true);
+        }
+
+        void failNextDataForce() {
+            failNextDataForce.set(true);
         }
 
         @Override
@@ -262,6 +300,9 @@ class RingSharedWalCrashWindowTest {
 
                 @Override
                 public void force() throws IOException {
+                    if (failNextDataForce.compareAndSet(true, false)) {
+                        throw new IOException("injected ring WAL data force failure");
+                    }
                     handle.force();
                 }
 
