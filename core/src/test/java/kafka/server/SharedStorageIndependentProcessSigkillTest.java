@@ -220,6 +220,16 @@ public class SharedStorageIndependentProcessSigkillTest {
                     System.out.println("MATRIX_WAL_ONLY_FAILOVER_READABLE rf=" +
                         scenario.replicationFactor() + " oldLeader=" + oldLeader +
                         " newLeader=" + replacementLeader + " range=" + crashRange);
+                    if (scenario.replicationFactor() == 2) {
+                        // A separate shared-WAL routed topic avoids poisoning
+                        // the main acknowledged offset sequence with the rejected
+                        // append, while proving RF2 minISR=2 before S3 recovers.
+                        waitForTopicState(admin, WRITE_PROBE_TOPIC, (short) 2, (short) 1,
+                            replacementLeader);
+                        assertAcksAllRejectedByMinIsr(bootstrapServers);
+                        System.out.println("MATRIX_SHARED_WAL_MIN_ISR_REJECTED_S3_OFFLINE rf=2 leader=" +
+                            replacementLeader + " minIsr=2");
+                    }
                     SharedStorageS3TestControl.start(s3Control);
                     s3Stopped = false;
                     runReplicatedFailover(
@@ -285,8 +295,8 @@ public class SharedStorageIndependentProcessSigkillTest {
             restartBroker(repositoryRoot, processRuntime, brokers, oldLeader);
             waitForTopicState(admin, TOPIC, (short) 3, (short) 3, newLeader);
         } else {
-            waitForTopicState(admin, WRITE_PROBE_TOPIC, (short) 2, (short) 1, newLeader);
-            assertAcksAllRejectedByMinIsr(bootstrapServers);
+            // Rejection already proved against a shared WAL-routed topic while
+            // S3 was offline, before the old leader was allowed to restart.
             System.out.println("MATRIX_WRITE_REJECTED_MIN_ISR rf=2 leader=" + newLeader + " minIsr=2");
             restartBroker(repositoryRoot, processRuntime, brokers, oldLeader);
             waitForTopicState(admin, TOPIC, (short) 2, (short) 2, newLeader);
@@ -416,7 +426,8 @@ public class SharedStorageIndependentProcessSigkillTest {
             "auto.create.topics.enable=false",
             "unclean.leader.election.enable=false",
             "storage.extension.class=org.apache.kafka.storage.internals.shared.s3.S3SharedStorageExtension",
-            "shared.storage.topics=" + TOPIC,
+            // Both data and RF=2 ACK rejection probe must use broker-wide WAL.
+            "shared.storage.topics=" + TOPIC + "," + WRITE_PROBE_TOPIC,
             "shared.storage.wal.dir=" + walDir.toAbsolutePath(),
             "shared.storage.wal.engine=ring",
             "shared.storage.wal.capacity.bytes=" + (64L * 1024 * 1024),
@@ -713,7 +724,8 @@ public class SharedStorageIndependentProcessSigkillTest {
         } catch (Exception e) {
             failure = e;
         }
-        assertTrue(failure != null, "RF=2/minISR=2 must reject acks=all while only one replica is in ISR");
+        assertTrue(failure != null,
+            "RF=2/minISR=2 must reject acks=all on the shared-WAL probe while one replica is in ISR");
         assertTrue(
             hasCause(failure, NotEnoughReplicasException.class) ||
                 hasCause(failure, NotEnoughReplicasAfterAppendException.class),
