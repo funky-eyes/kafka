@@ -37,13 +37,41 @@ Current verified implementation:
 - Both physical WAL implementations use `FileChannelWalIoBackend` by default.
 - `WalIoBackend.Handle.read/write/force` is a **synchronous** interface. `appendBatch()` returns `CompletableFuture` because the WAL has a background single-writer loop, batching, GROUP_COMMIT and a durability barrier, **not** because physical I/O uses Java `AsynchronousFileChannel`, Linux `libaio`, or `io_uring`.
 - The backend currently advertises `supportsDirectIo() == false`; page-cache-backed positional file I/O is the default. Preallocation capability is distinct from direct I/O or native asynchronous submission.
-- The current branch has **no production native-AIO WAL backend**, no runtime `io_uring` selection and no asynchronous `force` completion API. A new backend cannot safely be substituted by renaming a class.
+- There is **no kernel-native-AIO WAL backend**, no runtime `io_uring` selection and no asynchronous `force` completion API. The opt-in Java AIO adapter awaits each operation's completion to preserve the current durability contract. A new backend cannot safely be substituted by renaming a class.
 
 ## Relationship to open-source AutoMQ
 
 The *design inspiration* is shared storage with WAL on the synchronous write path and object-backed longer-term storage, not bit-for-bit reuse of AutoMQ's protocol or source. Open-source AutoMQ offers multiple WAL implementations, including object-storage WAL (`s3stream/.../wal/impl/object`). That object WAL buffers and asynchronously uploads batches; its behavior cannot be equated to this project's Broker-local WAL or used as evidence that all AutoMQ WAL variants use Java AIO or Linux `io_uring`.
 
 Our deliberate difference is Kafka-native partition replication of the RecordBatch *into each Broker's WAL*, with Kafka ISR/HW and minISR controlling acknowledgement and failover, rather than inventing another independent replica quorum or WAL-certificate authority. A WAL-only failure/restart test with S3 offline is a required correctness gate, not an optimization benchmark.
+
+## Selectable Java disk backends (experimental AIO)
+
+The physical backend is configurable without changing the WAL data format:
+
+```properties
+shared.storage.wal.engine=ring
+shared.storage.wal.io.backend=nio
+# For experimental Java NIO.2 asynchronous channel reads/writes:
+# shared.storage.wal.io.backend=aio
+```
+
+`nio` (default) uses synchronous `FileChannel` positional writes and `force(false)`.
+`aio` selects `AsynchronousFileChannel` for positional read/write operations.
+The existing WAL state-machine `Handle` contract is still synchronous: it awaits
+each AIO operation's completion before proceeding to the next write/checkpoint
+and calls the synchronous `AsynchronousFileChannel.force(false)` durability
+barrier. Thus AIO is a **real Java AIO API**, but **not** a fully pipelined
+nonblocking writer or a guarantee of kernel-native AIO on every JDK.
+
+This switch applies to both Ring and rotating-file WAL, with identical durable
+record and checkpoint formats. No `java.io.FileInputStream`,
+`FileOutputStream` or `RandomAccessFile` is used for physical WAL I/O.
+An unknown `bio` backend value is rejected at configuration parsing.
+
+AIO is opt-in until durability/crash-recovery parity and performance benchmarks
+have been verified on the target filesystem; never silently switch from a
+failed in-flight AIO group to NIO and claim a successful ACK.
 
 ## Current native asynchronous I/O status
 
@@ -54,7 +82,7 @@ Our deliberate difference is Kafka-native partition replication of the RecordBat
 | Batched `force(false)`/durability completion | Yes | Synchronous fsync-like barrier on writer |
 | Default circular preallocated Ring WAL | Yes | Physical layout; does not imply `O_DIRECT` |
 | Portable FileChannel positional backend | Yes | Known correctness fallback |
-| Java `AsynchronousFileChannel` backend | No | May use worker threads, not proof of kernel AIO |
+| Java `AsynchronousFileChannel` backend | Experimental opt-in | AIO read/write API; existing WAL waits for completion, so not a full nonblocking pipeline |
 | Linux direct `O_DIRECT` backend | No | Alignment, platform and buffer ownership still unresolved |
 | Native `io_uring` backend | No | Requires explicit implementation and CI |
 
