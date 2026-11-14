@@ -183,15 +183,15 @@ S3-offline and crash recovery gates.
 ## Same-device six-size JMH validation harness (experimental)
 
 Run the **local WAL only** `SharedWalDurabilityBench` on a dedicated
-ordinary SSD/cloud block volume whose sustained characteristics are measured
+ordinary SSD/cloud block volume mounted at `/mnt/provisioned-wal` whose sustained characteristics are measured
 separately (e.g. 3000 IOPS, 128 MB/s). Unlike AutoMQ's published raw-device
 Delta WAL results, this uses Java NIO / NIO.2 AIO file channels, a
 single local Broker WAL and normal `force(false)` barriers. Never equate its
 latencies to Kafka Producer `acks=all` without the separate RF2/RF3 tests.
 
 ```sh
-./gradlew :jmh-benchmarks:jmh -DjmhArgs='SharedWalDurabilityBench -t 1 -rf json -rff /tmp/shared-wal-1thread.json'
-./gradlew :jmh-benchmarks:jmh -DjmhArgs='SharedWalDurabilityBench -t 16 -rf json -rff /tmp/shared-wal-16threads.json'
+WAL_BENCH_DIR=/mnt/provisioned-wal ./gradlew :jmh-benchmarks:jmh -DjmhArgs='SharedWalDurabilityBench -t 1 -rf json -rff /tmp/shared-wal-1thread.json'
+WAL_BENCH_DIR=/mnt/provisioned-wal ./gradlew :jmh-benchmarks:jmh -DjmhArgs='SharedWalDurabilityBench -t 16 -rf json -rff /tmp/shared-wal-16threads.json'
 ```
 
 The JMH params cover payloads `1024, 4096, 65536, 131072, 262144,
