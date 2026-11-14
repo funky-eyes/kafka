@@ -40,12 +40,22 @@ class AsynchronousFileChannelWalIoBackendTest {
     @Test
     void aioPositionalReadWriteAndDurableReopenMatchNioFormat() throws Exception {
         Path path = tempDir.resolve("aio-physical.wal");
-        byte[] payload = "java-aio-wal".getBytes(StandardCharsets.UTF_8);
+        byte[] first = "java-aio-".getBytes(StandardCharsets.UTF_8);
+        byte[] second = "wal".getBytes(StandardCharsets.UTF_8);
+        byte[] third = "-batch".getBytes(StandardCharsets.UTF_8);
+        byte[] payload = ByteBuffer.allocate(first.length + second.length + third.length)
+            .put(first).put(second).put(third).array();
         try (WalIoBackend backend = new AsynchronousFileChannelWalIoBackend();
              WalIoBackend.Handle handle = backend.create(path)) {
             assertFalse(backend.supportsDirectIo());
             assertTrue(backend.supportsPreallocation());
-            assertEquals(payload.length, handle.write(ByteBuffer.wrap(payload), 0L));
+            assertThrows(IllegalArgumentException.class, () -> handle.writeBatch(List.of(
+                new WalIoBackend.WriteRequest(ByteBuffer.wrap(first), 0L),
+                new WalIoBackend.WriteRequest(ByteBuffer.wrap(second), 1L))));
+            handle.writeBatch(List.of(
+                new WalIoBackend.WriteRequest(ByteBuffer.wrap(first), 0L),
+                new WalIoBackend.WriteRequest(ByteBuffer.wrap(second), first.length),
+                new WalIoBackend.WriteRequest(ByteBuffer.wrap(third), first.length + second.length)));
             handle.force();
         }
         try (WalIoBackend backend = new FileChannelWalIoBackend();
