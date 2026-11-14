@@ -237,25 +237,37 @@ public final class RingSharedWal implements SharedWal {
             return future;
         }
 
-        long groupBytes = 0L;
         try {
-            for (WalRecordCodec.EncodedRecord record : encoded) {
-                groupBytes = Math.addExact(groupBytes, record.totalLength());
-            }
+            enqueueEncodedGroup(encoded, records.size(), future, encodedGroupBytes(encoded));
         } catch (ArithmeticException e) {
             future.completeExceptionally(new IllegalArgumentException("WAL append group size overflow", e));
-            return future;
         }
+        return future;
+    }
 
+    private static long encodedGroupBytes(List<WalRecordCodec.EncodedRecord> encoded) {
+        long groupBytes = 0L;
+        for (WalRecordCodec.EncodedRecord record : encoded) {
+            groupBytes = Math.addExact(groupBytes, record.totalLength());
+        }
+        return groupBytes;
+    }
+
+    private void enqueueEncodedGroup(
+        List<WalRecordCodec.EncodedRecord> encoded,
+        int userRecordCount,
+        CompletableFuture<List<WalAppendResult>> future,
+        long groupBytes
+    ) {
         synchronized (lifecycleLock) {
             Throwable currentFailure = failure;
             if (currentFailure != null) {
                 future.completeExceptionally(new IllegalStateException("Ring WAL writer has failed", currentFailure));
-                return future;
+                return;
             }
             if (!accepting) {
                 future.completeExceptionally(new IllegalStateException("Ring WAL is closed"));
-                return future;
+                return;
             }
             if (outstandingGroups.get() >= maxOutstandingGroups ||
                 groupBytes > maxOutstandingBytes ||
@@ -265,22 +277,20 @@ public final class RingSharedWal implements SharedWal {
                     "Ring WAL append admission pressure: groups=" + outstandingGroups.get() +
                     ", bytes=" + outstandingBytes.get() + ", maxGroups=" + maxOutstandingGroups +
                     ", maxBytes=" + maxOutstandingBytes));
-                return future;
+                return;
             }
             outstandingGroups.incrementAndGet();
             outstandingBytes.addAndGet(groupBytes);
-            PendingAppend group = new PendingAppend(
+            pendingAppends.add(new PendingAppend(
                 List.copyOf(encoded),
-                records.size(),
+                userRecordCount,
                 future,
                 System.nanoTime(),
                 groupBytes,
                 new AtomicBoolean(false),
                 false
-            );
-            pendingAppends.add(group);
+            ));
         }
-        return future;
     }
 
     @Override
