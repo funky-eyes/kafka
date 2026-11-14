@@ -600,7 +600,7 @@ class ImmutableSourceAuditWorkflowTest(unittest.TestCase):
             workflow.replace("contents: read", "contents: write")))
         self.assertTrue(immutable_source_audit_violations(
             workflow.replace("          set -euo pipefail",
-                             "          set -euo pipefail\\n          git rebase --rebase-merges HEAD~2",
+                             "          set -euo pipefail\n          git rebase --rebase-merges HEAD~2",
                              1)))
         self.assertTrue(immutable_source_audit_violations(
             workflow.replace("ref: ${{ github.sha }}",
