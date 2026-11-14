@@ -40,14 +40,25 @@ class AsynchronousFileChannelWalIoBackendTest {
     @Test
     void aioPositionalReadWriteAndDurableReopenMatchNioFormat() throws Exception {
         Path path = tempDir.resolve("aio-physical.wal");
-        byte[] payload = "java-aio-wal".getBytes(StandardCharsets.UTF_8);
+        byte[] first = "java-aio-".getBytes(StandardCharsets.UTF_8);
+        byte[] second = "wal".getBytes(StandardCharsets.UTF_8);
+        byte[] third = "-batch".getBytes(StandardCharsets.UTF_8);
+        byte[] payload = ByteBuffer.allocate(first.length + second.length + third.length)
+            .put(first).put(second).put(third).array();
         try (WalIoBackend backend = new AsynchronousFileChannelWalIoBackend();
              WalIoBackend.Handle handle = backend.create(path)) {
             assertFalse(backend.supportsDirectIo());
             assertTrue(backend.supportsPreallocation());
-            assertEquals(payload.length, handle.write(ByteBuffer.wrap(payload), 0L));
+            assertThrows(IllegalArgumentException.class, () -> handle.writeBatch(List.of(
+                new WalIoBackend.WriteRequest(ByteBuffer.wrap(first), 0L),
+                new WalIoBackend.WriteRequest(ByteBuffer.wrap(second), 1L))));
+            handle.writeBatch(List.of(
+                new WalIoBackend.WriteRequest(ByteBuffer.wrap(first), 0L),
+                new WalIoBackend.WriteRequest(ByteBuffer.wrap(second), first.length),
+                new WalIoBackend.WriteRequest(ByteBuffer.wrap(third), first.length + second.length)));
             handle.force();
         }
+        assertBatchLimits();
         try (WalIoBackend backend = new FileChannelWalIoBackend();
              WalIoBackend.Handle reader = backend.openRead(path)) {
             ByteBuffer result = ByteBuffer.allocate(payload.length);
@@ -56,6 +67,26 @@ class AsynchronousFileChannelWalIoBackendTest {
             byte[] recovered = new byte[result.remaining()];
             result.get(recovered);
             assertArrayEquals(payload, recovered);
+        }
+    }
+
+    private void assertBatchLimits() throws Exception {
+        Path path = tempDir.resolve("aio-batch-limits.wal");
+        try (WalIoBackend backend = new AsynchronousFileChannelWalIoBackend();
+             WalIoBackend.Handle handle = backend.create(path)) {
+            assertThrows(IllegalArgumentException.class, () ->
+                new WalIoBackend.WriteRequest(ByteBuffer.wrap(new byte[2]), Long.MAX_VALUE));
+            List<WalIoBackend.WriteRequest> tooMany = new ArrayList<>();
+            for (int i = 0; i <= WalIoBackend.MAX_WRITE_BATCH_REQUESTS; i++) {
+                tooMany.add(new WalIoBackend.WriteRequest(ByteBuffer.wrap(new byte[1]), i));
+            }
+            assertThrows(IllegalArgumentException.class, () -> handle.writeBatch(tooMany));
+            assertThrows(IllegalArgumentException.class, () -> handle.writeBatch(List.of(
+                new WalIoBackend.WriteRequest(
+                    ByteBuffer.allocate((int) WalIoBackend.MAX_WRITE_BATCH_BYTES), 0L),
+                new WalIoBackend.WriteRequest(ByteBuffer.wrap(new byte[1]),
+                    WalIoBackend.MAX_WRITE_BATCH_BYTES))));
+            assertEquals(0L, handle.size());
         }
     }
 

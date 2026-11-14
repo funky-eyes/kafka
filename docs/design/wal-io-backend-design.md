@@ -73,6 +73,25 @@ AIO is opt-in until durability/crash-recovery parity and performance benchmarks
 have been verified on the target filesystem; never silently switch from a
 failed in-flight AIO group to NIO and claim a successful ACK.
 
+## Batched positional submission foundation (not yet WAL-writer pipelining)
+
+The physical Handle now exposes `writeBatch(List<WriteRequest>)` for
+**disjoint** positional writes, bounded to 64 requests and 16 MiB per call. The portable NIO implementation writes them in
+sequence; the Java AIO implementation submits independent writes first, then
+drains every submitted completion (including partial writes and failure paths)
+before returning. Overlapping ranges are rejected before any submission.
+The caller retains ownership of all ByteBuffers until the method returns.
+
+This primitive is deliberately **not wired into the Ring or rotating-file WAL
+writer yet**. Existing production `write(...)` paths and all force/checkpoint
+and `acks` conditions remain unchanged. Even the new batch method waits for
+completion and does not make `force(false)` asynchronous. The next change
+must stage bounded non-overlapping WAL record writes without reusing Ring
+physical slots and preserve a strict completed-writes -> data force ->
+checkpoint write -> checkpoint force -> durable future completion order.
+The new API must not be counted as an end-to-end throughput optimization
+without measured benchmarks.
+
 ## Current native asynchronous I/O status
 
 | Capability | Current | Interpretation |
