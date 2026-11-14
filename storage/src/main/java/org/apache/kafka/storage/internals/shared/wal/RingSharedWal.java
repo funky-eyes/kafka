@@ -102,7 +102,7 @@ public final class RingSharedWal implements SharedWal {
         );
     }
 
-    RingSharedWal(Path path, long totalCapacityBytes, WalIoBackend ioBackend) throws IOException {
+    public RingSharedWal(Path path, long totalCapacityBytes, WalIoBackend ioBackend) throws IOException {
         this(
             path,
             totalCapacityBytes,

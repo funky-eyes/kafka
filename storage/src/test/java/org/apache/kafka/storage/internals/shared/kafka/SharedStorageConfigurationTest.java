@@ -77,6 +77,28 @@ class SharedStorageConfigurationTest {
     }
 
     @Test
+    void supportsJavaNioOrAioForEitherWalLayout() {
+        File logDir = TestUtils.tempDirectory();
+        for (String engine : List.of("ring", "rotating-file")) {
+            for (String mode : List.of("nio", "aio")) {
+                SharedStorageConfiguration config = SharedStorageConfiguration.from(context(
+                    Map.of(SharedStorageConfiguration.WAL_ENGINE_CONFIG, engine,
+                        SharedStorageConfiguration.WAL_IO_BACKEND_CONFIG, mode), logDir));
+                assertEquals(mode, config.walIoMode().configValue());
+            }
+        }
+    }
+
+    @Test
+    void rejectsBioOrUnknownWalIoBackend() {
+        File logDir = TestUtils.tempDirectory();
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
+            SharedStorageConfiguration.from(context(Map.of(
+                SharedStorageConfiguration.WAL_IO_BACKEND_CONFIG, "bio"), logDir)));
+        assertTrue(error.getMessage().contains("expected nio or aio"));
+    }
+
+    @Test
     void rejectsUnknownWalEngine() {
         Map<String, Object> originals = Map.of(
             SharedStorageConfiguration.WAL_ENGINE_CONFIG,
