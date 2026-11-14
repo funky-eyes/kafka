@@ -14,7 +14,7 @@
 # limitations under the License.
 
 
-name: Normalize Shared Storage Author
+name: Audit Shared Storage Commit Provenance
 
 on:
   push:
@@ -23,118 +23,65 @@ on:
 
 permissions:
   actions: read
-  contents: write
+  contents: read
 
 jobs:
-  normalize-author:
-    if: github.actor != 'github-actions[bot]'
+  audit-source:
     concurrency:
-      group: shared-storage-author-normalize-${{ github.ref }}
+      group: shared-storage-source-audit-${{ github.ref }}
       cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Checkout complete development history
+      - name: Checkout immutable triggering commit
         uses: actions/checkout@v5
         with:
-          ref: shared-wal-s3-4.3.1
+          ref: ${{ github.sha }}
           fetch-depth: 0
-          persist-credentials: true
+          persist-credentials: false
 
-      - name: Normalize development commit identity
+      - name: Verify exact source and audit historical attribution
         shell: bash
         env:
           BASE_SHA: 26b251a451ce941d3d7a55e6487bcb7f16b5ad48
-          TARGET_NAME: Jianbin Chen
+          SOURCE_SHA: ${{ github.sha }}
           TARGET_EMAIL: jianbin@apache.org
-          TARGET_BRANCH: shared-wal-s3-4.3.1
         run: |
           set -euo pipefail
 
-          git fetch --no-tags origin "${TARGET_BRANCH}"
-          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
-            git fetch --no-tags origin "${BASE_SHA}"
-          fi
-          git checkout -B "${TARGET_BRANCH}" "origin/${TARGET_BRANCH}"
-          remote_head=$(git rev-parse "origin/${TARGET_BRANCH}")
+          # Never rewrite published merge history or change commit identities.
+          test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
+          git cat-file -e "${BASE_SHA}^{commit}"
+          git merge-base --is-ancestor "${BASE_SHA}" "${SOURCE_SHA}"
 
-          oldest_bad=""
-          while read -r commit; do
-            author_email=$(git show -s --format='%ae' "${commit}")
-            committer_email=$(git show -s --format='%ce' "${commit}")
-            if [ "${author_email}" != "${TARGET_EMAIL}" ] || \
-               [ "${committer_email}" != "${TARGET_EMAIL}" ]; then
-              oldest_bad="${commit}"
-              break
-            fi
-          done < <(git rev-list --reverse "${BASE_SHA}..HEAD")
-
-          if [ -z "${oldest_bad}" ]; then
-            echo "All development commits already use ${TARGET_EMAIL}."
-            exit 0
-          fi
-
-          rebase_base=$(git rev-parse "${oldest_bad}^")
-          git config user.name "${TARGET_NAME}"
-          git config user.email "${TARGET_EMAIL}"
-
-          cat > /tmp/normalize-shared-storage-author.sh <<'SCRIPT'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          current_author=$(git show -s --format='%ae' HEAD)
-          current_committer=$(git show -s --format='%ce' HEAD)
-          if [ "${current_author}" != "${TARGET_EMAIL}" ] || \
-             [ "${current_committer}" != "${TARGET_EMAIL}" ]; then
-            GIT_COMMITTER_NAME="${TARGET_NAME}" \
-            GIT_COMMITTER_EMAIL="${TARGET_EMAIL}" \
-              git commit --amend --no-edit --allow-empty \
-                --author="${TARGET_NAME} <${TARGET_EMAIL}>"
-          fi
-          SCRIPT
-          chmod +x /tmp/normalize-shared-storage-author.sh
-          export TARGET_NAME TARGET_EMAIL
-
-          git rebase --rebase-merges \
-            --exec /tmp/normalize-shared-storage-author.sh \
-            "${rebase_base}"
-
-          bad_emails=$(git log "${BASE_SHA}..HEAD" --format='%ae%n%ce' | \
-            grep -vFx "${TARGET_EMAIL}" || true)
-          if [ -n "${bad_emails}" ]; then
-            echo "Unexpected development commit identities remain:"
-            printf '%s\n' "${bad_emails}"
-            exit 1
-          fi
-
-          git log "${BASE_SHA}..HEAD" --format='%h %an <%ae> / %cn <%ce>'
-
-          # The initiating external/API push already starts every push-triggered GA gate.
-          # This rewrite deliberately uses GITHUB_TOKEN: GitHub suppresses push workflows created by that token,
-          # preventing a second expensive CI fan-out. The GA manifest binds evidence by production + gate contract
-          # fingerprints, so the normalized SHA can safely reuse evidence from the initiating push.
-          git push \
-            --force-with-lease="refs/heads/${TARGET_BRANCH}:${remote_head}" \
-            origin "HEAD:${TARGET_BRANCH}"
+          # Legacy/non-target attribution is reported but preserved. Rewriting
+          # hundreds of accepted commits would invalidate prior CI and PR ancestry.
+          differing_identities="$(git log "${BASE_SHA}..${SOURCE_SHA}" --format='%ae%n%ce' |
+            grep -cvFx "${TARGET_EMAIL}" || true)"
+          echo "::notice title=Immutable source history::source=${SOURCE_SHA} non-target author/committer fields=${differing_identities}; preserving original attribution and all accepted commits"
 
   seal-ga-evidence:
-    name: Seal GA evidence for normalized branch
-    needs: normalize-author
+    name: Seal GA evidence for immutable source commit
+    needs: audit-source
     concurrency:
       group: shared-storage-ga-seal-shared-wal-s3-4.3.1
       cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Checkout normalized branch
+      - name: Checkout exact triggering commit
         uses: actions/checkout@v5
         with:
-          ref: shared-wal-s3-4.3.1
+          ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Resolve normalized release SHA
+      - name: Verify exact release SHA
         id: release-sha
         shell: bash
-        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          echo "sha=${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"
 
       - name: Test GA manifest evidence rules
         run: python3 tools/test_shared_storage_ga_manifest.py
@@ -201,6 +148,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: shared-storage-normalized-ga-manifest
+          name: shared-storage-immutable-ga-manifest
           path: shared-storage-ga-manifest.md
           if-no-files-found: warn
