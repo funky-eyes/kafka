@@ -70,6 +70,27 @@ class AsynchronousFileChannelWalIoBackendTest {
     }
 
     @Test
+    void aioBatchRejectsResourceExhaustionAndInvalidPositionsBeforeWriting() throws Exception {
+        Path path = tempDir.resolve("aio-batch-limits.wal");
+        try (WalIoBackend backend = new AsynchronousFileChannelWalIoBackend();
+             WalIoBackend.Handle handle = backend.create(path)) {
+            assertThrows(IllegalArgumentException.class, () ->
+                new WalIoBackend.WriteRequest(ByteBuffer.wrap(new byte[2]), Long.MAX_VALUE));
+            List<WalIoBackend.WriteRequest> tooMany = new ArrayList<>();
+            for (int i = 0; i <= WalIoBackend.MAX_WRITE_BATCH_REQUESTS; i++) {
+                tooMany.add(new WalIoBackend.WriteRequest(ByteBuffer.wrap(new byte[1]), i));
+            }
+            assertThrows(IllegalArgumentException.class, () -> handle.writeBatch(tooMany));
+            assertThrows(IllegalArgumentException.class, () -> handle.writeBatch(List.of(
+                new WalIoBackend.WriteRequest(
+                    ByteBuffer.allocate((int) WalIoBackend.MAX_WRITE_BATCH_BYTES), 0L),
+                new WalIoBackend.WriteRequest(ByteBuffer.wrap(new byte[1]),
+                    WalIoBackend.MAX_WRITE_BATCH_BYTES))));
+            assertEquals(0L, handle.size());
+        }
+    }
+
+    @Test
     void aioPreallocationAndTruncatePreservePhysicalCapacity() throws Exception {
         Path path = tempDir.resolve("aio-preallocation.wal");
         long capacity = 64L * 1024L + 19L;
