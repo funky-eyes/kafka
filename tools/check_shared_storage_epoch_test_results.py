@@ -21,6 +21,21 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 REQUIRED_TESTS = {
+    "org.apache.kafka.storage.internals.shared.wal.AsynchronousFileChannelWalIoBackendTest": (
+        "aioPositionalReadWriteAndDurableReopenMatchNioFormat",
+        "aioPreallocationAndTruncatePreservePhysicalCapacity",
+        "aioRingAcknowledgedGroupsColdReplayOnNioBackend",
+        "aioRotatingWalAcknowledgedGroupsColdReplayOnNioBackend",
+        "aioRejectsOperationsAfterClosingHandle",
+    ),
+    "org.apache.kafka.storage.internals.shared.kafka.SharedStorageConfigurationTest": (
+        "supportsJavaNioOrAioForEitherWalLayout",
+        "rejectsBioOrUnknownWalIoBackend",
+    ),
+    "org.apache.kafka.storage.internals.shared.kafka.SharedStorageWalFactoryTest": (
+        "aioRingWalReopensWithoutFormatMigrationUsingNio",
+        "aioRotatingWalReopensWithoutFormatMigrationUsingNio",
+    ),
     "org.apache.kafka.storage.internals.shared.wal.FileSharedWalIoBackendTest": (
         "failedLaterDataForceKeepsPreviouslyAcknowledgedFileWalPrefixRecoverable",
     ),

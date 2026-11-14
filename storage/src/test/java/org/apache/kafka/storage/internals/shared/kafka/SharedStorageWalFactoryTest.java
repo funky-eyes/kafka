@@ -60,6 +60,42 @@ class SharedStorageWalFactoryTest {
     }
 
     @Test
+    void aioRingWalReopensWithoutFormatMigrationUsingNio() throws Exception {
+        Path logDir = Files.createDirectory(tempDir.resolve("aio-ring-kafka"));
+        Path walDir = tempDir.resolve("aio-ring-shared");
+        SharedStorageConfiguration aio = configuration(logDir, walDir, Map.of(
+            SharedStorageConfiguration.WAL_IO_BACKEND_CONFIG, "aio"));
+        try (SharedWal wal = SharedStorageWalFactory.create(aio)) {
+            assertInstanceOf(RingSharedWal.class, wal);
+        }
+        SharedStorageConfiguration nio = configuration(logDir, walDir, Map.of(
+            SharedStorageConfiguration.WAL_IO_BACKEND_CONFIG, "nio"));
+        try (SharedWal reopened = SharedStorageWalFactory.create(nio)) {
+            assertInstanceOf(RingSharedWal.class, reopened);
+        }
+    }
+
+    @Test
+    void aioRotatingWalReopensWithoutFormatMigrationUsingNio() throws Exception {
+        Path logDir = Files.createDirectory(tempDir.resolve("aio-file-kafka"));
+        Path walDir = tempDir.resolve("aio-file-shared");
+        SharedStorageConfiguration aio = configuration(logDir, walDir, Map.of(
+            SharedStorageConfiguration.WAL_IO_BACKEND_CONFIG, "aio",
+            SharedStorageConfiguration.WAL_ENGINE_CONFIG, "rotating-file",
+            SharedStorageConfiguration.WAL_SEGMENT_BYTES_CONFIG, 16L * 1024L));
+        try (SharedWal wal = SharedStorageWalFactory.create(aio)) {
+            assertInstanceOf(RotatingFileSharedWal.class, wal);
+        }
+        SharedStorageConfiguration nio = configuration(logDir, walDir, Map.of(
+            SharedStorageConfiguration.WAL_IO_BACKEND_CONFIG, "nio",
+            SharedStorageConfiguration.WAL_ENGINE_CONFIG, "rotating-file",
+            SharedStorageConfiguration.WAL_SEGMENT_BYTES_CONFIG, 16L * 1024L));
+        try (SharedWal reopened = SharedStorageWalFactory.create(nio)) {
+            assertInstanceOf(RotatingFileSharedWal.class, reopened);
+        }
+    }
+
+    @Test
     void createsRotatingFileRollbackBackendWhenExplicitlyConfigured() throws Exception {
         Path logDir = Files.createDirectory(tempDir.resolve("kafka-log-rotating"));
         Path walDir = tempDir.resolve("rotating-wal");
