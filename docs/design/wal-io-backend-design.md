@@ -92,6 +92,28 @@ checkpoint write -> checkpoint force -> durable future completion order.
 The new API must not be counted as an end-to-end throughput optimization
 without measured benchmarks.
 
+## Ring WAL staged physical AIO batches (stacked follow-up)
+
+The Ring WAL writer stages DATA, GROUP_COMMIT, header/payload and padding
+fragments as disjoint physical positional writes. A fixed 64-request / 16 MiB
+submission limit bounds each physical batch; any larger logical group is split
+into multiple completed physical batches. Ring allocation and retained-capacity
+admission remain above I/O. A completed physical batch **does not** complete
+a WAL append future. The writer retains the existing strict order:
+
+1. Finish every staged physical write, including all partial writes.
+2. Complete the synchronous data `force(false)`.
+3. Write the next alternating Ring superblock checkpoint.
+4. Complete the synchronous checkpoint `force(false)`, plus required head mirror.
+5. Only then complete the WAL append futures; Kafka still owns ISR/HW/acks.
+
+No physical write may cross the Ring data region or overlap another staged
+physical write. Even though Java AIO can have multiple writes in flight,
+this implementation still waits for the batch to settle, and the WAL writer's
+durability barriers remain blocking. Keep default NIO and opt-in AIO until
+full exact-HEAD failure testing, crash recovery, wrap and performance validation
+pass. The rotating-file WAL is not yet migrated to this staged batch path.
+
 ## Current native asynchronous I/O status
 
 | Capability | Current | Interpretation |
