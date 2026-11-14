@@ -672,6 +672,13 @@ REQUIRED_TESTS = {
         "snapshotRegistryRollbackRestoresPreviousDiagnosticStateAfterReplacement",
         "emptySnapshotClearsStaleDiagnosticsButInvalidBoundaryCannotMutateState",
     ),
+    "org.apache.kafka.controller.WalReplicaDurabilityV1StandbyCommitReplayTest": (
+        "trustedStandbyBatchKeepsRealOffsetsAndDoesNotOrdinarilyReplayCertificates",
+        "ordinaryCommittedMetadataDoesNotConsultExperimentalFeatureOrMutateTimeline",
+        "lateStaleCasOrWrongWireFailsBeforeAnyOrdinaryReplay",
+        "failedOrdinaryMetadataReplayCannotInstallPrevalidatedCertificateEvidence",
+        "snapshotCheckpointInLogAndDisabledFeatureAreRejectedFailClosed",
+    ),
     "org.apache.kafka.controller.WalReplicaDurabilityCertificateReplayStateTest": (
         "committedLogReplayFreezesGeneratedRecordAndItsNestedMutableEntries",
         "untrustedOrUncommittedSourceCannotOverwriteExistingReplayState",
