@@ -35,6 +35,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -53,6 +54,8 @@ class RingSharedWalTest {
         try (RingSharedWal wal = new RingSharedWal(path, totalCapacity)) {
             assertEquals(WalDurabilityStats.EMPTY, wal.durabilityStats());
             assertEquals(WalWriteLatencyStats.EMPTY, wal.writeLatencyStats());
+            assertEquals(WalWriteLatencyStats.EMPTY,
+                new WalWriteLatencyStats(0L, 0L, 0L, 0L, 0L, 0L));
 
             wal.appendBatch(List.of(dataRecord(0L, 32), dataRecord(1L, 32))).join();
             WalDurabilityStats first = wal.durabilityStats();
@@ -60,6 +63,8 @@ class RingSharedWalTest {
             WalWriteLatencyStats firstLatency = wal.writeLatencyStats();
             assertEquals(1L, firstLatency.queuedAppendGroups());
             assertEquals(1L, firstLatency.physicalWriteCalls());
+            assertEquals(5L, firstLatency.stagedPhysicalRequests());
+            assertEquals(1L, firstLatency.submittedPhysicalRequests());
             assertTrue(firstLatency.totalQueueNanos() >= firstLatency.maxQueueNanos());
             assertTrue(firstLatency.totalPhysicalWriteNanos() >= firstLatency.maxPhysicalWriteNanos());
             assertEquals(1L, first.durableAppendGroupCount());
@@ -89,8 +94,11 @@ class RingSharedWalTest {
             WalWriteLatencyStats secondLatency = wal.writeLatencyStats();
             assertEquals(2L, secondLatency.queuedAppendGroups());
             assertEquals(2L, secondLatency.physicalWriteCalls());
+            assertEquals(8L, secondLatency.stagedPhysicalRequests());
+            assertEquals(2L, secondLatency.submittedPhysicalRequests());
             assertTrue(secondLatency.totalQueueNanos() >= firstLatency.totalQueueNanos());
             assertTrue(secondLatency.totalPhysicalWriteNanos() >= firstLatency.totalPhysicalWriteNanos());
+            assertCoalescingRetainsBufferBoundaries();
             assertEquals(2L, second.durableAppendGroupCount());
             assertEquals(wal.usedBytes(), second.durableBytes());
             assertTrue(second.durabilityBarrierNanos() >= first.durabilityBarrierNanos());
@@ -182,6 +190,37 @@ class RingSharedWalTest {
             assertEquals(0L, wal.admissionStats().outstandingBytes());
             assertEquals(1L, wal.admissionStats().rejectedGroups());
         }
+    }
+
+    private void assertCoalescingRetainsBufferBoundaries() {
+        ByteBuffer smallA = ByteBuffer.wrap(new byte[] {1, 2});
+        ByteBuffer smallB = ByteBuffer.wrap(new byte[] {3});
+        ByteBuffer afterGap = ByteBuffer.wrap(new byte[] {4});
+        List<WalIoBackend.WriteRequest> original = List.of(
+            new WalIoBackend.WriteRequest(smallA, RingWalLayout.DATA_START),
+            new WalIoBackend.WriteRequest(smallB, RingWalLayout.DATA_START + 2L),
+            new WalIoBackend.WriteRequest(afterGap, RingWalLayout.DATA_START + 20L)
+        );
+        List<WalIoBackend.WriteRequest> compacted = RingWalWriteCoalescer.coalesce(original);
+        assertEquals(2, compacted.size());
+        assertEquals(RingWalLayout.DATA_START, compacted.get(0).position());
+        ByteBuffer compactedBytes = compacted.get(0).source().duplicate();
+        byte[] actual = new byte[compactedBytes.remaining()];
+        compactedBytes.get(actual);
+        assertArrayEquals(new byte[] {1, 2, 3}, actual);
+        assertEquals(0, smallA.position());
+        assertEquals(0, smallB.position());
+        assertEquals(RingWalLayout.DATA_START + 20L, compacted.get(1).position());
+
+        ByteBuffer big = ByteBuffer.allocate(RingWalWriteCoalescer.MAX_COALESCED_BYTES + 1);
+        WalIoBackend.WriteRequest bigWrite = new WalIoBackend.WriteRequest(big, RingWalLayout.DATA_START);
+        assertSame(big, RingWalWriteCoalescer.coalesce(List.of(bigWrite)).get(0).source());
+
+        List<WalIoBackend.WriteRequest> wrapped = RingWalWriteCoalescer.coalesce(List.of(
+            new WalIoBackend.WriteRequest(ByteBuffer.wrap(new byte[] {5}), RingWalLayout.DATA_START + 99L),
+            new WalIoBackend.WriteRequest(ByteBuffer.wrap(new byte[] {6}), RingWalLayout.DATA_START)
+        ));
+        assertEquals(2, wrapped.size());
     }
 
     @Test
