@@ -58,6 +58,7 @@ class AsynchronousFileChannelWalIoBackendTest {
                 new WalIoBackend.WriteRequest(ByteBuffer.wrap(third), first.length + second.length)));
             handle.force();
         }
+        assertBatchLimits();
         try (WalIoBackend backend = new FileChannelWalIoBackend();
              WalIoBackend.Handle reader = backend.openRead(path)) {
             ByteBuffer result = ByteBuffer.allocate(payload.length);
@@ -69,8 +70,7 @@ class AsynchronousFileChannelWalIoBackendTest {
         }
     }
 
-    @Test
-    void aioBatchRejectsResourceExhaustionAndInvalidPositionsBeforeWriting() throws Exception {
+    private void assertBatchLimits() throws Exception {
         Path path = tempDir.resolve("aio-batch-limits.wal");
         try (WalIoBackend backend = new AsynchronousFileChannelWalIoBackend();
              WalIoBackend.Handle handle = backend.create(path)) {
