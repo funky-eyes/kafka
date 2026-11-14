@@ -80,6 +80,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 @Timeout(value = 8, unit = TimeUnit.MINUTES)
 public class SharedStorageIndependentProcessSigkillTest {
     private static final String REPLICATION_FACTOR_ENV = "SHARED_STORAGE_REPLICATION_FACTOR";
+    private static final String WAL_IO_BACKEND_ENV = "SHARED_STORAGE_WAL_IO_BACKEND";
     private static final String TOPIC = "shared-wal-sigkill";
     private static final String WRITE_PROBE_TOPIC = "shared-wal-write-probe";
     private static final String METADATA_TOPIC = "__shared_storage_metadata";
@@ -109,7 +110,14 @@ public class SharedStorageIndependentProcessSigkillTest {
         String clusterId = Uuid.randomUuid().toString();
         String bootstrapServers = bootstrapServers();
         Map<Integer, BrokerProcess> brokers = new LinkedHashMap<>();
+        String s3Control = System.getenv(SharedStorageS3TestControl.CONTROL_ENV);
+        boolean s3Stopped = false;
+        if (scenario.replicationFactor() >= 2) {
+            assertTrue(s3Control != null && !s3Control.isBlank(),
+                "RF2/RF3 permanent WAL loss proof requires S3 outage fixture control");
+        }
 
+        System.out.println("MATRIX_WAL_IO backend=" + configuredWalIoBackend());
         System.out.println("MATRIX_SCENARIO rf=" + scenario.replicationFactor() +
             " acks=all minIsr=" + scenario.minIsr());
         try {
@@ -155,6 +163,14 @@ public class SharedStorageIndependentProcessSigkillTest {
                     () -> "Old leader " + oldLeader + " never remotely committed warmup range " + warmup
                 );
 
+                if (scenario.replicationFactor() >= 2) {
+                    // Force the entire newly acknowledged range to remain WAL-only.
+                    // S3 must not be reachable when the leader is killed.
+                    SharedStorageS3TestControl.stop(s3Control);
+                    s3Stopped = true;
+                    System.out.println("MATRIX_S3_OFFLINE rf=" + scenario.replicationFactor());
+                }
+
                 OffsetRange crashRange = produceRange(bootstrapServers, WARMUP_RECORDS, CRASH_RECORDS);
                 assertEquals(new OffsetRange(WARMUP_RECORDS, PRE_RECOVERY_RECORDS), crashRange);
                 assertFalse(
@@ -193,6 +209,35 @@ public class SharedStorageIndependentProcessSigkillTest {
                         scenario
                     );
                 } else {
+                    int replacementLeader = waitForNewLeader(admin, TOPIC, oldLeader);
+                    assertNotEquals(oldLeader, replacementLeader);
+                    assertTrue(brokers.get(replacementLeader).process().isAlive());
+                    assertFalse(allCoverage(bootstrapServers, partition).covers(crashRange),
+                        "Acknowledged WAL-only crash range must not have reached S3 during outage");
+                    // Prove actual Kafka Fetch from the surviving replica's WAL
+                    // while the S3 endpoint is still stopped, before upload/reclaim.
+                    assertAcknowledgedWalOnlyRangeReadable(bootstrapServers, crashRange);
+                    assertFalse(allCoverage(bootstrapServers, partition).covers(crashRange),
+                        "Remote coverage must stay absent throughout WAL-only failover read");
+                    System.out.println("MATRIX_WAL_ONLY_FAILOVER_READABLE rf=" +
+                        scenario.replicationFactor() + " oldLeader=" + oldLeader +
+                        " newLeader=" + replacementLeader + " range=" + crashRange);
+                    if (scenario.replicationFactor() == 3) {
+                        assertRf3S3OfflineFailoverWritable(
+                            admin, bootstrapServers, partition, replacementLeader);
+                    }
+                    if (scenario.replicationFactor() == 2) {
+                        // A separate shared-WAL routed topic avoids poisoning
+                        // the main acknowledged offset sequence with the rejected
+                        // append, while proving RF2 minISR=2 before S3 recovers.
+                        waitForTopicState(admin, WRITE_PROBE_TOPIC, (short) 2, (short) 1,
+                            replacementLeader);
+                        assertAcksAllRejectedByMinIsr(bootstrapServers);
+                        System.out.println("MATRIX_SHARED_WAL_MIN_ISR_REJECTED_S3_OFFLINE rf=2 leader=" +
+                            replacementLeader + " minIsr=2");
+                    }
+                    SharedStorageS3TestControl.start(s3Control);
+                    s3Stopped = false;
                     runReplicatedFailover(
                         repositoryRoot,
                         processRuntime,
@@ -207,9 +252,31 @@ public class SharedStorageIndependentProcessSigkillTest {
                 }
             }
         } finally {
+            if (s3Stopped) {
+                SharedStorageS3TestControl.startIgnoringFailure(s3Control);
+            }
             stopProcesses(brokers);
             copyDiagnostics(repositoryRoot);
         }
+    }
+
+    private static void assertRf3S3OfflineFailoverWritable(
+        Admin admin,
+        String bootstrapServers,
+        SharedPartitionId partition,
+        int replacementLeader
+    ) throws Exception {
+        // Native ISR=2 must preserve acks=all writes after an old-leader
+        // permanent WAL loss, even before the S3 endpoint is restarted.
+        waitForTopicState(admin, TOPIC, (short) 3, (short) 2, replacementLeader);
+        OffsetRange offlinePostCrash = produceRange(
+            bootstrapServers, PRE_RECOVERY_RECORDS, POST_CRASH_RECORDS);
+        assertEquals(new OffsetRange(PRE_RECOVERY_RECORDS, TOTAL_RECORDS), offlinePostCrash);
+        assertAcknowledgedWalOnlyRangeReadable(bootstrapServers, offlinePostCrash);
+        assertFalse(allCoverage(bootstrapServers, partition).covers(offlinePostCrash),
+            "RF3 post-election acks=all writes must remain WAL-only until S3 returns");
+        System.out.println("MATRIX_RF3_S3_OFFLINE_FAILOVER_WRITABLE leader=" +
+            replacementLeader + " range=" + offlinePostCrash);
     }
 
     private void runReplicatedFailover(
@@ -233,28 +300,28 @@ public class SharedStorageIndependentProcessSigkillTest {
             () -> "Replacement leader " + newLeader +
                 " never uploaded the pre-SIGKILL acknowledged range " + crashRange
         );
+        // RF3 has already acknowledged its post-election tail while MinIO
+        // was offline; RF2 cannot write again until its original ISR recovers.
+        int expectedBeforeRestart = scenario.replicationFactor() == 3
+            ? TOTAL_RECORDS : PRE_RECOVERY_RECORDS;
         assertExpectedValues(
-            consumeAll(bootstrapServers, PRE_RECOVERY_RECORDS),
-            PRE_RECOVERY_RECORDS,
+            consumeAll(bootstrapServers, expectedBeforeRestart),
+            expectedBeforeRestart,
             "Acknowledged data must be readable from the replacement leader"
         );
         System.out.println("MATRIX_FAILOVER_READABLE rf=" + scenario.replicationFactor() +
-            " oldLeader=" + oldLeader + " newLeader=" + newLeader + " records=" + PRE_RECOVERY_RECORDS);
+            " oldLeader=" + oldLeader + " newLeader=" + newLeader + " records=" + expectedBeforeRestart);
 
         if (scenario.replicationFactor() == 3) {
-            OffsetRange postCrash = produceRange(
-                bootstrapServers,
-                PRE_RECOVERY_RECORDS,
-                POST_CRASH_RECORDS
-            );
-            assertEquals(new OffsetRange(PRE_RECOVERY_RECORDS, TOTAL_RECORDS), postCrash);
+            // The post-crash range was already acknowledged, consumed and
+            // verified against WAL while MinIO remained offline.
             System.out.println("MATRIX_FAILOVER_WRITABLE rf=3 newLeader=" + newLeader +
-                " postRange=" + postCrash);
+                " postRange=" + new OffsetRange(PRE_RECOVERY_RECORDS, TOTAL_RECORDS));
             restartBroker(repositoryRoot, processRuntime, brokers, oldLeader);
             waitForTopicState(admin, TOPIC, (short) 3, (short) 3, newLeader);
         } else {
-            waitForTopicState(admin, WRITE_PROBE_TOPIC, (short) 2, (short) 1, newLeader);
-            assertAcksAllRejectedByMinIsr(bootstrapServers);
+            // Rejection already proved against a shared WAL-routed topic while
+            // S3 was offline, before the old leader was allowed to restart.
             System.out.println("MATRIX_WRITE_REJECTED_MIN_ISR rf=2 leader=" + newLeader + " minIsr=2");
             restartBroker(repositoryRoot, processRuntime, brokers, oldLeader);
             waitForTopicState(admin, TOPIC, (short) 2, (short) 2, newLeader);
@@ -348,6 +415,11 @@ public class SharedStorageIndependentProcessSigkillTest {
         waitForTopicState(admin, WRITE_PROBE_TOPIC, (short) 2, (short) 2, oldLeader);
     }
 
+    private static String configuredWalIoBackend() {
+        String configured = System.getenv(WAL_IO_BACKEND_ENV);
+        return configured == null || configured.isBlank() ? "nio" : configured.trim();
+    }
+
     private Path writeBrokerConfig(
         int nodeId,
         String clusterId,
@@ -384,9 +456,11 @@ public class SharedStorageIndependentProcessSigkillTest {
             "auto.create.topics.enable=false",
             "unclean.leader.election.enable=false",
             "storage.extension.class=org.apache.kafka.storage.internals.shared.s3.S3SharedStorageExtension",
-            "shared.storage.topics=" + TOPIC,
+            // Both data and RF=2 ACK rejection probe must use broker-wide WAL.
+            "shared.storage.topics=" + TOPIC + "," + WRITE_PROBE_TOPIC,
             "shared.storage.wal.dir=" + walDir.toAbsolutePath(),
             "shared.storage.wal.engine=ring",
+            "shared.storage.wal.io.backend=" + configuredWalIoBackend(),
             "shared.storage.wal.capacity.bytes=" + (64L * 1024 * 1024),
             "shared.storage.object.target.bytes=" + (1024L * 1024),
             "shared.storage.upload.interval.ms=" + UPLOAD_INTERVAL_MS,
@@ -681,7 +755,8 @@ public class SharedStorageIndependentProcessSigkillTest {
         } catch (Exception e) {
             failure = e;
         }
-        assertTrue(failure != null, "RF=2/minISR=2 must reject acks=all while only one replica is in ISR");
+        assertTrue(failure != null,
+            "RF=2/minISR=2 must reject acks=all on the shared-WAL probe while one replica is in ISR");
         assertTrue(
             hasCause(failure, NotEnoughReplicasException.class) ||
                 hasCause(failure, NotEnoughReplicasAfterAppendException.class),
@@ -717,6 +792,39 @@ public class SharedStorageIndependentProcessSigkillTest {
         Properties properties = new Properties();
         properties.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
         return Admin.create(properties);
+    }
+
+    private static void assertAcknowledgedWalOnlyRangeReadable(
+        String bootstrapServers,
+        OffsetRange range
+    ) {
+        Properties properties = new Properties();
+        properties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+        properties.put(ConsumerConfig.GROUP_ID_CONFIG, "wal-only-" + UUID.randomUUID());
+        properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
+        properties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        properties.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        TopicPartition partition = new TopicPartition(TOPIC, 0);
+        long expectedOffset = range.startOffset();
+        try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(properties)) {
+            consumer.assign(List.of(partition));
+            consumer.seek(partition, range.startOffset());
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(90);
+            while (expectedOffset < range.endOffset() && System.nanoTime() < deadline) {
+                for (ConsumerRecord<String, String> record : consumer.poll(Duration.ofMillis(500))) {
+                    assertEquals(expectedOffset, record.offset(),
+                        "Surviving WAL-only Kafka records must remain contiguous");
+                    assertEquals(value(Math.toIntExact(expectedOffset)), record.value(),
+                        "Surviving WAL-only Kafka data must match every acks=all response");
+                    expectedOffset++;
+                    if (expectedOffset == range.endOffset()) {
+                        break;
+                    }
+                }
+            }
+        }
+        assertEquals(range.endOffset(), expectedOffset,
+            "All acknowledged records must be readable from surviving WAL while S3 is down");
     }
 
     private static List<String> consumeAll(String bootstrapServers, int expectedCount) {

@@ -69,7 +69,15 @@ binary_valid() {
   [ -x "${path}" ] || return 1
   actual="$(sha256sum "${path}" | awk '{print $1}')"
   [ "${actual}" = "${expected_sha256}" ] || return 1
-  "${path}" --version 2>&1 | grep -Fq "${expected_release}"
+  # Capture the complete version output before matching. Under pipefail,
+  # grep -q can close its input early and cause a false failure (SIGPIPE)
+  # from a verified release binary that writes additional lines.
+  local version_output
+  version_output="$("${path}" --version 2>&1)" || return 1
+  case "${version_output}" in
+    *"${expected_release}"*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 download_verified() {
@@ -108,7 +116,7 @@ download_verified() {
   chmod 0755 "${temporary}"
   mv "${temporary}" "${destination}"
 
-  if ! "${destination}" --version 2>&1 | grep -Fq "${expected_release}"; then
+  if ! binary_valid "${destination}" "${expected_release}" "${expected_sha256}"; then
     rm -f "${destination}"
     echo "Downloaded binary does not report expected release ${expected_release}: ${url}" >&2
     exit 1
