@@ -76,6 +76,8 @@ public final class RingSharedWal implements SharedWal {
     private final AtomicLong physicalWriteCalls = new AtomicLong();
     private final AtomicLong totalPhysicalWriteNanos = new AtomicLong();
     private final AtomicLong maxPhysicalWriteNanos = new AtomicLong();
+    private final AtomicLong stagedPhysicalRequests = new AtomicLong();
+    private final AtomicLong submittedPhysicalRequests = new AtomicLong();
     private final Object lifecycleLock = new Object();
     private final Object ioLock = new Object();
     private final long writerShutdownTimeoutMs;
@@ -396,7 +398,9 @@ public final class RingSharedWal implements SharedWal {
             maxQueueNanos.get(),
             physicalWriteCalls.get(),
             totalPhysicalWriteNanos.get(),
-            maxPhysicalWriteNanos.get()
+            maxPhysicalWriteNanos.get(),
+            stagedPhysicalRequests.get(),
+            submittedPhysicalRequests.get()
         );
     }
 
@@ -820,9 +824,12 @@ public final class RingSharedWal implements SharedWal {
 
         void flush(long plannedTail) throws IOException {
             if (!requests.isEmpty()) {
+                List<WalIoBackend.WriteRequest> compacted = RingWalWriteCoalescer.coalesce(requests);
+                stagedPhysicalRequests.addAndGet(requests.size());
+                submittedPhysicalRequests.addAndGet(compacted.size());
                 long startedNanos = System.nanoTime();
                 try {
-                    file.writeBatch(requests, plannedTail);
+                    file.writeBatch(compacted, plannedTail);
                 } finally {
                     long elapsed = Math.max(0L, System.nanoTime() - startedNanos);
                     physicalWriteCalls.incrementAndGet();
