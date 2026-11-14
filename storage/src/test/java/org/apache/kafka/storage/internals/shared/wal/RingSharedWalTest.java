@@ -124,6 +124,67 @@ class RingSharedWalTest {
     }
 
     @Test
+    void limitsOutstandingRingAppendCreditsDespiteCallerFutureCancellation() throws Exception {
+        Path path = tempDir.resolve("ring-admission-backpressure.wal");
+        long capacity = RingWalLayout.DATA_START + 4096L;
+        BlockingDataWriteBackend backend = new BlockingDataWriteBackend();
+
+        try (RingSharedWal wal = new RingSharedWal(path, capacity, backend,
+            TimeUnit.SECONDS.toMillis(30L), 0L, 1, 1024L)) {
+            backend.blockNextDataWrite();
+            CompletableFuture<List<WalAppendResult>> first =
+                wal.appendBatch(List.of(dataRecord(0L, 32)));
+            assertTrue(backend.awaitDataWrite(10L, TimeUnit.SECONDS));
+            assertEquals(1, wal.admissionStats().outstandingGroups());
+            assertTrue(wal.admissionStats().outstandingBytes() > 0L);
+
+            CompletionException rejection = assertThrows(CompletionException.class, () ->
+                wal.appendBatch(List.of(dataRecord(1L, 32))).join());
+            assertInstanceOf(WalCapacityExceededException.class, rejection.getCause());
+            assertEquals(1L, wal.admissionStats().rejectedGroups());
+
+            // A public future is cancellable, but the physical WAL write still
+            // owns the input and must retain admission credits until settled.
+            assertTrue(first.cancel(false));
+            assertEquals(1, wal.admissionStats().outstandingGroups());
+            assertInstanceOf(WalCapacityExceededException.class,
+                assertThrows(CompletionException.class, () ->
+                    wal.appendBatch(List.of(dataRecord(2L, 32))).join()).getCause());
+
+            backend.releaseDataWrite();
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10L);
+            while (wal.admissionStats().outstandingGroups() != 0 && System.nanoTime() < deadline) {
+                Thread.sleep(10L);
+            }
+            assertEquals(0, wal.admissionStats().outstandingGroups());
+            assertEquals(0L, wal.admissionStats().outstandingBytes());
+            assertEquals(1, wal.appendBatch(List.of(dataRecord(3L, 32))).join().size());
+        } finally {
+            backend.releaseDataWrite();
+        }
+
+        try (RingSharedWal recovered = new RingSharedWal(path, capacity)) {
+            List<WalRecord> records = new ArrayList<>();
+            recovered.replay((record, ignored) -> records.add(record));
+            assertEquals(2, records.size());
+            assertEquals(0L, records.get(0).firstOffset());
+            assertEquals(3L, records.get(1).firstOffset());
+        }
+
+        Path oversize = tempDir.resolve("ring-admission-byte-budget.wal");
+        try (RingSharedWal wal = new RingSharedWal(oversize, capacity,
+            new FileChannelWalIoBackend(), TimeUnit.SECONDS.toMillis(30L),
+            0L, 10, 96L)) {
+            assertInstanceOf(WalCapacityExceededException.class,
+                assertThrows(CompletionException.class, () ->
+                    wal.appendBatch(List.of(dataRecord(0L, 32))).join()).getCause());
+            assertEquals(0, wal.admissionStats().outstandingGroups());
+            assertEquals(0L, wal.admissionStats().outstandingBytes());
+            assertEquals(1L, wal.admissionStats().rejectedGroups());
+        }
+    }
+
+    @Test
     void coalescesNearConcurrentSingletonGroupsBehindOneDurabilityBarrier() throws Exception {
         Path path = tempDir.resolve("durability-coalescing.wal");
         long totalCapacity = RingWalLayout.DATA_START + 4096L;
