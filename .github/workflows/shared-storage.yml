@@ -48,7 +48,7 @@ on:
       - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityV1ReplayStateTest.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityV1StandbyCommitReplay.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityV1StandbyCommitReplayTest.java'
-      # Snapshot-reader memory and deep-copy boundaries are pinned by 842 Java25 methods.
+      # Snapshot-reader memory, deep-copy and single-use restore gates pin 844 Java25 methods.
       - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityV1SnapshotReaderObserver.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityV1SnapshotReaderObserverTest.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityV1CommittedBatchOrigin.java'
@@ -162,7 +162,7 @@ on:
       - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityV1ReplayStateTest.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityV1StandbyCommitReplay.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityV1StandbyCommitReplayTest.java'
-      # Snapshot-reader memory and deep-copy boundaries are pinned by 842 Java25 methods.
+      # Snapshot-reader memory, deep-copy and single-use restore gates pin 844 Java25 methods.
       - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityV1SnapshotReaderObserver.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityV1SnapshotReaderObserverTest.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityV1CommittedBatchOrigin.java'
