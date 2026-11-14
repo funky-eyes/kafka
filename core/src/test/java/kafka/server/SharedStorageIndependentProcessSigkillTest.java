@@ -80,6 +80,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 @Timeout(value = 8, unit = TimeUnit.MINUTES)
 public class SharedStorageIndependentProcessSigkillTest {
     private static final String REPLICATION_FACTOR_ENV = "SHARED_STORAGE_REPLICATION_FACTOR";
+    private static final String WAL_IO_BACKEND_ENV = "SHARED_STORAGE_WAL_IO_BACKEND";
     private static final String TOPIC = "shared-wal-sigkill";
     private static final String WRITE_PROBE_TOPIC = "shared-wal-write-probe";
     private static final String METADATA_TOPIC = "__shared_storage_metadata";
@@ -116,6 +117,7 @@ public class SharedStorageIndependentProcessSigkillTest {
                 "RF2/RF3 permanent WAL loss proof requires S3 outage fixture control");
         }
 
+        System.out.println("MATRIX_WAL_IO backend=" + configuredWalIoBackend());
         System.out.println("MATRIX_SCENARIO rf=" + scenario.replicationFactor() +
             " acks=all minIsr=" + scenario.minIsr());
         try {
@@ -413,6 +415,11 @@ public class SharedStorageIndependentProcessSigkillTest {
         waitForTopicState(admin, WRITE_PROBE_TOPIC, (short) 2, (short) 2, oldLeader);
     }
 
+    private static String configuredWalIoBackend() {
+        String configured = System.getenv(WAL_IO_BACKEND_ENV);
+        return configured == null || configured.isBlank() ? "nio" : configured.trim();
+    }
+
     private Path writeBrokerConfig(
         int nodeId,
         String clusterId,
@@ -453,6 +460,7 @@ public class SharedStorageIndependentProcessSigkillTest {
             "shared.storage.topics=" + TOPIC + "," + WRITE_PROBE_TOPIC,
             "shared.storage.wal.dir=" + walDir.toAbsolutePath(),
             "shared.storage.wal.engine=ring",
+            "shared.storage.wal.io.backend=" + configuredWalIoBackend(),
             "shared.storage.wal.capacity.bytes=" + (64L * 1024 * 1024),
             "shared.storage.object.target.bytes=" + (1024L * 1024),
             "shared.storage.upload.interval.ms=" + UPLOAD_INTERVAL_MS,

@@ -89,16 +89,18 @@ concurrency:
 # Each RF case is a separate external-process fault domain and produces independent evidence.
 jobs:
   acks-all-replication-matrix:
-    name: acks=all RF${{ matrix.rf }} leader SIGKILL
+    name: acks=all RF${{ matrix.rf }} ${{ matrix.io }} leader SIGKILL
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        rf:
-          - 1
-          - 2
-          - 3
+        include:
+          - { rf: 1, io: nio }
+          - { rf: 2, io: nio }
+          - { rf: 3, io: nio }
+          # Same RF2 S3-offline/SIGKILL/old-WAL-erasure contract with Java AIO.
+          - { rf: 2, io: aio }
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -142,6 +144,7 @@ jobs:
           SHARED_STORAGE_S3_REGION: us-east-1
           SHARED_STORAGE_S3_BUCKET: kafka-shared-storage-sigkill
           SHARED_STORAGE_REPLICATION_FACTOR: ${{ matrix.rf }}
+          SHARED_STORAGE_WAL_IO_BACKEND: ${{ matrix.io }}
           SHARED_STORAGE_S3_CONTROL: ${{ github.workspace }}/tools/shared_storage_minio_fixture.sh
         run: |
           set -o pipefail
@@ -163,6 +166,7 @@ jobs:
           grep -q 'errors="0"' "$result_xml"
           grep -q 'skipped="0"' "$result_xml"
           grep -q 'MATRIX_SCENARIO rf=${{ matrix.rf }} acks=all minIsr=' "$result_xml"
+          grep -q 'MATRIX_WAL_IO backend=${{ matrix.io }}' "$result_xml"
           grep -q 'MATRIX_SIGKILL rf=${{ matrix.rf }} brokerId=' "$result_xml"
           grep -q 'MATRIX_RECOVERED rf=${{ matrix.rf }} mode=' "$result_xml"
 
@@ -192,6 +196,7 @@ jobs:
 
           {
             grep 'MATRIX_SCENARIO rf=${{ matrix.rf }} acks=all minIsr=' "$result_xml"
+            grep 'MATRIX_WAL_IO backend=${{ matrix.io }}' "$result_xml"
             grep 'MATRIX_SIGKILL rf=${{ matrix.rf }} brokerId=' "$result_xml"
             grep 'MATRIX_RECOVERED rf=${{ matrix.rf }} mode=' "$result_xml"
             case '${{ matrix.rf }}' in
@@ -214,7 +219,7 @@ jobs:
                 grep 'MATRIX_FAILOVER_WRITABLE rf=3 newLeader=' "$result_xml"
                 ;;
             esac
-            printf 'MATRIX_SUCCESS rf=%s commit=%s\n' '${{ matrix.rf }}' "$GITHUB_SHA"
+            printf 'MATRIX_SUCCESS rf=%s io=%s commit=%s\n' '${{ matrix.rf }}' '${{ matrix.io }}' "$GITHUB_SHA"
           } > shared-storage-sigkill-proof.txt
           cat shared-storage-sigkill-proof.txt
 
@@ -226,7 +231,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: shared-storage-acks-all-rf${{ matrix.rf }}-sigkill
+          name: shared-storage-acks-all-rf${{ matrix.rf }}-${{ matrix.io }}-sigkill
           path: |
             shared-storage-sigkill-build.log
             shared-storage-sigkill-runtime.txt
