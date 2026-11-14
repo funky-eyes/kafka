@@ -21,6 +21,7 @@ from shared_storage_ga_manifest import EVIDENCE_WORKFLOW_PATHS, PRODUCTION_PATHS
 
 from check_shared_storage_ga_workflows import (
     foreign_evidence_workflow_triggers,
+    immutable_source_audit_violations,
     event_path_patterns,
     concrete_production_paths,
     path_is_triggered,
@@ -577,6 +578,33 @@ class WorkflowJobBlockTest(unittest.TestCase):
         self.assertIn("echo storage", blocks["storage-tests"])
         self.assertNotIn("echo minio", blocks["storage-tests"])
         self.assertIn("echo minio", blocks["minio-environment"])
+
+
+
+class ImmutableSourceAuditWorkflowTest(unittest.TestCase):
+    @staticmethod
+    def workflow():
+        root = Path(__file__).resolve().parents[1]
+        return (root / ".github/workflows/shared-storage-author.yml").read_text(encoding="utf-8")
+
+    def test_exact_sha_audit_and_seal_never_mutate_published_history(self):
+        workflow = self.workflow()
+        self.assertEqual([], immutable_source_audit_violations(workflow))
+        self.assertIn("SOURCE_SHA: ${{ github.sha }}", workflow)
+        self.assertIn("python3 tools/shared_storage_ga_source_runs.py", workflow)
+        self.assertIn("python3 tools/shared_storage_ga_manifest.py", workflow)
+
+    def test_detects_history_rewrite_or_write_permissions(self):
+        workflow = self.workflow()
+        self.assertTrue(immutable_source_audit_violations(
+            workflow.replace("contents: read", "contents: write")))
+        self.assertTrue(immutable_source_audit_violations(
+            workflow.replace("          set -euo pipefail",
+                             "          set -euo pipefail\\n          git rebase --rebase-merges HEAD~2",
+                             1)))
+        self.assertTrue(immutable_source_audit_violations(
+            workflow.replace("ref: ${{ github.sha }}",
+                             "ref: shared-wal-s3-4.3.1", 1)))
 
 
 if __name__ == "__main__":
