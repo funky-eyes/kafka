@@ -48,6 +48,7 @@ on:
       - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityV1ReplayStateTest.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityV1StandbyCommitReplay.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityV1StandbyCommitReplayTest.java'
+      # Snapshot-reader memory budgets are pinned in the 840-method Java25 evidence gate.
       - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityV1SnapshotReaderObserver.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityV1SnapshotReaderObserverTest.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityV1CommittedBatchOrigin.java'
@@ -161,6 +162,7 @@ on:
       - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityV1ReplayStateTest.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityV1StandbyCommitReplay.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityV1StandbyCommitReplayTest.java'
+      # Snapshot-reader memory budgets are pinned in the 840-method Java25 evidence gate.
       - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityV1SnapshotReaderObserver.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityV1SnapshotReaderObserverTest.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityV1CommittedBatchOrigin.java'
