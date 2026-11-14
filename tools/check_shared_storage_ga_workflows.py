@@ -908,7 +908,8 @@ def main():
         errors.append(
             f"{AUTHOR_WORKFLOW_NAME}: push branches must be exactly {CANONICAL_EVIDENCE_BRANCH!r}; "
             "source audit must not introduce a staging publication path"
-        )    for issue in immutable_source_audit_violations(author_workflow):
+        )
+    for issue in immutable_source_audit_violations(author_workflow):
         errors.append(f"{AUTHOR_WORKFLOW_NAME}: {issue}")
     if "shared-wal-s3-4.3.1-staging" in author_workflow:
         errors.append(
