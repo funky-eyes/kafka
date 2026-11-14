@@ -388,8 +388,10 @@ def immutable_source_audit_violations(text):
         errors.append("audit and seal must both checkout immutable triggering SHA")
     if "test \"$(git rev-parse HEAD)\" = \"${SOURCE_SHA}\"" not in text:
         errors.append("audit must verify exact triggering source SHA")
-    if "git merge-base --is-ancestor" not in text:
-        errors.append("audit must validate the pinned development ancestry")
+    if 'git log -n 256 "${SOURCE_SHA}"' not in text:
+        errors.append("audit must inspect only bounded exact-SHA reachable history")
+    if "git cat-file -e" in text or "BASE_SHA:" in text:
+        errors.append("provenance audit must not depend on a stale fixed history anchor")
     if "test \"$(git rev-parse HEAD)\" = \"${GITHUB_SHA}\"" not in text:
         errors.append("GA seal must verify exact release SHA")
     if "needs: audit-source" not in text:
