@@ -23,6 +23,7 @@ import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -120,6 +121,29 @@ final class RingWalFile implements AutoCloseable {
         layout.retainedBytes(state.headOffset(), allocation.nextTailOffset());
         ensureContiguous(allocation.walOffset(), allocation.encodedLength());
         writeFully(bytes, allocation.physicalPosition());
+    }
+
+    /**
+     * Write a bounded, disjoint set of already allocated data-region fragments.
+     * A write-batch completion is NOT durable: only forceAndCheckpointWithStats
+     * publishes the new recoverable tail after all data writes have settled.
+     */
+    synchronized void writeBatch(List<WalIoBackend.WriteRequest> writes, long plannedTail) throws IOException {
+        ensureOpen();
+        if (plannedTail < state.tailOffset()) {
+            throw new IllegalArgumentException("Ring WAL batch must not move behind durable tail");
+        }
+        layout.retainedBytes(state.headOffset(), plannedTail);
+        WalIoBackend.validateWriteBatch(writes);
+        for (WalIoBackend.WriteRequest request : writes) {
+            long position = request.position();
+            int bytes = request.source().remaining();
+            if (position < RingWalLayout.DATA_START ||
+                position > layout.totalCapacityBytes() - bytes) {
+                throw new IllegalArgumentException("Ring WAL batch write crosses physical data region");
+            }
+        }
+        handle.writeBatch(writes);
     }
 
     synchronized ByteBuffer read(long walOffset, int length) throws IOException {

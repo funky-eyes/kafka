@@ -110,18 +110,32 @@ class AsynchronousFileChannelWalIoBackendTest {
     @Test
     void aioRingAcknowledgedGroupsColdReplayOnNioBackend() throws Exception {
         Path path = tempDir.resolve("aio-ring.wal");
-        WalRecord confirmed = record(0L, "ring-aio");
-        long totalCapacity = RingWalLayout.DATA_START + 64L * 1024L;
+        List<WalRecord> original = new ArrayList<>();
+        List<WalRecord> wrapped = new ArrayList<>();
+        for (int i = 0; i < 100; i++) {
+            original.add(record(i, "ring-aio-batched-initial-" + i));
+            wrapped.add(record(100 + i, "ring-aio-wrapped-" + i));
+        }
+        // Each group fits independently, but both groups together exceed the
+        // 12 KiB data region. Reclamation forces real physical Ring wrap.
+        long totalCapacity = RingWalLayout.DATA_START + 12L * 1024L;
         try (RingSharedWal wal = new RingSharedWal(
             path, totalCapacity, new AsynchronousFileChannelWalIoBackend())) {
-            assertEquals(1, wal.appendBatch(List.of(confirmed)).join().size());
+            assertEquals(original.size(), wal.appendBatch(original).join().size());
+            assertTrue(wal.reclaim((record, ignored) -> true) > 0L);
+            List<WalAppendResult> wrappedLocations = wal.appendBatch(wrapped).join();
+            assertEquals(wrapped.size(), wrappedLocations.size());
+            assertTrue(wrappedLocations.get(wrappedLocations.size() - 1).offset() >=
+                totalCapacity - RingWalLayout.DATA_START);
         }
         try (RingSharedWal restored = new RingSharedWal(
             path, totalCapacity, new FileChannelWalIoBackend())) {
             List<WalRecord> records = new ArrayList<>();
             restored.replay((record, ignored) -> records.add(record));
-            assertEquals(1, records.size());
-            assertArrayEquals(bytes(confirmed.payload()), bytes(records.get(0).payload()));
+            assertEquals(wrapped.size(), records.size());
+            for (int i = 0; i < wrapped.size(); i++) {
+                assertArrayEquals(bytes(wrapped.get(i).payload()), bytes(records.get(i).payload()));
+            }
         }
     }
 
