@@ -142,6 +142,7 @@ jobs:
           SHARED_STORAGE_S3_REGION: us-east-1
           SHARED_STORAGE_S3_BUCKET: kafka-shared-storage-sigkill
           SHARED_STORAGE_REPLICATION_FACTOR: ${{ matrix.rf }}
+          SHARED_STORAGE_S3_CONTROL: ${{ github.workspace }}/tools/shared_storage_minio_fixture.sh
         run: |
           set -o pipefail
           ./gradlew :core:test \
@@ -171,12 +172,16 @@ jobs:
               grep -q 'MATRIX_RECOVERED rf=1 mode=original-node-restart' "$result_xml"
               ;;
             2)
+              grep -q 'MATRIX_S3_OFFLINE rf=2' "$result_xml"
+              grep -q 'MATRIX_WAL_ONLY_FAILOVER_READABLE rf=2 oldLeader=' "$result_xml"
               grep -q 'MATRIX_FAILOVER_READABLE rf=2 oldLeader=' "$result_xml"
               grep -q 'MATRIX_WRITE_REJECTED_MIN_ISR rf=2 leader=' "$result_xml"
               grep -q 'MATRIX_WRITE_RESUMED rf=2 leader=' "$result_xml"
               grep -q 'MATRIX_RECOVERED rf=2 mode=automatic-failover' "$result_xml"
               ;;
             3)
+              grep -q 'MATRIX_S3_OFFLINE rf=3' "$result_xml"
+              grep -q 'MATRIX_WAL_ONLY_FAILOVER_READABLE rf=3 oldLeader=' "$result_xml"
               grep -q 'MATRIX_FAILOVER_READABLE rf=3 oldLeader=' "$result_xml"
               grep -q 'MATRIX_FAILOVER_WRITABLE rf=3 newLeader=' "$result_xml"
               grep -q 'MATRIX_RECOVERED rf=3 mode=automatic-failover' "$result_xml"
@@ -192,11 +197,15 @@ jobs:
                 grep 'MATRIX_RESTART_REQUIRED rf=1 leader=' "$result_xml"
                 ;;
               2)
+                grep 'MATRIX_S3_OFFLINE rf=2' "$result_xml"
+                grep 'MATRIX_WAL_ONLY_FAILOVER_READABLE rf=2 oldLeader=' "$result_xml"
                 grep 'MATRIX_FAILOVER_READABLE rf=2 oldLeader=' "$result_xml"
                 grep 'MATRIX_WRITE_REJECTED_MIN_ISR rf=2 leader=' "$result_xml"
                 grep 'MATRIX_WRITE_RESUMED rf=2 leader=' "$result_xml"
                 ;;
               3)
+                grep 'MATRIX_S3_OFFLINE rf=3' "$result_xml"
+                grep 'MATRIX_WAL_ONLY_FAILOVER_READABLE rf=3 oldLeader=' "$result_xml"
                 grep 'MATRIX_FAILOVER_READABLE rf=3 oldLeader=' "$result_xml"
                 grep 'MATRIX_FAILOVER_WRITABLE rf=3 newLeader=' "$result_xml"
                 ;;

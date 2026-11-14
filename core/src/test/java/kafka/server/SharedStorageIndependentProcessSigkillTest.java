@@ -109,6 +109,12 @@ public class SharedStorageIndependentProcessSigkillTest {
         String clusterId = Uuid.randomUuid().toString();
         String bootstrapServers = bootstrapServers();
         Map<Integer, BrokerProcess> brokers = new LinkedHashMap<>();
+        String s3Control = System.getenv(SharedStorageS3TestControl.CONTROL_ENV);
+        boolean s3Stopped = false;
+        if (scenario.replicationFactor() >= 2) {
+            assertTrue(s3Control != null && !s3Control.isBlank(),
+                "RF2/RF3 permanent WAL loss proof requires S3 outage fixture control");
+        }
 
         System.out.println("MATRIX_SCENARIO rf=" + scenario.replicationFactor() +
             " acks=all minIsr=" + scenario.minIsr());
@@ -155,6 +161,14 @@ public class SharedStorageIndependentProcessSigkillTest {
                     () -> "Old leader " + oldLeader + " never remotely committed warmup range " + warmup
                 );
 
+                if (scenario.replicationFactor() >= 2) {
+                    // Force the entire newly acknowledged range to remain WAL-only.
+                    // S3 must not be reachable when the leader is killed.
+                    SharedStorageS3TestControl.stop(s3Control);
+                    s3Stopped = true;
+                    System.out.println("MATRIX_S3_OFFLINE rf=" + scenario.replicationFactor());
+                }
+
                 OffsetRange crashRange = produceRange(bootstrapServers, WARMUP_RECORDS, CRASH_RECORDS);
                 assertEquals(new OffsetRange(WARMUP_RECORDS, PRE_RECOVERY_RECORDS), crashRange);
                 assertFalse(
@@ -193,6 +207,21 @@ public class SharedStorageIndependentProcessSigkillTest {
                         scenario
                     );
                 } else {
+                    int replacementLeader = waitForNewLeader(admin, TOPIC, oldLeader);
+                    assertNotEquals(oldLeader, replacementLeader);
+                    assertTrue(brokers.get(replacementLeader).process().isAlive());
+                    assertFalse(allCoverage(bootstrapServers, partition).covers(crashRange),
+                        "Acknowledged WAL-only crash range must not have reached S3 during outage");
+                    // Prove actual Kafka Fetch from the surviving replica's WAL
+                    // while the S3 endpoint is still stopped, before upload/reclaim.
+                    assertAcknowledgedWalOnlyRangeReadable(bootstrapServers, crashRange);
+                    assertFalse(allCoverage(bootstrapServers, partition).covers(crashRange),
+                        "Remote coverage must stay absent throughout WAL-only failover read");
+                    System.out.println("MATRIX_WAL_ONLY_FAILOVER_READABLE rf=" +
+                        scenario.replicationFactor() + " oldLeader=" + oldLeader +
+                        " newLeader=" + replacementLeader + " range=" + crashRange);
+                    SharedStorageS3TestControl.start(s3Control);
+                    s3Stopped = false;
                     runReplicatedFailover(
                         repositoryRoot,
                         processRuntime,
@@ -207,6 +236,9 @@ public class SharedStorageIndependentProcessSigkillTest {
                 }
             }
         } finally {
+            if (s3Stopped) {
+                SharedStorageS3TestControl.startIgnoringFailure(s3Control);
+            }
             stopProcesses(brokers);
             copyDiagnostics(repositoryRoot);
         }
@@ -717,6 +749,39 @@ public class SharedStorageIndependentProcessSigkillTest {
         Properties properties = new Properties();
         properties.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
         return Admin.create(properties);
+    }
+
+    private static void assertAcknowledgedWalOnlyRangeReadable(
+        String bootstrapServers,
+        OffsetRange range
+    ) {
+        Properties properties = new Properties();
+        properties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+        properties.put(ConsumerConfig.GROUP_ID_CONFIG, "wal-only-" + UUID.randomUUID());
+        properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
+        properties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        properties.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        TopicPartition partition = new TopicPartition(TOPIC, 0);
+        long expectedOffset = range.startOffset();
+        try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(properties)) {
+            consumer.assign(List.of(partition));
+            consumer.seek(partition, range.startOffset());
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(90);
+            while (expectedOffset < range.endOffset() && System.nanoTime() < deadline) {
+                for (ConsumerRecord<String, String> record : consumer.poll(Duration.ofMillis(500))) {
+                    assertEquals(expectedOffset, record.offset(),
+                        "Surviving WAL-only Kafka records must remain contiguous");
+                    assertEquals(value(Math.toIntExact(expectedOffset)), record.value(),
+                        "Surviving WAL-only Kafka data must match every acks=all response");
+                    expectedOffset++;
+                    if (expectedOffset == range.endOffset()) {
+                        break;
+                    }
+                }
+            }
+        }
+        assertEquals(range.endOffset(), expectedOffset,
+            "All acknowledged records must be readable from surviving WAL while S3 is down");
     }
 
     private static List<String> consumeAll(String bootstrapServers, int expectedCount) {
