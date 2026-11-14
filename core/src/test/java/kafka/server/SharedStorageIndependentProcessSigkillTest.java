@@ -220,6 +220,22 @@ public class SharedStorageIndependentProcessSigkillTest {
                     System.out.println("MATRIX_WAL_ONLY_FAILOVER_READABLE rf=" +
                         scenario.replicationFactor() + " oldLeader=" + oldLeader +
                         " newLeader=" + replacementLeader + " range=" + crashRange);
+                    if (scenario.replicationFactor() == 3) {
+                        // Native ISR=2 should keep acks=all writes available
+                        // after electing the remaining WAL-backed leader even
+                        // while the entire S3 endpoint is still unavailable.
+                        waitForTopicState(admin, TOPIC, (short) 3, (short) 2,
+                            replacementLeader);
+                        OffsetRange offlinePostCrash = produceRange(
+                            bootstrapServers, PRE_RECOVERY_RECORDS, POST_CRASH_RECORDS);
+                        assertEquals(new OffsetRange(PRE_RECOVERY_RECORDS, TOTAL_RECORDS),
+                            offlinePostCrash);
+                        assertAcknowledgedWalOnlyRangeReadable(bootstrapServers, offlinePostCrash);
+                        assertFalse(allCoverage(bootstrapServers, partition).covers(offlinePostCrash),
+                            "RF3 post-election acks=all writes must remain WAL-only until S3 returns");
+                        System.out.println("MATRIX_RF3_S3_OFFLINE_FAILOVER_WRITABLE leader=" +
+                            replacementLeader + " range=" + offlinePostCrash);
+                    }
                     if (scenario.replicationFactor() == 2) {
                         // A separate shared-WAL routed topic avoids poisoning
                         // the main acknowledged offset sequence with the rejected
@@ -284,14 +300,10 @@ public class SharedStorageIndependentProcessSigkillTest {
             " oldLeader=" + oldLeader + " newLeader=" + newLeader + " records=" + PRE_RECOVERY_RECORDS);
 
         if (scenario.replicationFactor() == 3) {
-            OffsetRange postCrash = produceRange(
-                bootstrapServers,
-                PRE_RECOVERY_RECORDS,
-                POST_CRASH_RECORDS
-            );
-            assertEquals(new OffsetRange(PRE_RECOVERY_RECORDS, TOTAL_RECORDS), postCrash);
+            // The post-crash range was already acknowledged, consumed and
+            // verified against WAL while MinIO remained offline.
             System.out.println("MATRIX_FAILOVER_WRITABLE rf=3 newLeader=" + newLeader +
-                " postRange=" + postCrash);
+                " postRange=" + new OffsetRange(PRE_RECOVERY_RECORDS, TOTAL_RECORDS));
             restartBroker(repositoryRoot, processRuntime, brokers, oldLeader);
             waitForTopicState(admin, TOPIC, (short) 3, (short) 3, newLeader);
         } else {
