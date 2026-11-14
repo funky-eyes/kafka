@@ -76,7 +76,7 @@ failed in-flight AIO group to NIO and claim a successful ACK.
 ## Batched positional submission foundation (not yet WAL-writer pipelining)
 
 The physical Handle now exposes `writeBatch(List<WriteRequest>)` for
-**disjoint** positional writes. The portable NIO implementation writes them in
+**disjoint** positional writes, bounded to 64 requests and 16 MiB per call. The portable NIO implementation writes them in
 sequence; the Java AIO implementation submits independent writes first, then
 drains every submitted completion (including partial writes and failure paths)
 before returning. Overlapping ranges are rejected before any submission.
