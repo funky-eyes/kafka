@@ -1237,21 +1237,7 @@ public final class QuorumController implements Controller {
                                 log.debug("Replaying commits from the active node up to " +
                                     "offset {} and epoch {}.", offset, epoch);
                             }
-                            int recordIndex = 0;
-                            for (ApiMessageAndVersion message : messages) {
-                                long recordOffset = batch.baseOffset() + recordIndex;
-                                try {
-                                    replay(message.message(), Optional.empty(), recordOffset);
-                                } catch (Throwable e) {
-                                    String failureMessage = String.format("Unable to apply %s " +
-                                        "record at offset %d on standby controller, from the " +
-                                        "batch with baseOffset %d",
-                                        message.message().getClass().getSimpleName(),
-                                        recordOffset, batch.baseOffset());
-                                    throw fatalFaultHandler.handleFault(failureMessage, e);
-                                }
-                                recordIndex++;
-                            }
+                            replayStandbyCommittedBatch(batch);
                             offsetControl.handleCommitBatch(batch);
                         }
                     }
@@ -1259,6 +1245,25 @@ public final class QuorumController implements Controller {
                     reader.close();
                 }
             });
+        }
+
+        /**
+         * Genuine standby KRaft commit callback, never speculative append.
+         * No V1 certificate writer or Producer ACK/physical GC integration.
+         */
+        private void replayStandbyCommittedBatch(Batch<ApiMessageAndVersion> batch) {
+            try {
+                WalReplicaDurabilityV1StandbyCommitReplay.replayCommittedBatch(
+                    batch,
+                    featureControl::metadataVersionOrThrow,
+                    featureControl::isWalReplicaDurabilityEnabled,
+                    walReplicaDurabilityV1Diagnostics,
+                    (message, offset) -> replay(message.message(), Optional.empty(), offset));
+            } catch (Throwable e) {
+                throw fatalFaultHandler.handleFault(
+                    "Unable to apply committed KRaft standby batch at base offset " +
+                        batch.baseOffset(), e);
+            }
         }
 
         @Override
@@ -1724,6 +1729,12 @@ public final class QuorumController implements Controller {
     private final PartitionRetirementControlManager partitionRetirementControl;
 
     /**
+     * Standby-only, UNTRUSTED WAL certificate diagnostic timeline. This never
+     * authorizes ACK/HW/GC and the active Controller has no V1 record Writer.
+     */
+    private final WalReplicaDurabilityV1ReplayState walReplicaDurabilityV1Diagnostics;
+
+    /**
      * Deny-all in production. A package-private Builder seam permits tests
      * to exercise uniquely authenticated broker identities; ordinary
      * Controller startup must never install a shared inter-broker principal.
@@ -1841,6 +1852,7 @@ public final class QuorumController implements Controller {
         this.controllerMetrics = controllerMetrics;
         this.snapshotRegistry = new SnapshotRegistry(logContext);
         this.partitionRetirementControl = new PartitionRetirementControlManager(snapshotRegistry);
+        this.walReplicaDurabilityV1Diagnostics = new WalReplicaDurabilityV1ReplayState(snapshotRegistry);
         this.retirementSourceProbeRegistry = new PartitionRetirementSourceProbeRegistry(clusterId);
         this.retirementReplicaRoundRegistry = new PartitionRetirementReplicaRoundRegistry();
         this.retirementBrokerPrincipalPolicy = Objects.requireNonNull(

@@ -25,8 +25,8 @@ import java.util.List;
 
 /**
  * Validation-only adapter for the actual KRaft data-batch offset and wire
- * version. A future Controller caller MUST invoke this only from the trusted
- * Raft handleCommit callback. This class cannot prove callback provenance.
+ * version. The standby Controller observes it only from the trusted Raft
+ * handleCommit callback. This class cannot prove callback provenance.
  *
  * It never emits metadata records, invokes the production Controller replay
  * switch, authenticates WAL bytes, authorizes Producer ACK, or permits GC.

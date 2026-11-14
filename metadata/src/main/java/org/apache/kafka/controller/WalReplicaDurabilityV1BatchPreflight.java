@@ -32,8 +32,8 @@ import static org.apache.kafka.controller.WalReplicaDurabilityCertificateReplayS
 
 /**
  * Pure, non-mutating preflight of all V1 WAL certificate claims within one
- * already-committed KRaft batch. No caller is wired into QuorumController;
- * this is not certificate issuance, a Broker fsync attestation, an ACK
+ * already-committed KRaft batch. The standby QuorumController callback may
+ * use it solely for diagnostics; it is not a Broker fsync attestation, an ACK
  * authorization, a high-watermark update, or COMMITTED physical GC.
  *
  * A batch's trusted provenance still MUST be supplied by an actual KRaft
