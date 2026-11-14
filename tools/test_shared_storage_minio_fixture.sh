@@ -86,6 +86,26 @@ cache_probe_sha="$(sha256sum "${cache_probe}" | awk '{print $1}')"
 
 binary_valid "${cache_probe}" "sleep (GNU coreutils)" "${cache_probe_sha}"
 
+# Regression: a correctly checksummed, pinned binary may print additional
+# text after the expected version. grep -q under pipefail used to close early
+# and spuriously reject it with SIGPIPE; the version check must be stable.
+verbose_version="${TMP}/verbose-version"
+cat > "${verbose_version}" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\\n' 'mc version RELEASE.2025-07-21T05-28-08Z'
+for ((i = 0; i < 10000; i++)); do
+  printf 'additional version information %s\\n' "${i}"
+done
+EOF
+chmod 0755 "${verbose_version}"
+verbose_sha="$(sha256sum "${verbose_version}" | awk '{print $1}')"
+binary_valid "${verbose_version}" "RELEASE.2025-07-21T05-28-08Z" "${verbose_sha}"
+if binary_valid "${verbose_version}" "RELEASE.2025-07-22T00-00-00Z" "${verbose_sha}"; then
+  echo "Verbose fixture version accepted an incorrect release" >&2
+  exit 1
+fi
+
+
 fake_bin="${TMP}/fake-bin"
 mkdir -p "${fake_bin}"
 cat > "${fake_bin}/curl" <<'EOF'
