@@ -395,8 +395,8 @@ def immutable_source_audit_violations(text):
     if "needs: audit-source" not in text:
         errors.append("GA seal must depend on successful source audit")
     forbidden = (
-        r"(?m)^\\s*git\\s+(?:push|rebase|commit\\s+--amend)\\b",
-        r"(?m)^\\s*(?:GIT_COMMITTER_[A-Z_]+|git\\s+config\\s+user\\.)",
+        r"(?m)^\s*git\s+(?:push|rebase|commit\s+--amend)\b",
+        r"(?m)^\s*(?:GIT_COMMITTER_[A-Z_]+|git\s+config\s+user\.)",
     )
     if any(re.search(pattern, text) for pattern in forbidden):
         errors.append("provenance audit must never rewrite commits, identities or branch refs")
