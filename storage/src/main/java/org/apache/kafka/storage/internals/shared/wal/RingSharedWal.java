@@ -27,6 +27,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -44,6 +45,8 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public final class RingSharedWal implements SharedWal {
     private static final int MAX_DRAINED_APPENDS = 1024;
+    private static final int DEFAULT_MAX_OUTSTANDING_GROUPS = 4096;
+    private static final long DEFAULT_MAX_OUTSTANDING_BYTES = 256L * 1024L * 1024L;
     private static final long DEFAULT_SINGLETON_COALESCE_NANOS = 0L;
     private static final long INTER_ARRIVAL_100_MICROS_NANOS = TimeUnit.MICROSECONDS.toNanos(100L);
     private static final long INTER_ARRIVAL_250_MICROS_NANOS = TimeUnit.MICROSECONDS.toNanos(250L);
@@ -76,10 +79,15 @@ public final class RingSharedWal implements SharedWal {
     private final AtomicLong physicalWriteCalls = new AtomicLong();
     private final AtomicLong totalPhysicalWriteNanos = new AtomicLong();
     private final AtomicLong maxPhysicalWriteNanos = new AtomicLong();
+    private final AtomicInteger outstandingGroups = new AtomicInteger();
+    private final AtomicLong outstandingBytes = new AtomicLong();
+    private final AtomicLong rejectedAdmissionGroups = new AtomicLong();
     private final Object lifecycleLock = new Object();
     private final Object ioLock = new Object();
     private final long writerShutdownTimeoutMs;
     private final long singletonCoalesceNanos;
+    private final int maxOutstandingGroups;
+    private final long maxOutstandingBytes;
     private final Thread writerThread;
 
     private long singletonCoalesceWaitCount;
@@ -134,6 +142,19 @@ public final class RingSharedWal implements SharedWal {
         long writerShutdownTimeoutMs,
         long singletonCoalesceNanos
     ) throws IOException {
+        this(path, totalCapacityBytes, ioBackend, writerShutdownTimeoutMs, singletonCoalesceNanos,
+            DEFAULT_MAX_OUTSTANDING_GROUPS, DEFAULT_MAX_OUTSTANDING_BYTES);
+    }
+
+    RingSharedWal(
+        Path path,
+        long totalCapacityBytes,
+        WalIoBackend ioBackend,
+        long writerShutdownTimeoutMs,
+        long singletonCoalesceNanos,
+        int maxOutstandingGroups,
+        long maxOutstandingBytes
+    ) throws IOException {
         Objects.requireNonNull(path, "path");
         Objects.requireNonNull(ioBackend, "ioBackend");
         if (writerShutdownTimeoutMs <= 0) {
@@ -142,6 +163,11 @@ public final class RingSharedWal implements SharedWal {
         if (singletonCoalesceNanos < 0L) {
             throw new IllegalArgumentException("singletonCoalesceNanos must be non-negative");
         }
+        if (maxOutstandingGroups <= 0 || maxOutstandingBytes <= 0L) {
+            throw new IllegalArgumentException("WAL admission limits must be positive");
+        }
+        this.maxOutstandingGroups = maxOutstandingGroups;
+        this.maxOutstandingBytes = maxOutstandingBytes;
         this.writerShutdownTimeoutMs = writerShutdownTimeoutMs;
         this.singletonCoalesceNanos = singletonCoalesceNanos;
         this.file = new RingWalFile(path, totalCapacityBytes, ioBackend);
@@ -199,6 +225,16 @@ public final class RingSharedWal implements SharedWal {
             return future;
         }
 
+        long groupBytes = 0L;
+        try {
+            for (WalRecordCodec.EncodedRecord record : encoded) {
+                groupBytes = Math.addExact(groupBytes, record.totalLength());
+            }
+        } catch (ArithmeticException e) {
+            future.completeExceptionally(new IllegalArgumentException("WAL append group size overflow", e));
+            return future;
+        }
+
         synchronized (lifecycleLock) {
             Throwable currentFailure = failure;
             if (currentFailure != null) {
@@ -209,13 +245,28 @@ public final class RingSharedWal implements SharedWal {
                 future.completeExceptionally(new IllegalStateException("Ring WAL is closed"));
                 return future;
             }
-            pendingAppends.add(new PendingAppend(
+            if (outstandingGroups.get() >= maxOutstandingGroups ||
+                groupBytes > maxOutstandingBytes ||
+                outstandingBytes.get() > maxOutstandingBytes - groupBytes) {
+                rejectedAdmissionGroups.incrementAndGet();
+                future.completeExceptionally(new WalCapacityExceededException(
+                    "Ring WAL append admission pressure: groups=" + outstandingGroups.get() +
+                    ", bytes=" + outstandingBytes.get() + ", maxGroups=" + maxOutstandingGroups +
+                    ", maxBytes=" + maxOutstandingBytes));
+                return future;
+            }
+            outstandingGroups.incrementAndGet();
+            outstandingBytes.addAndGet(groupBytes);
+            PendingAppend group = new PendingAppend(
                 List.copyOf(encoded),
                 records.size(),
                 future,
                 System.nanoTime(),
+                groupBytes,
+                new AtomicBoolean(false),
                 false
-            ));
+            );
+            pendingAppends.add(group);
         }
         return future;
     }
@@ -397,6 +448,14 @@ public final class RingSharedWal implements SharedWal {
             physicalWriteCalls.get(),
             totalPhysicalWriteNanos.get(),
             maxPhysicalWriteNanos.get()
+        );
+    }
+
+    /** Admission credits include queued and currently writing groups, not caller-cancelled futures. */
+    public RingWalAdmissionStats admissionStats() {
+        return new RingWalAdmissionStats(
+            outstandingGroups.get(), outstandingBytes.get(), rejectedAdmissionGroups.get(),
+            maxOutstandingGroups, maxOutstandingBytes
         );
     }
 
@@ -653,7 +712,7 @@ public final class RingSharedWal implements SharedWal {
         WalCapacityExceededException capacityFailure
     ) {
         for (int i = firstRejected; i < groups.size(); i++) {
-            groups.get(i).future().completeExceptionally(capacityFailure);
+            completePendingGroup(groups.get(i), null, capacityFailure);
         }
     }
 
@@ -710,7 +769,7 @@ public final class RingSharedWal implements SharedWal {
         maxGroupsPerDurabilityBatch.accumulateAndGet(admitted.size(), Math::max);
         publishCoalescingDiagnostics();
         for (PlannedGroup group : admitted) {
-            group.pending().future().complete(group.userResults());
+            completePendingGroup(group.pending(), group.userResults(), null);
         }
     }
 
@@ -983,6 +1042,23 @@ public final class RingSharedWal implements SharedWal {
         return true;
     }
 
+    /**
+     * Release credits only from the writer's terminal path, never via a public
+     * CompletableFuture callback: callers are allowed to cancel a future even
+     * while its WAL bytes are still queued or in-flight.
+     */
+    private void completePendingGroup(PendingAppend group, List<WalAppendResult> results, Throwable error) {
+        if (group.creditsReleased().compareAndSet(false, true)) {
+            outstandingGroups.decrementAndGet();
+            outstandingBytes.addAndGet(-group.admittedBytes());
+        }
+        if (error == null) {
+            group.future().complete(results);
+        } else {
+            group.future().completeExceptionally(error);
+        }
+    }
+
     private void failWriter(Throwable t, List<PendingAppend> currentGroups) {
         synchronized (lifecycleLock) {
             failure = t;
@@ -991,13 +1067,13 @@ public final class RingSharedWal implements SharedWal {
         }
         for (PendingAppend group : currentGroups) {
             if (!group.poison()) {
-                group.future().completeExceptionally(t);
+                completePendingGroup(group, null, t);
             }
         }
         PendingAppend pending;
         while ((pending = pendingAppends.poll()) != null) {
             if (!pending.poison()) {
-                pending.future().completeExceptionally(t);
+                completePendingGroup(pending, null, t);
             }
         }
     }
@@ -1094,10 +1170,13 @@ public final class RingSharedWal implements SharedWal {
         int userRecordCount,
         CompletableFuture<List<WalAppendResult>> future,
         long enqueuedNanos,
+        long admittedBytes,
+        AtomicBoolean creditsReleased,
         boolean poison
     ) {
         private static PendingAppend poisonPill() {
-            return new PendingAppend(List.of(), 0, new CompletableFuture<>(), 0L, true);
+            return new PendingAppend(List.of(), 0, new CompletableFuture<>(), 0L,
+                0L, new AtomicBoolean(true), true);
         }
     }
 
