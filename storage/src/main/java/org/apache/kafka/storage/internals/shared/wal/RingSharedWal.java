@@ -629,6 +629,9 @@ public final class RingSharedWal implements SharedWal {
     }
 
     private void writeNewlyAdmittedGroups(List<PlannedGroup> admitted, int firstNewPlan) throws IOException {
+        if (firstNewPlan >= admitted.size()) {
+            return;
+        }
         PhysicalWriteBatch batch = new PhysicalWriteBatch();
         for (int i = firstNewPlan; i < admitted.size(); i++) {
             PlannedGroup group = admitted.get(i);
