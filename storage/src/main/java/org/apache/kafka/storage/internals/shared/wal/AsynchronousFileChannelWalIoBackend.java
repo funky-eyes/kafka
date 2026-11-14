@@ -25,6 +25,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Set;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -153,6 +155,67 @@ public final class AsynchronousFileChannelWalIoBackend implements WalIoBackend {
             // No subsequent force or GROUP_COMMIT publication may overtake an
             // unfinished AIO write. Full writes are retried by the caller.
             return await(channel.write(source, position));
+        }
+
+        /**
+         * Submit all disjoint positional writes before awaiting completions. Even
+         * after one write fails, drain every outstanding future before returning:
+         * AsynchronousFileChannel still owns each ByteBuffer until completion.
+         * No WAL force, checkpoint, or ACK is performed here.
+         */
+        @Override
+        public void writeBatch(List<WriteRequest> writes) throws IOException {
+            WalIoBackend.validateWriteBatch(writes);
+            List<PendingWrite> pending = new ArrayList<>(writes.size());
+            IOException failure = null;
+            for (WriteRequest request : writes) {
+                if (!request.source().hasRemaining()) {
+                    continue;
+                }
+                try {
+                    pending.add(new PendingWrite(
+                        request.source(), request.position(),
+                        channel.write(request.source(), request.position())));
+                } catch (RuntimeException e) {
+                    failure = new IOException("Failed to submit asynchronous WAL write", e);
+                    break;
+                }
+            }
+            for (PendingWrite write : pending) {
+                try {
+                    int written = await(write.completion());
+                    long position = Math.addExact(write.position(), written);
+                    if (written <= 0) {
+                        throw new IOException("Asynchronous WAL batch write made no progress at " + write.position());
+                    }
+                    while (write.source().hasRemaining()) {
+                        written = await(channel.write(write.source(), position));
+                        if (written <= 0) {
+                            throw new IOException("Asynchronous WAL batch write made no progress at " + position);
+                        }
+                        position = Math.addExact(position, written);
+                    }
+                } catch (IOException e) {
+                    if (failure == null) {
+                        failure = e;
+                    } else {
+                        failure.addSuppressed(e);
+                    }
+                } catch (RuntimeException e) {
+                    IOException wrapped = new IOException("Asynchronous WAL batch write failed", e);
+                    if (failure == null) {
+                        failure = wrapped;
+                    } else {
+                        failure.addSuppressed(wrapped);
+                    }
+                }
+            }
+            if (failure != null) {
+                throw failure;
+            }
+        }
+
+        private record PendingWrite(ByteBuffer source, long position, Future<Integer> completion) {
         }
 
         @Override
