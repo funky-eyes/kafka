@@ -73,7 +73,7 @@ AIO is opt-in until durability/crash-recovery parity and performance benchmarks
 have been verified on the target filesystem; never silently switch from a
 failed in-flight AIO group to NIO and claim a successful ACK.
 
-## Batched positional submission foundation (not yet WAL-writer pipelining)
+## Batched positional submission foundation (Ring integrated; rotating-file pending)
 
 The physical Handle now exposes `writeBatch(List<WriteRequest>)` for
 **disjoint** positional writes, bounded to 64 requests and 16 MiB per call. The portable NIO implementation writes them in
@@ -82,15 +82,12 @@ drains every submitted completion (including partial writes and failure paths)
 before returning. Overlapping ranges are rejected before any submission.
 The caller retains ownership of all ByteBuffers until the method returns.
 
-This primitive is deliberately **not wired into the Ring or rotating-file WAL
-writer yet**. Existing production `write(...)` paths and all force/checkpoint
-and `acks` conditions remain unchanged. Even the new batch method waits for
-completion and does not make `force(false)` asynchronous. The next change
-must stage bounded non-overlapping WAL record writes without reusing Ring
-physical slots and preserve a strict completed-writes -> data force ->
-checkpoint write -> checkpoint force -> durable future completion order.
-The new API must not be counted as an end-to-end throughput optimization
-without measured benchmarks.
+As of the merged #54 Ring WAL code, the Ring writer uses this method to
+submit batches of disjoint DATA, padding, GROUP_COMMIT headers and payloads.
+The rotating-file writer is not yet migrated. All force/checkpoint and Kafka
+ACK conditions are unchanged. The API waits for every submitted write to
+complete and does **not** make `force(false)` asynchronous; no performance
+advantage is assumed without measured benchmarks.
 
 ## Ring WAL staged physical AIO batches (stacked follow-up)
 
@@ -113,6 +110,75 @@ this implementation still waits for the batch to settle, and the WAL writer's
 durability barriers remain blocking. Keep default NIO and opt-in AIO until
 full exact-HEAD failure testing, crash recovery, wrap and performance validation
 pass. The rotating-file WAL is not yet migrated to this staged batch path.
+
+## Portable WAL performance roadmap and source comparisons (2026-11-14)
+
+This repo's **performance bottleneck to test first** is the serialized
+`data force(false) -> superblock write -> checkpoint force(false)` path.
+Two separate durability barriers are performed on a normal Ring append;
+head advancement may require a third force for the mirrored superblock.
+The current Ring writer has a 0 ns default singleton linger and an unbounded
+`LinkedBlockingQueue`. The AIO backend has a two-worker executor and
+`writeBatch` waits until all completions settle.
+
+Comparisons require keeping the same durability guarantee:
+
+| Proven pattern | Reference | Safe takeaway |
+| --- | --- | --- |
+| Time/size threshold, bounded parallel submissions, ordered recovery | AutoMQ 2024 Delta WAL design | Compare against ~333 us batching window, **not** an assumed 333 us WAL RT; the raw-device path differs from Java file I/O |
+| Group commit with one sync for multiple writers, recycled log segments | RocksDB WAL Performance wiki | Join small appends and reduce file metadata I/O; never copy its default nonsync mode for `acks=all` |
+| Configurable minimum sync interval, concurrent fsync queue | CockroachDB Pebble `WALMinSyncInterval` | Preserve default zero delay, benchmark an optional microsecond-level window |
+| Conditional group-commit delay and separate write/fsync metrics | PostgreSQL 18 WAL documentation | Do not sleep when no contention; record timing by phase |
+| Adaptive group-writes with journal-sync safety | Apache BookKeeper configuration | Keep buffered bytes and wait caps independent from durability semantics |
+| Periodic vs batch commitlog modes | ScyllaDB | Never acknowledge unsynced periodic writes while promising durable WAL |
+
+Source references:
+
+- https://www.automq.com/blog/principle-analysis-how-automq-implements-high-performance-wal-based-on-raw-devices
+- https://github.com/facebook/rocksdb/wiki/WAL-Performance
+- https://github.com/cockroachdb/pebble/blob/master/options.go
+- https://www.postgresql.org/docs/current/runtime-config-wal.html
+- https://github.com/apache/bookkeeper/blob/master/conf/bk_server.conf
+- https://docs.scylladb.com/manual/stable/reference/configuration-parameters.html
+
+### Development sequence (avoid premature complexity)
+
+1. **Observe before changing ACK timing**: `WalDurabilityStats` already
+   reports aggregate data-force/checkpoint-force duration. The optional
+   `WalWriteLatencyStats` API counts Ring append queue wait and physical
+   batch completion duration (total and maximum nanoseconds, no fake p99
+   estimate). These are per-process aggregate counters, **not** Producer
+   `acks=all` percentiles; expose actual histogram/p99 in a future change.
+2. **Reduce tiny positional writes without extra forces**: benchmark
+   bounded contiguous staging of small WAL fragments (64 KiB candidate),
+   retaining a zero-copy escape route for large buffers and fail-closed
+   write completion. Do not silently copy an entire 128 MiB record.
+3. **Introduce bounded backlog**: cap pending logical groups and bytes by
+   memory budget with explicit rejection/backpressure, but never block a
+   producer while holding the WAL lifecycle lock. Preserve a consistent
+   close/poison/drain and buffer ownership contract.
+4. **Tune *optional* microbatch window**: default 0 ns; test 0, 50,
+   100, 250 and 333 us under controlled concurrency, with soft data-byte
+   thresholds separate from the existing 64-request/16-MiB hard limits.
+   Trigger immediately on enough data and avoid waiting while busy.
+5. **Investigate single-force commit as a separate protocol change**:
+   current durable superblock tail is the recovery authority, not merely
+   an optional index. Simply removing `data force` or delaying the
+   superblock loses crash consistency. A valid candidate must prove:
+   acknowledged committed groups survive cold restart; a torn/partial
+   group never hides a previously ACKed prefix; stale tail scanning
+   respects ring generation and reclaimed/overwritten slots; the
+   superblock head mirror stays safe on reclaims; all fault windows
+   including SIGKILL and permanent old-leader loss preserve `acks=all`.
+   Keep double force until an alternative proof, tests and
+   same-disk benchmark exist.
+
+A 3000-IOPS device budget gives 333 us as the *average allowed I/O
+completion spacing at saturation*, **not** a single I/O latency or a
+`force()` completion time. Local WAL and Kafka Producer `acks=all` RT
+must be measured separately. Adopt only changes that improve the
+latency/throughput frontier while passing exact-head RF2/RF3,
+S3-offline and crash recovery gates.
 
 ## Current native asynchronous I/O status
 
