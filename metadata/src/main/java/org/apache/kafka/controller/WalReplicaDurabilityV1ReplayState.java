@@ -143,6 +143,15 @@ final class WalReplicaDurabilityV1ReplayState {
         }
     }
 
+    /**
+     * A fully replayed ordinary Kafka snapshot without a V1 checkpoint
+     * replaces all previously observed diagnostic-only certificate data.
+     * Bootstrap snapshots need no experimental feature or minimum offset.
+     */
+    void clearUntrustedAfterCheckpointFreeSnapshot() {
+        state.clear();
+    }
+
     /** Untrusted diagnostic only: never a durable receipt or ACK/GC permit. */
     UntrustedEvidence getUntrusted(Key key) {
         return state.get(key);

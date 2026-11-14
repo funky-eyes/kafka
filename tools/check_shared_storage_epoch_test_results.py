@@ -679,6 +679,13 @@ REQUIRED_TESTS = {
         "failedOrdinaryMetadataReplayCannotInstallPrevalidatedCertificateEvidence",
         "snapshotCheckpointInLogAndDisabledFeatureAreRejectedFailClosed",
     ),
+    "org.apache.kafka.controller.WalReplicaDurabilityV1SnapshotReaderObserverTest": (
+        "standbySnapshotCollectsOnlyCheckpointsAndRestoresOriginalLogOffset",
+        "ordinaryBootstrapSnapshotAtOffsetZeroNeverRequiresExperimentalFeature",
+        "malformedLateOrDuplicateCheckpointFailsBeforeDiagnosticReplacement",
+        "incrementalCertificateCannotMasqueradeAsSnapshotCheckpointOrWrongWire",
+        "restoredEvidenceIsImmutableAndTopicIncarnationsRemainDistinct",
+    ),
     "org.apache.kafka.controller.WalReplicaDurabilityCertificateReplayStateTest": (
         "committedLogReplayFreezesGeneratedRecordAndItsNestedMutableEntries",
         "untrustedOrUncommittedSourceCannotOverwriteExistingReplayState",

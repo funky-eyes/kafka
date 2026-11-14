@@ -1275,6 +1275,8 @@ public final class QuorumController implements Controller {
                         throw fatalFaultHandler.handleFault("Asked to load snapshot " + snapshotName +
                                 ", but we are the active controller at epoch " + curClaimEpoch);
                     }
+                    WalReplicaDurabilityV1SnapshotReaderObserver checkpointObserver =
+                        new WalReplicaDurabilityV1SnapshotReaderObserver();
                     offsetControl.beginLoadSnapshot(reader.snapshotId());
                     while (reader.hasNext()) {
                         Batch<ApiMessageAndVersion> batch = reader.next();
@@ -1287,8 +1289,10 @@ public final class QuorumController implements Controller {
                         int i = 1;
                         for (ApiMessageAndVersion message : messages) {
                             try {
-                                replay(message.message(), Optional.of(reader.snapshotId()),
-                                        reader.lastContainedLogOffset());
+                                if (!checkpointObserver.captureIfCheckpoint(message)) {
+                                    replay(message.message(), Optional.of(reader.snapshotId()),
+                                            reader.lastContainedLogOffset());
+                                }
                             } catch (Throwable e) {
                                 String failureMessage = String.format("Unable to apply %s record " +
                                     "from snapshot %s on standby controller, which was %d of " +
@@ -1300,6 +1304,14 @@ public final class QuorumController implements Controller {
                             i++;
                         }
                     }
+                    // Original certificate offsets survive only via the
+                    // snapshot-only V1 checkpoint envelope. Restore strictly
+                    // after the complete trusted SnapshotReader is replayed.
+                    checkpointObserver.restoreAfterCompleteSnapshot(
+                        reader.snapshotId(),
+                        featureControl::metadataVersionOrThrow,
+                        featureControl::isWalReplicaDurabilityEnabled,
+                        walReplicaDurabilityV1Diagnostics);
                     offsetControl.endLoadSnapshot(reader.lastContainedLogTimestamp());
                 } catch (FaultHandlerException e) {
                     throw e;
