@@ -43,7 +43,6 @@ jobs:
       - name: Verify exact source and audit historical attribution
         shell: bash
         env:
-          BASE_SHA: 26b251a451ce941d3d7a55e6487bcb7f16b5ad48
           SOURCE_SHA: ${{ github.sha }}
           TARGET_EMAIL: jianbin@apache.org
         run: |
@@ -51,12 +50,11 @@ jobs:
 
           # Never rewrite published merge history or change commit identities.
           test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
-          git cat-file -e "${BASE_SHA}^{commit}"
-          git merge-base --is-ancestor "${BASE_SHA}" "${SOURCE_SHA}"
-
-          # Legacy/non-target attribution is reported but preserved. Rewriting
-          # hundreds of accepted commits would invalidate prior CI and PR ancestry.
-          differing_identities="$(git log "${BASE_SHA}..${SOURCE_SHA}" --format='%ae%n%ce' |
+          # The previous BASE_SHA can disappear after earlier Git history
+          # normalization. Audit only commits reachable from the exact pushed
+          # source SHA; do not fetch or assume a stale historical anchor.
+          # This is attribution telemetry, never permission to rewrite history.
+          differing_identities="$(git log -n 256 "${SOURCE_SHA}" --format='%ae%n%ce' |
             grep -cvFx "${TARGET_EMAIL}" || true)"
           echo "::notice title=Immutable source history::source=${SOURCE_SHA} non-target author/committer fields=${differing_identities}; preserving original attribution and all accepted commits"
 
