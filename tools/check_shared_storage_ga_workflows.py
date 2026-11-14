@@ -29,7 +29,7 @@ MANIFEST = ROOT / "tools" / "shared_storage_ga_manifest.py"
 MAIN_WORKFLOW_NAME = "Shared Storage"
 GA_RELEASE_WORKFLOW_NAME = "Shared Storage GA Release Gate"
 REAL_S3_SEAL_WORKFLOW_NAME = "Shared Storage Real S3 GA Seal"
-AUTHOR_WORKFLOW_NAME = "Normalize Shared Storage Author"
+AUTHOR_WORKFLOW_NAME = "Audit Shared Storage Commit Provenance"
 CANONICAL_EVIDENCE_BRANCH = "shared-wal-s3-4.3.1"
 UNBUILT_ROOT_SHARED_SOURCE_DIRS = (
     ROOT / "src" / "main" / "java" / "org" / "apache" / "kafka" / "storage" / "internals" / "shared",
@@ -376,6 +376,31 @@ def redundant_runtime_staging_test_compiles(text):
         for task in RUNTIME_STAGING_REDUNDANT_TEST_COMPILE_TASKS
         if task in text
     ]
+
+
+
+def immutable_source_audit_violations(text):
+    """Fail closed if the branch provenance/GA seal workflow can rewrite history."""
+    errors = []
+    if "contents: read" not in text or "contents: write" in text:
+        errors.append("provenance audit must use read-only repository permissions")
+    if text.count("ref: ${{ github.sha }}") != 2:
+        errors.append("audit and seal must both checkout immutable triggering SHA")
+    if "test \"$(git rev-parse HEAD)\" = \"${SOURCE_SHA}\"" not in text:
+        errors.append("audit must verify exact triggering source SHA")
+    if "git merge-base --is-ancestor" not in text:
+        errors.append("audit must validate the pinned development ancestry")
+    if "test \"$(git rev-parse HEAD)\" = \"${GITHUB_SHA}\"" not in text:
+        errors.append("GA seal must verify exact release SHA")
+    if "needs: audit-source" not in text:
+        errors.append("GA seal must depend on successful source audit")
+    forbidden = (
+        r"(?m)^\s*git\s+(?:push|rebase|commit\s+--amend)\b",
+        r"(?m)^\s*(?:GIT_COMMITTER_[A-Z_]+|git\s+config\s+user\.)",
+    )
+    if any(re.search(pattern, text) for pattern in forbidden):
+        errors.append("provenance audit must never rewrite commits, identities or branch refs")
+    return errors
 
 
 def main():
@@ -882,19 +907,17 @@ def main():
     if author_branches != {CANONICAL_EVIDENCE_BRANCH}:
         errors.append(
             f"{AUTHOR_WORKFLOW_NAME}: push branches must be exactly {CANONICAL_EVIDENCE_BRANCH!r}; "
-            "author normalization must not introduce a staging publication path"
+            "source audit must not introduce a staging publication path"
         )
-    if "github.actor != 'github-actions[bot]'" not in author_workflow:
-        errors.append(f"{AUTHOR_WORKFLOW_NAME}: GitHub Actions bot rewrite fence is required")
-    if "--force-with-lease=" not in author_workflow:
-        errors.append(f"{AUTHOR_WORKFLOW_NAME}: normalized branch rewrite must use force-with-lease")
+    for issue in immutable_source_audit_violations(author_workflow):
+        errors.append(f"{AUTHOR_WORKFLOW_NAME}: {issue}")
     if "shared-wal-s3-4.3.1-staging" in author_workflow:
         errors.append(
             f"{AUTHOR_WORKFLOW_NAME}: staging ingress is forbidden because GITHUB_TOKEN pushes do not "
             "retrigger push-based GA evidence workflows"
         )
     if "SOURCE_SHA: ${{ github.sha }}" not in author_workflow:
-        errors.append(f"{AUTHOR_WORKFLOW_NAME}: normalized seal must retain the triggering source SHA")
+        errors.append(f"{AUTHOR_WORKFLOW_NAME}: immutable seal must retain the triggering source SHA")
     source_wait_token = "python3 tools/shared_storage_ga_source_runs.py"
     full_manifest_token = "python3 tools/shared_storage_ga_manifest.py"
     if source_wait_token not in author_workflow:
@@ -904,7 +927,7 @@ def main():
     full_manifest_count = author_workflow.count(full_manifest_token)
     if full_manifest_count != 1:
         errors.append(
-            f"{AUTHOR_WORKFLOW_NAME}: normalized seal must execute the full GA manifest exactly once; "
+            f"{AUTHOR_WORKFLOW_NAME}: immutable seal must execute the full GA manifest exactly once; "
             f"found {full_manifest_count}"
         )
     elif not full_manifest_after_source_wait_loop(
