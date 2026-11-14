@@ -168,9 +168,12 @@ public final class SharedLogSegment extends LogSegment {
             return;
         }
 
+        // Both leader and follower calls must reject a wrong Kafka tail before
+        // their record batches become durable in the broker-wide WAL. A late
+        // check leaves a phantom, potentially replayable WAL group on failure.
+        validateLargestOffsetBeforeWal(largestOffset, serialized);
         appendToWal(batchesRequiringWal(serialized));
         materializeLogicalMetadata(serialized);
-        validateLargestOffset(largestOffset);
     }
 
     private List<SharedStorageEngine.OwnedDataBatch> batchesRequiringWal(
@@ -234,10 +237,20 @@ public final class SharedLogSegment extends LogSegment {
         return Math.addExact(position, batchSize);
     }
 
-    private void validateLargestOffset(long largestOffset) {
-        if (lastOffset != largestOffset) {
+    private void validateLargestOffsetBeforeWal(
+        long largestOffset,
+        List<KafkaRecordBatchAdapter.SerializedBatch> serialized
+    ) {
+        // Match the prior post-append check's max-offset semantics, but do
+        // the validation before any WAL group or logical index is modified.
+        long actualLastOffset = lastOffset;
+        for (KafkaRecordBatchAdapter.SerializedBatch batch : serialized) {
+            actualLastOffset = Math.max(actualLastOffset, batch.lastOffset());
+        }
+        if (actualLastOffset != largestOffset) {
             throw new IllegalStateException(
-                "Kafka append largest offset mismatch: expected=" + largestOffset + ", actual=" + lastOffset);
+                "Kafka append largest offset mismatch: expected=" + largestOffset +
+                    ", actual=" + actualLastOffset);
         }
     }
 

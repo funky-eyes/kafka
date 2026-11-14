@@ -21,6 +21,10 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 REQUIRED_TESTS = {
+    "org.apache.kafka.storage.internals.shared.kafka.SharedLogSegmentRecoveryTest": (
+        "shouldRejectMismatchedKafkaFollowerTailBeforePersistingWal",
+        "shouldKeepExistingDurableWalPrefixWhenNextAppendTailIsInvalid",
+    ),
     "org.apache.kafka.storage.internals.shared.metadata.RemoteObjectIndexTest": (
         "alternateOnlyPublicationAdvancesPhysicalReadGenerationWithoutPrimaryRevision",
         "duplicateReplayAndRejectedConflictDoNotAdvancePhysicalReadGeneration",
