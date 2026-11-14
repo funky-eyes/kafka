@@ -90,7 +90,11 @@ public class SharedWalDurabilityBench {
 
     @Setup(Level.Trial)
     public void setup() throws IOException {
-        workingDirectory = Files.createTempDirectory("shared-wal-durability-jmh-");
+        String diskRoot = System.getenv().getOrDefault(
+            "WAL_BENCH_DIR", System.getProperty("java.io.tmpdir"));
+        Path targetDisk = Path.of(diskRoot).toAbsolutePath().normalize();
+        Files.createDirectories(targetDisk);
+        workingDirectory = Files.createTempDirectory(targetDisk, "shared-wal-durability-jmh-");
         payload = new byte[payloadBytes];
         for (int i = 0; i < payload.length; i++) {
             payload[i] = (byte) (i & 0xff);
