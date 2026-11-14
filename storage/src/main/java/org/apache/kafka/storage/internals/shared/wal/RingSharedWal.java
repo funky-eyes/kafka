@@ -629,13 +629,16 @@ public final class RingSharedWal implements SharedWal {
     }
 
     private void writeNewlyAdmittedGroups(List<PlannedGroup> admitted, int firstNewPlan) throws IOException {
+        PhysicalWriteBatch batch = new PhysicalWriteBatch();
         for (int i = firstNewPlan; i < admitted.size(); i++) {
             PlannedGroup group = admitted.get(i);
             for (PlannedRecord record : group.records()) {
-                writePadding(record.allocation());
-                writeEncoded(record.allocation().walOffset(), record.encoded());
+                stagePadding(record.allocation(), batch, group.nextTailOffset());
+                stageEncoded(record.allocation().walOffset(), record.encoded(),
+                    batch, group.nextTailOffset());
             }
         }
+        batch.flush(admitted.get(admitted.size() - 1).nextTailOffset());
     }
 
     private boolean lateDrainAvailable(List<PendingAppend> groups) {
@@ -707,59 +710,87 @@ public final class RingSharedWal implements SharedWal {
         return new PlannedGroup(pending, List.copyOf(records), List.copyOf(userResults), cursor);
     }
 
-    private void writePadding(RingWalLayout.Allocation allocation) throws IOException {
+    private void stagePadding(
+        RingWalLayout.Allocation allocation,
+        PhysicalWriteBatch batch,
+        long plannedTail
+    ) throws IOException {
         long remaining = allocation.paddingBytes();
         if (remaining <= 0L) {
             return;
         }
-
         long cursor = allocation.walOffset() - remaining;
         if (remaining >= WalRecordCodec.MIN_RECORD_BYTES) {
             ByteBuffer marker = RingPaddingMarker.encode(cursor, allocation.walOffset());
-            writeRaw(cursor, marker);
+            batch.add(cursor, marker, plannedTail);
             cursor += RingPaddingMarker.MARKER_BYTES;
             remaining -= RingPaddingMarker.MARKER_BYTES;
         }
-        writeZeroPadding(cursor, remaining);
-    }
-
-    private void writeZeroPadding(long startOffset, long length) throws IOException {
-        long remaining = length;
-        long cursor = startOffset;
-        while (remaining > 0) {
-            int chunkBytes = (int) Math.min(ZERO_CHUNK_BYTES, remaining);
-            ByteBuffer zeroes = ZERO_CHUNK.duplicate();
-            zeroes.limit(chunkBytes);
-            writeRaw(cursor, zeroes);
-            cursor += chunkBytes;
-            remaining -= chunkBytes;
+        while (remaining > 0L) {
+            int bytes = (int) Math.min(ZERO_CHUNK_BYTES, remaining);
+            ByteBuffer zeros = ZERO_CHUNK.duplicate();
+            zeros.limit(bytes);
+            batch.add(cursor, zeros, plannedTail);
+            cursor += bytes;
+            remaining -= bytes;
         }
     }
 
-    private void writeEncoded(long walOffset, WalRecordCodec.EncodedRecord encoded) throws IOException {
-        writeRaw(walOffset, encoded.header());
+    private void stageEncoded(
+        long walOffset,
+        WalRecordCodec.EncodedRecord encoded,
+        PhysicalWriteBatch batch,
+        long plannedTail
+    ) throws IOException {
+        batch.add(walOffset, encoded.header(), plannedTail);
         ByteBuffer payload = encoded.payload();
         if (payload.hasRemaining()) {
-            writeRaw(Math.addExact(walOffset, WalRecordCodec.HEADER_BYTES), payload);
+            batch.add(Math.addExact(walOffset, WalRecordCodec.HEADER_BYTES), payload, plannedTail);
         }
     }
 
-    private void writeRaw(long walOffset, ByteBuffer source) throws IOException {
-        ByteBuffer bytes = source.duplicate();
-        if (!bytes.hasRemaining()) {
-            return;
+    /**
+     * Stage at most 64 disjoint positional fragments / 16 MiB per submission.
+     * No physical write is allowed to cross the Ring data boundary. Even on
+     * Java AIO, flush waits for every in-flight buffer before a later batch
+     * or the final data-force/checkpoint durability barrier may proceed.
+     */
+    private final class PhysicalWriteBatch {
+        private final List<WalIoBackend.WriteRequest> requests = new ArrayList<>();
+        private long bytes;
+
+        void add(long walOffset, ByteBuffer source, long plannedTail) throws IOException {
+            ByteBuffer remaining = source.duplicate();
+            long cursor = walOffset;
+            while (remaining.hasRemaining()) {
+                RingWalLayout.PhysicalAddress address = layout.address(cursor);
+                long untilWrap = layout.totalCapacityBytes() - address.position();
+                if (untilWrap <= 0L) {
+                    throw new IllegalArgumentException("Ring WAL fragment crosses physical data boundary");
+                }
+                int length = (int) Math.min(Math.min((long) remaining.remaining(),
+                    WalIoBackend.MAX_WRITE_BATCH_BYTES), untilWrap);
+                if (!requests.isEmpty() &&
+                    (requests.size() >= WalIoBackend.MAX_WRITE_BATCH_REQUESTS ||
+                        bytes + length > WalIoBackend.MAX_WRITE_BATCH_BYTES)) {
+                    flush(plannedTail);
+                }
+                ByteBuffer fragment = remaining.slice();
+                fragment.limit(length);
+                requests.add(new WalIoBackend.WriteRequest(fragment, address.position()));
+                bytes += length;
+                remaining.position(remaining.position() + length);
+                cursor = Math.addExact(cursor, length);
+            }
         }
-        int length = bytes.remaining();
-        RingWalLayout.PhysicalAddress address = layout.address(walOffset);
-        RingWalLayout.Allocation fragment = new RingWalLayout.Allocation(
-            walOffset,
-            address.generation(),
-            address.position(),
-            length,
-            0L,
-            Math.addExact(walOffset, length)
-        );
-        file.write(fragment, bytes);
+
+        void flush(long plannedTail) throws IOException {
+            if (!requests.isEmpty()) {
+                file.writeBatch(requests, plannedTail);
+                requests.clear();
+                bytes = 0L;
+            }
+        }
     }
 
     private long recoverMaxGroupId() throws IOException {
