@@ -183,6 +183,7 @@ jobs:
             3)
               grep -q 'MATRIX_S3_OFFLINE rf=3' "$result_xml"
               grep -q 'MATRIX_WAL_ONLY_FAILOVER_READABLE rf=3 oldLeader=' "$result_xml"
+              grep -q 'MATRIX_RF3_S3_OFFLINE_FAILOVER_WRITABLE leader=' "$result_xml"
               grep -q 'MATRIX_FAILOVER_READABLE rf=3 oldLeader=' "$result_xml"
               grep -q 'MATRIX_FAILOVER_WRITABLE rf=3 newLeader=' "$result_xml"
               grep -q 'MATRIX_RECOVERED rf=3 mode=automatic-failover' "$result_xml"
@@ -208,6 +209,7 @@ jobs:
               3)
                 grep 'MATRIX_S3_OFFLINE rf=3' "$result_xml"
                 grep 'MATRIX_WAL_ONLY_FAILOVER_READABLE rf=3 oldLeader=' "$result_xml"
+                grep 'MATRIX_RF3_S3_OFFLINE_FAILOVER_WRITABLE leader=' "$result_xml"
                 grep 'MATRIX_FAILOVER_READABLE rf=3 oldLeader=' "$result_xml"
                 grep 'MATRIX_FAILOVER_WRITABLE rf=3 newLeader=' "$result_xml"
                 ;;
