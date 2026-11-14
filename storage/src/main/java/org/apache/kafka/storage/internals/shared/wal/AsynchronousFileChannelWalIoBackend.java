@@ -93,20 +93,35 @@ public final class AsynchronousFileChannelWalIoBackend implements WalIoBackend {
     }
 
     private static int await(Future<Integer> io) throws IOException {
+        // AIO may continue accessing its ByteBuffer after interruption.
+        // Always wait until that operation terminates before letting the WAL
+        // state machine reuse or release the buffer. Restore interruption and
+        // fence the writer rather than acknowledging the interrupted append.
+        boolean interrupted = false;
         try {
-            return io.get();
-        } catch (InterruptedException e) {
-            io.cancel(true);
-            Thread.currentThread().interrupt();
-            throw new IOException("Interrupted waiting for asynchronous WAL I/O", e);
-        } catch (ExecutionException e) {
-            Throwable cause = e.getCause();
-            if (cause instanceof IOException ioFailure) {
-                throw ioFailure;
+            while (true) {
+                try {
+                    int result = io.get();
+                    if (interrupted) {
+                        throw new IOException("Interrupted waiting for asynchronous WAL I/O");
+                    }
+                    return result;
+                } catch (InterruptedException e) {
+                    interrupted = true;
+                } catch (ExecutionException e) {
+                    Throwable cause = e.getCause();
+                    if (cause instanceof IOException ioFailure) {
+                        throw ioFailure;
+                    }
+                    throw new IOException("Asynchronous WAL I/O failed", cause);
+                } catch (CancellationException e) {
+                    throw new IOException("Asynchronous WAL I/O was cancelled", e);
+                }
             }
-            throw new IOException("Asynchronous WAL I/O failed", cause);
-        } catch (CancellationException e) {
-            throw new IOException("Asynchronous WAL I/O was cancelled", e);
+        } finally {
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 
