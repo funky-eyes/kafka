@@ -40,6 +40,19 @@ public record WalWriteLatencyStats(
     public static final WalWriteLatencyStats EMPTY =
         new WalWriteLatencyStats(0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L);
 
+    /** Preserve existing diagnostics call sites that do not count physical fragments. */
+    public WalWriteLatencyStats(
+        long queuedAppendGroups,
+        long totalQueueNanos,
+        long maxQueueNanos,
+        long physicalWriteCalls,
+        long totalPhysicalWriteNanos,
+        long maxPhysicalWriteNanos
+    ) {
+        this(queuedAppendGroups, totalQueueNanos, maxQueueNanos,
+            physicalWriteCalls, totalPhysicalWriteNanos, maxPhysicalWriteNanos, 0L, 0L);
+    }
+
     public WalWriteLatencyStats {
         if (queuedAppendGroups < 0L || totalQueueNanos < 0L || maxQueueNanos < 0L ||
             physicalWriteCalls < 0L || totalPhysicalWriteNanos < 0L || maxPhysicalWriteNanos < 0L) {
