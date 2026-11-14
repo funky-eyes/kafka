@@ -180,6 +180,38 @@ must be measured separately. Adopt only changes that improve the
 latency/throughput frontier while passing exact-head RF2/RF3,
 S3-offline and crash recovery gates.
 
+## Same-device six-size JMH validation harness (experimental)
+
+Run the **local WAL only** `SharedWalDurabilityBench` on a dedicated
+ordinary SSD/cloud block volume whose sustained characteristics are measured
+separately (e.g. 3000 IOPS, 128 MB/s). Unlike AutoMQ's published raw-device
+Delta WAL results, this uses Java NIO / NIO.2 AIO file channels, a
+single local Broker WAL and normal `force(false)` barriers. Never equate its
+latencies to Kafka Producer `acks=all` without the separate RF2/RF3 tests.
+
+```sh
+./gradlew :jmh-benchmarks:jmh -DjmhArgs='SharedWalDurabilityBench -t 1 -rf json -rff /tmp/shared-wal-1thread.json'
+./gradlew :jmh-benchmarks:jmh -DjmhArgs='SharedWalDurabilityBench -t 16 -rf json -rff /tmp/shared-wal-16threads.json'
+```
+
+The JMH params cover payloads `1024, 4096, 65536, 131072, 262144,
+1048576` bytes, layouts `ring,rotating-file`, and backends `nio,aio`.
+JMH `SampleTime` records p50/p95/p99 by variant. Setup uses a fixed-capacity
+WAL, and a dedicated background maintenance thread reclaims all committed
+groups when pressure exceeds 50%; this is a **synthetic eligibility policy**
+for a local WAL benchmark, not a substitute for verified remote S3 upload
+coverage. Reclaim may add background force work, intentionally counted as
+part of operating a reusable WAL.
+
+Run the six payload sizes on the *same machine and filesystem*, record
+filesystem/device + block size, concurrency, queue depth, JDK, kernel,
+write-back cache, fsync frequency, CPU, GC, IOPS, MiB/s and error count.
+Inspect separate `WalDurabilityStats` data/checkpoint force observations
+for Ring. At minimum run both 1 and 16 producers; run a distinct Kafka
+producer benchmark under RF2/RF3 `acks=all`, S3 offline and leader disk loss
+before any performance-driven default change. No benchmark in this file
+asserts numerical speedups or emulates 3000 IOPS by sleeping.
+
 ## Current native asynchronous I/O status
 
 | Capability | Current | Interpretation |
