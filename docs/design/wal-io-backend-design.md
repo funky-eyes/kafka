@@ -153,10 +153,19 @@ Source references:
    bounded contiguous staging of small WAL fragments (64 KiB candidate),
    retaining a zero-copy escape route for large buffers and fail-closed
    write completion. Do not silently copy an entire 128 MiB record.
-3. **Introduce bounded backlog**: cap pending logical groups and bytes by
-   memory budget with explicit rejection/backpressure, but never block a
-   producer while holding the WAL lifecycle lock. Preserve a consistent
-   close/poison/drain and buffer ownership contract.
+3. **Bound outstanding append pressure (candidate)**: Ring WAL now has
+   configurable `shared.storage.wal.admission.max.groups` (default 4096)
+   and `shared.storage.wal.admission.max.bytes` (default 256 MiB).
+   Credits include queued **and writing** groups, and are released only
+   by the writer's terminal completion/error handler. Reject pressure
+   immediately using `WalCapacityExceededException` rather than
+   blocking an append thread; a user-cancelled `CompletableFuture`
+   never refunds still-in-flight I/O. These bytes count encoded payloads,
+   not complete process RSS or caller-side allocations. The queue is
+   operationally bounded by admission even though its backing collection
+   remains a `LinkedBlockingQueue`. Measure rejected groups under load
+   and provide a retry policy on callers; retain the 0 ns linger default
+   until benchmarking establishes an improvement.
 4. **Tune *optional* microbatch window**: default 0 ns; test 0, 50,
    100, 250 and 333 us under controlled concurrency, with soft data-byte
    thresholds separate from the existing 64-request/16-MiB hard limits.
