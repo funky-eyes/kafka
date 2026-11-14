@@ -591,6 +591,8 @@ class ImmutableSourceAuditWorkflowTest(unittest.TestCase):
         workflow = self.workflow()
         self.assertEqual([], immutable_source_audit_violations(workflow))
         self.assertIn("SOURCE_SHA: ${{ github.sha }}", workflow)
+        self.assertIn('git log -n 256 "${SOURCE_SHA}"', workflow)
+        self.assertNotIn("BASE_SHA:", workflow)
         self.assertIn("python3 tools/shared_storage_ga_source_runs.py", workflow)
         self.assertIn("python3 tools/shared_storage_ga_manifest.py", workflow)
 
@@ -605,6 +607,12 @@ class ImmutableSourceAuditWorkflowTest(unittest.TestCase):
         self.assertTrue(immutable_source_audit_violations(
             workflow.replace("ref: ${{ github.sha }}",
                              "ref: shared-wal-s3-4.3.1", 1)))
+        self.assertTrue(immutable_source_audit_violations(
+            workflow.replace('git log -n 256 "${SOURCE_SHA}"',
+                             'git log "${SOURCE_SHA}"', 1)))
+        self.assertTrue(immutable_source_audit_violations(
+            workflow.replace("          SOURCE_SHA: ${{ github.sha }}",
+                             "          BASE_SHA: old-history-sha\\n          SOURCE_SHA: ${{ github.sha }}", 1)))
 
 
 if __name__ == "__main__":
