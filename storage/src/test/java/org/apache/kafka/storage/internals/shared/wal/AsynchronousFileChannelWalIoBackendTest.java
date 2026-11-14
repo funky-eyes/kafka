@@ -110,22 +110,28 @@ class AsynchronousFileChannelWalIoBackendTest {
     @Test
     void aioRingAcknowledgedGroupsColdReplayOnNioBackend() throws Exception {
         Path path = tempDir.resolve("aio-ring.wal");
-        List<WalRecord> confirmed = new ArrayList<>();
+        List<WalRecord> original = new ArrayList<>();
+        List<WalRecord> wrapped = new ArrayList<>();
         for (int i = 0; i < 100; i++) {
-            confirmed.add(record(i, "ring-aio-batched-" + i));
+            original.add(record(i, "ring-aio-batched-" + i));
+            wrapped.add(record(100 + i, "ring-aio-wrapped-" + i));
         }
-        long totalCapacity = RingWalLayout.DATA_START + 64L * 1024L;
+        // Each group fits independently, but both groups together exceed the
+        // 12 KiB data region. Reclamation forces real physical Ring wrap.
+        long totalCapacity = RingWalLayout.DATA_START + 12L * 1024L;
         try (RingSharedWal wal = new RingSharedWal(
             path, totalCapacity, new AsynchronousFileChannelWalIoBackend())) {
-            assertEquals(confirmed.size(), wal.appendBatch(confirmed).join().size());
+            assertEquals(original.size(), wal.appendBatch(original).join().size());
+            assertTrue(wal.reclaim((record, ignored) -> true) > 0L);
+            assertEquals(wrapped.size(), wal.appendBatch(wrapped).join().size());
         }
         try (RingSharedWal restored = new RingSharedWal(
             path, totalCapacity, new FileChannelWalIoBackend())) {
             List<WalRecord> records = new ArrayList<>();
             restored.replay((record, ignored) -> records.add(record));
-            assertEquals(confirmed.size(), records.size());
-            for (int i = 0; i < confirmed.size(); i++) {
-                assertArrayEquals(bytes(confirmed.get(i).payload()), bytes(records.get(i).payload()));
+            assertEquals(wrapped.size(), records.size());
+            for (int i = 0; i < wrapped.size(); i++) {
+                assertArrayEquals(bytes(wrapped.get(i).payload()), bytes(records.get(i).payload()));
             }
         }
     }
