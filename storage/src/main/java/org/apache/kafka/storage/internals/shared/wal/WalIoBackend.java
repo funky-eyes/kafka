@@ -30,6 +30,8 @@ import java.util.Objects;
  * Those semantics remain in the WAL state machine.</p>
  */
 public interface WalIoBackend extends AutoCloseable {
+    int MAX_WRITE_BATCH_REQUESTS = 64;
+    long MAX_WRITE_BATCH_BYTES = 16L * 1024L * 1024L;
 
     /** Opens an existing physical unit for positional reads only. */
     Handle openRead(Path path) throws IOException;
@@ -63,7 +65,9 @@ public interface WalIoBackend extends AutoCloseable {
             if (position < 0L) {
                 throw new IllegalArgumentException("WAL write position must be non-negative");
             }
-            Math.addExact(position, source.remaining());
+            if (position > Long.MAX_VALUE - source.remaining()) {
+                throw new IllegalArgumentException("WAL positional write extends beyond Long.MAX_VALUE");
+            }
         }
     }
 
@@ -74,14 +78,26 @@ public interface WalIoBackend extends AutoCloseable {
      */
     static void validateWriteBatch(List<WriteRequest> writes) {
         Objects.requireNonNull(writes, "writes");
+        if (writes.size() > MAX_WRITE_BATCH_REQUESTS) {
+            throw new IllegalArgumentException("WAL write batch exceeds maximum request count");
+        }
+        long totalBytes = 0L;
         for (int i = 0; i < writes.size(); i++) {
             WriteRequest current = Objects.requireNonNull(writes.get(i), "write");
             long start = current.position();
-            long end = Math.addExact(start, current.source().remaining());
+            int bytes = current.source().remaining();
+            if (start > Long.MAX_VALUE - bytes) {
+                throw new IllegalArgumentException("WAL write range exceeds Long.MAX_VALUE");
+            }
+            long end = start + bytes;
+            totalBytes += bytes;
+            if (totalBytes > MAX_WRITE_BATCH_BYTES) {
+                throw new IllegalArgumentException("WAL write batch exceeds maximum byte count");
+            }
             for (int j = 0; j < i; j++) {
                 WriteRequest previous = writes.get(j);
                 long otherStart = previous.position();
-                long otherEnd = Math.addExact(otherStart, previous.source().remaining());
+                long otherEnd = otherStart + previous.source().remaining();
                 if (start < otherEnd && otherStart < end) {
                     throw new IllegalArgumentException("Overlapping WAL positional writes in a batch");
                 }
