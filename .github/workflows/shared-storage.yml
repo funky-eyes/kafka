@@ -101,7 +101,7 @@ on:
       - 'server-common/src/test/java/org/apache/kafka/server/common/WalReplicaDurabilityVersionTest.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/FeatureControlManager.java'
       - 'metadata/src/main/java/org/apache/kafka/image/FeaturesImage.java'
-      # WAL replica append must reject a mismatched Kafka tail before durable write; 840 named test methods.
+      # WAL replica append preflight and Ring WAL failed-force ACK fence: 841 named test methods.
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/**'
       - 'storage/shared-storage-s3/**'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/log/LogLoader.java'
@@ -215,7 +215,7 @@ on:
       - 'server-common/src/test/java/org/apache/kafka/server/common/WalReplicaDurabilityVersionTest.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/FeatureControlManager.java'
       - 'metadata/src/main/java/org/apache/kafka/image/FeaturesImage.java'
-      # WAL replica append must reject a mismatched Kafka tail before durable write; 840 named test methods.
+      # WAL replica append preflight and Ring WAL failed-force ACK fence: 841 named test methods.
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/**'
       - 'storage/shared-storage-s3/**'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/log/LogLoader.java'
