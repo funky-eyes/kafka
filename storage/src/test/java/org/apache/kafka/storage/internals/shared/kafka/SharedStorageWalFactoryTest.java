@@ -54,9 +54,28 @@ class SharedStorageWalFactoryTest {
         try (SharedWal wal = SharedStorageWalFactory.create(configuration)) {
             assertInstanceOf(RingSharedWal.class, wal);
             assertEquals(RING_CAPACITY - 8L * 1024L, wal.capacityBytes());
+            RingSharedWal ring = (RingSharedWal) wal;
+            assertEquals(SharedStorageConfiguration.DEFAULT_WAL_ADMISSION_MAX_GROUPS,
+                ring.admissionStats().maxOutstandingGroups());
+            assertEquals(SharedStorageConfiguration.DEFAULT_WAL_ADMISSION_MAX_BYTES,
+                ring.admissionStats().maxOutstandingBytes());
         }
 
         assertEquals(RING_CAPACITY, Files.size(SharedStorageWalFactory.ringWalPath(walDir)));
+    }
+
+    @Test
+    void honorsRingWalAdmissionLimitsFromBrokerConfiguration() throws Exception {
+        Path logDir = Files.createDirectory(tempDir.resolve("backpressure-kafka"));
+        Path walDir = tempDir.resolve("backpressure-wal");
+        SharedStorageConfiguration config = configuration(logDir, walDir, Map.of(
+            SharedStorageConfiguration.WAL_ADMISSION_MAX_GROUPS_CONFIG, 7,
+            SharedStorageConfiguration.WAL_ADMISSION_MAX_BYTES_CONFIG, 8192L));
+        try (SharedWal wal = SharedStorageWalFactory.create(config)) {
+            RingSharedWal ring = assertInstanceOf(RingSharedWal.class, wal);
+            assertEquals(7, ring.admissionStats().maxOutstandingGroups());
+            assertEquals(8192L, ring.admissionStats().maxOutstandingBytes());
+        }
     }
 
     @Test
