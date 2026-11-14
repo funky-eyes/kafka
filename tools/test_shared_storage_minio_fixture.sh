@@ -92,9 +92,9 @@ binary_valid "${cache_probe}" "sleep (GNU coreutils)" "${cache_probe_sha}"
 verbose_version="${TMP}/verbose-version"
 cat > "${verbose_version}" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\\n' 'mc version RELEASE.2025-07-21T05-28-08Z'
+printf '%s\n' 'mc version RELEASE.2025-07-21T05-28-08Z'
 for ((i = 0; i < 10000; i++)); do
-  printf 'additional version information %s\\n' "${i}"
+  printf 'additional version information %s\n' "${i}"
 done
 EOF
 chmod 0755 "${verbose_version}"
