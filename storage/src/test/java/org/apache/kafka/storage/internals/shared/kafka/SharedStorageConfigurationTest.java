@@ -48,6 +48,10 @@ class SharedStorageConfigurationTest {
         assertEquals(SharedStorageConfiguration.WalEngine.RING, config.walEngine());
         assertEquals(SharedStorageConfiguration.DEFAULT_WAL_CAPACITY_BYTES, config.walCapacityBytes());
         assertEquals(SharedStorageConfiguration.DEFAULT_WAL_SEGMENT_BYTES, config.walSegmentBytes());
+        assertEquals(SharedStorageConfiguration.DEFAULT_WAL_ADMISSION_MAX_GROUPS,
+            config.walAdmissionMaxGroups());
+        assertEquals(SharedStorageConfiguration.DEFAULT_WAL_ADMISSION_MAX_BYTES,
+            config.walAdmissionMaxBytes());
         assertEquals(SharedStorageConfiguration.DEFAULT_OBJECT_TARGET_BYTES, config.objectTargetBytes());
         assertEquals(SharedStorageConfiguration.DEFAULT_READ_INDEX_CACHE_ENTRIES, config.readIndexCacheEntries());
         assertEquals(SharedStorageConfiguration.DEFAULT_READ_DATA_BLOCK_CACHE_BYTES, config.readDataBlockCacheBytes());
@@ -96,6 +100,19 @@ class SharedStorageConfigurationTest {
             SharedStorageConfiguration.from(context(Map.of(
                 SharedStorageConfiguration.WAL_IO_BACKEND_CONFIG, "bio"), logDir)));
         assertTrue(error.getMessage().contains("expected nio or aio"));
+    }
+
+    @Test
+    void rejectsInvalidWalAdmissionLimits() {
+        File logDir = TestUtils.tempDirectory();
+        assertTrue(assertThrows(IllegalArgumentException.class, () ->
+            SharedStorageConfiguration.from(context(Map.of(
+                SharedStorageConfiguration.WAL_ADMISSION_MAX_GROUPS_CONFIG, 0), logDir)))
+            .getMessage().contains(SharedStorageConfiguration.WAL_ADMISSION_MAX_GROUPS_CONFIG));
+        assertTrue(assertThrows(IllegalArgumentException.class, () ->
+            SharedStorageConfiguration.from(context(Map.of(
+                SharedStorageConfiguration.WAL_ADMISSION_MAX_BYTES_CONFIG, -1), logDir)))
+            .getMessage().contains(SharedStorageConfiguration.WAL_ADMISSION_MAX_BYTES_CONFIG));
     }
 
     @Test
@@ -168,6 +185,8 @@ class SharedStorageConfigurationTest {
     void parsesExplicitReadUploadAndCleanupTuning() {
         Map<String, Object> originals = new HashMap<>();
         originals.put(SharedStorageConfiguration.OBJECT_TARGET_BYTES_CONFIG, "67108864");
+        originals.put(SharedStorageConfiguration.WAL_ADMISSION_MAX_GROUPS_CONFIG, 256);
+        originals.put(SharedStorageConfiguration.WAL_ADMISSION_MAX_BYTES_CONFIG, "16777216");
         originals.put(SharedStorageConfiguration.READ_INDEX_CACHE_ENTRIES_CONFIG, "256");
         originals.put(SharedStorageConfiguration.READ_DATA_BLOCK_CACHE_BYTES_CONFIG, 128L * 1024 * 1024);
         originals.put(SharedStorageConfiguration.UPLOAD_INTERVAL_MS_CONFIG, 250L);
@@ -179,6 +198,8 @@ class SharedStorageConfigurationTest {
         );
 
         assertEquals(64L * 1024 * 1024, config.objectTargetBytes());
+        assertEquals(256, config.walAdmissionMaxGroups());
+        assertEquals(16L * 1024 * 1024, config.walAdmissionMaxBytes());
         assertEquals(256, config.readIndexCacheEntries());
         assertEquals(128L * 1024 * 1024, config.readDataBlockCacheBytes());
         assertEquals(250L, config.uploadIntervalMs());

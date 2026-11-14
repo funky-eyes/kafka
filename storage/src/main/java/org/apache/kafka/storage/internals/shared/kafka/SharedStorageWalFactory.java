@@ -46,7 +46,8 @@ public final class SharedStorageWalFactory {
                 WalIoBackend backend = selectBackend(configuration);
                 try {
                     yield new RingSharedWal(ringWalPath(configuration.walDir()),
-                        configuration.walCapacityBytes(), backend);
+                        configuration.walCapacityBytes(), backend,
+                        configuration.walAdmissionMaxGroups(), configuration.walAdmissionMaxBytes());
                 } catch (IOException | RuntimeException | Error failure) {
                     closeFailedBackend(backend, failure);
                     throw failure;

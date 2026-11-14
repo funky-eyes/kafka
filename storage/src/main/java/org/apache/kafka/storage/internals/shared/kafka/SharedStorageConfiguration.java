@@ -36,6 +36,8 @@ public final class SharedStorageConfiguration {
     public static final String WAL_IO_BACKEND_CONFIG = "shared.storage.wal.io.backend";
     public static final String WAL_CAPACITY_BYTES_CONFIG = "shared.storage.wal.capacity.bytes";
     public static final String WAL_SEGMENT_BYTES_CONFIG = "shared.storage.wal.segment.bytes";
+    public static final String WAL_ADMISSION_MAX_GROUPS_CONFIG = "shared.storage.wal.admission.max.groups";
+    public static final String WAL_ADMISSION_MAX_BYTES_CONFIG = "shared.storage.wal.admission.max.bytes";
     public static final String OBJECT_TARGET_BYTES_CONFIG = "shared.storage.object.target.bytes";
     public static final String READ_INDEX_CACHE_ENTRIES_CONFIG = "shared.storage.read.index.cache.entries";
     public static final String READ_DATA_BLOCK_CACHE_BYTES_CONFIG = "shared.storage.read.data.block.cache.bytes";
@@ -52,6 +54,8 @@ public final class SharedStorageConfiguration {
     public static final WalIoMode DEFAULT_WAL_IO_MODE = WalIoMode.NIO;
     public static final long DEFAULT_WAL_CAPACITY_BYTES = 2L * 1024 * 1024 * 1024;
     public static final long DEFAULT_WAL_SEGMENT_BYTES = 64L * 1024 * 1024;
+    public static final int DEFAULT_WAL_ADMISSION_MAX_GROUPS = 4096;
+    public static final long DEFAULT_WAL_ADMISSION_MAX_BYTES = 256L * 1024 * 1024;
     public static final long DEFAULT_OBJECT_TARGET_BYTES = 32L * 1024 * 1024;
     public static final int DEFAULT_READ_INDEX_CACHE_ENTRIES = 1_024;
     public static final long DEFAULT_READ_DATA_BLOCK_CACHE_BYTES = 64L * 1024 * 1024;
@@ -67,6 +71,8 @@ public final class SharedStorageConfiguration {
     private final WalIoMode walIoMode;
     private final long walCapacityBytes;
     private final long walSegmentBytes;
+    private final int walAdmissionMaxGroups;
+    private final long walAdmissionMaxBytes;
     private final long objectTargetBytes;
     private final int readIndexCacheEntries;
     private final long readDataBlockCacheBytes;
@@ -85,6 +91,8 @@ public final class SharedStorageConfiguration {
         WalIoMode walIoMode,
         long walCapacityBytes,
         long walSegmentBytes,
+        int walAdmissionMaxGroups,
+        long walAdmissionMaxBytes,
         long objectTargetBytes,
         ReadCacheConfiguration readCache,
         UploadConfiguration upload,
@@ -97,6 +105,8 @@ public final class SharedStorageConfiguration {
         this.walIoMode = walIoMode;
         this.walCapacityBytes = walCapacityBytes;
         this.walSegmentBytes = walSegmentBytes;
+        this.walAdmissionMaxGroups = walAdmissionMaxGroups;
+        this.walAdmissionMaxBytes = walAdmissionMaxBytes;
         this.objectTargetBytes = objectTargetBytes;
         this.readIndexCacheEntries = readCache.indexEntries();
         this.readDataBlockCacheBytes = readCache.dataBlockBytes();
@@ -129,6 +139,16 @@ public final class SharedStorageConfiguration {
             context.originals().get(WAL_SEGMENT_BYTES_CONFIG),
             DEFAULT_WAL_SEGMENT_BYTES,
             WAL_SEGMENT_BYTES_CONFIG
+        );
+        int walAdmissionMaxGroups = positiveInt(
+            context.originals().get(WAL_ADMISSION_MAX_GROUPS_CONFIG),
+            DEFAULT_WAL_ADMISSION_MAX_GROUPS,
+            WAL_ADMISSION_MAX_GROUPS_CONFIG
+        );
+        long walAdmissionMaxBytes = positiveLong(
+            context.originals().get(WAL_ADMISSION_MAX_BYTES_CONFIG),
+            DEFAULT_WAL_ADMISSION_MAX_BYTES,
+            WAL_ADMISSION_MAX_BYTES_CONFIG
         );
         if (walEngine == WalEngine.ROTATING_FILE && walSegmentBytes > walCapacityBytes) {
             throw new IllegalArgumentException(
@@ -195,6 +215,8 @@ public final class SharedStorageConfiguration {
             walIoMode,
             walCapacityBytes,
             walSegmentBytes,
+            walAdmissionMaxGroups,
+            walAdmissionMaxBytes,
             objectTargetBytes,
             readCache,
             upload,
@@ -247,6 +269,14 @@ public final class SharedStorageConfiguration {
 
     public long walSegmentBytes() {
         return walSegmentBytes;
+    }
+
+    public int walAdmissionMaxGroups() {
+        return walAdmissionMaxGroups;
+    }
+
+    public long walAdmissionMaxBytes() {
+        return walAdmissionMaxBytes;
     }
 
     public long objectTargetBytes() {
