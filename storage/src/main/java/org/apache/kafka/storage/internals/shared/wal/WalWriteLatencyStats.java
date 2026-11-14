@@ -42,10 +42,12 @@ public record WalWriteLatencyStats(
 
     public WalWriteLatencyStats {
         if (queuedAppendGroups < 0L || totalQueueNanos < 0L || maxQueueNanos < 0L ||
-            physicalWriteCalls < 0L || totalPhysicalWriteNanos < 0L || maxPhysicalWriteNanos < 0L ||
-            stagedPhysicalRequests < 0L || submittedPhysicalRequests < 0L ||
-            submittedPhysicalRequests > stagedPhysicalRequests) {
+            physicalWriteCalls < 0L || totalPhysicalWriteNanos < 0L || maxPhysicalWriteNanos < 0L) {
             throw new IllegalArgumentException("WAL write latency statistics must be non-negative");
+        }
+        if (stagedPhysicalRequests < 0L || submittedPhysicalRequests < 0L ||
+            submittedPhysicalRequests > stagedPhysicalRequests) {
+            throw new IllegalArgumentException("WAL coalesced request counts must be ordered and non-negative");
         }
     }
 }
