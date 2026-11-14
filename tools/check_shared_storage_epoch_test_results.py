@@ -665,6 +665,13 @@ REQUIRED_TESTS = {
         "ordinaryMetadataAndEmptyBatchesNeverCreateCheckpointEvidence",
         "nullMalformedAndRevokedFeatureInputsCannotExposeCheckpointPlan",
     ),
+    "org.apache.kafka.controller.WalReplicaDurabilityV1SnapshotRestoreTest": (
+        "restoredSnapshotPreservesOriginalOffsetForSubsequentCommittedV1Cas",
+        "malformedLateCheckpointCannotClearOrPartiallyReplacePriorState",
+        "completeSnapshotReplacesOldTopicsWithoutBorrowingRecreatedTopicIdentity",
+        "snapshotRegistryRollbackRestoresPreviousDiagnosticStateAfterReplacement",
+        "emptySnapshotClearsStaleDiagnosticsButInvalidBoundaryCannotMutateState",
+    ),
     "org.apache.kafka.controller.WalReplicaDurabilityCertificateReplayStateTest": (
         "committedLogReplayFreezesGeneratedRecordAndItsNestedMutableEntries",
         "untrustedOrUncommittedSourceCannotOverwriteExistingReplayState",
