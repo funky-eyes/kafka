@@ -689,6 +689,8 @@ REQUIRED_TESTS = {
         "missingNestedClaimListsFailEarlyWithoutPoisoningNextCheckpoint",
         "mutatedCaptureSourceCannotChangePreflightOrRestoredOffsets",
         "nullNestedEntriesFailBeforeCaptureAndDoNotPoisonNextRecord",
+        "completedSnapshotObserverRejectsSecondRestoreAndLateCapture",
+        "failedSnapshotPreflightPermanentlyFencesObserverWithoutDiagnosticMutation",
     ),
     "org.apache.kafka.controller.WalReplicaDurabilityCertificateReplayStateTest": (
         "committedLogReplayFreezesGeneratedRecordAndItsNestedMutableEntries",

@@ -53,6 +53,9 @@ final class WalReplicaDurabilityV1SnapshotReaderObserver {
 
     private final List<ApiMessageAndVersion> captured = new ArrayList<>();
     private long capturedClaimCount;
+    // The trusted SnapshotReader callback creates one observer per snapshot.
+    // One failed or completed restore must never be retried on the same capture.
+    private boolean restoreStarted;
 
     /**
      * Called once for each record from the actual standby SnapshotReader.
@@ -61,6 +64,9 @@ final class WalReplicaDurabilityV1SnapshotReaderObserver {
      *         must skip, false for a normal metadata record to replay.
      */
     boolean captureIfCheckpoint(ApiMessageAndVersion entry) {
+        if (restoreStarted) {
+            throw new IllegalStateException("WAL snapshot observer cannot capture after restore begins");
+        }
         if (entry == null || entry.message() == null) {
             throw new IllegalArgumentException("null record in trusted snapshot callback");
         }
@@ -160,6 +166,12 @@ final class WalReplicaDurabilityV1SnapshotReaderObserver {
         Objects.requireNonNull(currentMetadataVersion, "currentMetadataVersion");
         Objects.requireNonNull(negotiatedExperimentalFeature, "negotiatedExperimentalFeature");
         Objects.requireNonNull(diagnosticTimeline, "diagnosticTimeline");
+        if (restoreStarted) {
+            throw new IllegalStateException("WAL snapshot observer can restore only once");
+        }
+        // Burn the one-shot restore token before any feature check, validation,
+        // or state mutation; a malformed snapshot must not be retried.
+        restoreStarted = true;
         if (captured.isEmpty()) {
             diagnosticTimeline.clearUntrustedAfterCheckpointFreeSnapshot();
             return;

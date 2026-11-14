@@ -253,4 +253,45 @@ class WalReplicaDurabilityV1SnapshotReaderObserverTest {
         complete(observer, SNAPSHOT, diagnostic);
         assertEquals(1000L, diagnostic.getUntrusted(key(topic)).kraftOffset());
     }
+
+    @Test
+    void completedSnapshotObserverRejectsSecondRestoreAndLateCapture() {
+        Uuid topic = Uuid.randomUuid();
+        var observer = new WalReplicaDurabilityV1SnapshotReaderObserver();
+        var diagnostic = timeline();
+        assertTrue(observer.captureIfCheckpoint(wire(checkpoint(topic, 1000))));
+        complete(observer, SNAPSHOT, diagnostic);
+        var original = diagnostic.getUntrusted(key(topic));
+        assertThrows(IllegalStateException.class,
+            () -> complete(observer, SNAPSHOT, diagnostic));
+        assertThrows(IllegalStateException.class,
+            () -> observer.captureIfCheckpoint(wire(checkpoint(Uuid.randomUuid(), 1100))));
+        assertEquals(original, diagnostic.getUntrusted(key(topic)));
+
+        // A checkpoint-free bootstrap is also a complete single-use snapshot.
+        var empty = new WalReplicaDurabilityV1SnapshotReaderObserver();
+        complete(empty, new OffsetAndEpoch(0, 0), diagnostic);
+        assertThrows(IllegalStateException.class,
+            () -> complete(empty, new OffsetAndEpoch(0, 0), diagnostic));
+        assertThrows(IllegalStateException.class,
+            () -> empty.captureIfCheckpoint(new ApiMessageAndVersion(new NoOpRecord(), (short) 0)));
+    }
+
+    @Test
+    void failedSnapshotPreflightPermanentlyFencesObserverWithoutDiagnosticMutation() {
+        Uuid topic = Uuid.randomUuid();
+        var diagnostic = timeline();
+        var valid = new WalReplicaDurabilityV1SnapshotReaderObserver();
+        valid.captureIfCheckpoint(wire(checkpoint(topic, 1000)));
+        complete(valid, SNAPSHOT, diagnostic);
+        var original = diagnostic.getUntrusted(key(topic));
+
+        var bad = new WalReplicaDurabilityV1SnapshotReaderObserver();
+        bad.captureIfCheckpoint(wire(checkpoint(Uuid.randomUuid(), 1400)));
+        assertThrows(IllegalArgumentException.class, () -> complete(bad, SNAPSHOT, diagnostic));
+        assertThrows(IllegalStateException.class, () -> complete(bad, SNAPSHOT, diagnostic));
+        assertThrows(IllegalStateException.class,
+            () -> bad.captureIfCheckpoint(wire(checkpoint(Uuid.randomUuid(), 1050))));
+        assertEquals(original, diagnostic.getUntrusted(key(topic)));
+    }
 }
