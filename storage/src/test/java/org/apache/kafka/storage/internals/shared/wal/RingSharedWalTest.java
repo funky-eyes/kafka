@@ -52,10 +52,16 @@ class RingSharedWalTest {
 
         try (RingSharedWal wal = new RingSharedWal(path, totalCapacity)) {
             assertEquals(WalDurabilityStats.EMPTY, wal.durabilityStats());
+            assertEquals(WalWriteLatencyStats.EMPTY, wal.writeLatencyStats());
 
             wal.appendBatch(List.of(dataRecord(0L, 32), dataRecord(1L, 32))).join();
             WalDurabilityStats first = wal.durabilityStats();
             assertEquals(1L, first.durabilityBatchCount());
+            WalWriteLatencyStats firstLatency = wal.writeLatencyStats();
+            assertEquals(1L, firstLatency.queuedAppendGroups());
+            assertEquals(1L, firstLatency.physicalWriteCalls());
+            assertTrue(firstLatency.totalQueueNanos() >= firstLatency.maxQueueNanos());
+            assertTrue(firstLatency.totalPhysicalWriteNanos() >= firstLatency.maxPhysicalWriteNanos());
             assertEquals(1L, first.durableAppendGroupCount());
             assertEquals(wal.usedBytes(), first.durableBytes());
             assertTrue(first.durabilityBarrierNanos() >= 0L);
@@ -80,6 +86,11 @@ class RingSharedWalTest {
             wal.appendBatch(List.of(dataRecord(2L, 32))).join();
             WalDurabilityStats second = wal.durabilityStats();
             assertEquals(2L, second.durabilityBatchCount());
+            WalWriteLatencyStats secondLatency = wal.writeLatencyStats();
+            assertEquals(2L, secondLatency.queuedAppendGroups());
+            assertEquals(2L, secondLatency.physicalWriteCalls());
+            assertTrue(secondLatency.totalQueueNanos() >= firstLatency.totalQueueNanos());
+            assertTrue(secondLatency.totalPhysicalWriteNanos() >= firstLatency.totalPhysicalWriteNanos());
             assertEquals(2L, second.durableAppendGroupCount());
             assertEquals(wal.usedBytes(), second.durableBytes());
             assertTrue(second.durabilityBarrierNanos() >= first.durabilityBarrierNanos());
@@ -134,6 +145,7 @@ class RingSharedWalTest {
             assertEquals(1L, stats.durabilityBatchCount());
             assertEquals(2L, stats.durableAppendGroupCount());
             assertEquals(2L, stats.maxGroupsPerDurabilityBatch());
+            assertEquals(2L, wal.writeLatencyStats().queuedAppendGroups());
             assertTrue(stats.singletonCoalesceHitCount() <= stats.singletonCoalesceWaitCount());
             assertTrue(stats.singletonCoalesceWaitNanos() >= 0L);
             assertEquals(1L, stats.appendInterArrivalCount());
@@ -170,6 +182,7 @@ class RingSharedWalTest {
             assertEquals(1L, stats.durabilityBatchCount());
             assertEquals(2L, stats.durableAppendGroupCount());
             assertEquals(2L, stats.maxGroupsPerDurabilityBatch());
+            assertEquals(2L, wal.writeLatencyStats().queuedAppendGroups());
             assertEquals(0L, stats.singletonCoalesceWaitCount());
             assertEquals(0L, stats.singletonCoalesceHitCount());
             assertEquals(1L, stats.appendInterArrivalCount());
