@@ -23,7 +23,9 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
@@ -97,6 +99,42 @@ class FileSharedWalIoBackendTest {
         }
     }
 
+
+    @Test
+    void failedLaterDataForceKeepsPreviouslyAcknowledgedFileWalPrefixRecoverable() throws Exception {
+        Path dir = tempDir.resolve("confirmed-prefix-survives-force-error");
+        BlockingForceBackend backend = new BlockingForceBackend();
+        WalRecord confirmed = WalRecord.data(1L, 2L, 0, 3, 0L, 0L,
+            ByteBuffer.wrap("confirmed".getBytes(StandardCharsets.UTF_8)));
+        WalRecord attempted = WalRecord.data(1L, 2L, 0, 3, 1L, 1L,
+            ByteBuffer.wrap("no-ack".getBytes(StandardCharsets.UTF_8)));
+
+        // Allow the first fsync to complete, then inject a failure only for
+        // the next group. The older acknowledged prefix must remain intact.
+        backend.allowForce.countDown();
+        try (FileSharedWal wal = new FileSharedWal(dir, 1024 * 1024, 64 * 1024, backend)) {
+            wal.appendBatch(List.of(confirmed)).get(10, TimeUnit.SECONDS);
+            backend.failNextForce();
+            ExecutionException failed = assertThrows(ExecutionException.class,
+                () -> wal.appendBatch(List.of(attempted)).get(10, TimeUnit.SECONDS));
+            assertTrue(failed.getCause() instanceof IOException,
+                "an unsuccessful fsync must not release the append future");
+            ExecutionException fenced = assertThrows(ExecutionException.class,
+                () -> wal.appendBatch(List.of(attempted)).get(10, TimeUnit.SECONDS));
+            assertTrue(fenced.getCause() instanceof IllegalStateException,
+                "a failed WAL writer must reject later replica appends");
+        }
+
+        try (FileSharedWal reopened = new FileSharedWal(dir, 1024 * 1024, 64 * 1024)) {
+            List<WalRecord> replayed = new ArrayList<>();
+            reopened.replay((record, ignored) -> replayed.add(record));
+            assertFalse(replayed.isEmpty(), "the previously acknowledged record must survive cold replay");
+            assertArrayEquals(bytes(confirmed.payload()), bytes(replayed.get(0).payload()));
+            // A failed fsync cannot prove whether its bytes reached stable media:
+            // do not assume that a later unacknowledged record must disappear.
+        }
+    }
+
     private static byte[] bytes(ByteBuffer buffer) {
         ByteBuffer copy = buffer.duplicate();
         byte[] result = new byte[copy.remaining()];
@@ -108,14 +146,18 @@ class FileSharedWalIoBackendTest {
         private final FileChannelWalIoBackend delegate = new FileChannelWalIoBackend();
         private final CountDownLatch forceEntered = new CountDownLatch(1);
         private final CountDownLatch allowForce = new CountDownLatch(1);
-        private final boolean failForce;
+        private final AtomicBoolean failForce;
 
         private BlockingForceBackend() {
             this(false);
         }
 
         private BlockingForceBackend(boolean failForce) {
-            this.failForce = failForce;
+            this.failForce = new AtomicBoolean(failForce);
+        }
+
+        void failNextForce() {
+            failForce.set(true);
         }
 
         @Override
@@ -176,7 +218,7 @@ class FileSharedWalIoBackendTest {
                         Thread.currentThread().interrupt();
                         throw new IOException("Interrupted at test durability barrier", e);
                     }
-                    if (failForce) {
+                    if (failForce.compareAndSet(true, false)) {
                         throw new IOException("Injected WAL force failure");
                     }
                     delegateHandle.force();
