@@ -110,18 +110,23 @@ class AsynchronousFileChannelWalIoBackendTest {
     @Test
     void aioRingAcknowledgedGroupsColdReplayOnNioBackend() throws Exception {
         Path path = tempDir.resolve("aio-ring.wal");
-        WalRecord confirmed = record(0L, "ring-aio");
+        List<WalRecord> confirmed = new ArrayList<>();
+        for (int i = 0; i < 100; i++) {
+            confirmed.add(record(i, "ring-aio-batched-" + i));
+        }
         long totalCapacity = RingWalLayout.DATA_START + 64L * 1024L;
         try (RingSharedWal wal = new RingSharedWal(
             path, totalCapacity, new AsynchronousFileChannelWalIoBackend())) {
-            assertEquals(1, wal.appendBatch(List.of(confirmed)).join().size());
+            assertEquals(confirmed.size(), wal.appendBatch(confirmed).join().size());
         }
         try (RingSharedWal restored = new RingSharedWal(
             path, totalCapacity, new FileChannelWalIoBackend())) {
             List<WalRecord> records = new ArrayList<>();
             restored.replay((record, ignored) -> records.add(record));
-            assertEquals(1, records.size());
-            assertArrayEquals(bytes(confirmed.payload()), bytes(records.get(0).payload()));
+            assertEquals(confirmed.size(), records.size());
+            for (int i = 0; i < confirmed.size(); i++) {
+                assertArrayEquals(bytes(confirmed.get(i).payload()), bytes(records.get(i).payload()));
+            }
         }
     }
 
