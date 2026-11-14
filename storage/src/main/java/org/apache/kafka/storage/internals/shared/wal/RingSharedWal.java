@@ -45,8 +45,8 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public final class RingSharedWal implements SharedWal {
     private static final int MAX_DRAINED_APPENDS = 1024;
-    private static final int DEFAULT_MAX_OUTSTANDING_GROUPS = 4096;
-    private static final long DEFAULT_MAX_OUTSTANDING_BYTES = 256L * 1024L * 1024L;
+    public static final int DEFAULT_MAX_OUTSTANDING_GROUPS = 4096;
+    public static final long DEFAULT_MAX_OUTSTANDING_BYTES = 256L * 1024L * 1024L;
     private static final long DEFAULT_SINGLETON_COALESCE_NANOS = 0L;
     private static final long INTER_ARRIVAL_100_MICROS_NANOS = TimeUnit.MICROSECONDS.toNanos(100L);
     private static final long INTER_ARRIVAL_250_MICROS_NANOS = TimeUnit.MICROSECONDS.toNanos(250L);
@@ -124,6 +124,18 @@ public final class RingSharedWal implements SharedWal {
             DEFAULT_WRITER_SHUTDOWN_TIMEOUT_MS,
             DEFAULT_SINGLETON_COALESCE_NANOS
         );
+    }
+
+    /** Public per-broker admission limits for config-driven Ring WAL creation. */
+    public RingSharedWal(
+        Path path,
+        long totalCapacityBytes,
+        WalIoBackend ioBackend,
+        int maxOutstandingGroups,
+        long maxOutstandingBytes
+    ) throws IOException {
+        this(path, totalCapacityBytes, ioBackend, DEFAULT_WRITER_SHUTDOWN_TIMEOUT_MS,
+            DEFAULT_SINGLETON_COALESCE_NANOS, maxOutstandingGroups, maxOutstandingBytes);
     }
 
     RingSharedWal(
