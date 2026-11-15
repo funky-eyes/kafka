@@ -794,23 +794,8 @@ class S3SharedStorageUploadCrashE2ETest {
                     }
                     SharedMetadataRecordCodec.MetadataValue value =
                         SharedMetadataRecordCodec.decodeValue(key, record.value());
-                    if (key.type() == SharedMetadataRecordCodec.KeyType.OBJECT &&
-                        value instanceof SharedMetadataRecordCodec.PreparedObjectValue preparedValue) {
-                        prepared.put(key.id(), preparedValue.createdTimeMs());
-                        committed.remove(key.id());
-                    } else if (key.type() == SharedMetadataRecordCodec.KeyType.OBJECT &&
-                        value instanceof SharedMetadataRecordCodec.FencedPreparedObjectValue preparedValue) {
-                        prepared.put(key.id(), preparedValue.createdTimeMs());
-                        committed.remove(key.id());
-                    } else if (key.type() == SharedMetadataRecordCodec.KeyType.OBJECT &&
-                        value instanceof SharedMetadataRecordCodec.FencedClaimedObjectValue claimed) {
-                        prepared.remove(key.id());
-                        committed.remove(key.id());
-                        cleanup.put(key.id(), claimed);
-                    } else if (key.type() == SharedMetadataRecordCodec.KeyType.OBJECT &&
-                        value instanceof SharedMetadataRecordCodec.CommittedObjectValue committedValue) {
-                        prepared.remove(key.id());
-                        committed.put(key.id(), committedValue.metadata());
+                    if (key.type() == SharedMetadataRecordCodec.KeyType.OBJECT) {
+                        applyObjectMetadataSnapshot(key.id(), value, prepared, committed, cleanup);
                     } else if (key.type() == SharedMetadataRecordCodec.KeyType.OBJECT_CLEANUP) {
                         cleanup.put(key.id(), value);
                     }
@@ -818,6 +803,29 @@ class S3SharedStorageUploadCrashE2ETest {
             }
         }
         return new MetadataSnapshot(Map.copyOf(prepared), Map.copyOf(committed), Map.copyOf(cleanup));
+    }
+
+    private static void applyObjectMetadataSnapshot(
+        long objectId,
+        SharedMetadataRecordCodec.MetadataValue value,
+        Map<Long, Long> prepared,
+        Map<Long, SharedObjectMetadata> committed,
+        Map<Long, SharedMetadataRecordCodec.MetadataValue> cleanup
+    ) {
+        if (value instanceof SharedMetadataRecordCodec.PreparedObjectValue original) {
+            prepared.put(objectId, original.createdTimeMs());
+            committed.remove(objectId);
+        } else if (value instanceof SharedMetadataRecordCodec.FencedPreparedObjectValue fenced) {
+            prepared.put(objectId, fenced.createdTimeMs());
+            committed.remove(objectId);
+        } else if (value instanceof SharedMetadataRecordCodec.FencedClaimedObjectValue claimed) {
+            prepared.remove(objectId);
+            committed.remove(objectId);
+            cleanup.put(objectId, claimed);
+        } else if (value instanceof SharedMetadataRecordCodec.CommittedObjectValue confirmed) {
+            prepared.remove(objectId);
+            committed.put(objectId, confirmed.metadata());
+        }
     }
 
     private static BarrierEvidence readBarrierEvidence(Path marker) throws IOException {
