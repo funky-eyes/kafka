@@ -224,16 +224,7 @@ public final class SharedMetadataImage {
             }
             return;
         }
-        CleanupObject cleanup = cleanupObjects.get(objectId);
-        if (cleanup != null) {
-            if (cleanup.fenced) {
-                throw corruption("COMMIT after fenced CLAIM for object " + objectId);
-            }
-            if (state == State.RECOVERING) {
-                throw corruption("Ambiguous compacted COMMIT and cleanup fence for object " + objectId);
-            }
-            // The cleanup record has an earlier offset in the authoritative partition, so this is a losing delayed
-            // COMMIT. Keep the fence and ignore the object value; both keys remain available after compaction.
+        if (suppressCommitAfterCleanup(objectId)) {
             return;
         }
         SharedObjectMetadata existing = committedObjects.putIfAbsent(objectId, metadata);
@@ -249,6 +240,22 @@ public final class SharedMetadataImage {
             // COMMITTED winners into the broker's remote read index.
             committedObjectListener.accept(metadata);
         }
+    }
+
+    private boolean suppressCommitAfterCleanup(long objectId) {
+        CleanupObject cleanup = cleanupObjects.get(objectId);
+        if (cleanup == null) {
+            return false;
+        }
+        if (cleanup.fenced) {
+            throw corruption("COMMIT after fenced CLAIM for object " + objectId);
+        }
+        if (state == State.RECOVERING) {
+            throw corruption("Ambiguous compacted COMMIT and cleanup fence for object " + objectId);
+        }
+        // Legacy different-key cleanup won the live append order. Keep its
+        // fence, but never let a late COMMIT publish new remote read references.
+        return true;
     }
 
     private void applyObjectCatalogSeal(long objectId, MetadataValue value, long recordOffset) {
