@@ -224,7 +224,10 @@ public class QuorumControllerTest {
             ));
             try (QuorumControllerTestEnv env = new QuorumControllerTestEnv.Builder(clientEnv)
                 .setBootstrapMetadata(experimental).build()) {
-                QuorumController controller = env.activeController();
+                // Wait for the leadership-activation event before testing the
+                // feature-gated Controller writer; an elected leader can still
+                // be processing replay/activation when activeController() returns.
+                QuorumController controller = env.activeController(true);
                 var candidates = List.of(
                     new CommittedObjectRetirementControlManager.TerminalDeletion(501L, 6L),
                     new CommittedObjectRetirementControlManager.TerminalDeletion(502L, 7L)
