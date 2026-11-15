@@ -50,6 +50,8 @@ public final class SharedMetadataRecordCodec {
     private static final byte OBJECT_CLEANUP_DELETED = 5;
     private static final byte PARTITION_LOG_START_ADVANCED = 6;
     private static final byte OBJECT_CATALOG_SEALED = 7;
+    private static final byte OBJECT_FENCED_PREPARED = 8;
+    private static final byte OBJECT_FENCED_CLAIMED = 9;
     private static final int VALUE_HEADER_BYTES = Short.BYTES + Byte.BYTES;
     private static final int COMMITTED_OBJECT_HEADER_BYTES = Long.BYTES + Long.BYTES + Integer.BYTES;
     private static final int CATALOG_SEAL_DIGEST_BYTES = 64;
@@ -178,6 +180,15 @@ public final class SharedMetadataRecordCodec {
             .put(OBJECT_PREPARED)
             .putLong(createdTimeMs)
             .array();
+    }
+
+    /** Fenced lifecycle states share the COMMIT key; encoding is not arbitration. */
+    public static byte[] fencedPreparedObjectValue(long createdTimeMs) {
+        return cleanupValue(OBJECT_FENCED_PREPARED, createdTimeMs);
+    }
+
+    public static byte[] fencedClaimedObjectValue(long createdTimeMs) {
+        return cleanupValue(OBJECT_FENCED_CLAIMED, createdTimeMs);
     }
 
     public static byte[] cleanupClaimedValue(long createdTimeMs) {
@@ -327,6 +338,12 @@ public final class SharedMetadataRecordCodec {
     private static MetadataValue decodeObjectValue(long objectId, byte type, ByteBuffer buffer) {
         if (type == OBJECT_PREPARED) {
             return new PreparedObjectValue(decodeCreatedTime(buffer, "prepared object value"));
+        }
+        if (type == OBJECT_FENCED_PREPARED) {
+            return new FencedPreparedObjectValue(decodeCreatedTime(buffer, "fenced prepared object value"));
+        }
+        if (type == OBJECT_FENCED_CLAIMED) {
+            return new FencedClaimedObjectValue(decodeCreatedTime(buffer, "fenced claimed object value"));
         }
         if (type == OBJECT_COMMITTED) {
             return decodeCommittedObject(objectId, buffer);
@@ -545,6 +562,12 @@ public final class SharedMetadataRecordCodec {
     }
 
     public record PreparedObjectValue(long createdTimeMs) implements MetadataValue {
+    }
+
+    public record FencedPreparedObjectValue(long createdTimeMs) implements MetadataValue {
+    }
+
+    public record FencedClaimedObjectValue(long createdTimeMs) implements MetadataValue {
     }
 
     public record CommittedObjectValue(SharedObjectMetadata metadata) implements MetadataValue {
