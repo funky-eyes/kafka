@@ -50,10 +50,11 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -530,13 +531,24 @@ public final class S3ObjectStore implements ObjectStore {
         return builder.build();
     }
 
-    private static ExecutorService newIoExecutor(S3ObjectStoreConfig config) {
+    /**
+     * A slow S3 endpoint must not accumulate an unbounded number of queued WAL
+     * uploads and GC requests. Existing submitAsync catches rejection and
+     * completes the request future exceptionally, preserving retryability.
+     */
+    static ExecutorService newIoExecutor(S3ObjectStoreConfig config) {
         AtomicInteger threadId = new AtomicInteger();
-        return Executors.newFixedThreadPool(config.ioThreads(), runnable -> {
-            Thread thread = new Thread(runnable, "kafka-shared-s3-io-" + threadId.incrementAndGet());
-            thread.setDaemon(true);
-            return thread;
-        });
+        int backlog = (int) Math.min(1024L, Math.max(32L, (long) config.ioThreads() * 64L));
+        return new ThreadPoolExecutor(
+            config.ioThreads(), config.ioThreads(), 0L, TimeUnit.MILLISECONDS,
+            new ArrayBlockingQueue<>(backlog),
+            runnable -> {
+                Thread thread = new Thread(runnable, "kafka-shared-s3-io-" + threadId.incrementAndGet());
+                thread.setDaemon(true);
+                return thread;
+            },
+            new ThreadPoolExecutor.AbortPolicy()
+        );
     }
 
     @Override
