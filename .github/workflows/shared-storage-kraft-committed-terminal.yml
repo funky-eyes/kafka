@@ -1,0 +1,68 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements. See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License. You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Shared Storage KRaft COMMITTED Terminal
+
+on:
+  push:
+    branches:
+      - codex/kraft-committed-terminal-writer
+    paths:
+      - 'metadata/src/main/java/org/apache/kafka/controller/CommittedObjectRetirementControlManager.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/QuorumController.java'
+      - 'metadata/src/test/java/org/apache/kafka/controller/CommittedObjectRetirementControlManagerTest.java'
+      - 'metadata/src/test/java/org/apache/kafka/controller/QuorumControllerTest.java'
+      - 'metadata/src/main/resources/common/metadata/CommittedObjectRetirementRecord.json'
+      - '.github/workflows/shared-storage-kraft-committed-terminal.yml'
+  pull_request:
+    paths:
+      - 'metadata/src/main/java/org/apache/kafka/controller/CommittedObjectRetirementControlManager.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/QuorumController.java'
+      - 'metadata/src/test/java/org/apache/kafka/controller/CommittedObjectRetirementControlManagerTest.java'
+      - 'metadata/src/test/java/org/apache/kafka/controller/QuorumControllerTest.java'
+      - 'metadata/src/main/resources/common/metadata/CommittedObjectRetirementRecord.json'
+      - '.github/workflows/shared-storage-kraft-committed-terminal.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  terminal-record:
+    name: Java 25 KRaft terminal record CAS
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Configure Java 25 and Gradle
+        uses: ./.github/actions/setup-gradle
+        with:
+          java-version: 25
+          gradle-cache-read-only: true
+
+      - name: Compile and enforce metadata Checkstyle
+        run: |
+          ./gradlew :metadata:checkstyleMain :metadata:checkstyleTest \
+            :metadata:spotbugsMain --no-scan --max-workers=2
+
+      - name: Controller terminal CAS and inactive-feature regression
+        run: |
+          ./gradlew :metadata:test \
+            --tests 'org.apache.kafka.controller.CommittedObjectRetirementControlManagerTest' \
+            --tests 'org.apache.kafka.controller.QuorumControllerTest.testTerminalObjectRetirementWriterCannotBypassUnnegotiatedFeature' \
+            --no-scan --max-workers=2 -PmaxParallelForks=1

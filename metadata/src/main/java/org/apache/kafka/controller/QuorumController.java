@@ -1608,8 +1608,9 @@ public final class QuorumController implements Controller {
     }
 
     /**
-     * Keep both experimental replay paths out of the central Controller switch:
-     * neither may emit authorization or issue a COMMITTED object deletion.
+     * Keep experimental retirement record replay out of the central Controller
+     * switch. Only the last, already-deleted bookkeeping edge may be emitted;
+     * this switch never authorizes COMMITTED physical object deletion.
      */
     private void replayRetirementRecord(ApiMessage message, Optional<OffsetAndEpoch> snapshotId, long offset) {
         if (message instanceof PartitionRetirementAuthorityRecord partition) {
@@ -1639,9 +1640,30 @@ public final class QuorumController implements Controller {
     }
 
     /**
-     * Replay only: no authenticated catalog handoff or distributed BrokerEpoch
-     * safe-epoch attestation exists. Even DELETE_READY is not a worker permit.
-     * This experimental record is never emitted on the Kafka 4.3.1 baseline.
+     * Complete the terminal KRaft bookkeeping ONLY after DELETE_RECORDED.
+     *
+     * <p>Package-private until a version-negotiated Controller protocol has
+     * authenticated the preceding cross-log handoff and all-Broker fence.
+     * This emits no DELETE_READY, invokes no S3 API, and is disabled on the
+     * Kafka 4.3.1 production feature level.</p>
+     */
+    CompletableFuture<Boolean> finalizeRecordedCommittedObjectDeletion(
+        long objectId, long expectedRecordedOffset
+    ) {
+        return appendWriteEvent("finalizeRecordedCommittedObjectDeletion", OptionalLong.empty(), () -> {
+            if (!featureControl.isPartitionRetirementAuthorityEnabled()) {
+                return ControllerResult.of(List.of(), false);
+            }
+            return committedObjectRetirementControl.finalizeRecordedDeletion(
+                objectId, expectedRecordedOffset, offsetControl.nextWriteOffset());
+        });
+    }
+
+    /**
+     * No authenticated catalog handoff or distributed BrokerEpoch safe-epoch
+     * attestation exists. DELETE_READY is not a worker permit. Only terminal
+     * DELETED bookkeeping may be emitted internally on a negotiated feature
+     * level, never on the Kafka 4.3.1 baseline.
      */
     private void replayCommittedObjectRetirement(
         CommittedObjectRetirementRecord record,
@@ -1772,7 +1794,7 @@ public final class QuorumController implements Controller {
     /** Replay-only KRaft retirement authority mirror, with no write event or producer. */
     private final PartitionRetirementControlManager partitionRetirementControl;
 
-    /** Replay-only COMMITTED physical-object lifecycle; NEVER a physical deletion grant. */
+    /** COMMITTED lifecycle; terminal bookkeeping only, NEVER a physical DELETE grant. */
     private final CommittedObjectRetirementControlManager committedObjectRetirementControl;
 
     /**

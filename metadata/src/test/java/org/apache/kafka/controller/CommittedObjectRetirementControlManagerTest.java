@@ -37,6 +37,65 @@ class CommittedObjectRetirementControlManagerTest {
     private static final String DIGEST = "0123456789abcdef".repeat(4);
 
     @Test
+    void terminalWriterOnlyAppendsAfterMatchingRecordedPhysicalDelete() {
+        CommittedObjectRetirementControlManager manager = manager();
+        assertEquals(false, manager.finalizeRecordedDeletion(OBJECT_ID, 12L, 13L).response());
+        assertEquals(0, manager.finalizeRecordedDeletion(OBJECT_ID, 12L, 13L).records().size());
+
+        manager.replayFromKRaft(record(10L, -1L, 1, -1L), Optional.empty(), 10L);
+        manager.replayFromKRaft(record(11L, 10L, 2, 7L), Optional.empty(), 11L);
+        assertEquals(false, manager.finalizeRecordedDeletion(OBJECT_ID, 11L, 12L).response());
+        assertEquals(CommittedObjectRetirementState.Stage.DELETE_READY, manager.get(OBJECT_ID).stage());
+
+        manager.replayFromKRaft(record(12L, 11L, 3, 7L), Optional.empty(), 12L);
+        ControllerResult<Boolean> terminal = manager.finalizeRecordedDeletion(OBJECT_ID, 12L, 13L);
+        assertEquals(true, terminal.response());
+        assertEquals(true, terminal.isAtomic());
+        assertEquals(1, terminal.records().size());
+        CommittedObjectRetirementRecord generated =
+            (CommittedObjectRetirementRecord) terminal.records().get(0).message();
+        assertEquals(OBJECT_ID, generated.objectId());
+        assertEquals(12L, generated.previousKRaftOffset());
+        assertEquals(13L, generated.acceptedKRaftOffset());
+        assertEquals((byte) 4, generated.stage());
+        assertEquals(DIGEST, generated.descriptorSha256());
+        assertEquals(CATALOG, generated.catalogTopicId());
+
+        // The write result alone is not durable; only actual KRaft replay
+        // can advance the timeline. An uncertain append must be retried via CAS.
+        assertEquals(CommittedObjectRetirementState.Stage.DELETE_RECORDED, manager.get(OBJECT_ID).stage());
+        manager.replayFromKRaft(generated, Optional.empty(), 13L);
+        assertEquals(CommittedObjectRetirementState.Stage.DELETED, manager.get(OBJECT_ID).stage());
+        assertEquals(false, manager.finalizeRecordedDeletion(OBJECT_ID, 12L, 14L).response());
+    }
+
+    @Test
+    void terminalWriterRejectsStaleOffsetAndNeverSkipsPhysicalDeleteStage() {
+        CommittedObjectRetirementControlManager manager = manager();
+        manager.replayFromKRaft(record(10L, -1L, 1, -1L), Optional.empty(), 10L);
+        assertEquals(false, manager.finalizeRecordedDeletion(OBJECT_ID, 10L, 11L).response());
+        manager.replayFromKRaft(record(11L, 10L, 2, 7L), Optional.empty(), 11L);
+        assertEquals(false, manager.finalizeRecordedDeletion(OBJECT_ID, 11L, 12L).response());
+        manager.replayFromKRaft(record(12L, 11L, 3, 7L), Optional.empty(), 12L);
+        assertEquals(false, manager.finalizeRecordedDeletion(OBJECT_ID, 11L, 13L).response());
+        assertThrows(IllegalStateException.class, () ->
+            manager.finalizeRecordedDeletion(OBJECT_ID, 12L, 12L));
+        assertThrows(IllegalArgumentException.class, () ->
+            manager.finalizeRecordedDeletion(0L, 12L, 13L));
+        assertThrows(IllegalArgumentException.class, () ->
+            manager.finalizeRecordedDeletion(OBJECT_ID, -1L, 13L));
+
+        // Exact KRaft append verification remains mandatory: a prepared
+        // terminal record replayed at another offset is corruption.
+        CommittedObjectRetirementRecord planned =
+            (CommittedObjectRetirementRecord) manager.finalizeRecordedDeletion(
+                OBJECT_ID, 12L, 13L).records().get(0).message();
+        assertThrows(IllegalStateException.class, () ->
+            manager.replayFromKRaft(planned, Optional.empty(), 14L));
+        assertEquals(CommittedObjectRetirementState.Stage.DELETE_RECORDED, manager.get(OBJECT_ID).stage());
+    }
+
+    @Test
     void exactKRaftOffsetsAndCasDriveEveryDurableStage() {
         CommittedObjectRetirementControlManager manager = manager();
         manager.replayFromKRaft(record(10L, -1L, 1, -1L), Optional.empty(), 10L);
