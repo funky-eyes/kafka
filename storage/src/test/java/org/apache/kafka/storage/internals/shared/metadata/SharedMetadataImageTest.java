@@ -23,6 +23,8 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -54,26 +56,29 @@ class SharedMetadataImageTest {
             SharedMetadataRecordCodec.fencedPreparedObjectValue(60L));
         image.markReady();
 
+        ExecutorService workers = Executors.newFixedThreadPool(4);
         CompletableFuture<Void> writer = CompletableFuture.runAsync(() ->
             image.apply(SharedMetadataRecordCodec.objectKey(committedId),
-                SharedMetadataRecordCodec.committedObjectValue(metadata(committedId, 100L))));
+                SharedMetadataRecordCodec.committedObjectValue(metadata(committedId, 100L))), workers);
         try {
             assertTrue(publishing.await(5, TimeUnit.SECONDS));
             // The callback holds the single metadata writer monitor.
             // O(1) identity probes must neither acquire it nor read a HashMap
             // concurrently with a writer.
             CompletableFuture<Boolean> knownPrepared = CompletableFuture.supplyAsync(() ->
-                image.objectIdentityKnown(preparedId));
+                image.objectIdentityKnown(preparedId), workers);
             CompletableFuture<Boolean> knownCommitted = CompletableFuture.supplyAsync(() ->
-                image.objectIdentityKnown(committedId));
+                image.objectIdentityKnown(committedId), workers);
             CompletableFuture<Boolean> fenced = CompletableFuture.supplyAsync(() ->
-                image.fencedPrepared(preparedId, 60L));
+                image.fencedPrepared(preparedId, 60L), workers);
             assertTrue(knownPrepared.get(3, TimeUnit.SECONDS));
             assertTrue(knownCommitted.get(3, TimeUnit.SECONDS));
             assertTrue(fenced.get(3, TimeUnit.SECONDS));
         } finally {
             allowPublication.countDown();
+            workers.shutdown();
             writer.get(10, TimeUnit.SECONDS);
+            assertTrue(workers.awaitTermination(10, TimeUnit.SECONDS));
         }
     }
 
