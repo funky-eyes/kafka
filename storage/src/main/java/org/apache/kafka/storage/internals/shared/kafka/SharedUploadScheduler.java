@@ -698,6 +698,11 @@ public final class SharedUploadScheduler implements AutoCloseable {
             return 0L;
         }
         try {
+            // The metadata checkpoint alone cannot protect bytes from an
+            // external Bucket expiration policy installed after upload.
+            // Fail closed for WAL reclamation when the remote provider's
+            // retention controls cannot be verified.
+            uploader.requireSafeForWalReclaim();
             long reclaimedBytes = engine.reclaimCheckpointedWal();
             lastMaintenanceFailure.set(null);
             if (reclaimedBytes > 0) {

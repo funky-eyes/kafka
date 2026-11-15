@@ -57,6 +57,64 @@ class SharedUploadSchedulerTest {
     Path tempDir;
 
     @Test
+    void lifecyclePolicyDriftMustBlockWalReclaimWithoutBlockingLaterRetry() throws Exception {
+        InMemoryObjectStore backing = new InMemoryObjectStore();
+        InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
+        AtomicBoolean bucketExpiryDetected = new AtomicBoolean();
+        AtomicInteger policyChecks = new AtomicInteger();
+        ObjectStore guarded = new ObjectStore() {
+            @Override
+            public void requireSafeForWalReclaim() {
+                policyChecks.incrementAndGet();
+                if (bucketExpiryDetected.get()) {
+                    throw new IllegalStateException("External Bucket expiration threatens COMMITTED data");
+                }
+            }
+
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                return backing.put(objectId, data);
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                return backing.rangeRead(objectId, position, length);
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return backing.delete(objectId);
+            }
+        };
+        try (SharedStorageEngine engine = engine("bucket-expiry-wal-reclaim")) {
+            append(engine, P0, 0L, 9L, new byte[] {1, 2, 3});
+            SharedCommitProgress progress = leaderProgress(P0, 0L, 10L);
+            SharedObjectUploader uploader = new SharedObjectUploader(
+                guarded, metadataStore, new SharedObjectPacker(), engine
+            );
+            try (SharedUploadScheduler scheduler = new SharedUploadScheduler(
+                engine, progress, uploader, () -> 100L, () -> 1_000L, 1024L
+            )) {
+                assertTrue(scheduler.tryUploadOnce().get(10, TimeUnit.SECONDS).isPresent());
+                scheduler.checkpointRemoteCommitsOnce();
+                // Simulate a Bucket policy edited after COMMIT but before
+                // the rotating WAL has had its last local copy reclaimed.
+                bucketExpiryDetected.set(true);
+                assertEquals(0L, scheduler.reclaimCheckpointedWalOnce());
+                assertTrue(scheduler.lastFailure().isPresent());
+                assertTrue(scheduler.lastFailure().orElseThrow().getMessage().contains("Bucket expiration"));
+                assertEquals(1, policyChecks.get());
+
+                bucketExpiryDetected.set(false);
+                scheduler.checkpointRemoteCommitsOnce();
+                scheduler.reclaimCheckpointedWalOnce();
+                assertEquals(2, policyChecks.get());
+                assertTrue(scheduler.lastFailure().isEmpty());
+            }
+        }
+    }
+
+    @Test
     void closeWaitsForInFlightUploadBeforeReturning() throws Exception {
         InMemoryObjectMetadataStore metadataStore = new InMemoryObjectMetadataStore();
         CountDownLatch putStarted = new CountDownLatch(1);

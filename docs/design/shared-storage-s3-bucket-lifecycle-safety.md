@@ -67,3 +67,18 @@ No automatically shortened Kafka retention or fake-success read is allowed.
    manual restoration procedure; this module does not access old version IDs.
 4. Keep the KRaft COMMITTED physical GC worker disabled until the cross-log
    barrier and all BrokerEpoch retirement proof are independently verified.
+
+## Additional WAL reclaim gate
+
+The scheduled checkpointed-WAL reclaim path invokes the same provider Bucket
+policy guard immediately before `SharedStorageEngine.reclaimCheckpointedWal`.
+If the policy becomes unsafe or cannot be inspected, reclaim fails closed and
+retains the local WAL; the normal scheduled upload/checkpoint retry loop may
+resume reclaim after an operator repairs the Bucket policy.
+
+This check uses the guard's existing 30-second cached verdict to avoid a
+Bucket control-plane round trip for every maintenance interval. It reduces
+the exposure to external Bucket changes **but is not an absolute protection**:
+a policy might change immediately after a check, or objects might already
+be missing. A future independent verifier must cover remote object existence,
+version retention, and the full cross-Broker lifecycle before S3 GA claims.

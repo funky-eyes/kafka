@@ -82,6 +82,15 @@ public final class SharedObjectUploader {
         this.uploadHook = Objects.requireNonNull(uploadHook, "uploadHook");
     }
 
+    /**
+     * Called immediately before the scheduler may release checkpointed WAL
+     * bytes. Reuse the exact remote provider bound to this uploader; do not
+     * infer safety from Topic retention or a previous upload's success.
+     */
+    public void requireSafeForWalReclaim() {
+        objectStore.requireSafeForWalReclaim();
+    }
+
     public CompletableFuture<SharedObjectMetadata> upload(
         long objectId,
         long createdTimeMs,

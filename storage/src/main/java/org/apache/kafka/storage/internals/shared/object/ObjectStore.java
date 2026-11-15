@@ -103,6 +103,20 @@ public interface ObjectStore extends AutoCloseable {
         return put(objectId, parts);
     }
 
+    /**
+     * Revalidate provider-side conditions before releasing the last local
+     * recoverable WAL bytes for objects already committed remotely.
+     *
+     * <p>Only implementations relying on externally mutable Bucket policy
+     * should override this hook. In-memory/test stores without remote
+     * expiration semantics retain a no-op. A successful check is advisory:
+     * policy can change afterward, so it is never a physical GC grant.</p>
+     *
+     * @throws IllegalStateException if reclaim would be unsafe
+     */
+    default void requireSafeForWalReclaim() {
+    }
+
     CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length);
 
     CompletableFuture<Void> delete(long objectId);

@@ -359,6 +359,11 @@ public final class S3ObjectStore implements ObjectStore {
     }
 
     @Override
+    public void requireSafeForWalReclaim() {
+        lifecycleGuard.requireSafeForUpload();
+    }
+
+    @Override
     public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
         if (objectId < 0) {
             return CompletableFuture.failedFuture(new IllegalArgumentException("objectId must be non-negative"));
