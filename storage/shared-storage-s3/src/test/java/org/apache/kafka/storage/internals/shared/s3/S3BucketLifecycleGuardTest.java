@@ -117,6 +117,22 @@ class S3BucketLifecycleGuardTest {
     }
 
     @Test
+    void unexpectedPolicyEvaluationErrorCannotCachePreviousSafeVerdict() {
+        AtomicInteger evaluations = new AtomicInteger();
+        S3BucketLifecycleGuard guard = new S3BucketLifecycleGuard(() -> {
+            if (evaluations.incrementAndGet() == 1) {
+                throw new AssertionError("simulated fatal lifecycle SDK failure");
+            }
+            return List.of(expiring("unsafe-after-failure", "objects/", true));
+        }, "objects", () -> 10L);
+        assertThrows(AssertionError.class, guard::requireSafeForUpload);
+        IllegalStateException failed = assertThrows(IllegalStateException.class,
+            guard::requireSafeForUpload);
+        assertTrue(failed.getMessage().contains("unsafe-after-failure"));
+        assertEquals(2, evaluations.get());
+    }
+
+    @Test
     void rechecksAfterThirtySecondsAndDoesNotReuseOldSafeVerdict() {
         AtomicLong time = new AtomicLong();
         AtomicInteger attempts = new AtomicInteger();

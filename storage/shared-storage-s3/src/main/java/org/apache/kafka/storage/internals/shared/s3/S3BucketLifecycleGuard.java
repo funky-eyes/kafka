@@ -74,9 +74,13 @@ final class S3BucketLifecycleGuard {
     synchronized void requireSafeForUpload() {
         long now = nanoClock.getAsLong();
         if (!checked || now - lastCheck < 0L || now - lastCheck >= RECHECK_NANOS) {
-            checked = true;
+            // Publish a cache verdict only after evaluation finishes.
+            // An unexpected JVM Error must not leave a previously safe
+            // verdict reusable for another 30 seconds.
+            RuntimeException newFailure = checkRules();
+            lastFailure = newFailure;
             lastCheck = now;
-            lastFailure = checkRules();
+            checked = true;
         }
         if (lastFailure != null) {
             throw lastFailure;
