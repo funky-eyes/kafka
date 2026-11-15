@@ -1,0 +1,50 @@
+// Licensed to the Apache Software Foundation (ASF) under one or more
+// contributor license agreements.  See the NOTICE file distributed with
+// this work for additional information regarding copyright ownership.
+// The ASF licenses this file to You under the Apache License, Version 2.0
+// (the "License"); you may not use this file except in compliance with
+// the License.  You may obtain a copy of the License at
+//
+//    http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// EXPERIMENTAL / REPLAY ONLY. There is no production writer, catalog handoff
+// authority, distributed safe-epoch attestation, or physical DELETE grant.
+{
+  "apiKey": 32,
+  "type": "metadata",
+  "name": "CommittedObjectRetirementRecord",
+  "validVersions": "0",
+  "flexibleVersions": "0+",
+  "fields": [
+    { "name": "ObjectId", "type": "int64", "versions": "0+",
+      "about": "Immutable physical KSO2 object identifier, never recycled." },
+    { "name": "AcceptedKRaftOffset", "type": "int64", "versions": "0+",
+      "about": "Exact accepted log append offset or prior accepted offset retained by a trusted snapshot." },
+    { "name": "PreviousKRaftOffset", "type": "int64", "versions": "0+", "default": "-1",
+      "about": "Previous accepted object-lifecycle position; -1 on first intent." },
+    { "name": "RetirementEpoch", "type": "int64", "versions": "0+",
+      "about": "Unique controller-specified, immutable object retirement generation." },
+    { "name": "CatalogTopicId", "type": "uuid", "versions": "0+",
+      "about": "Incarnation of the compacted Kafka shared metadata topic, never its recyclable name." },
+    { "name": "CatalogCommitOffset", "type": "int64", "versions": "0+",
+      "about": "Claimed durable original COMMITTED descriptor position in the separate Kafka metadata log." },
+    { "name": "SealedCatalogPositionExclusive", "type": "int64", "versions": "0+",
+      "about": "Claimed read-committed catalog handoff boundary; replay cannot independently prove it." },
+    { "name": "ObjectSize", "type": "int64", "versions": "0+",
+      "about": "Immutable serialized physical object size." },
+    { "name": "ObjectChecksum", "type": "int64", "versions": "0+",
+      "about": "Immutable physical object checksum recorded in the original COMMITTED descriptor." },
+    { "name": "DescriptorSha256", "type": "string", "versions": "0+",
+      "about": "Lowercase hex SHA-256 of the canonical immutable COMMITTED descriptor, including every packed range." },
+    { "name": "Stage", "type": "int8", "versions": "0+",
+      "about": "1 RETIRE_INTENT, 2 DELETE_READY, 3 DELETE_RECORDED, 4 DELETED. Replay only, never a delete grant." },
+    { "name": "SafeEpoch", "type": "int64", "versions": "0+", "default": "-1",
+      "about": "Claimed distributed safe epoch; -1 for intent. Not authenticated or sufficient for physical DELETE." }
+  ]
+}

@@ -64,6 +64,7 @@ import org.apache.kafka.common.metadata.BeginTransactionRecord;
 import org.apache.kafka.common.metadata.BrokerRegistrationChangeRecord;
 import org.apache.kafka.common.metadata.ClearElrRecord;
 import org.apache.kafka.common.metadata.ClientQuotaRecord;
+import org.apache.kafka.common.metadata.CommittedObjectRetirementRecord;
 import org.apache.kafka.common.metadata.ConfigRecord;
 import org.apache.kafka.common.metadata.DelegationTokenRecord;
 import org.apache.kafka.common.metadata.EndTransactionRecord;
@@ -1524,7 +1525,8 @@ public final class QuorumController implements Controller {
                     ((PartitionRecord) message).topicId(), ((PartitionRecord) message).partitionId());
                 break;
             case PARTITION_RETIREMENT_AUTHORITY_RECORD:
-                replayPartitionRetirementAuthority((PartitionRetirementAuthorityRecord) message, snapshotId, offset);
+            case COMMITTED_OBJECT_RETIREMENT_RECORD:
+                replayRetirementRecord(message, snapshotId, offset);
                 break;
             case CONFIG_RECORD:
                 configurationControl.replay((ConfigRecord) message);
@@ -1582,12 +1584,8 @@ public final class QuorumController implements Controller {
                 delegationTokenControlManager.replay((RemoveDelegationTokenRecord) message);
                 break;
             case NO_OP_RECORD:
-                // NoOpRecord is an empty record and doesn't need to be replayed
-                break;
             case ZK_MIGRATION_STATE_RECORD:
-                // In 4.0, although migration is no longer supported and ZK has been removed from Kafka,
-                // users might migrate from ZK to KRaft in version 3.x and then perform a rolling upgrade to 4.0.
-                // Therefore, this case needs to be retained but will be a no-op.
+                // No-op records and historical ZK migration records need no replay action.
                 break;
             case BEGIN_TRANSACTION_RECORD:
                 offsetControl.replay((BeginTransactionRecord) message, offset);
@@ -1609,6 +1607,20 @@ public final class QuorumController implements Controller {
         }
     }
 
+    /**
+     * Keep both experimental replay paths out of the central Controller switch:
+     * neither may emit authorization or issue a COMMITTED object deletion.
+     */
+    private void replayRetirementRecord(ApiMessage message, Optional<OffsetAndEpoch> snapshotId, long offset) {
+        if (message instanceof PartitionRetirementAuthorityRecord partition) {
+            replayPartitionRetirementAuthority(partition, snapshotId, offset);
+        } else if (message instanceof CommittedObjectRetirementRecord object) {
+            replayCommittedObjectRetirement(object, snapshotId, offset);
+        } else {
+            throw new IllegalArgumentException("Unexpected retirement record type " + message.apiKey());
+        }
+    }
+
     private void replayPartitionRetirementAuthority(
         PartitionRetirementAuthorityRecord record,
         Optional<OffsetAndEpoch> snapshotId,
@@ -1624,6 +1636,24 @@ public final class QuorumController implements Controller {
         // tied to the previous write position is now stale, regardless of
         // which Broker or leader produced it.
         invalidateRetirementDiagnosticsPartition(record.topicId(), record.partitionId());
+    }
+
+    /**
+     * Replay only: no authenticated catalog handoff or distributed BrokerEpoch
+     * safe-epoch attestation exists. Even DELETE_READY is not a worker permit.
+     * This experimental record is never emitted on the Kafka 4.3.1 baseline.
+     */
+    private void replayCommittedObjectRetirement(
+        CommittedObjectRetirementRecord record,
+        Optional<OffsetAndEpoch> snapshotId,
+        long offset
+    ) {
+        if (!featureControl.isPartitionRetirementAuthorityEnabled()) {
+            throw new IllegalStateException(
+                "KRaft COMMITTED object lifecycle record before negotiated retirement authority feature"
+            );
+        }
+        committedObjectRetirementControl.replayFromKRaft(record, snapshotId, offset);
     }
 
     /**
@@ -1741,6 +1771,9 @@ public final class QuorumController implements Controller {
 
     /** Replay-only KRaft retirement authority mirror, with no write event or producer. */
     private final PartitionRetirementControlManager partitionRetirementControl;
+
+    /** Replay-only COMMITTED physical-object lifecycle; NEVER a physical deletion grant. */
+    private final CommittedObjectRetirementControlManager committedObjectRetirementControl;
 
     /**
      * Standby-only, UNTRUSTED WAL certificate diagnostic timeline. This never
@@ -1866,6 +1899,7 @@ public final class QuorumController implements Controller {
         this.controllerMetrics = controllerMetrics;
         this.snapshotRegistry = new SnapshotRegistry(logContext);
         this.partitionRetirementControl = new PartitionRetirementControlManager(snapshotRegistry);
+        this.committedObjectRetirementControl = new CommittedObjectRetirementControlManager(snapshotRegistry);
         this.walReplicaDurabilityV1Diagnostics = new WalReplicaDurabilityV1ReplayState(snapshotRegistry);
         this.retirementSourceProbeRegistry = new PartitionRetirementSourceProbeRegistry(clusterId);
         this.retirementReplicaRoundRegistry = new PartitionRetirementReplicaRoundRegistry();
