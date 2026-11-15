@@ -509,8 +509,6 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
                 configuration.clusterId(),
                 objectId,
                 () -> {
-                    // initTransactions fences every prior generation first.
-                    // The later LSO observes their terminal COMMIT or CLAIM.
                     captureReadCommittedReplayHorizon()
                         .get(15L, java.util.concurrent.TimeUnit.SECONDS);
                     return !image.objectIdentityKnown(objectId);
@@ -590,11 +588,42 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
 
     @Override
     public CompletableFuture<Boolean> claimCleanup(long objectId, long expectedCreatedTimeMs) {
-        // COMMIT and CLAIM currently use independent compacted keys. A Kafka
-        // append order is not an atomic cross-broker CAS, and compaction can
-        // erase evidence needed to replay the winning transition. A positive
-        // reply here would authorize irreversible S3 DELETE: fail closed.
-        return CompletableFuture.failedFuture(unsafeOrphanClaim());
+        if (!configuration.fencedLifecycleEnabled()) {
+            return CompletableFuture.failedFuture(unsafeOrphanClaim());
+        }
+        if (expectedCreatedTimeMs < 0L) {
+            return CompletableFuture.failedFuture(
+                new IllegalArgumentException("expectedCreatedTimeMs must be non-negative"));
+        }
+        if (closed.get() || !image.isReady()) {
+            return CompletableFuture.failedFuture(new IllegalStateException("Shared metadata is not ready"));
+        }
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                return FencedObjectLifecycleArbiter.claimAfterFencing(
+                    configuration.producerProperties(),
+                    SharedMetadataClientConfiguration.TOPIC_NAME,
+                    configuration.clusterId(),
+                    objectId,
+                    expectedCreatedTimeMs,
+                    () -> {
+                        // This is issued strictly AFTER the competing producer
+                        // has been fenced by initTransactions on the same ID.
+                        captureReadCommittedReplayHorizon()
+                            .get(15L, java.util.concurrent.TimeUnit.SECONDS);
+                        return image.fencedPrepared(objectId, expectedCreatedTimeMs);
+                    }
+                );
+            } catch (Exception failure) {
+                throw new CompletionException(failure);
+            }
+        }, lifecycleExecutor).thenCompose(offset -> {
+            if (offset.isEmpty()) {
+                return CompletableFuture.completedFuture(false);
+            }
+            return awaitApplied(offset.getAsLong())
+                .thenApply(ignored -> image.cleanupClaimed(objectId, expectedCreatedTimeMs));
+        });
     }
 
     @Override
@@ -645,14 +674,19 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
 
     @Override
     public List<ObjectMetadataStore.PreparedObject> preparedObjects() {
-        return image.preparedObjects();
+        return configuration.fencedLifecycleEnabled()
+            ? image.fencedPreparedObjects() : image.preparedObjects();
     }
 
     @Override
     public List<ObjectMetadataStore.PreparedObject> cleanupClaimedObjects() {
-        // Historical CLAIMED records are equally unsafe to re-delete when
-        // their earlier COMMIT may have been removed by compaction.
-        throw unsafeOrphanClaim();
+        if (!configuration.fencedLifecycleEnabled()) {
+            // Legacy claims cannot prove compaction-stable arbitration.
+            throw unsafeOrphanClaim();
+        }
+        // Never re-delete old legacy CLAIMED records, only v2 claims whose
+        // upload producer was fenced before the transaction committed.
+        return image.fencedCleanupClaimedObjects();
     }
 
     public SharedMetadataImage.State state() {

@@ -449,10 +449,8 @@ public final class SharedMetadataImage {
     }
 
     /**
-     * A new fenced upload may never reuse a remotely recorded object identity.
-     * Call only after its transactional producer is initialized and a fresh
-     * read-committed catalog horizon has been fully applied. The broker-wide
-     * object ID allocator remains responsible for never allocating reused IDs.
+     * Existing object identity check; call only after a new uploader fenced
+     * previous producer generations and caught up to post-fence Kafka LSO.
      */
     public synchronized boolean objectIdentityKnown(long objectId) {
         requireReady();
@@ -480,6 +478,24 @@ public final class SharedMetadataImage {
             .map(prepared -> new ObjectMetadataStore.PreparedObject(prepared.objectId, prepared.createdTimeMs))
             .sorted(Comparator.comparingLong(ObjectMetadataStore.PreparedObject::objectId))
             .toList();
+    }
+
+    /** Durable v2 CLAIM records remain retryable after late S3 PUT completion. */
+    public synchronized List<ObjectMetadataStore.PreparedObject> fencedCleanupClaimedObjects() {
+        requireReady();
+        return cleanupObjects.entrySet().stream()
+            .filter(entry -> entry.getValue().fenced && entry.getValue().state == CleanupState.CLAIMED)
+            .map(entry -> new ObjectMetadataStore.PreparedObject(
+                entry.getKey(), entry.getValue().createdTimeMs))
+            .sorted(Comparator.comparingLong(ObjectMetadataStore.PreparedObject::objectId))
+            .toList();
+    }
+
+    /** Targeted O(1) check; call only after post-fencing LSO catch-up. */
+    public synchronized boolean fencedPrepared(long objectId, long expectedCreatedTimeMs) {
+        requireReady();
+        PreparedObject prepared = preparedObjects.get(objectId);
+        return prepared != null && prepared.fenced && prepared.createdTimeMs == expectedCreatedTimeMs;
     }
 
     public synchronized List<ObjectMetadataStore.PreparedObject> cleanupClaimedObjects() {

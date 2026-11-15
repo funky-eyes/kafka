@@ -476,6 +476,8 @@ class S3SharedStorageUploadCrashE2ETest {
             "shared.storage.upload.interval.ms=" + UPLOAD_INTERVAL_MS,
             "shared.storage.orphan.cleanup.interval.ms=" + ORPHAN_CLEANUP_INTERVAL_MS,
             "shared.storage.orphan.grace.ms=" + ORPHAN_GRACE_MS,
+            // All three CI brokers explicitly negotiate the same experimental v2 mode.
+            "shared.storage.orphan.fenced.lifecycle.enabled=true",
             "shared.storage.metadata.listener.name=PLAINTEXT",
             "shared.storage.metadata.replication.factor=3",
             "shared.storage.metadata.min.insync.replicas=2",
@@ -752,7 +754,8 @@ class S3SharedStorageUploadCrashE2ETest {
         SharedMetadataRecordCodec.MetadataValue value =
             metadataSnapshot(bootstrapServers).cleanupStates().get(objectId);
         return value instanceof SharedMetadataRecordCodec.CleanupClaimedValue ||
-            value instanceof SharedMetadataRecordCodec.CleanupDeletedValue;
+            value instanceof SharedMetadataRecordCodec.CleanupDeletedValue ||
+            value instanceof SharedMetadataRecordCodec.FencedClaimedObjectValue;
     }
 
     private static MetadataSnapshot metadataSnapshot(String bootstrapServers) {
@@ -791,14 +794,8 @@ class S3SharedStorageUploadCrashE2ETest {
                     }
                     SharedMetadataRecordCodec.MetadataValue value =
                         SharedMetadataRecordCodec.decodeValue(key, record.value());
-                    if (key.type() == SharedMetadataRecordCodec.KeyType.OBJECT &&
-                        value instanceof SharedMetadataRecordCodec.PreparedObjectValue preparedValue) {
-                        prepared.put(key.id(), preparedValue.createdTimeMs());
-                        committed.remove(key.id());
-                    } else if (key.type() == SharedMetadataRecordCodec.KeyType.OBJECT &&
-                        value instanceof SharedMetadataRecordCodec.CommittedObjectValue committedValue) {
-                        prepared.remove(key.id());
-                        committed.put(key.id(), committedValue.metadata());
+                    if (key.type() == SharedMetadataRecordCodec.KeyType.OBJECT) {
+                        applyObjectMetadataSnapshot(key.id(), value, prepared, committed, cleanup);
                     } else if (key.type() == SharedMetadataRecordCodec.KeyType.OBJECT_CLEANUP) {
                         cleanup.put(key.id(), value);
                     }
@@ -806,6 +803,29 @@ class S3SharedStorageUploadCrashE2ETest {
             }
         }
         return new MetadataSnapshot(Map.copyOf(prepared), Map.copyOf(committed), Map.copyOf(cleanup));
+    }
+
+    private static void applyObjectMetadataSnapshot(
+        long objectId,
+        SharedMetadataRecordCodec.MetadataValue value,
+        Map<Long, Long> prepared,
+        Map<Long, SharedObjectMetadata> committed,
+        Map<Long, SharedMetadataRecordCodec.MetadataValue> cleanup
+    ) {
+        if (value instanceof SharedMetadataRecordCodec.PreparedObjectValue original) {
+            prepared.put(objectId, original.createdTimeMs());
+            committed.remove(objectId);
+        } else if (value instanceof SharedMetadataRecordCodec.FencedPreparedObjectValue fenced) {
+            prepared.put(objectId, fenced.createdTimeMs());
+            committed.remove(objectId);
+        } else if (value instanceof SharedMetadataRecordCodec.FencedClaimedObjectValue claimed) {
+            prepared.remove(objectId);
+            committed.remove(objectId);
+            cleanup.put(objectId, claimed);
+        } else if (value instanceof SharedMetadataRecordCodec.CommittedObjectValue confirmed) {
+            prepared.remove(objectId);
+            committed.put(objectId, confirmed.metadata());
+        }
     }
 
     private static BarrierEvidence readBarrierEvidence(Path marker) throws IOException {
