@@ -1275,7 +1275,7 @@ public final class QuorumController implements Controller {
                         throw fatalFaultHandler.handleFault("Asked to load snapshot " + snapshotName +
                                 ", but we are the active controller at epoch " + curClaimEpoch);
                     }
-                    // Buffer bounded, deeply copied V1 checkpoint claims only;
+                    // One snapshot, one bounded, deeply copied V1 diagnostics observer;
                     // ordinary metadata is streamed through normal standby replay.
                     WalReplicaDurabilityV1SnapshotReaderObserver checkpointObserver =
                         new WalReplicaDurabilityV1SnapshotReaderObserver();
