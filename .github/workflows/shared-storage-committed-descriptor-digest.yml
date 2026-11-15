@@ -48,6 +48,8 @@ jobs:
           gradle-cache-read-only: true
       - name: Verify canonical immutable KSO2 descriptor hashing
         run: |
-          ./gradlew :storage:checkstyleMain :storage:checkstyleTest :storage:test \
+          # Global Storage Checkstyle runs in the shared-storage parent workflow;
+          # this specialized workflow runs only its targeted correctness test.
+          ./gradlew :storage:test \
             --tests 'org.apache.kafka.storage.internals.shared.metadata.CommittedObjectDescriptorDigestTest' \
             --no-scan --max-workers=2 -PmaxParallelForks=1
