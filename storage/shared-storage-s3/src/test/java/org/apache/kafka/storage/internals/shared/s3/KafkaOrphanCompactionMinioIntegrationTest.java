@@ -293,6 +293,16 @@ class KafkaOrphanCompactionMinioIntegrationTest {
                 assertTrue(recovered.committedObject(objectId).isEmpty());
                 assertEquals(List.of(surviving), published,
                     "Only the object whose COMMIT won may publish a remote read reference");
+
+                // initTransactions alone is not a permanent object-ID fence.
+                // A new producer generation must inspect the post-fence
+                // catalog and refuse to re-PREPARE either terminal object.
+                assertThrows(IllegalStateException.class, () ->
+                    new FencedObjectLifecycleArbiter.Uploader(
+                        properties, topic, namespace, objectId));
+                assertThrows(IllegalStateException.class, () ->
+                    new FencedObjectLifecycleArbiter.Uploader(
+                        properties, topic, namespace, committedObjectId));
             } finally {
                 objects.delete(objectId).get(30, TimeUnit.SECONDS);
                 admin.deleteTopics(List.of(topic)).all().get(30, TimeUnit.SECONDS);
