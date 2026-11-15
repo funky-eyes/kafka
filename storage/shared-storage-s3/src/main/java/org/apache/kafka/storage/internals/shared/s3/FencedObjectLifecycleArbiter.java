@@ -36,6 +36,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.OptionalLong;
 import java.util.Properties;
+import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -141,15 +142,32 @@ final class FencedObjectLifecycleArbiter {
     static OptionalLong claimIfPrepared(
         Properties original, String topic, String namespace, long objectId, long expectedCreatedTimeMs
     ) throws Exception {
+        // CI-only full-topic scan: production uses the already-replayed metadata image.
+        return claimAfterFencing(original, topic, namespace, objectId, expectedCreatedTimeMs,
+            () -> {
+                MetadataValue latest = readLatestAfterFence(original, topic, objectId);
+                return latest instanceof FencedPreparedObjectValue prepared
+                    && prepared.createdTimeMs() == expectedCreatedTimeMs;
+            });
+    }
+
+    /**
+     * The callback must capture a new read-committed LSO AFTER initTransactions
+     * has fenced the upload producer, wait until that LSO has been applied,
+     * and revalidate the exact original v2 PREPARED object generation.
+     * Only the owning metadata-store implementation may supply that witness.
+     */
+    static OptionalLong claimAfterFencing(
+        Properties original, String topic, String namespace, long objectId, long expectedCreatedTimeMs,
+        Callable<Boolean> postFenceReadCommittedPrepared
+    ) throws Exception {
+        Objects.requireNonNull(postFenceReadCommittedPrepared, "postFenceReadCommittedPrepared");
         try (KafkaProducer<byte[], byte[]> cleaner = new KafkaProducer<>(
             transactionalProperties(original, namespace, objectId)
         )) {
-            // Synchronously fence the unique uploader that initialized this
-            // transactional.id BEFORE PREPARE. A late COMMIT then fails.
+            // Must complete before the read-committed horizon is captured.
             cleaner.initTransactions();
-            MetadataValue latest = readLatestAfterFence(original, topic, objectId);
-            if (!(latest instanceof FencedPreparedObjectValue prepared)
-                || prepared.createdTimeMs() != expectedCreatedTimeMs) {
+            if (!Boolean.TRUE.equals(postFenceReadCommittedPrepared.call())) {
                 return OptionalLong.empty();
             }
             cleaner.beginTransaction();

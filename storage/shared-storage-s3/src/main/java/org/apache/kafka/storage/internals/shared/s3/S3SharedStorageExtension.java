@@ -34,6 +34,8 @@ import org.apache.kafka.storage.internals.shared.kafka.SharedUploadScheduler;
 import org.apache.kafka.storage.internals.shared.metadata.BrokerObjectId;
 import org.apache.kafka.storage.internals.shared.metadata.LocalRemoteObjectCheckpoint;
 import org.apache.kafka.storage.internals.shared.object.ActiveObjectUploads;
+import org.apache.kafka.storage.internals.shared.object.OrphanCleanupScheduler;
+import org.apache.kafka.storage.internals.shared.object.OrphanObjectCleaner;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectPacker;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectReader;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectUploadHook;
@@ -93,6 +95,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
     private KafkaObjectMetadataStore metadataStore;
     private S3ObjectStore objectStore;
     private SharedUploadScheduler uploadScheduler;
+    private OrphanCleanupScheduler orphanCleanupScheduler;
     private boolean closed;
 
     @Override
@@ -284,6 +287,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
     ) throws IOException {
         KafkaObjectMetadataStore newMetadataStore = null;
         SharedUploadScheduler newUploadScheduler = null;
+        OrphanCleanupScheduler newOrphanCleanupScheduler = null;
         boolean installed = false;
         try {
             SharedMetadataClientConfiguration metadataConfiguration =
@@ -327,9 +331,19 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
                 configuration.uploadWalPressurePercent(),
                 configuration.uploadMaxInflight()
             );
-            // A compacted COMMIT can be lost from independently keyed CLAIM history.
-            // Never schedule physical orphan DELETE without durable cross-broker arbitration.
-            LOG.warn("PREPARED object orphan cleanup disabled: durable cross-broker CLAIM arbitration is absent");
+            if (metadataConfiguration.fencedLifecycleEnabled()) {
+                // Only generation-fenced v2 PREPARED objects are eligible.
+                // The metadata store first fences the upload producer and
+                // captures a post-fence read-committed horizon before CLAIM.
+                newOrphanCleanupScheduler = new OrphanCleanupScheduler(
+                    new OrphanObjectCleaner(sharedObjectStore, newMetadataStore, activeUploads, engine.remoteIndex()),
+                    context.time()::milliseconds,
+                    configuration.orphanGraceMs()
+                );
+                LOG.warn("Experimental v2 fenced orphan cleanup enabled on this Broker");
+            } else {
+                LOG.warn("Legacy PREPARED orphan cleanup remains disabled pending safe arbitration");
+            }
 
             synchronized (this) {
                 if (closed || storage != engine || objectStore != sharedObjectStore) {
@@ -337,12 +351,17 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
                 }
                 metadataStore = newMetadataStore;
                 uploadScheduler = newUploadScheduler;
+                orphanCleanupScheduler = newOrphanCleanupScheduler;
                 newUploadScheduler.start(configuration.uploadIntervalMs());
+                if (newOrphanCleanupScheduler != null) {
+                    newOrphanCleanupScheduler.start(configuration.orphanCleanupIntervalMs());
+                }
                 sharedMetrics.attachUploadScheduler(newUploadScheduler);
                 installed = true;
             }
         } finally {
             if (!installed) {
+                closeIgnoringFailure(newOrphanCleanupScheduler);
                 closeIgnoringFailure(newUploadScheduler);
                 closeIgnoringFailure(newMetadataStore);
             }
@@ -462,6 +481,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         CompletableFuture<Void> readyFuture;
         ExecutorService executor;
         SharedUploadScheduler scheduler;
+        OrphanCleanupScheduler cleanupScheduler;
         SharedStorageMetrics sharedMetrics;
         KafkaObjectMetadataStore metadata;
         S3ObjectStore objects;
@@ -474,6 +494,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             readyFuture = brokerReadyFuture;
             executor = bootstrapExecutor;
             scheduler = uploadScheduler;
+            cleanupScheduler = orphanCleanupScheduler;
             sharedMetrics = metrics;
             metadata = metadataStore;
             objects = objectStore;
@@ -481,6 +502,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             brokerReadyFuture = null;
             bootstrapExecutor = null;
             uploadScheduler = null;
+            orphanCleanupScheduler = null;
             metrics = null;
             metadataStore = null;
             objectStore = null;
@@ -501,7 +523,10 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             interrupted = awaitExecutorStop(executor);
         }
 
-        // Phase 1: stop upload admission; metadata apply may still be in progress.
+        // Phase 1: stop all new upload and cleanup admission.
+        if (cleanupScheduler != null) {
+            interrupted |= cleanupScheduler.stop();
+        }
         if (scheduler != null) {
             interrupted |= scheduler.stop();
         }
@@ -512,7 +537,8 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         // Phase 2: stop metadata clients to unblock in-flight uploads before draining the scheduler.
         failure = close(failure, metadata);
 
-        // Phase 3: all remaining async work is bounded by the S3 request policy. Drain it before closing S3 or WAL.
+        // Phase 3: drain in-flight remote operations before closing S3 or WAL.
+        failure = close(failure, cleanupScheduler);
         failure = close(failure, scheduler);
         failure = close(failure, objects);
         failure = close(failure, engine);

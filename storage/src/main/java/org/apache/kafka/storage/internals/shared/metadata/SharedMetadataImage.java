@@ -460,6 +460,24 @@ public final class SharedMetadataImage {
             .toList();
     }
 
+    /** Durable v2 CLAIM records remain retryable after late S3 PUT completion. */
+    public synchronized List<ObjectMetadataStore.PreparedObject> fencedCleanupClaimedObjects() {
+        requireReady();
+        return cleanupObjects.entrySet().stream()
+            .filter(entry -> entry.getValue().fenced && entry.getValue().state == CleanupState.CLAIMED)
+            .map(entry -> new ObjectMetadataStore.PreparedObject(
+                entry.getKey(), entry.getValue().createdTimeMs))
+            .sorted(Comparator.comparingLong(ObjectMetadataStore.PreparedObject::objectId))
+            .toList();
+    }
+
+    /** Targeted O(1) check; call only after post-fencing LSO catch-up. */
+    public synchronized boolean fencedPrepared(long objectId, long expectedCreatedTimeMs) {
+        requireReady();
+        PreparedObject prepared = preparedObjects.get(objectId);
+        return prepared != null && prepared.fenced && prepared.createdTimeMs == expectedCreatedTimeMs;
+    }
+
     public synchronized List<ObjectMetadataStore.PreparedObject> cleanupClaimedObjects() {
         requireReady();
         List<ObjectMetadataStore.PreparedObject> result = cleanupObjects.entrySet().stream()
