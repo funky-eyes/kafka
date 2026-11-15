@@ -82,15 +82,27 @@ final class FencedObjectLifecycleArbiter {
         private boolean committed;
 
         Uploader(Properties original, String topic, String namespace, long objectId) {
+            // The test-only fixture verifies the same rule by scanning Kafka.
+            this(original, topic, namespace, objectId,
+                () -> readLatestAfterFence(original, topic, objectId) == null);
+        }
+
+        Uploader(Properties original, String topic, String namespace, long objectId,
+                 Callable<Boolean> postFenceObjectIdAbsent) {
             this.topic = Objects.requireNonNull(topic, "topic");
             this.objectId = objectId;
+            Objects.requireNonNull(postFenceObjectIdAbsent, "postFenceObjectIdAbsent");
             producer = new KafkaProducer<>(transactionalProperties(original, namespace, objectId));
             try {
-                // Must precede PREPARE; never reacquire this identity after being fenced.
                 producer.initTransactions();
-            } catch (RuntimeException failure) {
-                producer.close();
-                throw failure;
+                // Fencing is not a permanent object-ID tombstone. Every new
+                // writer must reject an existing PREPARED, CLAIMED or COMMIT.
+                if (!Boolean.TRUE.equals(postFenceObjectIdAbsent.call())) {
+                    throw new IllegalStateException("Fenced object identity already exists: " + objectId);
+                }
+            } catch (Exception failure) {
+                producer.close(Duration.ofSeconds(2L));
+                throw new IllegalStateException("Unable to initialize unique fenced upload " + objectId, failure);
             }
         }
 
