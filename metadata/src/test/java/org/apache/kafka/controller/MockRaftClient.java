@@ -349,6 +349,24 @@ public final class MockRaftClient implements RaftClient<ApiMessageAndVersion>, A
             }
             return allRecords;
         }
+
+        /**
+         * Absolute KRaft log positions aligned to {@link #allRecords()}.
+         * LeaderChangeBatch consumes one offset but is not returned by
+         * allRecords(), so a record's list index is NOT its Raft offset.
+         */
+        public synchronized List<Long> allRecordOffsets() {
+            List<Long> offsets = new ArrayList<>();
+            for (Entry<Long, LocalBatch> batchEntry : batches.entrySet()) {
+                if (batchEntry.getValue() instanceof LocalRecordBatch recordBatch) {
+                    long firstOffset = batchEntry.getKey() - recordBatch.records.size() + 1;
+                    for (int i = 0; i < recordBatch.records.size(); i++) {
+                        offsets.add(firstOffset + i);
+                    }
+                }
+            }
+            return offsets;
+        }
     }
 
     private static class MetaLogListenerData {

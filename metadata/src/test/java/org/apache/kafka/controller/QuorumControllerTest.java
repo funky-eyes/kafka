@@ -208,6 +208,9 @@ public class QuorumControllerTest {
         try (MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build()) {
             // These records are actual KRaft log entries, not injected into a
             // local Controller manager or its read-only metadata snapshot.
+            // MockRaft's initial LeaderChangeBatch occupies offset 0; the
+            // first FeatureLevelRecord is at 1, not zero. Keep fixture CAS
+            // positions aligned with the actual KRaft log, not allRecords().
             clientEnv.appendInitialRecords(List.of(
                 new ApiMessageAndVersion(new FeatureLevelRecord()
                     .setName(MetadataVersion.FEATURE_NAME)
@@ -215,12 +218,12 @@ public class QuorumControllerTest {
                 new ApiMessageAndVersion(new FeatureLevelRecord()
                     .setName(PartitionRetirementAuthorityVersion.FEATURE_NAME)
                     .setFeatureLevel((short) 1), (short) 0),
-                new ApiMessageAndVersion(terminalFixtureRecord(501L, 2L, -1L, 1, catalogTopicId), (short) 0),
-                new ApiMessageAndVersion(terminalFixtureRecord(502L, 3L, -1L, 1, catalogTopicId), (short) 0),
-                new ApiMessageAndVersion(terminalFixtureRecord(501L, 4L, 2L, 2, catalogTopicId), (short) 0),
-                new ApiMessageAndVersion(terminalFixtureRecord(502L, 5L, 3L, 2, catalogTopicId), (short) 0),
-                new ApiMessageAndVersion(terminalFixtureRecord(501L, 6L, 4L, 3, catalogTopicId), (short) 0),
-                new ApiMessageAndVersion(terminalFixtureRecord(502L, 7L, 5L, 3, catalogTopicId), (short) 0)
+                new ApiMessageAndVersion(terminalFixtureRecord(501L, 3L, -1L, 1, catalogTopicId), (short) 0),
+                new ApiMessageAndVersion(terminalFixtureRecord(502L, 4L, -1L, 1, catalogTopicId), (short) 0),
+                new ApiMessageAndVersion(terminalFixtureRecord(501L, 5L, 3L, 2, catalogTopicId), (short) 0),
+                new ApiMessageAndVersion(terminalFixtureRecord(502L, 6L, 4L, 2, catalogTopicId), (short) 0),
+                new ApiMessageAndVersion(terminalFixtureRecord(501L, 7L, 5L, 3, catalogTopicId), (short) 0),
+                new ApiMessageAndVersion(terminalFixtureRecord(502L, 8L, 6L, 3, catalogTopicId), (short) 0)
             ));
             try (QuorumControllerTestEnv env = new QuorumControllerTestEnv.Builder(clientEnv)
                 .setBootstrapMetadata(experimental).build()) {
@@ -229,8 +232,8 @@ public class QuorumControllerTest {
                 // be processing replay/activation when activeController() returns.
                 QuorumController controller = env.activeController(true);
                 var candidates = List.of(
-                    new CommittedObjectRetirementControlManager.TerminalDeletion(501L, 6L),
-                    new CommittedObjectRetirementControlManager.TerminalDeletion(502L, 7L)
+                    new CommittedObjectRetirementControlManager.TerminalDeletion(501L, 7L),
+                    new CommittedObjectRetirementControlManager.TerminalDeletion(502L, 8L)
                 );
                 long before = committedRetirementRecordCount(clientEnv);
                 assertEquals(2, controller.finalizeRecordedCommittedObjectDeletionBatch(candidates)
@@ -244,8 +247,8 @@ public class QuorumControllerTest {
                 for (int offset = 0; offset < appended.size(); offset++) {
                     if (appended.get(offset).message() instanceof CommittedObjectRetirementRecord retirement
                         && retirement.stage() == 4) {
-                        assertEquals((long) offset, retirement.acceptedKRaftOffset());
-                        assertEquals(retirement.objectId() == 501L ? 6L : 7L,
+                        assertEquals(clientEnv.allRecordOffsets().get(offset), retirement.acceptedKRaftOffset());
+                        assertEquals(retirement.objectId() == 501L ? 7L : 8L,
                             retirement.previousKRaftOffset());
                         terminalCount++;
                     }
