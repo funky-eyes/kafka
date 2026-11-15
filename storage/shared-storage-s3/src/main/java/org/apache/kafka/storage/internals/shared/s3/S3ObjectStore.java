@@ -32,7 +32,11 @@ import software.amazon.awssdk.services.s3.model.CompleteMultipartUploadRequest;
 import software.amazon.awssdk.services.s3.model.CompletedMultipartUpload;
 import software.amazon.awssdk.services.s3.model.CompletedPart;
 import software.amazon.awssdk.services.s3.model.CreateMultipartUploadRequest;
+import software.amazon.awssdk.services.s3.model.Delete;
 import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
+import software.amazon.awssdk.services.s3.model.DeleteObjectsRequest;
+import software.amazon.awssdk.services.s3.model.DeleteObjectsResponse;
+import software.amazon.awssdk.services.s3.model.ObjectIdentifier;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
@@ -418,6 +422,44 @@ public final class S3ObjectStore implements ObjectStore {
                 .key(config.objectKey(objectId))
                 .build()
         ));
+    }
+
+    /**
+     * Use one native S3 DeleteObjects call for up to 1,000 independently
+     * claimed orphan IDs. S3 bulk deletes are NOT atomic: the response may
+     * report individual failures despite HTTP success. Fail the whole batch
+     * and let durable CLAIM records retry any already-deleted keys safely.
+     */
+    @Override
+    public CompletableFuture<Void> deleteBatch(List<Long> objectIds) {
+        Objects.requireNonNull(objectIds, "objectIds");
+        if (objectIds.isEmpty()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        if (objectIds.size() > 1_000) {
+            return CompletableFuture.failedFuture(new IllegalArgumentException(
+                "S3 DeleteObjects supports at most 1000 keys per request"));
+        }
+        List<ObjectIdentifier> identifiers = new ArrayList<>(objectIds.size());
+        for (Long objectId : objectIds) {
+            if (objectId == null || objectId < 0L) {
+                return CompletableFuture.failedFuture(new IllegalArgumentException(
+                    "Object ID must be non-negative"));
+            }
+            identifiers.add(ObjectIdentifier.builder().key(config.objectKey(objectId)).build());
+        }
+        DeleteObjectsRequest request = DeleteObjectsRequest.builder()
+            .bucket(config.bucket())
+            .delete(Delete.builder().objects(identifiers).quiet(true).build())
+            .build();
+        return runAsync(() -> {
+            DeleteObjectsResponse response = client.deleteObjects(request);
+            if (!response.errors().isEmpty()) {
+                throw new IllegalStateException(
+                    "S3 DeleteObjects reported " + response.errors().size()
+                        + " per-object errors; all durable CLAIMs must be retried");
+            }
+        });
     }
 
     private CompletableFuture<Void> runAsync(Runnable operation) {
