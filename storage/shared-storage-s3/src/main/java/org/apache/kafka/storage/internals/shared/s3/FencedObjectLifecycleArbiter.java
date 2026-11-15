@@ -39,13 +39,12 @@ import java.util.Properties;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Isolated Kafka-transaction protocol proof, NOT a production orphan-cleanup entry point.
+ * Experimental Kafka-transaction lifecycle writer; orphan cleanup is NOT enabled by this type.
  *
- * <p>Initializing an identical per-object transactional.id fences the old uploader
- * producer before the cleaner reads the read-committed end. One compacted key
- * preserves the final COMMIT-or-CLAIM transition. This proof uses a full-topic
- * scan; production must use the existing continuously replayed metadata image
- * and a post-fence read-committed horizon before enabling DELETE.</p>
+ * <p>One compacted object key preserves the final COMMIT-or-CLAIM state.
+ * The test-only claimant below scans a complete topic; production must
+ * instead use the continuously replayed metadata image and a post-fence
+ * read-committed horizon before enabling any physical DELETE.</p>
  */
 final class FencedObjectLifecycleArbiter {
     private static final long IO_TIMEOUT_SECONDS = 30L;
@@ -79,17 +78,31 @@ final class FencedObjectLifecycleArbiter {
         private final String topic;
         private final long objectId;
         private boolean prepared;
+        private boolean committed;
 
         Uploader(Properties original, String topic, String namespace, long objectId) {
+            // CI fixture: use a post-fence read-committed scan. Production
+            // supplies its existing continuously replayed metadata image.
+            this(original, topic, namespace, objectId,
+                () -> readLatestAfterFence(original, topic, objectId) == null);
+        }
+
+        Uploader(Properties original, String topic, String namespace, long objectId,
+                 Callable<Boolean> postFenceObjectIdAbsent) {
             this.topic = Objects.requireNonNull(topic, "topic");
             this.objectId = objectId;
+            Objects.requireNonNull(postFenceObjectIdAbsent, "postFenceObjectIdAbsent");
             producer = new KafkaProducer<>(transactionalProperties(original, namespace, objectId));
             try {
-                // Must precede PREPARE; never reacquire this identity after being fenced.
                 producer.initTransactions();
-            } catch (RuntimeException failure) {
-                producer.close();
-                throw failure;
+                // A later uploader may have fenced us in turn; no producer
+                // generation may re-PREPARE an existing CLAIMED/COMMITTED ID.
+                if (!Boolean.TRUE.equals(postFenceObjectIdAbsent.call())) {
+                    throw new IllegalStateException("Fenced object identity already exists: " + objectId);
+                }
+            } catch (Exception failure) {
+                producer.close(Duration.ofSeconds(2L));
+                throw new IllegalStateException("Unable to initialize unique fenced upload " + objectId, failure);
             }
         }
 
@@ -104,10 +117,12 @@ final class FencedObjectLifecycleArbiter {
 
         long commit(SharedObjectMetadata metadata) throws Exception {
             Objects.requireNonNull(metadata, "metadata");
-            if (!prepared || metadata.objectId() != objectId) {
+            if (!prepared || committed || metadata.objectId() != objectId) {
                 throw new IllegalStateException("Object has no matching fenced PREPARE");
             }
-            return append(SharedMetadataRecordCodec.committedObjectValue(metadata));
+            long offset = append(SharedMetadataRecordCodec.committedObjectValue(metadata));
+            committed = true;
+            return offset;
         }
 
         private long append(byte[] value) throws Exception {
@@ -130,7 +145,9 @@ final class FencedObjectLifecycleArbiter {
 
         @Override
         public void close() {
-            producer.close();
+            // Do not hold the metadata consumer callback for Kafka's default
+            // producer-close timeout during leader loss.
+            producer.close(Duration.ofSeconds(2L));
         }
     }
 
