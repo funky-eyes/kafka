@@ -34,7 +34,6 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CommittedObjectRetirementImageTest {
     private static final Uuid CATALOG = Uuid.randomUuid();
@@ -102,13 +101,13 @@ class CommittedObjectRetirementImageTest {
     }
 
     @Test
-    void oldSnapshotWithoutObjectLedgerRemovesPriorImageState() {
+    void snapshotOmittingPreviouslyAcceptedObjectLifecycleFailsClosed() {
         Entry terminal = Entry.fromRecord(record(100L, 30L, 29L, 4, 30L));
         CommittedObjectRetirementDelta delta = new CommittedObjectRetirementDelta(
             new CommittedObjectRetirementImage(Map.of(100L, terminal))
         );
-        delta.finishSnapshot();
-        assertTrue(delta.apply().isEmpty());
+        assertThrows(IllegalStateException.class, delta::finishSnapshot);
+        assertEquals(terminal, delta.apply().get(100L));
     }
 
     @Test

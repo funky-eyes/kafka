@@ -52,6 +52,16 @@ public final class CommittedObjectRetirementDelta {
     }
 
     public void finishSnapshot() {
+        // A trusted newer snapshot must not silently forget any previously
+        // accepted intent or terminal object-ID fence. Fail the entire
+        // metadata load instead of reopening a deleted physical object.
+        for (long objectId : image.entries().keySet()) {
+            if (!changed.containsKey(objectId)) {
+                throw new IllegalStateException(
+                    "KRaft snapshot omitted a previously accepted physical object lifecycle: " + objectId
+                );
+            }
+        }
         snapshot = true;
     }
 
