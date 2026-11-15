@@ -2197,8 +2197,22 @@ public final class QuorumController implements Controller {
     ) {
         if (ids.isEmpty())
             return CompletableFuture.completedFuture(Map.of());
-        return appendWriteEvent("deleteTopics", context.deadlineNs(),
-            () -> replicationControl.deleteTopics(context, ids));
+        return appendWriteEvent("deleteTopics", context.deadlineNs(), () -> {
+            ControllerResult<Map<Uuid, ApiError>> nativeDelete = replicationControl.deleteTopics(context, ids);
+            if (!featureControl.isPartitionRetirementAuthorityEnabled()) {
+                return nativeDelete;
+            }
+            return PartitionRetirementTopicDeletionRecords.augment(
+                nativeDelete,
+                topicId -> {
+                    ReplicationControlManager.TopicControlInfo topic = replicationControl.getTopic(topicId);
+                    return topic == null ? Set.of() : topic.partitionIds();
+                },
+                partitionRetirementControl::get,
+                offsetControl.nextWriteOffset(),
+                maxRecordsPerBatch
+            );
+        });
     }
 
     @Override
