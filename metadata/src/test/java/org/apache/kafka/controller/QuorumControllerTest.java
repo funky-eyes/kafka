@@ -208,9 +208,10 @@ public class QuorumControllerTest {
         try (MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build()) {
             // These records are actual KRaft log entries, not injected into a
             // local Controller manager or its read-only metadata snapshot.
-            // MockRaft's initial LeaderChangeBatch occupies offset 0; the
-            // first FeatureLevelRecord is at 1, not zero. Keep fixture CAS
-            // positions aligned with the actual KRaft log, not allRecords().
+            // MockRaft elects the initial leader at offset 0 during setup.
+            // appendInitialRecords writes a second LeaderChange at offset 1
+            // before its records (offsets 2..9), followed by another leader
+            // change at offset 10. Both leader changes consume real offsets.
             clientEnv.appendInitialRecords(List.of(
                 new ApiMessageAndVersion(new FeatureLevelRecord()
                     .setName(MetadataVersion.FEATURE_NAME)
@@ -218,13 +219,15 @@ public class QuorumControllerTest {
                 new ApiMessageAndVersion(new FeatureLevelRecord()
                     .setName(PartitionRetirementAuthorityVersion.FEATURE_NAME)
                     .setFeatureLevel((short) 1), (short) 0),
-                new ApiMessageAndVersion(terminalFixtureRecord(501L, 3L, -1L, 1, catalogTopicId), (short) 0),
-                new ApiMessageAndVersion(terminalFixtureRecord(502L, 4L, -1L, 1, catalogTopicId), (short) 0),
-                new ApiMessageAndVersion(terminalFixtureRecord(501L, 5L, 3L, 2, catalogTopicId), (short) 0),
-                new ApiMessageAndVersion(terminalFixtureRecord(502L, 6L, 4L, 2, catalogTopicId), (short) 0),
-                new ApiMessageAndVersion(terminalFixtureRecord(501L, 7L, 5L, 3, catalogTopicId), (short) 0),
-                new ApiMessageAndVersion(terminalFixtureRecord(502L, 8L, 6L, 3, catalogTopicId), (short) 0)
+                new ApiMessageAndVersion(terminalFixtureRecord(501L, 4L, -1L, 1, catalogTopicId), (short) 0),
+                new ApiMessageAndVersion(terminalFixtureRecord(502L, 5L, -1L, 1, catalogTopicId), (short) 0),
+                new ApiMessageAndVersion(terminalFixtureRecord(501L, 6L, 4L, 2, catalogTopicId), (short) 0),
+                new ApiMessageAndVersion(terminalFixtureRecord(502L, 7L, 5L, 2, catalogTopicId), (short) 0),
+                new ApiMessageAndVersion(terminalFixtureRecord(501L, 8L, 6L, 3, catalogTopicId), (short) 0),
+                new ApiMessageAndVersion(terminalFixtureRecord(502L, 9L, 7L, 3, catalogTopicId), (short) 0)
             ));
+            assertEquals(List.of(2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L), clientEnv.allRecordOffsets(),
+                "Synthetic retirement fixture offsets must include BOTH preceding LeaderChange batches");
             try (QuorumControllerTestEnv env = new QuorumControllerTestEnv.Builder(clientEnv)
                 .setBootstrapMetadata(experimental).build()) {
                 // Wait for the leadership-activation event before testing the
@@ -232,8 +235,8 @@ public class QuorumControllerTest {
                 // be processing replay/activation when activeController() returns.
                 QuorumController controller = env.activeController(true);
                 var candidates = List.of(
-                    new CommittedObjectRetirementControlManager.TerminalDeletion(501L, 7L),
-                    new CommittedObjectRetirementControlManager.TerminalDeletion(502L, 8L)
+                    new CommittedObjectRetirementControlManager.TerminalDeletion(501L, 8L),
+                    new CommittedObjectRetirementControlManager.TerminalDeletion(502L, 9L)
                 );
                 long before = committedRetirementRecordCount(clientEnv);
                 assertEquals(2, controller.finalizeRecordedCommittedObjectDeletionBatch(candidates)
@@ -248,7 +251,7 @@ public class QuorumControllerTest {
                     if (appended.get(offset).message() instanceof CommittedObjectRetirementRecord retirement
                         && retirement.stage() == 4) {
                         assertEquals(clientEnv.allRecordOffsets().get(offset), retirement.acceptedKRaftOffset());
-                        assertEquals(retirement.objectId() == 501L ? 7L : 8L,
+                        assertEquals(retirement.objectId() == 501L ? 8L : 9L,
                             retirement.previousKRaftOffset());
                         terminalCount++;
                     }
