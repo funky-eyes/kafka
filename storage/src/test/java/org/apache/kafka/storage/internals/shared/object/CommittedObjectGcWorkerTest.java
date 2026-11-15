@@ -46,6 +46,66 @@ class CommittedObjectGcWorkerTest {
     private static final long OBJECT_ID = 501L;
 
     @Test
+    void concurrentKRaftGrantChecksMustAllFinishBeforeAnyPhysicalDelete() {
+        TestContext ctx = new TestContext();
+        for (long id : List.of(501L, 502L)) {
+            ctx.put(id);
+            ctx.authority.add(id);
+            ctx.fence.fence(id);
+        }
+        CompletableFuture<Boolean> first = new CompletableFuture<>();
+        ctx.authority.validationGates.put(501L, first);
+        CompletableFuture<CommittedObjectGcWorker.SweepStats> sweep = ctx.worker.sweep();
+        assertEquals(List.of(501L, 502L), ctx.authority.checked,
+            "Independent KRaft grants must not queue behind a slow first check");
+        assertEquals(0, ctx.store.deletes.get());
+        assertFalse(sweep.isDone());
+
+        first.complete(false);
+        assertEquals(new CommittedObjectGcWorker.SweepStats(2, 1, 1), sweep.join());
+        assertEquals(List.of(List.of(502L)), ctx.store.batches);
+        assertTrue(ctx.store.backing.contains(501L));
+        assertFalse(ctx.store.backing.contains(502L));
+        assertTrue(ctx.authority.ready.containsKey(501L));
+    }
+
+    @Test
+    void failedKRaftGrantVerificationAbortsAllPhysicalBatchDeletes() {
+        TestContext ctx = new TestContext();
+        for (long id : List.of(501L, 502L)) {
+            ctx.put(id);
+            ctx.authority.add(id);
+            ctx.fence.fence(id);
+        }
+        CompletableFuture<Boolean> failing = new CompletableFuture<>();
+        ctx.authority.validationGates.put(501L, failing);
+        CompletableFuture<CommittedObjectGcWorker.SweepStats> sweep = ctx.worker.sweep();
+        assertEquals(2, ctx.authority.checked.size());
+        failing.completeExceptionally(new IllegalStateException("stale KRaft read"));
+        assertThrows(CompletionException.class, sweep::join);
+        assertEquals(0, ctx.store.deletes.get());
+        assertTrue(ctx.store.batches.isEmpty());
+        assertEquals(0, ctx.authority.completions.get());
+        assertEquals(2, ctx.authority.ready.size());
+        ctx.authority.validationGates.clear();
+        assertEquals(new CommittedObjectGcWorker.SweepStats(2, 0, 2), ctx.worker.sweep().join());
+    }
+
+    @Test
+    void controllerBatchMustNotInventObjectOrSwitchRetirementGeneration() {
+        CommittedObjectGcWorker.DeleteReady original = ready(501L);
+        assertThrows(IllegalStateException.class, () ->
+            CommittedObjectGcWorker.verifyApprovedSubset(List.of(original), List.of(ready(502L))));
+        assertThrows(IllegalStateException.class, () ->
+            CommittedObjectGcWorker.verifyApprovedSubset(List.of(original), List.of(original, original)));
+        assertThrows(IllegalStateException.class, () ->
+            CommittedObjectGcWorker.verifyApprovedSubset(List.of(original), List.of(
+                new CommittedObjectGcWorker.DeleteReady(
+                    original.descriptor(), original.retirementGeneration() + 1, original.readyRecordOffset()
+                ))));
+    }
+
+    @Test
     void distinctKRaftGrantsAndDrainedReadersShareOnePhysicalDeleteBatch() {
         TestContext ctx = new TestContext();
         for (long id : List.of(501L, 502L, 503L)) {
@@ -253,6 +313,8 @@ class CommittedObjectGcWorkerTest {
         private final Map<Long, CommittedObjectGcWorker.DeleteReady> ready = new LinkedHashMap<>();
         private final AtomicBoolean failCompletion = new AtomicBoolean();
         private final AtomicInteger completions = new AtomicInteger();
+        private final Map<Long, CompletableFuture<Boolean>> validationGates = new LinkedHashMap<>();
+        private final List<Long> checked = new ArrayList<>();
         private List<CommittedObjectGcWorker.DeleteReady> override;
         private boolean permit = true;
 
@@ -269,6 +331,11 @@ class CommittedObjectGcWorkerTest {
 
         @Override
         public CompletableFuture<Boolean> stillDeleteReady(CommittedObjectGcWorker.DeleteReady candidate) {
+            checked.add(candidate.objectId());
+            CompletableFuture<Boolean> gate = validationGates.get(candidate.objectId());
+            if (gate != null) {
+                return gate.thenApply(allowed -> allowed && permit && candidate.equals(ready.get(candidate.objectId())));
+            }
             return CompletableFuture.completedFuture(
                 permit && candidate.equals(ready.get(candidate.objectId()))
             );
