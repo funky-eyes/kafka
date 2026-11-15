@@ -30,9 +30,11 @@ import java.util.Objects;
 import java.util.Optional;
 
 /**
- * Replay-only, snapshot-rollback-aware KRaft object-lifecycle ledger.
+ * Snapshot-rollback-aware KRaft object-lifecycle ledger.
  *
- * <p>This class never emits KRaft records and cannot authorize S3/MinIO DELETE.
+ * <p>Only the already-recorded physical DELETE -> terminal DELETED edge
+ * may emit an experimental internal KRaft record. This class cannot issue
+ * a physical S3/MinIO DELETE or grant DELETE_READY.
  * The catalog position, descriptor digest and safe epoch in a replayed record
  * are only claims: no bridge currently authenticates the separate compacted
  * Kafka COMMITTED catalog, prevents late PUT/COMMIT, or proves every Broker
