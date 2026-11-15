@@ -19,9 +19,9 @@ package org.apache.kafka.storage.internals.shared.s3;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.GetBucketLifecycleConfigurationRequest;
 import software.amazon.awssdk.services.s3.model.LifecycleRule;
-import software.amazon.awssdk.services.s3.model.LifecycleRuleExpiration;
+import software.amazon.awssdk.services.s3.model.LifecycleExpiration;
 import software.amazon.awssdk.services.s3.model.LifecycleRuleFilter;
-import software.amazon.awssdk.services.s3.model.LifecycleRuleStatus;
+import software.amazon.awssdk.services.s3.model.ExpirationStatus;
 import software.amazon.awssdk.services.s3.model.S3Exception;
 
 import java.util.List;
@@ -126,7 +126,7 @@ final class S3BucketLifecycleGuard {
             if (rule == null) {
                 return "<invalid-null-rule>";
             }
-            if (rule.status() == LifecycleRuleStatus.DISABLED
+            if (rule.status() == ExpirationStatus.DISABLED
                 || !expiresCurrentObject(rule.expiration())) {
                 continue;
             }
@@ -138,7 +138,7 @@ final class S3BucketLifecycleGuard {
         return null;
     }
 
-    private static boolean expiresCurrentObject(LifecycleRuleExpiration expiration) {
+    private static boolean expiresCurrentObject(LifecycleExpiration expiration) {
         if (expiration == null) {
             return false;
         }

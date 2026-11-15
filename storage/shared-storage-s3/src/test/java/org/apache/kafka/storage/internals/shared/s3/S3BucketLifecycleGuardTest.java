@@ -20,9 +20,9 @@ import org.junit.jupiter.api.Test;
 
 import software.amazon.awssdk.awscore.exception.AwsErrorDetails;
 import software.amazon.awssdk.services.s3.model.LifecycleRule;
-import software.amazon.awssdk.services.s3.model.LifecycleRuleExpiration;
+import software.amazon.awssdk.services.s3.model.LifecycleExpiration;
 import software.amazon.awssdk.services.s3.model.LifecycleRuleFilter;
-import software.amazon.awssdk.services.s3.model.LifecycleRuleStatus;
+import software.amazon.awssdk.services.s3.model.ExpirationStatus;
 import software.amazon.awssdk.services.s3.model.S3Exception;
 
 import java.util.List;
@@ -60,9 +60,9 @@ class S3BucketLifecycleGuardTest {
         assertNull(S3BucketLifecycleGuard.firstExpiringRule(List.of(
             expiring("disabled", "objects/", false),
             LifecycleRule.builder().id("delete-old-markers")
-                .status(LifecycleRuleStatus.ENABLED)
+                .status(ExpirationStatus.ENABLED)
                 .filter(LifecycleRuleFilter.builder().prefix("objects/").build())
-                .expiration(LifecycleRuleExpiration.builder()
+                .expiration(LifecycleExpiration.builder()
                     .expiredObjectDeleteMarker(true).build())
                 .build()
         ), "objects"));
@@ -71,9 +71,9 @@ class S3BucketLifecycleGuardTest {
     @Test
     void unknownOrTagOnlyRuleIsConservativelyGlobal() {
         LifecycleRule rule = LifecycleRule.builder().id("tag-filter")
-            .status(LifecycleRuleStatus.ENABLED)
+            .status(ExpirationStatus.ENABLED)
             .filter(LifecycleRuleFilter.builder().build())
-            .expiration(LifecycleRuleExpiration.builder().days(1).build())
+            .expiration(LifecycleExpiration.builder().days(1).build())
             .build();
         assertEquals("tag-filter", S3BucketLifecycleGuard.firstExpiringRule(
             List.of(rule), "objects"));
@@ -127,9 +127,9 @@ class S3BucketLifecycleGuardTest {
 
     private static LifecycleRule expiring(String id, String prefix, boolean enabled) {
         return LifecycleRule.builder().id(id)
-            .status(enabled ? LifecycleRuleStatus.ENABLED : LifecycleRuleStatus.DISABLED)
+            .status(enabled ? ExpirationStatus.ENABLED : ExpirationStatus.DISABLED)
             .filter(LifecycleRuleFilter.builder().prefix(prefix).build())
-            .expiration(LifecycleRuleExpiration.builder().days(1).build())
+            .expiration(LifecycleExpiration.builder().days(1).build())
             .build();
     }
 }
