@@ -43,13 +43,13 @@ final class LocalCommittedObjectIoFence {
         this.uploads = Objects.requireNonNull(uploads, "uploads");
     }
 
-    synchronized void fence(long objectId) {
+    void fence(long objectId) {
         reads.fence(objectId);
         uploads.fence(objectId);
     }
 
     /** An advisory local condition, never a physical COMMITTED DELETE grant. */
-    synchronized boolean locallyDrainedAfterFence(long objectId) {
+    boolean locallyDrainedAfterFence(long objectId) {
         return reads.locallyDrainedAfterFence(objectId)
             && uploads.locallyDrainedAfterFence(objectId);
     }
