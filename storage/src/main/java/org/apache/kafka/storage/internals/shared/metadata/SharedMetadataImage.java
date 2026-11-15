@@ -37,6 +37,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 
 /**
@@ -53,16 +54,19 @@ import java.util.function.Consumer;
 public final class SharedMetadataImage {
     private static final long INITIAL_SEQUENCE = 1L;
 
-    private final Map<Long, PreparedObject> preparedObjects = new HashMap<>();
-    private final Map<Long, SharedObjectMetadata> committedObjects = new HashMap<>();
+    // Each object transition is still serialized by the single metadata
+    // replay writer. Concurrent maps allow O(1) lock-free read probes without
+    // contending with expensive catalog callbacks or whole-image snapshots.
+    private final Map<Long, PreparedObject> preparedObjects = new ConcurrentHashMap<>();
+    private final Map<Long, SharedObjectMetadata> committedObjects = new ConcurrentHashMap<>();
     private final Map<Long, Long> committedObjectPositions = new HashMap<>();
-    private final Map<Long, CatalogSealEvidence> catalogSeals = new HashMap<>();
-    private final Map<Long, CleanupObject> cleanupObjects = new HashMap<>();
+    private final Map<Long, CatalogSealEvidence> catalogSeals = new ConcurrentHashMap<>();
+    private final Map<Long, CleanupObject> cleanupObjects = new ConcurrentHashMap<>();
     private final Map<Integer, Long> brokerSequenceWatermarks = new HashMap<>();
     private final Map<SharedPartitionId, Long> partitionLogStarts = new HashMap<>();
     private final Consumer<SharedObjectMetadata> committedObjectListener;
-    private State state = State.RECOVERING;
-    private Throwable failure;
+    private volatile State state = State.RECOVERING;
+    private volatile Throwable failure;
     private long lastConsumedMetadataOffset = -1L;
 
     public SharedMetadataImage() {
@@ -452,13 +456,18 @@ public final class SharedMetadataImage {
      * Existing object identity check; call only after a new uploader fenced
      * previous producer generations and caught up to post-fence Kafka LSO.
      */
-    public synchronized boolean objectIdentityKnown(long objectId) {
+    public boolean objectIdentityKnown(long objectId) {
         requireReady();
         if (objectId <= 0L) {
             throw new IllegalArgumentException("objectId must be positive");
         }
-        return preparedObjects.containsKey(objectId) || committedObjects.containsKey(objectId)
+        // PREPARED -> COMMITTED and PREPARED -> CLAIMED always install
+        // the successor BEFORE removing the former. Thus readers cannot
+        // observe an absent identity during either successful transition.
+        boolean known = preparedObjects.containsKey(objectId) || committedObjects.containsKey(objectId)
             || cleanupObjects.containsKey(objectId) || catalogSeals.containsKey(objectId);
+        requireReady();
+        return known;
     }
 
     public synchronized List<ObjectMetadataStore.PreparedObject> preparedObjects() {
@@ -492,10 +501,14 @@ public final class SharedMetadataImage {
     }
 
     /** Targeted O(1) check; call only after post-fencing LSO catch-up. */
-    public synchronized boolean fencedPrepared(long objectId, long expectedCreatedTimeMs) {
+    public boolean fencedPrepared(long objectId, long expectedCreatedTimeMs) {
         requireReady();
+        // The caller MUST first capture and apply a post-producer-fence
+        // read-committed LSO. An arbitrary live map read is not GC authority.
         PreparedObject prepared = preparedObjects.get(objectId);
-        return prepared != null && prepared.fenced && prepared.createdTimeMs == expectedCreatedTimeMs;
+        boolean matches = prepared != null && prepared.fenced && prepared.createdTimeMs == expectedCreatedTimeMs;
+        requireReady();
+        return matches;
     }
 
     public synchronized List<ObjectMetadataStore.PreparedObject> cleanupClaimedObjects() {
