@@ -39,13 +39,12 @@ import java.util.Properties;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Isolated Kafka-transaction protocol proof, NOT a production orphan-cleanup entry point.
+ * Experimental Kafka-transaction lifecycle writer; orphan cleanup is NOT enabled by this type.
  *
- * <p>Initializing an identical per-object transactional.id fences the old uploader
- * producer before the cleaner reads the read-committed end. One compacted key
- * preserves the final COMMIT-or-CLAIM transition. This proof uses a full-topic
- * scan; production must use the existing continuously replayed metadata image
- * and a post-fence read-committed horizon before enabling DELETE.</p>
+ * <p>One compacted object key preserves the final COMMIT-or-CLAIM state.
+ * The test-only claimant below scans a complete topic; production must
+ * instead use the continuously replayed metadata image and a post-fence
+ * read-committed horizon before enabling any physical DELETE.</p>
  */
 final class FencedObjectLifecycleArbiter {
     private static final long IO_TIMEOUT_SECONDS = 30L;
@@ -79,6 +78,7 @@ final class FencedObjectLifecycleArbiter {
         private final String topic;
         private final long objectId;
         private boolean prepared;
+        private boolean committed;
 
         Uploader(Properties original, String topic, String namespace, long objectId) {
             this.topic = Objects.requireNonNull(topic, "topic");
@@ -104,10 +104,12 @@ final class FencedObjectLifecycleArbiter {
 
         long commit(SharedObjectMetadata metadata) throws Exception {
             Objects.requireNonNull(metadata, "metadata");
-            if (!prepared || metadata.objectId() != objectId) {
+            if (!prepared || committed || metadata.objectId() != objectId) {
                 throw new IllegalStateException("Object has no matching fenced PREPARE");
             }
-            return append(SharedMetadataRecordCodec.committedObjectValue(metadata));
+            long offset = append(SharedMetadataRecordCodec.committedObjectValue(metadata));
+            committed = true;
+            return offset;
         }
 
         private long append(byte[] value) throws Exception {

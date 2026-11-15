@@ -132,7 +132,13 @@ public final class SharedObjectUploader {
         // Upload completion, not caller cancellation, releases the identity-scoped lease.
         // The public Future is a dependent view and cannot cancel the internal
         // metadata/PUT/COMMIT continuation before its asynchronous cleanup.
-        result.whenComplete((ignored, error) -> uploadLease.close());
+        result.whenComplete((ignored, error) -> {
+            try {
+                metadataStore.releaseUpload(objectId);
+            } finally {
+                uploadLease.close();
+            }
+        });
         return result.thenApply(metadata -> metadata);
     }
 
