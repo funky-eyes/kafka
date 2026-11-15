@@ -26,11 +26,14 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -38,6 +41,85 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class OrphanObjectCleanerTest {
+    @Test
+    void orphanGcRunsIndependentDeletesInBoundedParallelBatches() throws Exception {
+        InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
+        Map<Long, CompletableFuture<Void>> pending = new ConcurrentHashMap<>();
+        AtomicInteger active = new AtomicInteger();
+        AtomicInteger maximum = new AtomicInteger();
+        ObjectStore controlled = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                return CompletableFuture.completedFuture(null);
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                CompletableFuture<Void> gate = new CompletableFuture<>();
+                maximum.accumulateAndGet(active.incrementAndGet(), Math::max);
+                pending.put(objectId, gate);
+                return gate.whenComplete((ignored, error) -> active.decrementAndGet());
+            }
+        };
+        for (int index = 1; index <= 12; index++) {
+            metadata.prepare(50_000L + index, 100L).get();
+        }
+        OrphanObjectCleaner cleaner = new OrphanObjectCleaner(controlled, metadata);
+        CompletableFuture<Integer> cleanup = cleaner.clean(1_000L);
+        assertEquals(8, pending.size(), "A large batch must not issue unbounded S3 deletes");
+        assertEquals(8, active.get());
+        assertFalse(cleanup.isDone());
+
+        List<CompletableFuture<Void>> firstBatch = List.copyOf(pending.values());
+        firstBatch.forEach(gate -> gate.complete(null));
+        assertEquals(12, pending.size(), "The next batch starts only after the first has drained");
+        assertTrue(maximum.get() <= 8);
+        for (CompletableFuture<Void> gate : pending.values()) {
+            gate.complete(null);
+        }
+        assertEquals(12, cleanup.get(10, TimeUnit.SECONDS));
+        assertEquals(0, active.get());
+    }
+
+    @Test
+    void overlappingCleanupPassesNeverDeleteSamePhysicalIdTwice() throws Exception {
+        InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
+        long objectId = 60_001L;
+        metadata.prepare(objectId, 50L).get();
+        AtomicInteger deletes = new AtomicInteger();
+        CompletableFuture<Void> gate = new CompletableFuture<>();
+        ObjectStore controlled = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long id, ByteBuffer data) {
+                return CompletableFuture.completedFuture(null);
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long id, long position, int length) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long id) {
+                deletes.incrementAndGet();
+                return gate;
+            }
+        };
+        OrphanObjectCleaner cleaner = new OrphanObjectCleaner(controlled, metadata);
+        CompletableFuture<Integer> first = cleaner.clean(1_000L);
+        CompletableFuture<Integer> overlapping = cleaner.clean(1_000L);
+        assertEquals(1, deletes.get());
+        assertEquals(0, overlapping.get(10, TimeUnit.SECONDS));
+        gate.complete(null);
+        assertEquals(1, first.get(10, TimeUnit.SECONDS));
+        assertEquals(1, deletes.get());
+    }
+
     @Test
     void committedObjectIsNeverClaimedOrDeleted() throws Exception {
         InMemoryObjectStore objects = new InMemoryObjectStore();
