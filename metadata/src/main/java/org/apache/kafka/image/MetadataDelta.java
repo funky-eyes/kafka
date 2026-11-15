@@ -21,6 +21,7 @@ import org.apache.kafka.common.metadata.AccessControlEntryRecord;
 import org.apache.kafka.common.metadata.BrokerRegistrationChangeRecord;
 import org.apache.kafka.common.metadata.ClearElrRecord;
 import org.apache.kafka.common.metadata.ClientQuotaRecord;
+import org.apache.kafka.common.metadata.CommittedObjectRetirementRecord;
 import org.apache.kafka.common.metadata.ConfigRecord;
 import org.apache.kafka.common.metadata.DelegationTokenRecord;
 import org.apache.kafka.common.metadata.FeatureLevelRecord;
@@ -93,6 +94,8 @@ public final class MetadataDelta {
     private DelegationTokenDelta delegationTokenDelta = null;
 
     private PartitionRetirementAuthorityDelta partitionRetirementDelta = null;
+
+    private CommittedObjectRetirementDelta committedObjectRetirementDelta = null;
 
     private MetadataDelta(MetadataImage image, SupportedConfigChecker supportedConfigChecker) {
         this.image = image;
@@ -193,6 +196,14 @@ public final class MetadataDelta {
         return partitionRetirementDelta;
     }
 
+    public CommittedObjectRetirementDelta getOrCreateCommittedObjectRetirementDelta() {
+        if (committedObjectRetirementDelta == null) {
+            committedObjectRetirementDelta =
+                new CommittedObjectRetirementDelta(image.committedObjectRetirements());
+        }
+        return committedObjectRetirementDelta;
+    }
+
     private FeaturesImage currentFeatures() {
         return featuresDelta == null ? image.features() : featuresDelta.apply();
     }
@@ -200,6 +211,11 @@ public final class MetadataDelta {
     private PartitionRetirementAuthorityImage appliedPartitionRetirements() {
         return partitionRetirementDelta == null
             ? image.partitionRetirements() : partitionRetirementDelta.apply();
+    }
+
+    private CommittedObjectRetirementImage appliedCommittedObjectRetirements() {
+        return committedObjectRetirementDelta == null
+            ? image.committedObjectRetirements() : committedObjectRetirementDelta.apply();
     }
 
     public Optional<MetadataVersion> metadataVersionChanged() {
@@ -227,6 +243,9 @@ public final class MetadataDelta {
                 break;
             case PARTITION_RETIREMENT_AUTHORITY_RECORD:
                 replay((PartitionRetirementAuthorityRecord) record);
+                break;
+            case COMMITTED_OBJECT_RETIREMENT_RECORD:
+                replay((CommittedObjectRetirementRecord) record);
                 break;
             case CONFIG_RECORD:
                 replay((ConfigRecord) record);
@@ -317,6 +336,15 @@ public final class MetadataDelta {
             );
         }
         getOrCreatePartitionRetirementDelta().replay(record);
+    }
+
+    public void replay(CommittedObjectRetirementRecord record) {
+        if (!currentFeatures().isPartitionRetirementAuthorityEnabled()) {
+            throw new IllegalStateException(
+                "COMMITTED object retirement record before negotiated retirement feature"
+            );
+        }
+        getOrCreateCommittedObjectRetirementDelta().replay(record);
     }
 
     public void replay(ConfigRecord record) {
@@ -414,6 +442,7 @@ public final class MetadataDelta {
         getOrCreateScramDelta().finishSnapshot();
         getOrCreateDelegationTokenDelta().finishSnapshot();
         getOrCreatePartitionRetirementDelta().finishSnapshot();
+        getOrCreateCommittedObjectRetirementDelta().finishSnapshot();
     }
 
     public MetadataImage apply(MetadataProvenance provenance) {
@@ -482,7 +511,8 @@ public final class MetadataDelta {
             newAcls,
             newScram,
             newDelegationTokens,
-            appliedPartitionRetirements()
+            appliedPartitionRetirements(),
+            appliedCommittedObjectRetirements()
         );
     }
 
