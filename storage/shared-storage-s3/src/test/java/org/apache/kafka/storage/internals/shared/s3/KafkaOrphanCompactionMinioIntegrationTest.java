@@ -115,7 +115,7 @@ class KafkaOrphanCompactionMinioIntegrationTest {
             admin.createTopics(List.of(new NewTopic(topic, 1, (short) 3).configs(Map.of(
                 TopicConfig.CLEANUP_POLICY_CONFIG, TopicConfig.CLEANUP_POLICY_COMPACT,
                 TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2",
-                TopicConfig.SEGMENT_BYTES_CONFIG, "16384",
+                TopicConfig.SEGMENT_BYTES_CONFIG, "1048576",
                 TopicConfig.SEGMENT_MS_CONFIG, "1000",
                 TopicConfig.MIN_CLEANABLE_DIRTY_RATIO_CONFIG, "0.01",
                 TopicConfig.MAX_COMPACTION_LAG_MS_CONFIG, "3000"
@@ -141,7 +141,7 @@ class KafkaOrphanCompactionMinioIntegrationTest {
 
                     // Roll several segments so Kafka's real log cleaner can compact the first CLAIM.
                     byte[] filler = new byte[4_096];
-                    for (int i = 0; i < 256; i++) {
+                    for (int i = 0; i < 1024; i++) {
                         uploader.send(new ProducerRecord<>(topic, 0, new byte[] {99}, filler))
                             .get(30, TimeUnit.SECONDS);
                     }

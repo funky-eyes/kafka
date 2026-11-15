@@ -102,7 +102,7 @@ jobs:
             -PmaxParallelForks=1 -Dorg.gradle.jvmargs=-Xmx2g --no-scan
           result="$(find storage/shared-storage-s3/build/test-results build/junit-xml \
             -name 'TEST-org.apache.kafka.storage.internals.shared.s3.KafkaOrphanCompactionMinioIntegrationTest.xml' \
-            -print -quit 2>/dev/null)"
+            -print -quit 2>/dev/null || true)"
           test -n "$result"
           grep -q 'failures="0"' "$result"
           grep -q 'errors="0"' "$result"
