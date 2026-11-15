@@ -55,6 +55,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.OptionalLong;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
@@ -165,6 +166,144 @@ class KafkaOrphanCompactionMinioIntegrationTest {
                 admin.deleteTopics(List.of(topic)).all().get(30, TimeUnit.SECONDS);
             }
         }
+    }
+
+
+    /**
+     * Exercises the proposed single-key lifecycle through real transactional Kafka brokers,
+     * the real log cleaner, and real MinIO. This does not enable the production cleaner.
+     */
+    @Test
+    @Timeout(value = 6, unit = TimeUnit.MINUTES)
+    void fencedSingleKeyClaimSurvivesRealKafkaCompactionAndRejectsLateCommit() throws Exception {
+        String bootstrap = System.getenv("SHARED_STORAGE_KAFKA_BOOTSTRAP_SERVERS");
+        String endpoint = System.getenv("SHARED_STORAGE_S3_ENDPOINT");
+        assumeTrue(bootstrap != null && !bootstrap.isBlank(), "Kafka integration brokers are not configured");
+        assumeTrue(endpoint != null && !endpoint.isBlank(), "MinIO integration endpoint is not configured");
+
+        String topic = "fenced-compact-" + UUID.randomUUID();
+        String namespace = UUID.randomUUID().toString();
+        long objectId = 9_202L;
+        long committedObjectId = 9_203L;
+        long createdTimeMs = 2_000L;
+        byte[] key = SharedMetadataRecordCodec.objectKey(objectId);
+        byte[] bytes = new byte[] {5, 6, 7, 8};
+        SharedObjectMetadata descriptor = new SharedObjectMetadata(objectId, bytes.length, 2L, List.of(
+            new SharedObjectRange(new SharedPartitionId(1L, 2L, 0), new OffsetRange(0L, 1L),
+                0, 0L, bytes.length, 2L)
+        ));
+        SharedObjectMetadata surviving = new SharedObjectMetadata(committedObjectId, bytes.length, 3L, List.of(
+            new SharedObjectRange(new SharedPartitionId(1L, 2L, 1), new OffsetRange(0L, 1L),
+                0, 0L, bytes.length, 3L)
+        ));
+        Map<String, Object> options = new HashMap<>();
+        options.put(S3ObjectStoreConfig.BUCKET_CONFIG, "kafka-orphan-compaction-test");
+        options.put(S3ObjectStoreConfig.REGION_CONFIG, "us-east-1");
+        options.put(S3ObjectStoreConfig.ENDPOINT_CONFIG, endpoint);
+        options.put(S3ObjectStoreConfig.PATH_STYLE_ACCESS_CONFIG, true);
+        options.put(S3ObjectStoreConfig.KEY_PREFIX_CONFIG, "fenced-compaction/" + UUID.randomUUID());
+        S3ObjectStoreConfig objectConfig = S3ObjectStoreConfig.from(options);
+        Properties properties = producerProperties(bootstrap);
+        try (Admin admin = Admin.create(properties);
+             S3ObjectStore objects = new S3ObjectStore(objectConfig);
+             S3Client inspector = S3Client.builder().region(Region.US_EAST_1)
+                 .endpointOverride(objectConfig.endpoint().orElseThrow())
+                 .credentialsProvider(DefaultCredentialsProvider.builder().build())
+                 .httpClientBuilder(UrlConnectionHttpClient.builder())
+                 .serviceConfiguration(S3Configuration.builder().pathStyleAccessEnabled(true).build())
+                 .build()) {
+            assertTrue(admin.describeCluster().nodes().get(30, TimeUnit.SECONDS).size() >= 3);
+            try {
+                inspector.createBucket(CreateBucketRequest.builder().bucket(objectConfig.bucket()).build());
+            } catch (S3Exception e) {
+                if (e.statusCode() != 409) {
+                    throw e;
+                }
+            }
+            admin.createTopics(List.of(new NewTopic(topic, 1, (short) 3).configs(Map.of(
+                TopicConfig.CLEANUP_POLICY_CONFIG, TopicConfig.CLEANUP_POLICY_COMPACT,
+                TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2",
+                TopicConfig.SEGMENT_BYTES_CONFIG, "1048576",
+                TopicConfig.SEGMENT_MS_CONFIG, "1000",
+                TopicConfig.MIN_CLEANABLE_DIRTY_RATIO_CONFIG, "0.01",
+                TopicConfig.MAX_COMPACTION_LAG_MS_CONFIG, "3000"
+            )))).all().get(30, TimeUnit.SECONDS);
+            try {
+                final long preparedOffset;
+                final long claimOffset;
+                try (FencedObjectLifecycleArbiter.Uploader uploader =
+                         new FencedObjectLifecycleArbiter.Uploader(properties, topic, namespace, objectId)) {
+                    preparedOffset = uploader.prepare(createdTimeMs);
+                    objects.put(objectId, ByteBuffer.wrap(bytes)).get(30, TimeUnit.SECONDS);
+                    OptionalLong claim = FencedObjectLifecycleArbiter.claimIfPrepared(
+                        properties, topic, namespace, objectId, createdTimeMs
+                    );
+                    assertTrue(claim.isPresent(), "Fenced cleaner must win over an unfinished upload");
+                    claimOffset = claim.getAsLong();
+                    objects.delete(objectId).get(30, TimeUnit.SECONDS);
+                    S3Exception missing = assertThrows(S3Exception.class, () -> inspector.headObject(
+                        HeadObjectRequest.builder().bucket(objectConfig.bucket())
+                            .key(objectConfig.objectKey(objectId)).build()));
+                    assertEquals(404, missing.statusCode());
+
+                    // The uploader's producer was initialized before PREPARE.
+                    // Fencing must forbid the delayed COMMIT, not just hide it on replay.
+                    assertThrows(Exception.class, () -> uploader.commit(descriptor));
+                }
+                assertFalse(FencedObjectLifecycleArbiter.claimIfPrepared(
+                    properties, topic, namespace, objectId, createdTimeMs
+                ).isPresent(), "Duplicate cleaner must not mint a second CLAIM");
+
+                try (FencedObjectLifecycleArbiter.Uploader uploader =
+                         new FencedObjectLifecycleArbiter.Uploader(
+                             properties, topic, namespace, committedObjectId)) {
+                    uploader.prepare(createdTimeMs + 1L);
+                    uploader.commit(surviving);
+                }
+                assertFalse(FencedObjectLifecycleArbiter.claimIfPrepared(
+                    properties, topic, namespace, committedObjectId, createdTimeMs + 1L
+                ).isPresent(), "A committed winner must never be claimed for deletion");
+
+                try (KafkaProducer<byte[], byte[]> fillerProducer = new KafkaProducer<>(properties)) {
+                    byte[] filler = new byte[4_096];
+                    for (int i = 0; i < 1024; i++) {
+                        fillerProducer.send(new ProducerRecord<>(topic, 0, new byte[] {99}, filler))
+                            .get(30, TimeUnit.SECONDS);
+                    }
+                }
+                List<ConsumerRecord<byte[], byte[]>> compacted = awaitSingleKeyCompaction(
+                    bootstrap, topic, key, preparedOffset, claimOffset
+                );
+                List<SharedObjectMetadata> published = new ArrayList<>();
+                SharedMetadataImage recovered = new SharedMetadataImage(published::add);
+                for (ConsumerRecord<byte[], byte[]> record : compacted) {
+                    recovered.applyFromMetadataLog(record.key(), record.value(), record.offset());
+                }
+                recovered.markReady();
+                assertTrue(recovered.cleanupClaimed(objectId, createdTimeMs));
+                assertTrue(published.isEmpty(), "The claimed/deleted object must stay invisible after compaction");
+                assertTrue(recovered.committedObject(objectId).isEmpty());
+            } finally {
+                objects.delete(objectId).get(30, TimeUnit.SECONDS);
+                admin.deleteTopics(List.of(topic)).all().get(30, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    private static List<ConsumerRecord<byte[], byte[]>> awaitSingleKeyCompaction(
+        String bootstrap, String topic, byte[] key, long preparedOffset, long claimedOffset
+    ) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.MINUTES.toNanos(3);
+        while (System.nanoTime() < deadline) {
+            List<ConsumerRecord<byte[], byte[]>> records = readTargetRecords(bootstrap, topic, key, key);
+            boolean preparedSurvives = records.stream().anyMatch(record -> record.offset() == preparedOffset);
+            boolean claimSurvives = records.stream().anyMatch(record -> record.offset() == claimedOffset);
+            if (!preparedSurvives && claimSurvives) {
+                return records;
+            }
+            Thread.sleep(500L);
+        }
+        throw new AssertionError("Kafka did not compact the fenced PREPARE while retaining its CLAIM");
     }
 
     private static long applySent(SharedMetadataImage image, KafkaProducer<byte[], byte[]> producer,
