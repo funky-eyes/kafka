@@ -139,6 +139,11 @@ public final class SharedMetadataImage {
     }
 
     private void applyObjectTombstone(long objectId) {
+        if (catalogSeals.containsKey(objectId)) {
+            // A historical COMMITTED tombstone cannot erase a sealed
+            // physical object while its authoritative lifetime is unresolved.
+            throw corruption("Tombstone would erase a sealed COMMITTED object: " + objectId);
+        }
         if (state == State.READY) {
             // Live object tombstones lack KRaft retirement authorization.
             // Fail closed rather than diverging from other replica indexes.
@@ -230,10 +235,11 @@ public final class SharedMetadataImage {
             throw corruption("Catalog seal changed an immutable packed object descriptor: " + objectId);
         }
         CatalogSealEvidence next = new CatalogSealEvidence(recordOffset, seal);
-        CatalogSealEvidence prior = catalogSeals.putIfAbsent(objectId, next);
+        CatalogSealEvidence prior = catalogSeals.get(objectId);
         if (prior != null && !prior.equals(next)) {
             throw corruption("Conflicting catalog seal generations for object " + objectId);
         }
+        catalogSeals.putIfAbsent(objectId, next);
         // Keep existing COMMITTED references readable. This replay fact
         // DOES NOT retire primary/alternate indexes, drain readers, or
         // grant DELETE permission.

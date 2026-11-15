@@ -637,6 +637,26 @@ class SharedMetadataImageTest {
                 SharedMetadataRecordCodec.objectCatalogSealValue(8L, 17L, object)));
     }
 
+    @Test
+    void sealedCatalogRejectsHistoricalTombstoneAndConflictingLateCommit() {
+        long id = BrokerObjectId.compose(8, 94L);
+        SharedObjectMetadata original = metadata(id, 120L);
+        SharedMetadataImage conflicting = new SharedMetadataImage();
+        byte[] key = SharedMetadataRecordCodec.objectKey(id);
+        byte[] sealKey = SharedMetadataRecordCodec.objectCatalogSealKey(id);
+        byte[] seal = SharedMetadataRecordCodec.objectCatalogSealValue(8L, 17L, original);
+        conflicting.applyFromMetadataLog(key, SharedMetadataRecordCodec.committedObjectValue(original), 8L);
+        conflicting.applyFromMetadataLog(sealKey, seal, 9L);
+        assertThrows(IllegalStateException.class, () -> conflicting.applyFromMetadataLog(
+            key, SharedMetadataRecordCodec.committedObjectValue(metadata(id, 121L)), 10L));
+
+        SharedMetadataImage tombstone = new SharedMetadataImage();
+        tombstone.applyFromMetadataLog(key, SharedMetadataRecordCodec.committedObjectValue(original), 8L);
+        tombstone.applyFromMetadataLog(sealKey, seal, 9L);
+        assertThrows(IllegalStateException.class, () -> tombstone.applyFromMetadataLog(key, null, 10L));
+        assertEquals(SharedMetadataImage.State.FAILED, tombstone.state());
+    }
+
     private static SharedObjectMetadata metadata(long objectId, long checksum) {
         SharedObjectRange range = new SharedObjectRange(
             new SharedPartitionId(11L, 12L, 0),
