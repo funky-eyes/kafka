@@ -27,7 +27,15 @@ import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 import java.util.OptionalLong;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -41,6 +49,49 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class KafkaObjectMetadataStoreTest {
+    @Test
+    void concurrentDuplicatePrepareAllocatesOnlyOneTransactionalSlot() throws Exception {
+        long objectId = 7_001L;
+        Set<Long> initializing = ConcurrentHashMap.newKeySet();
+        Map<Long, Object> sessions = new ConcurrentHashMap<>();
+        ExecutorService workers = Executors.newFixedThreadPool(12);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<Boolean>> admissions = new ArrayList<>();
+        try {
+            for (int i = 0; i < 24; i++) {
+                admissions.add(workers.submit(() -> {
+                    start.await();
+                    return KafkaObjectMetadataStore.reserveFencedUpload(
+                        objectId, initializing, sessions);
+                }));
+            }
+            start.countDown();
+            int admitted = 0;
+            for (Future<Boolean> future : admissions) {
+                if (future.get(10, TimeUnit.SECONDS)) {
+                    admitted++;
+                }
+            }
+            assertEquals(1, admitted,
+                "Duplicate local PREPARE may not initTransactions and fence the winning uploader");
+            assertTrue(initializing.contains(objectId));
+            initializing.remove(objectId);
+            sessions.put(objectId, new Object());
+            assertFalse(KafkaObjectMetadataStore.reserveFencedUpload(
+                objectId, initializing, sessions));
+            assertFalse(initializing.contains(objectId));
+            sessions.remove(objectId);
+            assertTrue(KafkaObjectMetadataStore.reserveFencedUpload(
+                objectId, initializing, sessions));
+            initializing.remove(objectId);
+            assertThrows(IllegalArgumentException.class, () ->
+                KafkaObjectMetadataStore.reserveFencedUpload(0L, initializing, sessions));
+        } finally {
+            start.countDown();
+            workers.shutdownNow();
+        }
+    }
+
     @Test
     void orphanDeleteRequiresDurableArbitration() {
         UnsupportedOperationException refusal = KafkaObjectMetadataStore.unsafeOrphanClaim();
