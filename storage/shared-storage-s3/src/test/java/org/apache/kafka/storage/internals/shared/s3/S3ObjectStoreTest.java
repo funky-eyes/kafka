@@ -346,6 +346,21 @@ class S3ObjectStoreTest {
             assertEquals(objectId, absent.objectId());
             S3Exception original = assertInstanceOf(S3Exception.class, absent.getCause());
             assertEquals(404, original.statusCode(), "Deleted MinIO object must no longer be readable");
+
+            // Exercise the real S3 DeleteObjects API (one request, two keys),
+            // including idempotent retry after some or all keys are missing.
+            long first = 9_011L;
+            long second = 9_012L;
+            store.put(first, ByteBuffer.wrap(payload)).get(10, TimeUnit.SECONDS);
+            store.put(second, ByteBuffer.wrap(payload)).get(10, TimeUnit.SECONDS);
+            store.deleteBatch(List.of(first, second)).get(10, TimeUnit.SECONDS);
+            store.deleteBatch(List.of(first, second)).get(10, TimeUnit.SECONDS);
+            for (long removed : List.of(first, second)) {
+                ExecutionException notFound = assertThrows(ExecutionException.class,
+                    () -> store.rangeRead(removed, 0L, 1).get(10, TimeUnit.SECONDS));
+                assertEquals(removed, assertInstanceOf(RemoteObjectMissingException.class,
+                    notFound.getCause()).objectId());
+            }
         }
     }
 
