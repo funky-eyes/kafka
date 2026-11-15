@@ -37,6 +37,91 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class OrphanCleanupSchedulerTest {
     @Test
+    void cancellingCallerDoesNotReleaseOrStrandInFlightCleanupDuringClose() throws Exception {
+        InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
+        metadata.prepare(601L, 1L).get(10, TimeUnit.SECONDS);
+        CompletableFuture<Void> remoteDelete = new CompletableFuture<>();
+        AtomicInteger deletes = new AtomicInteger();
+        ObjectStore objects = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                return CompletableFuture.completedFuture(null);
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long offset, int length) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                deletes.incrementAndGet();
+                return remoteDelete;
+            }
+        };
+        OrphanCleanupScheduler scheduler = new OrphanCleanupScheduler(
+            new OrphanObjectCleaner(objects, metadata), () -> 10_000L, 1_000L
+        );
+        CompletableFuture<Integer> caller = scheduler.tryCleanOnce();
+        assertEquals(1, deletes.get());
+        assertTrue(caller.cancel(false));
+        assertEquals(0, scheduler.tryCleanOnce().get(10, TimeUnit.SECONDS),
+            "Cancelling the observer must not release the active delete slot");
+        assertEquals(1, deletes.get());
+
+        CompletableFuture<Void> closing = CompletableFuture.runAsync(scheduler::close);
+        try {
+            assertThrows(java.util.concurrent.TimeoutException.class,
+                () -> closing.get(200, TimeUnit.MILLISECONDS),
+                "Close must still wait for the actual remote delete despite caller cancellation");
+        } finally {
+            remoteDelete.complete(null);
+        }
+        closing.get(10, TimeUnit.SECONDS);
+        assertEquals(1, deletes.get());
+        assertTrue(metadata.isCleanupClaimed(601L));
+    }
+
+    @Test
+    void cancellingObserverStillReleasesSlotWhenRemoteDeleteFails() throws Exception {
+        InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
+        metadata.prepare(602L, 1L).get(10, TimeUnit.SECONDS);
+        CompletableFuture<Void> remoteDelete = new CompletableFuture<>();
+        AtomicInteger deletes = new AtomicInteger();
+        ObjectStore objects = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                return CompletableFuture.completedFuture(null);
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long offset, int length) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return deletes.incrementAndGet() == 1
+                    ? remoteDelete : CompletableFuture.completedFuture(null);
+            }
+        };
+        try (OrphanCleanupScheduler scheduler = new OrphanCleanupScheduler(
+            new OrphanObjectCleaner(objects, metadata), () -> 10_000L, 1_000L
+        )) {
+            CompletableFuture<Integer> observer = scheduler.tryCleanOnce();
+            assertTrue(observer.cancel(false));
+            assertEquals(0, scheduler.tryCleanOnce().get(10, TimeUnit.SECONDS));
+            IllegalStateException failure = new IllegalStateException("S3 bulk operation failed");
+            remoteDelete.completeExceptionally(failure);
+            assertTrue(scheduler.lastFailure().isPresent(),
+                "Internal completion must observe remote failure even when caller cancelled");
+            assertEquals(1, scheduler.tryCleanOnce().get(10, TimeUnit.SECONDS));
+            assertEquals(2, deletes.get());
+            assertTrue(scheduler.lastFailure().isEmpty());
+        }
+    }
+
+    @Test
     void closeWaitsForInFlightCleanupBeforeReturning() throws Exception {
         InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
         metadata.prepare(105L, 1L).get();
