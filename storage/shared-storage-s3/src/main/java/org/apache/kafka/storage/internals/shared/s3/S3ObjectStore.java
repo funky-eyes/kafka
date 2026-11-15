@@ -36,6 +36,7 @@ import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
+import software.amazon.awssdk.services.s3.model.S3Exception;
 import software.amazon.awssdk.services.s3.model.UploadPartRequest;
 
 import java.io.IOException;
@@ -71,6 +72,7 @@ public final class S3ObjectStore implements ObjectStore {
 
     private final S3ObjectStoreConfig config;
     private final S3Client client;
+    private final S3BucketLifecycleGuard lifecycleGuard;
     private final ExecutorService ioExecutor;
     private final AtomicBoolean closed = new AtomicBoolean();
 
@@ -81,6 +83,7 @@ public final class S3ObjectStore implements ObjectStore {
     S3ObjectStore(S3ObjectStoreConfig config, S3Client client, ExecutorService ioExecutor) {
         this.config = Objects.requireNonNull(config, "config");
         this.client = Objects.requireNonNull(client, "client");
+        this.lifecycleGuard = new S3BucketLifecycleGuard(client, config);
         this.ioExecutor = Objects.requireNonNull(ioExecutor, "ioExecutor");
     }
 
@@ -91,7 +94,10 @@ public final class S3ObjectStore implements ObjectStore {
             return CompletableFuture.failedFuture(new IllegalArgumentException("objectId must be non-negative"));
         }
         ByteBuffer payload = data.asReadOnlyBuffer();
-        return runAsync(() -> putSingle(objectId, payload));
+        return runAsync(() -> {
+            lifecycleGuard.requireSafeForUpload();
+            putSingle(objectId, payload);
+        });
     }
 
     @Override
@@ -115,7 +121,10 @@ public final class S3ObjectStore implements ObjectStore {
         if (payloads.size() == 1) {
             return put(objectId, payloads.get(0));
         }
-        return runAsync(() -> putMultipart(objectId, payloads));
+        return runAsync(() -> {
+            lifecycleGuard.requireSafeForUpload();
+            putMultipart(objectId, payloads);
+        });
     }
 
     @Override
@@ -141,6 +150,7 @@ public final class S3ObjectStore implements ObjectStore {
 
     private void putKnownSizeSource(long objectId, long objectSize, PartSource source) {
         try (source) {
+            lifecycleGuard.requireSafeForUpload();
             ByteBuffer first = nextPart(source);
             if (first == null) {
                 throw new IllegalArgumentException("Object part source must not be empty");
@@ -161,6 +171,7 @@ public final class S3ObjectStore implements ObjectStore {
 
     private void putUnknownSizeSource(long objectId, PartSource source) {
         try (source) {
+            lifecycleGuard.requireSafeForUpload();
             ByteBuffer first = nextPart(source);
             if (first == null) {
                 throw new IllegalArgumentException("Object part source must not be empty");
@@ -370,14 +381,24 @@ public final class S3ObjectStore implements ObjectStore {
         }
         String range = "bytes=" + position + "-" + lastByte;
         return supplyAsync(() -> {
-            ResponseBytes<GetObjectResponse> response = client.getObjectAsBytes(
-                GetObjectRequest.builder()
-                    .bucket(config.bucket())
-                    .key(config.objectKey(objectId))
-                    .range(range)
-                    .build()
-            );
-            return response.asByteBuffer().asReadOnlyBuffer();
+            try {
+                ResponseBytes<GetObjectResponse> response = client.getObjectAsBytes(
+                    GetObjectRequest.builder()
+                        .bucket(config.bucket())
+                        .key(config.objectKey(objectId))
+                        .range(range)
+                        .build()
+                );
+                return response.asByteBuffer().asReadOnlyBuffer();
+            } catch (S3Exception e) {
+                if (e.statusCode() == 404) {
+                    // This is not normal Kafka retention. The shared metadata
+                    // reference still exists; do not transform 404 into an
+                    // absent offset or change the partition's LogStartOffset.
+                    throw new RemoteObjectMissingException(objectId, config.bucket(), e);
+                }
+                throw e;
+            }
         });
     }
 
