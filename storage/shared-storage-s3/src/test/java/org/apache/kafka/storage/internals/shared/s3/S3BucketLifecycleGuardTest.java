@@ -98,7 +98,7 @@ class S3BucketLifecycleGuardTest {
         missingBuilder.statusCode(404);
         missingBuilder.awsErrorDetails(AwsErrorDetails.builder()
             .errorCode("NoSuchLifecycleConfiguration").build());
-        S3Exception absent = missingBuilder.build();
+        S3Exception absent = (S3Exception) missingBuilder.build();
         S3BucketLifecycleGuard noRules = new S3BucketLifecycleGuard(() -> {
             attempts.incrementAndGet();
             throw absent;
