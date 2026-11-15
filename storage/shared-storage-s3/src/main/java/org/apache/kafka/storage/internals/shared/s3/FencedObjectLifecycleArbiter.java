@@ -132,7 +132,9 @@ final class FencedObjectLifecycleArbiter {
 
         @Override
         public void close() {
-            producer.close();
+            // Do not hold the metadata consumer callback for Kafka's default
+            // producer-close timeout during leader loss.
+            producer.close(Duration.ofSeconds(2L));
         }
     }
 
