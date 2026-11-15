@@ -20,7 +20,13 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -31,6 +37,81 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ActiveCommittedObjectReadsTest {
+    @Test
+    void concurrentReadAdmissionAndFenceLinearizeWithoutLostLeases() throws Exception {
+        ActiveCommittedObjectReads reads = new ActiveCommittedObjectReads();
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            for (int attempt = 0; attempt < 64; attempt++) {
+                long objectId = 90_000L + attempt;
+                CountDownLatch start = new CountDownLatch(1);
+                Future<Optional<ActiveCommittedObjectReads.ReadLease>> admitted = workers.submit(() -> {
+                    start.await();
+                    return reads.tryAcquireLogicalRead(objectId);
+                });
+                Future<?> fenced = workers.submit(() -> {
+                    start.await();
+                    reads.fence(objectId);
+                    return null;
+                });
+                start.countDown();
+                Optional<ActiveCommittedObjectReads.ReadLease> lease =
+                    admitted.get(10, TimeUnit.SECONDS);
+                fenced.get(10, TimeUnit.SECONDS);
+
+                assertEquals(lease.isPresent() ? 1L : 0L, reads.inFlightLogicalReads(objectId));
+                if (lease.isPresent()) {
+                    assertFalse(reads.locallyDrainedAfterFence(objectId));
+                    lease.get().close();
+                    lease.get().close();
+                }
+                assertTrue(reads.locallyDrainedAfterFence(objectId));
+                assertTrue(reads.tryAcquire(objectId).isEmpty());
+                assertTrue(reads.tryAcquireLogicalRead(objectId).isEmpty());
+            }
+        } finally {
+            workers.shutdownNow();
+        }
+    }
+
+    @Test
+    void unrelatedPhysicalAndLogicalReadsUseIndependentObjectStates() throws Exception {
+        ActiveCommittedObjectReads reads = new ActiveCommittedObjectReads();
+        ExecutorService workers = Executors.newFixedThreadPool(8);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<?>> all = new java.util.ArrayList<>();
+        try {
+            for (int worker = 0; worker < 8; worker++) {
+                final int index = worker;
+                all.add(workers.submit(() -> {
+                    start.await();
+                    for (int offset = 0; offset < 128; offset++) {
+                        long objectId = 100_000L + index * 128L + offset;
+                        ActiveCommittedObjectReads.ReadLease get = reads.tryAcquire(objectId).orElseThrow();
+                        ActiveCommittedObjectReads.ReadLease logical =
+                            reads.tryAcquireLogicalRead(objectId).orElseThrow();
+                        assertEquals(1L, reads.inFlightRangeGets(objectId));
+                        assertEquals(1L, reads.inFlightLogicalReads(objectId));
+                        reads.fence(objectId);
+                        assertFalse(reads.locallyDrainedAfterFence(objectId));
+                        logical.close();
+                        get.close();
+                        assertTrue(reads.locallyDrainedAfterFence(objectId));
+                        assertTrue(reads.tryAcquire(objectId).isEmpty());
+                    }
+                    return null;
+                }));
+            }
+            start.countDown();
+            for (Future<?> operation : all) {
+                operation.get(20, TimeUnit.SECONDS);
+            }
+        } finally {
+            start.countDown();
+            workers.shutdownNow();
+        }
+    }
+
     @Test
     void localDrainRequiresFenceAndAllPhysicalGetLeases() {
         ActiveCommittedObjectReads pins = new ActiveCommittedObjectReads();
