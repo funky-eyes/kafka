@@ -54,14 +54,16 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
@@ -86,6 +88,7 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
     private static final long TOPIC_CREATE_RETRY_BACKOFF_MS = 250L;
     private static final long CLOSE_JOIN_TIMEOUT_MS = 30_000L;
     private static final int MAX_PENDING_REPLAY_HORIZONS = 32;
+    private static final int MAX_PENDING_LIFECYCLE_OPERATIONS = 256;
 
     private final SharedMetadataClientConfiguration configuration;
     private final Admin admin;
@@ -103,12 +106,23 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
     // Single-flight CAS admission happens before any expensive initTransactions.
     private final Set<Long> initializingFencedUploads = ConcurrentHashMap.newKeySet();
     private final Set<Long> claimingFencedObjects = ConcurrentHashMap.newKeySet();
-    private final ExecutorService lifecycleExecutor = Executors.newFixedThreadPool(4, runnable -> {
-        Thread thread = new Thread(runnable, "kafka-shared-object-lifecycle");
-        thread.setDaemon(true);
-        return thread;
-    });
+    // No unbounded executor queue: under overload, reject and retry later
+    // rather than retaining unlimited transactional producers / request state.
+    private final ExecutorService lifecycleExecutor = newLifecycleExecutor();
     private volatile Thread consumerThread;
+
+    static ThreadPoolExecutor newLifecycleExecutor() {
+        return new ThreadPoolExecutor(
+            4, 4, 0L, TimeUnit.MILLISECONDS,
+            new ArrayBlockingQueue<>(MAX_PENDING_LIFECYCLE_OPERATIONS),
+            runnable -> {
+                Thread thread = new Thread(runnable, "kafka-shared-object-lifecycle");
+                thread.setDaemon(true);
+                return thread;
+            },
+            new ThreadPoolExecutor.AbortPolicy()
+        );
+    }
 
     private KafkaObjectMetadataStore(
         SharedMetadataClientConfiguration configuration,
