@@ -448,6 +448,21 @@ public final class SharedMetadataImage {
         return Optional.ofNullable(committedObjects.get(objectId));
     }
 
+    /**
+     * A new fenced upload may never reuse a remotely recorded object identity.
+     * Call only after its transactional producer is initialized and a fresh
+     * read-committed catalog horizon has been fully applied. The broker-wide
+     * object ID allocator remains responsible for never allocating reused IDs.
+     */
+    public synchronized boolean objectIdentityKnown(long objectId) {
+        requireReady();
+        if (objectId <= 0L) {
+            throw new IllegalArgumentException("objectId must be positive");
+        }
+        return preparedObjects.containsKey(objectId) || committedObjects.containsKey(objectId)
+            || cleanupObjects.containsKey(objectId) || catalogSeals.containsKey(objectId);
+    }
+
     public synchronized List<ObjectMetadataStore.PreparedObject> preparedObjects() {
         requireReady();
         List<ObjectMetadataStore.PreparedObject> result = preparedObjects.values().stream()

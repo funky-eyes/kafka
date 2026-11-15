@@ -81,15 +81,28 @@ final class FencedObjectLifecycleArbiter {
         private boolean committed;
 
         Uploader(Properties original, String topic, String namespace, long objectId) {
+            // CI fixture: use a post-fence read-committed scan. Production
+            // supplies its existing continuously replayed metadata image.
+            this(original, topic, namespace, objectId,
+                () -> readLatestAfterFence(original, topic, objectId) == null);
+        }
+
+        Uploader(Properties original, String topic, String namespace, long objectId,
+                 Callable<Boolean> postFenceObjectIdAbsent) {
             this.topic = Objects.requireNonNull(topic, "topic");
             this.objectId = objectId;
+            Objects.requireNonNull(postFenceObjectIdAbsent, "postFenceObjectIdAbsent");
             producer = new KafkaProducer<>(transactionalProperties(original, namespace, objectId));
             try {
-                // Must precede PREPARE; never reacquire this identity after being fenced.
                 producer.initTransactions();
-            } catch (RuntimeException failure) {
-                producer.close();
-                throw failure;
+                // A later uploader may have fenced us in turn; no producer
+                // generation may re-PREPARE an existing CLAIMED/COMMITTED ID.
+                if (!Boolean.TRUE.equals(postFenceObjectIdAbsent.call())) {
+                    throw new IllegalStateException("Fenced object identity already exists: " + objectId);
+                }
+            } catch (Exception failure) {
+                producer.close(Duration.ofSeconds(2L));
+                throw new IllegalStateException("Unable to initialize unique fenced upload " + objectId, failure);
             }
         }
 
