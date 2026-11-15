@@ -16,96 +16,95 @@
  */
 package org.apache.kafka.storage.internals.shared.object;
 
-import java.util.HashMap;
-import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Process-local admission and drain fence for physical object uploads.
  *
- * <p>A lease remains active across PREPARE, PUT, COMMIT, and asynchronous
- * post-COMMIT publication. Fencing an object is irreversible in this registry:
- * new uploads fail, and an existing upload must finish before the local fence
- * can report drained. Stale or cancelled callers cannot release a later upload
- * of the same object ID through an earlier lease.</p>
+ * <p>Independent physical object IDs never contend on one global monitor.
+ * Writers atomically update only their own identity with ConcurrentHashMap.compute,
+ * while read-only observations are lock-free and see immutable state snapshots.
+ * compute holds a short, key-local map-bin lock; no I/O or callback runs inside it.
+ * A fenced identity stays present forever, preventing remove/reinsert ABA.
+ * A lease is identity-scoped and cannot release a newer upload.</p>
  *
- * <p>This is neither a cross-broker upload certificate nor KRaft authority.
- * It cannot authorize COMMITTED physical object deletion. Legacy begin/end
- * callers retain their original API but cannot release leased uploads.</p>
+ * <p>This is not distributed arbitration or Controller physical-delete
+ * authority. Kafka lifecycle fencing is still required between brokers.</p>
  */
 public final class ActiveObjectUploads {
-    private final Map<Long, State> objects = new HashMap<>();
+    private final ConcurrentHashMap<Long, State> objects = new ConcurrentHashMap<>();
 
-    /** Legacy admission API; new uploaders should retain the returned lease instead. */
-    public synchronized void begin(long objectId) {
-        State state = stateForAdmission(objectId);
-        state.legacyActive = true;
+    /** Legacy admission API; new uploaders should retain the lease instead. */
+    public void begin(long objectId) {
+        requireObjectId(objectId);
+        objects.compute(objectId, (id, current) -> {
+            requireIdleUnfenced(id, current);
+            return new State(true, null, false);
+        });
     }
 
-    /** Admit one upload, returning an identity-scoped, idempotent completion token. */
-    public synchronized UploadLease beginLease(long objectId) {
-        State state = stateForAdmission(objectId);
+    /** Admit one upload using an identity-scoped idempotent completion token. */
+    public UploadLease beginLease(long objectId) {
+        requireObjectId(objectId);
         UploadLease lease = new UploadLease(this, objectId);
-        state.lease = lease;
+        objects.compute(objectId, (id, current) -> {
+            requireIdleUnfenced(id, current);
+            return new State(false, lease, false);
+        });
         return lease;
     }
 
-    /** Only releases an upload admitted through the legacy begin API. */
-    public synchronized void end(long objectId) {
+    /** The legacy ID-only completion must never release an active lease. */
+    public void end(long objectId) {
+        objects.computeIfPresent(objectId, (id, current) -> {
+            if (current.lease() != null) {
+                throw new IllegalStateException("A leased object upload cannot be ended by ID: " + objectId);
+            }
+            return current.fenced() ? new State(false, null, true) : null;
+        });
+    }
+
+    /** Irreversibly prevent new local uploads, without waiting for active I/O. */
+    public void fence(long objectId) {
+        requireObjectId(objectId);
+        objects.compute(objectId, (id, current) ->
+            new State(current != null && current.legacyActive(),
+                current == null ? null : current.lease(), true)
+        );
+    }
+
+    /** Read-only local diagnostic; not a distributed GC grant. */
+    public boolean locallyDrainedAfterFence(long objectId) {
+        requireObjectId(objectId);
         State state = objects.get(objectId);
-        if (state == null) {
+        return state != null && state.fenced() && !state.legacyActive() && state.lease() == null;
+    }
+
+    public boolean contains(long objectId) {
+        State state = objects.get(objectId);
+        return state != null && (state.legacyActive() || state.lease() != null);
+    }
+
+    private static void requireIdleUnfenced(long objectId, State current) {
+        if (current == null) {
             return;
         }
-        if (state.lease != null) {
-            throw new IllegalStateException("A leased object upload cannot be ended by ID: " + objectId);
-        }
-        state.legacyActive = false;
-        removeIdleUnfenced(objectId, state);
-    }
-
-    /** Prevent any subsequent PUT admission for this object in this process. */
-    public synchronized void fence(long objectId) {
-        requireObjectId(objectId);
-        objects.computeIfAbsent(objectId, ignored -> new State()).fenced = true;
-    }
-
-    /** Local-only observation: it is not a distributed GC grant. */
-    public synchronized boolean locallyDrainedAfterFence(long objectId) {
-        requireObjectId(objectId);
-        State state = objects.get(objectId);
-        return state != null && state.fenced && !state.legacyActive && state.lease == null;
-    }
-
-    public synchronized boolean contains(long objectId) {
-        State state = objects.get(objectId);
-        return state != null && (state.legacyActive || state.lease != null);
-    }
-
-    private State stateForAdmission(long objectId) {
-        requireObjectId(objectId);
-        State state = objects.computeIfAbsent(objectId, ignored -> new State());
-        if (state.fenced) {
+        if (current.fenced()) {
             throw new IllegalStateException("Object upload is locally fenced: " + objectId);
         }
-        if (state.legacyActive || state.lease != null) {
+        if (current.legacyActive() || current.lease() != null) {
             throw new IllegalStateException("Object upload is already active: " + objectId);
         }
-        return state;
     }
 
-    private synchronized void release(UploadLease lease) {
-        State state = objects.get(lease.objectId);
-        if (state == null || state.lease != lease) {
-            throw new IllegalStateException("Upload lease does not own object: " + lease.objectId);
-        }
-        state.lease = null;
-        removeIdleUnfenced(lease.objectId, state);
-    }
-
-    private void removeIdleUnfenced(long objectId, State state) {
-        if (!state.fenced && !state.legacyActive && state.lease == null) {
-            objects.remove(objectId);
-        }
+    private void release(UploadLease lease) {
+        objects.compute(lease.objectId, (id, current) -> {
+            if (current == null || current.lease() != lease) {
+                throw new IllegalStateException("Upload lease does not own object: " + lease.objectId);
+            }
+            return current.fenced() ? new State(false, null, true) : null;
+        });
     }
 
     private static void requireObjectId(long objectId) {
@@ -114,10 +113,7 @@ public final class ActiveObjectUploads {
         }
     }
 
-    private static final class State {
-        private boolean legacyActive;
-        private UploadLease lease;
-        private boolean fenced;
+    private record State(boolean legacyActive, UploadLease lease, boolean fenced) {
     }
 
     public static final class UploadLease implements AutoCloseable {
