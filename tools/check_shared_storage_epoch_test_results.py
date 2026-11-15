@@ -712,6 +712,8 @@ REQUIRED_TESTS = {
         "restoredEvidenceIsImmutableAndTopicIncarnationsRemainDistinct",
         "cumulativeNestedClaimsAreBoundedBeforeSnapshotRestore",
         "missingNestedClaimListsFailEarlyWithoutPoisoningNextCheckpoint",
+        "mutatedCaptureSourceCannotChangePreflightOrRestoredOffsets",
+        "nullNestedEntriesFailBeforeCaptureAndDoNotPoisonNextRecord",
     ),
     "org.apache.kafka.controller.WalReplicaDurabilityCertificateReplayStateTest": (
         "committedLogReplayFreezesGeneratedRecordAndItsNestedMutableEntries",

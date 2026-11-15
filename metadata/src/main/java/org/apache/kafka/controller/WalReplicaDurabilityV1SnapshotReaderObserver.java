@@ -85,9 +85,57 @@ final class WalReplicaDurabilityV1SnapshotReaderObserver {
         if (newClaims > MAX_CHECKPOINT_CLAIMS - capturedClaimCount) {
             throw new IllegalArgumentException("too many buffered WAL checkpoint receipt and span claims");
         }
-        captured.add(entry);
+        // Snapshot records are mutable generated messages. Do not retain an
+        // alias which could change between this callback and final preflight.
+        ApiMessageAndVersion frozen = duplicateCheckpoint(checkpoint, entry.version());
+        captured.add(frozen);
         capturedClaimCount += newClaims;
         return true;
+    }
+
+    private static ApiMessageAndVersion duplicateCheckpoint(
+        WalReplicaDurabilityV1CheckpointRecord checkpoint,
+        short wireVersion
+    ) {
+        List<WalReplicaDurabilityV1CheckpointRecord.ReplicaReceipt> receipts =
+            new ArrayList<>(checkpoint.replicaReceipts().size());
+        for (var receipt : checkpoint.replicaReceipts()) {
+            if (receipt == null) {
+                throw new IllegalArgumentException("null WAL checkpoint replica receipt");
+            }
+            receipts.add(new WalReplicaDurabilityV1CheckpointRecord.ReplicaReceipt()
+                .setBrokerId(receipt.brokerId())
+                .setBrokerEpoch(receipt.brokerEpoch())
+                .setIncarnationId(receipt.incarnationId())
+                .setStorageGeneration(receipt.storageGeneration())
+                .setDurableEndOffset(receipt.durableEndOffset()));
+        }
+        List<WalReplicaDurabilityV1CheckpointRecord.WalSpan> spans =
+            new ArrayList<>(checkpoint.walSpans().size());
+        for (var span : checkpoint.walSpans()) {
+            if (span == null) {
+                throw new IllegalArgumentException("null WAL checkpoint span claim");
+            }
+            spans.add(new WalReplicaDurabilityV1CheckpointRecord.WalSpan()
+                .setBrokerId(span.brokerId())
+                .setStartOffset(span.startOffset())
+                .setEndOffset(span.endOffset())
+                .setCrc32c(span.crc32c()));
+        }
+        var copy = new WalReplicaDurabilityV1CheckpointRecord()
+            .setTopicId(checkpoint.topicId())
+            .setPartitionId(checkpoint.partitionId())
+            .setLeaderEpoch(checkpoint.leaderEpoch())
+            .setPartitionEpoch(checkpoint.partitionEpoch())
+            .setStartOffset(checkpoint.startOffset())
+            .setEndOffset(checkpoint.endOffset())
+            .setControllerEpoch(checkpoint.controllerEpoch())
+            .setAcceptedKRaftOffset(checkpoint.acceptedKRaftOffset())
+            .setPreviousKRaftOffset(checkpoint.previousKRaftOffset())
+            .setAcceptedRaftEpoch(checkpoint.acceptedRaftEpoch())
+            .setReplicaReceipts(receipts)
+            .setWalSpans(spans);
+        return new ApiMessageAndVersion(copy, wireVersion);
     }
 
     /**

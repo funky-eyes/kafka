@@ -48,7 +48,7 @@ on:
       - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityV1ReplayStateTest.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityV1StandbyCommitReplay.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityV1StandbyCommitReplayTest.java'
-      # Bounded standby V1 checkpoint claims are covered by 853 exact-head named Java25 tests.
+      # Bounded standby V1 deep-copied claims are covered by 855 exact-head Java25 tests.
       - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityV1SnapshotReaderObserver.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityV1SnapshotReaderObserverTest.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityV1CommittedBatchOrigin.java'
@@ -163,7 +163,7 @@ on:
       - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityV1ReplayStateTest.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityV1StandbyCommitReplay.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityV1StandbyCommitReplayTest.java'
-      # Bounded standby V1 checkpoint claims are covered by 853 exact-head named Java25 tests.
+      # Bounded standby V1 deep-copied claims are covered by 855 exact-head Java25 tests.
       - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityV1SnapshotReaderObserver.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/WalReplicaDurabilityV1SnapshotReaderObserverTest.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/WalReplicaDurabilityV1CommittedBatchOrigin.java'

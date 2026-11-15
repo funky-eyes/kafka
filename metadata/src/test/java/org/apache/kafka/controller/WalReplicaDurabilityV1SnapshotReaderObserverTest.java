@@ -208,4 +208,49 @@ class WalReplicaDurabilityV1SnapshotReaderObserverTest {
         complete(observer, SNAPSHOT, diagnostic);
         assertEquals(1000L, diagnostic.getUntrusted(key(validTopic)).kraftOffset());
     }
+
+    @Test
+    void mutatedCaptureSourceCannotChangePreflightOrRestoredOffsets() {
+        Uuid originalTopic = Uuid.randomUuid();
+        var source = checkpoint(originalTopic, 1000);
+        var observer = new WalReplicaDurabilityV1SnapshotReaderObserver();
+        assertTrue(observer.captureIfCheckpoint(wire(source)));
+        // Mutation after capture must not corrupt or redirect a checkpoint.
+        source.setTopicId(Uuid.randomUuid());
+        source.setAcceptedKRaftOffset(1400);
+        source.setAcceptedRaftEpoch(50);
+        source.setEndOffset(900);
+        source.replicaReceipts().get(0).setDurableEndOffset(900);
+        source.walSpans().get(0).setEndOffset(900);
+        var diagnostic = timeline();
+        complete(observer, SNAPSHOT, diagnostic);
+        assertEquals(1000L, diagnostic.getUntrusted(key(originalTopic)).kraftOffset());
+        assertEquals(200L, diagnostic.getUntrusted(key(originalTopic)).endOffset());
+        assertEquals(200L, diagnostic.getUntrusted(key(originalTopic)).replicas().get(0).durableEndOffset());
+        assertEquals(200L, diagnostic.getUntrusted(key(originalTopic)).spans().get(0).endOffset());
+    }
+
+    @Test
+    void nullNestedEntriesFailBeforeCaptureAndDoNotPoisonNextRecord() {
+        var observer = new WalReplicaDurabilityV1SnapshotReaderObserver();
+        var invalidReceipt = checkpoint(Uuid.randomUuid(), 1000);
+        var receipts = new java.util.ArrayList<>(invalidReceipt.replicaReceipts());
+        receipts.set(0, null);
+        invalidReceipt.setReplicaReceipts(receipts);
+        assertThrows(IllegalArgumentException.class,
+            () -> observer.captureIfCheckpoint(wire(invalidReceipt)));
+
+        var invalidSpan = checkpoint(Uuid.randomUuid(), 1000);
+        var spans = new java.util.ArrayList<>(invalidSpan.walSpans());
+        spans.set(1, null);
+        invalidSpan.setWalSpans(spans);
+        assertThrows(IllegalArgumentException.class,
+            () -> observer.captureIfCheckpoint(wire(invalidSpan)));
+
+        Uuid topic = Uuid.randomUuid();
+        assertTrue(observer.captureIfCheckpoint(wire(checkpoint(topic, 1000))));
+        var diagnostic = timeline();
+        complete(observer, SNAPSHOT, diagnostic);
+        assertEquals(1000L, diagnostic.getUntrusted(key(topic)).kraftOffset());
+    }
 }
