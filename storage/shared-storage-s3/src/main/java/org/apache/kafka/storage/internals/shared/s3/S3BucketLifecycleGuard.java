@@ -84,19 +84,10 @@ final class S3BucketLifecycleGuard {
     }
 
     private RuntimeException checkRules() {
+        final List<LifecycleRule> rules;
         try {
-            List<LifecycleRule> rules = Objects.requireNonNull(loadRules.get(),
+            rules = Objects.requireNonNull(loadRules.get(),
                 "Bucket lifecycle API returned null rules");
-            String blockingRule = firstExpiringRule(rules, keyPrefix);
-            if (blockingRule == null) {
-                return null;
-            }
-            return new IllegalStateException(
-                "S3 Bucket lifecycle expiration rule '" + blockingRule
-                    + "' applies to immutable shared-storage data keys under prefix '"
-                    + keyPrefix + "'. Disable the rule or isolate the Kafka data prefix; "
-                    + "Kafka retention and WAL replicas do not protect objects after external expiration."
-            );
         } catch (S3Exception e) {
             if (e.statusCode() == 404 && e.awsErrorDetails() != null
                 && "NoSuchLifecycleConfiguration".equals(e.awsErrorDetails().errorCode())) {
@@ -110,6 +101,17 @@ final class S3BucketLifecycleGuard {
             return new IllegalStateException(
                 "Unable to verify S3 Bucket lifecycle; new shared-storage writes are refused.", e);
         }
+        String blocking = firstExpiringRule(rules, keyPrefix);
+        return blocking == null ? null : unsafeRuleFailure(blocking);
+    }
+
+    private IllegalStateException unsafeRuleFailure(String rule) {
+        return new IllegalStateException(
+            "S3 Bucket lifecycle expiration rule '" + rule
+                + "' applies to immutable shared-storage data keys under prefix '"
+                + keyPrefix + "'. Disable the rule or isolate the Kafka data prefix; "
+                + "Kafka retention and WAL replicas do not protect objects after external expiration."
+        );
     }
 
     /**
