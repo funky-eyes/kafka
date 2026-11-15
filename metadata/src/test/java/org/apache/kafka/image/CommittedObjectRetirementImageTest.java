@@ -122,6 +122,17 @@ class CommittedObjectRetirementImageTest {
     }
 
     @Test
+    void repeatedSnapshotPreservesUnchangedTerminalObjectFence() {
+        Entry terminal = Entry.fromRecord(record(100L, 30L, 29L, 4, 30L));
+        CommittedObjectRetirementDelta delta = new CommittedObjectRetirementDelta(
+            new CommittedObjectRetirementImage(Map.of(100L, terminal))
+        );
+        delta.replay(terminal.toRecord());
+        delta.finishSnapshot();
+        assertEquals(terminal, delta.apply().get(100L));
+    }
+
+    @Test
     void imageDeltaRejectsChangedDescriptorOrSkippedStages() {
         Entry first = Entry.fromRecord(record(100L, 10L, -1L, 1, -1L));
         CommittedObjectRetirementDelta delta = new CommittedObjectRetirementDelta(

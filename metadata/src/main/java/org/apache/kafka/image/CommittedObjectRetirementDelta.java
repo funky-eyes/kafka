@@ -45,7 +45,10 @@ public final class CommittedObjectRetirementDelta {
         // A new image may contain only the last lifecycle stage from a trusted
         // compacted snapshot. When a previous value exists, enforce exact CAS
         // and immutable object identity on every later transition.
-        if (previous != null) {
+        if (previous != null && !previous.equals(next)) {
+            // An unchanged entry is legal when the same complete KRaft state
+            // is replayed from a newer snapshot. Real log-record positions
+            // remain independently validated by the Controller timeline.
             CommittedObjectRetirementState.validateTransition(previous, next);
         }
         changed.put(next.objectId(), next);
