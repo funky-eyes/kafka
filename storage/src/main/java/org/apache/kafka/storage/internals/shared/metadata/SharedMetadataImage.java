@@ -448,6 +448,19 @@ public final class SharedMetadataImage {
         return Optional.ofNullable(committedObjects.get(objectId));
     }
 
+    /**
+     * Existing object identity check; call only after a new uploader fenced
+     * previous producer generations and caught up to post-fence Kafka LSO.
+     */
+    public synchronized boolean objectIdentityKnown(long objectId) {
+        requireReady();
+        if (objectId <= 0L) {
+            throw new IllegalArgumentException("objectId must be positive");
+        }
+        return preparedObjects.containsKey(objectId) || committedObjects.containsKey(objectId)
+            || cleanupObjects.containsKey(objectId) || catalogSeals.containsKey(objectId);
+    }
+
     public synchronized List<ObjectMetadataStore.PreparedObject> preparedObjects() {
         requireReady();
         List<ObjectMetadataStore.PreparedObject> result = preparedObjects.values().stream()
