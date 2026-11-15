@@ -305,6 +305,33 @@ class S3ObjectStoreTest {
     }
 
     @Test
+    void boundedS3IoExecutorRejectsBacklogInsteadOfGrowingWithoutLimit() throws Exception {
+        S3ObjectStoreConfig config = S3ObjectStoreConfig.from(Map.of(
+            S3ObjectStoreConfig.BUCKET_CONFIG, "s3-io-backpressure",
+            S3ObjectStoreConfig.IO_THREADS_CONFIG, 1
+        ));
+        ExecutorService io = S3ObjectStore.newIoExecutor(config);
+        CountDownLatch running = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        try {
+            io.submit(() -> {
+                running.countDown();
+                release.await();
+                return null;
+            });
+            assertTrue(running.await(10, TimeUnit.SECONDS));
+            for (int index = 0; index < 64; index++) {
+                io.execute(() -> { });
+            }
+            assertThrows(RejectedExecutionException.class, () -> io.execute(() -> { }));
+        } finally {
+            release.countDown();
+            io.shutdown();
+            assertTrue(io.awaitTermination(10, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
     void deleteObjectsPerKeyErrorFailsTheWholeBatchForDurableRetry() throws Exception {
         S3Client fake = (S3Client) Proxy.newProxyInstance(
             S3Client.class.getClassLoader(),
