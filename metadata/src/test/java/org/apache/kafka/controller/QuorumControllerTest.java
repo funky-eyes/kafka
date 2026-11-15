@@ -198,6 +198,20 @@ public class QuorumControllerTest {
     }
 
     @Test
+    public void testTerminalObjectRetirementWriterCannotBypassUnnegotiatedFeature() throws Exception {
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv).build()
+        ) {
+            QuorumController controller = controlEnv.activeController();
+            int before = clientEnv.allRecords().size();
+            assertEquals(false, controller.finalizeRecordedCommittedObjectDeletion(501L, 12L)
+                .get(10, TimeUnit.SECONDS));
+            assertEquals(before, clientEnv.allRecords().size());
+        }
+    }
+
+    @Test
     public void testUntrustedRetirementClaimCannotBypassTheSerializedControllerEventQueue() throws Exception {
         try (
             MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();

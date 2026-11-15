@@ -1639,6 +1639,26 @@ public final class QuorumController implements Controller {
     }
 
     /**
+     * Complete the terminal KRaft bookkeeping ONLY after DELETE_RECORDED.
+     *
+     * <p>Package-private until a version-negotiated Controller protocol has
+     * authenticated the preceding cross-log handoff and all-Broker fence.
+     * This emits no DELETE_READY, invokes no S3 API, and is disabled on the
+     * Kafka 4.3.1 production feature level.</p>
+     */
+    CompletableFuture<Boolean> finalizeRecordedCommittedObjectDeletion(
+        long objectId, long expectedRecordedOffset
+    ) {
+        return appendWriteEvent("finalizeRecordedCommittedObjectDeletion", OptionalLong.empty(), () -> {
+            if (!featureControl.isPartitionRetirementAuthorityEnabled()) {
+                return ControllerResult.of(List.of(), false);
+            }
+            return committedObjectRetirementControl.finalizeRecordedDeletion(
+                objectId, expectedRecordedOffset, offsetControl.nextWriteOffset());
+        });
+    }
+
+    /**
      * Replay only: no authenticated catalog handoff or distributed BrokerEpoch
      * safe-epoch attestation exists. Even DELETE_READY is not a worker permit.
      * This experimental record is never emitted on the Kafka 4.3.1 baseline.

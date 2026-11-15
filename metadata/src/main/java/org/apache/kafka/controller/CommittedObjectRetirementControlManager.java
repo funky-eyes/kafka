@@ -19,10 +19,13 @@ package org.apache.kafka.controller;
 import org.apache.kafka.common.metadata.CommittedObjectRetirementRecord;
 import org.apache.kafka.metadata.CommittedObjectRetirementState;
 import org.apache.kafka.metadata.CommittedObjectRetirementState.Entry;
+import org.apache.kafka.metadata.CommittedObjectRetirementState.Stage;
+import org.apache.kafka.server.common.ApiMessageAndVersion;
 import org.apache.kafka.server.common.OffsetAndEpoch;
 import org.apache.kafka.timeline.SnapshotRegistry;
 import org.apache.kafka.timeline.TimelineHashMap;
 
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -69,6 +72,46 @@ final class CommittedObjectRetirementControlManager {
             CommittedObjectRetirementState.validateTransition(entries.get(next.objectId()), next);
         }
         entries.put(next.objectId(), next);
+    }
+
+    /**
+     * Terminalize an already durably DELETE_RECORDED object in the same KRaft
+     * event queue that serializes its lifecycle CAS.
+     *
+     * <p>This deliberately cannot emit RETIRE_INTENT, DELETE_READY, or
+     * DELETE_RECORDED. The physical deletion and reference-fencing proofs
+     * MUST have been established by separate authenticated authority before
+     * DELETE_RECORDED can exist. The result is not a physical DELETE grant.
+     *
+     * <p>For one record, the controller's next write offset is the prepared
+     * Raft record offset. The existing replay path fatally rejects an offset
+     * mismatch rather than accepting an invented generation.</p>
+     */
+    ControllerResult<Boolean> finalizeRecordedDeletion(
+        long objectId,
+        long expectedRecordedOffset,
+        long nextWriteOffset
+    ) {
+        if (objectId <= 0L || expectedRecordedOffset < 0L || nextWriteOffset < 0L) {
+            throw new IllegalArgumentException("Object ID and KRaft offsets must be non-negative");
+        }
+        Entry previous = entries.get(objectId);
+        if (previous == null || previous.stage() != Stage.DELETE_RECORDED
+            || previous.acceptedKRaftOffset() != expectedRecordedOffset) {
+            // A competing/controller-failover transition won, or physical
+            // DELETE was never durably recorded. No record is emitted.
+            return ControllerResult.of(List.of(), false);
+        }
+        if (nextWriteOffset <= previous.acceptedKRaftOffset()) {
+            throw new IllegalStateException("New KRaft retirement offset must advance the generation");
+        }
+        CommittedObjectRetirementRecord record = previous.toRecord()
+            .setPreviousKRaftOffset(previous.acceptedKRaftOffset())
+            .setAcceptedKRaftOffset(nextWriteOffset)
+            .setStage((byte) Stage.DELETED.wireId());
+        CommittedObjectRetirementState.validateTransition(previous, Entry.fromRecord(record));
+        return ControllerResult.atomicOf(
+            List.of(new ApiMessageAndVersion(record, (short) 0)), true);
     }
 
     Entry get(long objectId) {
