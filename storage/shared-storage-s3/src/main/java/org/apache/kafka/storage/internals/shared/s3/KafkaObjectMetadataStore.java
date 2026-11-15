@@ -559,7 +559,14 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
     public void releaseUpload(long objectId) {
         FencedObjectLifecycleArbiter.Uploader session = fencedUploads.remove(objectId);
         if (session != null) {
-            session.close();
+            try {
+                // The original upload may complete on the metadata consumer
+                // thread; do not block that thread closing Kafka networking.
+                lifecycleExecutor.execute(session::close);
+            } catch (java.util.concurrent.RejectedExecutionException closedExecutor) {
+                // A shutting-down store must still release all producers.
+                session.close();
+            }
         }
     }
 
