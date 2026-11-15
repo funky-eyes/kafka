@@ -44,9 +44,9 @@ import java.util.function.Consumer;
  * recovering and after a live replay failure. Initial replay publishes only final COMMITTED winners;
  * live object tombstones without KRaft retirement authorization fail closed.
  * Cleanup fences use a distinct compacted key from object metadata. The
- * single metadata partition therefore supplies the total order between COMMIT and cleanup while compaction preserves
- * both winners' evidence. A cleanup fence that precedes a delayed COMMIT wins; a cleanup record after a committed object
- * is a losing claim and is ignored.</p>
+ * single metadata partition orders live COMMIT and cleanup records. On initial replay, however, compaction may have
+ * removed an earlier record for either key, so their surviving order cannot prove the winner. A COMMIT and cleanup
+ * fence for the same object therefore fail recovery closed instead of publishing an ambiguous reference.</p>
  */
 public final class SharedMetadataImage {
     private static final long INITIAL_SEQUENCE = 1L;
@@ -195,6 +195,9 @@ public final class SharedMetadataImage {
             return;
         }
         if (cleanupObjects.containsKey(objectId)) {
+            if (state == State.RECOVERING) {
+                throw corruption("Ambiguous compacted COMMIT and cleanup fence for object " + objectId);
+            }
             // The cleanup record has an earlier offset in the authoritative partition, so this is a losing delayed
             // COMMIT. Keep the fence and ignore the object value; both keys remain available after compaction.
             return;
@@ -263,6 +266,9 @@ public final class SharedMetadataImage {
     private void applyCleanup(long objectId, MetadataValue value) {
         CleanupRecord cleanup = cleanupRecord(objectId, value);
         if (committedObjects.containsKey(objectId)) {
+            if (state == State.RECOVERING) {
+                throw corruption("Ambiguous compacted COMMIT and cleanup fence for object " + objectId);
+            }
             // COMMIT has the lower authoritative offset, therefore the cleanup attempt lost and must be a no-op.
             return;
         }
