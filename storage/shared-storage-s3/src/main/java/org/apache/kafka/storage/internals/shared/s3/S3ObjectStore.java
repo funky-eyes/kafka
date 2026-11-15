@@ -440,6 +440,14 @@ public final class S3ObjectStore implements ObjectStore {
             return CompletableFuture.failedFuture(new IllegalArgumentException(
                 "S3 DeleteObjects supports at most 1000 keys per request"));
         }
+        if (objectIds.size() == 1) {
+            // Avoid XML/checksum overhead when a sweep has only one key.
+            Long objectId = objectIds.get(0);
+            if (objectId == null) {
+                return CompletableFuture.failedFuture(new IllegalArgumentException("Object ID must not be null"));
+            }
+            return delete(objectId);
+        }
         List<ObjectIdentifier> identifiers = new ArrayList<>(objectIds.size());
         for (Long objectId : objectIds) {
             if (objectId == null || objectId < 0L) {
