@@ -360,7 +360,7 @@ public final class S3ObjectStore implements ObjectStore {
 
     @Override
     public void requireSafeForWalReclaim() {
-        lifecycleGuard.requireSafeForUpload();
+        lifecycleGuard.requireSafeForWalReclaim();
     }
 
     @Override

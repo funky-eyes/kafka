@@ -133,6 +133,56 @@ class S3BucketLifecycleGuardTest {
     }
 
     @Test
+    void walReclaimBypassesRecentSafeUploadCacheAndFencesPolicyDrift() {
+        AtomicInteger checks = new AtomicInteger();
+        S3BucketLifecycleGuard guard = new S3BucketLifecycleGuard(() ->
+            checks.incrementAndGet() == 1
+                ? List.of() : List.of(expiring("policy-flipped", "objects/", true)),
+            "objects", () -> 100L
+        );
+        guard.requireSafeForUpload();
+        assertEquals(1, checks.get());
+        guard.requireSafeForUpload();
+        assertEquals(1, checks.get());
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+            guard::requireSafeForWalReclaim);
+        assertTrue(failure.getMessage().contains("policy-flipped"));
+        assertEquals(2, checks.get());
+        assertThrows(IllegalStateException.class, guard::requireSafeForUpload);
+        assertEquals(2, checks.get());
+    }
+
+    @Test
+    void walReclaimRereadsRulesOnEveryAttemptAndCanRecoverAfterPolicyRepair() {
+        AtomicInteger checks = new AtomicInteger();
+        S3BucketLifecycleGuard guard = new S3BucketLifecycleGuard(() -> {
+            int round = checks.incrementAndGet();
+            return round == 2 ? List.of(expiring("transient-policy", "objects/", true)) : List.of();
+        }, "objects", () -> 100L);
+        guard.requireSafeForUpload();
+        assertThrows(IllegalStateException.class, guard::requireSafeForWalReclaim);
+        guard.requireSafeForWalReclaim();
+        guard.requireSafeForUpload();
+        assertEquals(3, checks.get());
+    }
+
+    @Test
+    void fatalRevalidationCannotRevivePreviousSafeVerdict() {
+        AtomicInteger checks = new AtomicInteger();
+        S3BucketLifecycleGuard guard = new S3BucketLifecycleGuard(() -> {
+            int round = checks.incrementAndGet();
+            if (round == 2) {
+                throw new AssertionError("fatal provider error");
+            }
+            return round == 1 ? List.of() : List.of(expiring("new-danger", "objects/", true));
+        }, "objects", () -> 100L);
+        guard.requireSafeForUpload();
+        assertThrows(AssertionError.class, guard::requireSafeForWalReclaim);
+        assertThrows(IllegalStateException.class, guard::requireSafeForUpload);
+        assertEquals(3, checks.get());
+    }
+
+    @Test
     void rechecksAfterThirtySecondsAndDoesNotReuseOldSafeVerdict() {
         AtomicLong time = new AtomicLong();
         AtomicInteger attempts = new AtomicInteger();

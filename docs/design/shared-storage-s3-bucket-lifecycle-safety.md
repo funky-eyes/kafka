@@ -82,3 +82,16 @@ the exposure to external Bucket changes **but is not an absolute protection**:
 a policy might change immediately after a check, or objects might already
 be missing. A future independent verifier must cover remote object existence,
 version retention, and the full cross-Broker lifecycle before S3 GA claims.
+
+## WAL reclaim must use a fresh Bucket policy verdict
+
+The final WAL reclaim boundary must not reuse the short-lived safe cache from an
+upload, because the Bucket policy can change after that upload and before WAL
+reclaim. Consequently, the S3 adapter now performs an uncached lifecycle API
+read for every attempted checkpointed-WAL reclaim, while ordinary PUTs retain
+30-second bounded caching. Inaccessible or unsafe rules leave WAL intact.
+
+This additional check is not a lease and cannot make S3 configuration
+immutable: administrators may still change policy immediately after inspection.
+Provider permission restrictions, operational policy enforcement and independent
+periodic audits remain necessary before production data-integrity guarantees.
