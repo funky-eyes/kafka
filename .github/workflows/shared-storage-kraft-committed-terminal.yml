@@ -19,6 +19,7 @@ on:
   push:
     branches:
       - codex/kraft-committed-terminal-writer
+      - codex/kraft-terminal-batch
     paths:
       - 'metadata/src/main/java/org/apache/kafka/controller/CommittedObjectRetirementControlManager.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/QuorumController.java'
@@ -65,4 +66,5 @@ jobs:
           ./gradlew :metadata:test \
             --tests 'org.apache.kafka.controller.CommittedObjectRetirementControlManagerTest' \
             --tests 'org.apache.kafka.controller.QuorumControllerTest.testTerminalObjectRetirementWriterCannotBypassUnnegotiatedFeature' \
+            --tests 'org.apache.kafka.controller.QuorumControllerTest.testTerminalBatchCannotBypassUnnegotiatedFeature' \
             --no-scan --max-workers=2 -PmaxParallelForks=1
