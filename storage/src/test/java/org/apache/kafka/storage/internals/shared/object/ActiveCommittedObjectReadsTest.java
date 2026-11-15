@@ -19,6 +19,7 @@ package org.apache.kafka.storage.internals.shared.object;
 import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -79,7 +80,7 @@ class ActiveCommittedObjectReadsTest {
         ActiveCommittedObjectReads reads = new ActiveCommittedObjectReads();
         ExecutorService workers = Executors.newFixedThreadPool(8);
         CountDownLatch start = new CountDownLatch(1);
-        List<Future<?>> all = new java.util.ArrayList<>();
+        List<Future<?>> all = new ArrayList<>();
         try {
             for (int worker = 0; worker < 8; worker++) {
                 final int index = worker;
