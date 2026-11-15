@@ -62,17 +62,14 @@ public class ActiveCommittedObjectReadsBenchmark {
     @Benchmark
     public void physicalRangeGetLease(ThreadParams thread) {
         long objectId = 1L + thread.getThreadIndex() % objectCardinality;
-        try (ActiveCommittedObjectReads.ReadLease ignored = reads.tryAcquire(objectId).orElseThrow()) {
-            // The lease remains active until the equivalent transport ends.
-        }
+        ActiveCommittedObjectReads.ReadLease lease = reads.tryAcquire(objectId).orElseThrow();
+        lease.close();
     }
 
     @Benchmark
     public void logicalCachedReadLease(ThreadParams thread) {
         long objectId = 1L + thread.getThreadIndex() % objectCardinality;
-        try (ActiveCommittedObjectReads.ReadLease ignored =
-                 reads.tryAcquireLogicalRead(objectId).orElseThrow()) {
-            // Cache hits still require a logical reader pin until completion.
-        }
+        ActiveCommittedObjectReads.ReadLease lease = reads.tryAcquireLogicalRead(objectId).orElseThrow();
+        lease.close();
     }
 }
