@@ -852,6 +852,14 @@ REQUIRED_TESTS = {
         "reservedTopicIdCannotEnterCommittedKRaftRecordReplay",
         "reservedTopicIdCannotEnterKRaftSnapshotReplay",
     ),
+    "org.apache.kafka.controller.PartitionRetirementTopicDeletionRecordsTest": (
+        "nativeTopicDeletionAndTerminalFactsShareOneKRaftAtomicBatch",
+        "preservesAcceptedAuthorityCoordinatesAndFencesRecreatedTopicId",
+        "multipleTopicsUseActualRecordPositionsAndSkipFailedOutcomes",
+        "oversizedTopicCannotCausePartialRetirementOrBreakNativeDelete",
+        "alreadyTerminalAuthorityNeverEmitsAnotherMutableClaim",
+        "malformedInputIsRejectedWithoutProducingAnyRetirementRecords",
+    ),
     "org.apache.kafka.metadata.PartitionRetirementAuthorityStateTest": (
         "generatedKRaftRecordIdIsReservedAndVersionZero",
         "distinctTopicIncarnationNeverSharesAnAuthorityKey",
