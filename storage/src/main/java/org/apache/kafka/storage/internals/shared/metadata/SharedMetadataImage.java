@@ -189,7 +189,7 @@ public final class SharedMetadataImage {
             // its durable Kafka catalog seal. Identity mismatch means corrupt
             // metadata; a matching duplicate loses to the earlier seal.
             if (!metadata.equals(committedObjects.get(objectId))
-                || !seal.descriptorSha256().equals(SharedMetadataRecordCodec.committedDescriptorSha256(metadata))) {
+                || !seal.seal().descriptorSha256().equals(SharedMetadataRecordCodec.committedDescriptorSha256(metadata))) {
                 throw corruption("Post-seal object COMMIT has a conflicting descriptor: " + objectId);
             }
             return;
