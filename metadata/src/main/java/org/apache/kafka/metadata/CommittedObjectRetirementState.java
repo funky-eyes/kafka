@@ -49,18 +49,25 @@ public final class CommittedObjectRetirementState {
         if (next.stage().wireId() != previous.stage().wireId() + 1) {
             throw new IllegalStateException("Object retirement stages must advance without skipping");
         }
-        if (next.retirementEpoch() != previous.retirementEpoch()
-            || !next.catalogTopicId().equals(previous.catalogTopicId())
-            || next.catalogCommitOffset() != previous.catalogCommitOffset()
-            || next.sealedCatalogPositionExclusive() != previous.sealedCatalogPositionExclusive()
-            || next.objectSize() != previous.objectSize()
-            || next.objectChecksum() != previous.objectChecksum()
-            || !next.descriptorSha256().equals(previous.descriptorSha256())) {
+        if (!sameCatalogIdentity(previous, next) || !sameObjectDescriptor(previous, next)) {
             throw new IllegalStateException("Object retirement changed its sealed immutable identity");
         }
         if (next.safeEpoch() < previous.safeEpoch()) {
             throw new IllegalStateException("Object retirement safe epoch regressed");
         }
+    }
+
+    private static boolean sameCatalogIdentity(Entry previous, Entry next) {
+        return previous.retirementEpoch() == next.retirementEpoch()
+            && previous.catalogTopicId().equals(next.catalogTopicId())
+            && previous.catalogCommitOffset() == next.catalogCommitOffset()
+            && previous.sealedCatalogPositionExclusive() == next.sealedCatalogPositionExclusive();
+    }
+
+    private static boolean sameObjectDescriptor(Entry previous, Entry next) {
+        return previous.objectSize() == next.objectSize()
+            && previous.objectChecksum() == next.objectChecksum()
+            && previous.descriptorSha256().equals(next.descriptorSha256());
     }
 
     public enum Stage {
