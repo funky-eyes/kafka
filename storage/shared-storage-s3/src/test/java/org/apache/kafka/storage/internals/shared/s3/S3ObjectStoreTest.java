@@ -26,8 +26,11 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.S3Configuration;
 import software.amazon.awssdk.services.s3.model.CreateBucketRequest;
+import software.amazon.awssdk.services.s3.model.DeleteObjectsResponse;
+import software.amazon.awssdk.services.s3.model.S3Error;
 import software.amazon.awssdk.services.s3.model.S3Exception;
 
+import java.lang.reflect.Proxy;
 import java.net.URI;
 import java.nio.ByteBuffer;
 import java.util.HashMap;
@@ -299,6 +302,38 @@ class S3ObjectStoreTest {
                 S3ObjectStoreConfig.MAX_ATTEMPTS_CONFIG, 0
             ))
         );
+    }
+
+    @Test
+    void deleteObjectsPerKeyErrorFailsTheWholeBatchForDurableRetry() throws Exception {
+        S3Client fake = (S3Client) Proxy.newProxyInstance(
+            S3Client.class.getClassLoader(),
+            new Class<?>[] {S3Client.class},
+            (proxy, method, arguments) -> {
+                if ("deleteObjects".equals(method.getName())) {
+                    return DeleteObjectsResponse.builder().errors(S3Error.builder()
+                        .key("objects/9001").code("AccessDenied").build()).build();
+                }
+                if ("close".equals(method.getName())) {
+                    return null;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+        S3ObjectStoreConfig config = S3ObjectStoreConfig.from(Map.of(
+            S3ObjectStoreConfig.BUCKET_CONFIG, "s3-bulk-errors",
+            S3ObjectStoreConfig.KEY_PREFIX_CONFIG, "objects"
+        ));
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try (S3ObjectStore store = new S3ObjectStore(config, fake, executor)) {
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                () -> store.deleteBatch(List.of(9_001L, 9_002L)).get(10, TimeUnit.SECONDS));
+            assertTrue(failure.getCause().getMessage().contains("per-object errors"));
+            ExecutionException oversized = assertThrows(ExecutionException.class,
+                () -> store.deleteBatch(java.util.Collections.nCopies(1_001, 9_001L))
+                    .get(10, TimeUnit.SECONDS));
+            assertInstanceOf(IllegalArgumentException.class, oversized.getCause());
+        }
     }
 
     @Test
