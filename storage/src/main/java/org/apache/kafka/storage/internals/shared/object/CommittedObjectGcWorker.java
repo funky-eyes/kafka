@@ -18,6 +18,7 @@ package org.apache.kafka.storage.internals.shared.object;
 
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
 
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
@@ -116,14 +117,46 @@ final class CommittedObjectGcWorker {
         return pending.thenApply(stats -> stats);
     }
 
+    /**
+     * KRaft grants remain per-object and are revalidated independently.
+     * Only already-fenced, still-authorized objects enter a bulk S3 request.
+     * The KRaft completion records remain individually durable/retryable.
+     */
     private CompletableFuture<SweepStats> deleteCandidates(List<DeleteReady> ready) {
         verifyCandidateBatch(ready);
-        CompletableFuture<SweepStats> result =
-            CompletableFuture.completedFuture(new SweepStats(ready.size(), 0, 0));
+        CompletableFuture<List<DeleteReady>> approved = CompletableFuture.completedFuture(new ArrayList<>());
         for (DeleteReady candidate : ready) {
-            result = result.thenCompose(stats -> deleteOne(candidate, stats));
+            // A local fence is necessary, never sufficient cross-Broker proof.
+            if (!localFence.locallyDrainedAfterFence(candidate.objectId())) {
+                continue;
+            }
+            approved = approved.thenCompose(winners -> Objects.requireNonNull(
+                authority.stillDeleteReady(candidate), "stillDeleteReady future"
+            ).thenApply(permitted -> {
+                if (Boolean.TRUE.equals(permitted)) {
+                    winners.add(candidate);
+                }
+                return winners;
+            }));
         }
-        return result;
+        return approved.thenCompose(winners -> deleteApprovedBatch(ready.size(), winners));
+    }
+
+    private CompletableFuture<SweepStats> deleteApprovedBatch(int observed, List<DeleteReady> approved) {
+        if (approved.isEmpty()) {
+            return CompletableFuture.completedFuture(new SweepStats(observed, observed, 0));
+        }
+        List<Long> ids = approved.stream().map(DeleteReady::objectId).toList();
+        return Objects.requireNonNull(objects.deleteBatch(ids), "ObjectStore DELETE batch future")
+            .thenCompose(ignored -> {
+                CompletableFuture<Void> recorded = CompletableFuture.completedFuture(null);
+                for (DeleteReady candidate : approved) {
+                    recorded = recorded.thenCompose(done -> Objects.requireNonNull(
+                        authority.recordDeleted(candidate), "recordDeleted future"));
+                }
+                return recorded.thenApply(done -> new SweepStats(
+                    observed, observed - approved.size(), approved.size()));
+            });
     }
 
     private static void verifyCandidateBatch(List<DeleteReady> ready) {
@@ -140,27 +173,5 @@ final class CommittedObjectGcWorker {
         }
     }
 
-    private CompletableFuture<SweepStats> deleteOne(DeleteReady candidate, SweepStats stats) {
-        // A local fence is a necessary condition, NEVER a sufficient global
-        // proof of reader quiescence or the absence of late multipart uploads.
-        if (!localFence.locallyDrainedAfterFence(candidate.objectId())) {
-            return CompletableFuture.completedFuture(
-                new SweepStats(stats.observed(), stats.deferred() + 1, stats.deleted())
-            );
-        }
-        return Objects.requireNonNull(authority.stillDeleteReady(candidate), "stillDeleteReady future")
-            .thenCompose(ready -> {
-                if (!Boolean.TRUE.equals(ready)) {
-                    return CompletableFuture.completedFuture(
-                        new SweepStats(stats.observed(), stats.deferred() + 1, stats.deleted())
-                    );
-                }
-                return Objects.requireNonNull(objects.delete(candidate.objectId()), "ObjectStore DELETE future")
-                    .thenCompose(ignored ->
-                        Objects.requireNonNull(authority.recordDeleted(candidate), "recordDeleted future"))
-                    .thenApply(ignored -> new SweepStats(
-                        stats.observed(), stats.deferred(), stats.deleted() + 1
-                    ));
-            });
-    }
+
 }
