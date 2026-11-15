@@ -69,6 +69,16 @@ class S3BucketLifecycleGuardTest {
     }
 
     @Test
+    void explicitlyFalseExpiredObjectDeleteMarkerDoesNotDeleteLiveObjects() {
+        LifecycleRule noop = LifecycleRule.builder().id("no-op")
+            .status(ExpirationStatus.ENABLED)
+            .filter(LifecycleRuleFilter.builder().prefix("objects/").build())
+            .expiration(LifecycleExpiration.builder()
+                .expiredObjectDeleteMarker(false).build()).build();
+        assertNull(S3BucketLifecycleGuard.firstExpiringRule(List.of(noop), "objects"));
+    }
+
+    @Test
     void unknownOrTagOnlyRuleIsConservativelyGlobal() {
         LifecycleRule rule = LifecycleRule.builder().id("tag-filter")
             .status(ExpirationStatus.ENABLED)

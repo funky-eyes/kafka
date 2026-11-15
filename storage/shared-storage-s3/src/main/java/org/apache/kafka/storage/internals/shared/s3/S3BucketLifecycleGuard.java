@@ -101,8 +101,14 @@ final class S3BucketLifecycleGuard {
             return new IllegalStateException(
                 "Unable to verify S3 Bucket lifecycle; new shared-storage writes are refused.", e);
         }
-        String blocking = firstExpiringRule(rules, keyPrefix);
-        return blocking == null ? null : unsafeRuleFailure(blocking);
+        try {
+            String blocking = firstExpiringRule(rules, keyPrefix);
+            return blocking == null ? null : unsafeRuleFailure(blocking);
+        } catch (RuntimeException e) {
+            // Never leave a previously cached safe verdict in place after
+            // an unexpected parse/SDK failure: fail closed on every upload.
+            return new IllegalStateException("Cannot interpret S3 Bucket lifecycle rules.", e);
+        }
     }
 
     private IllegalStateException unsafeRuleFailure(String rule) {
@@ -144,8 +150,12 @@ final class S3BucketLifecycleGuard {
         }
         // ExpiredObjectDeleteMarker alone removes an obsolete delete marker,
         // not the current live object. Days/Date make it a real expiration.
-        return expiration.days() != null || expiration.date() != null
-            || !Boolean.TRUE.equals(expiration.expiredObjectDeleteMarker());
+        if (expiration.days() != null || expiration.date() != null) {
+            return true;
+        }
+        // true removes only obsolete markers; false explicitly takes no
+        // action. Missing mode is malformed/unknown, hence unsafe.
+        return expiration.expiredObjectDeleteMarker() == null;
     }
 
     private static String filterPrefix(LifecycleRule rule) {
