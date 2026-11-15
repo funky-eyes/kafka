@@ -1,0 +1,175 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.kafka.controller;
+
+import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.metadata.CommittedObjectRetirementRecord;
+import org.apache.kafka.common.utils.LogContext;
+import org.apache.kafka.server.common.OffsetAndEpoch;
+import org.apache.kafka.timeline.SnapshotRegistry;
+
+import org.junit.jupiter.api.Test;
+
+import java.util.Optional;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
+class CommittedObjectRetirementControlManagerTest {
+    private static final long OBJECT_ID = 501L;
+    private static final Uuid CATALOG = Uuid.randomUuid();
+    private static final String DIGEST = "0123456789abcdef".repeat(4);
+
+    @Test
+    void exactKRaftOffsetsAndCasDriveEveryDurableStage() {
+        CommittedObjectRetirementControlManager manager = manager();
+        manager.replayFromKRaft(record(10L, -1L, 1, -1L), Optional.empty(), 10L);
+        manager.replayFromKRaft(record(11L, 10L, 2, 7L), Optional.empty(), 11L);
+        manager.replayFromKRaft(record(12L, 11L, 3, 7L), Optional.empty(), 12L);
+        manager.replayFromKRaft(record(13L, 12L, 4, 7L), Optional.empty(), 13L);
+        assertEquals(CommittedObjectRetirementControlManager.Stage.DELETED, manager.get(OBJECT_ID).stage());
+        assertEquals(13L, manager.get(OBJECT_ID).acceptedKRaftOffset());
+    }
+
+    @Test
+    void firstTransitionMustBeAnIntentAndMustOccupyActualLogOffset() {
+        CommittedObjectRetirementControlManager manager = manager();
+        assertThrows(IllegalStateException.class, () ->
+            manager.replayFromKRaft(record(10L, -1L, 1, -1L), Optional.empty(), 11L));
+        assertNull(manager.get(OBJECT_ID));
+        assertThrows(IllegalStateException.class, () ->
+            manager.replayFromKRaft(record(10L, -1L, 2, 7L), Optional.empty(), 10L));
+        assertNull(manager.get(OBJECT_ID));
+    }
+
+    @Test
+    void staleCasAndStageSkipCannotReplaceACommittedIntent() {
+        CommittedObjectRetirementControlManager manager = manager();
+        manager.replayFromKRaft(record(10L, -1L, 1, -1L), Optional.empty(), 10L);
+        assertThrows(IllegalStateException.class, () ->
+            manager.replayFromKRaft(record(11L, 9L, 2, 7L), Optional.empty(), 11L));
+        assertThrows(IllegalStateException.class, () ->
+            manager.replayFromKRaft(record(11L, 10L, 3, 7L), Optional.empty(), 11L));
+        assertEquals(CommittedObjectRetirementControlManager.Stage.RETIRE_INTENT, manager.get(OBJECT_ID).stage());
+    }
+
+    @Test
+    void immutableDescriptorAndCatalogIncarnationCannotChange() {
+        CommittedObjectRetirementControlManager manager = manager();
+        manager.replayFromKRaft(record(10L, -1L, 1, -1L), Optional.empty(), 10L);
+        assertThrows(IllegalStateException.class, () ->
+            manager.replayFromKRaft(record(11L, 10L, 2, 7L).setDescriptorSha256("f".repeat(64)),
+                Optional.empty(), 11L));
+        assertThrows(IllegalStateException.class, () ->
+            manager.replayFromKRaft(record(11L, 10L, 2, 7L).setCatalogTopicId(Uuid.randomUuid()),
+                Optional.empty(), 11L));
+        assertThrows(IllegalStateException.class, () ->
+            manager.replayFromKRaft(record(11L, 10L, 2, 7L).setSealedCatalogPositionExclusive(13L),
+                Optional.empty(), 11L));
+    }
+
+    @Test
+    void readinessWithoutSafeEpochFailsClosed() {
+        CommittedObjectRetirementControlManager manager = manager();
+        manager.replayFromKRaft(record(10L, -1L, 1, -1L), Optional.empty(), 10L);
+        assertThrows(IllegalArgumentException.class, () ->
+            manager.replayFromKRaft(record(11L, 10L, 2, -1L), Optional.empty(), 11L));
+        assertEquals(CommittedObjectRetirementControlManager.Stage.RETIRE_INTENT, manager.get(OBJECT_ID).stage());
+    }
+
+    @Test
+    void terminalDeletionBlocksFutureObjectIdResurrection() {
+        CommittedObjectRetirementControlManager manager = manager();
+        manager.replayFromKRaft(record(10L, -1L, 4, 7L), Optional.of(new OffsetAndEpoch(20L, 4)), 19L);
+        assertThrows(IllegalStateException.class, () ->
+            manager.replayFromKRaft(record(21L, 10L, 2, 7L), Optional.empty(), 21L));
+    }
+
+    @Test
+    void trustedSnapshotMayRestoreOneTerminalEntryButNeverClaimFuturePosition() {
+        CommittedObjectRetirementControlManager manager = manager();
+        assertThrows(IllegalStateException.class, () ->
+            manager.replayFromKRaft(record(20L, 19L, 4, 7L),
+                Optional.of(new OffsetAndEpoch(20L, 3)), 19L));
+        assertNull(manager.get(OBJECT_ID));
+        manager.replayFromKRaft(record(20L, 19L, 4, 7L),
+            Optional.of(new OffsetAndEpoch(21L, 3)), 20L);
+        assertEquals(CommittedObjectRetirementControlManager.Stage.DELETED, manager.get(OBJECT_ID).stage());
+        assertThrows(IllegalStateException.class, () ->
+            manager.replayFromKRaft(record(20L, 19L, 3, 7L),
+                Optional.of(new OffsetAndEpoch(21L, 3)), 20L));
+    }
+
+    @Test
+    void controllerTimelineRollbackRestoresPriorKRaftLifecycle() {
+        SnapshotRegistry registry = new SnapshotRegistry(new LogContext());
+        CommittedObjectRetirementControlManager manager = new CommittedObjectRetirementControlManager(registry);
+        manager.replayFromKRaft(record(10L, -1L, 1, -1L), Optional.empty(), 10L);
+        registry.idempotentCreateSnapshot(10L);
+        manager.replayFromKRaft(record(11L, 10L, 2, 7L), Optional.empty(), 11L);
+        registry.idempotentCreateSnapshot(11L);
+        assertEquals(CommittedObjectRetirementControlManager.Stage.DELETE_READY, manager.get(OBJECT_ID).stage());
+        registry.revertToSnapshot(10L);
+        assertEquals(CommittedObjectRetirementControlManager.Stage.RETIRE_INTENT, manager.get(OBJECT_ID).stage());
+    }
+
+    @Test
+    void independentPhysicalObjectsAndCatalogTopicIncarnationsDoNotAlias() {
+        CommittedObjectRetirementControlManager manager = manager();
+        manager.replayFromKRaft(record(10L, -1L, 1, -1L), Optional.empty(), 10L);
+        manager.replayFromKRaft(record(11L, -1L, 1, -1L).setObjectId(OBJECT_ID + 1)
+            .setCatalogTopicId(Uuid.randomUuid()), Optional.empty(), 11L);
+        assertEquals(10L, manager.get(OBJECT_ID).acceptedKRaftOffset());
+        assertEquals(11L, manager.get(OBJECT_ID + 1).acceptedKRaftOffset());
+    }
+
+    @Test
+    void malformedDigestUnknownStageAndRegressingSafeEpochFailClosed() {
+        CommittedObjectRetirementControlManager manager = manager();
+        assertThrows(IllegalArgumentException.class, () ->
+            manager.replayFromKRaft(record(10L, -1L, 1, -1L).setDescriptorSha256("NOT_SHA"),
+                Optional.empty(), 10L));
+        assertThrows(IllegalArgumentException.class, () ->
+            manager.replayFromKRaft(record(10L, -1L, 1, -1L).setStage((byte) 9),
+                Optional.empty(), 10L));
+        manager.replayFromKRaft(record(10L, -1L, 1, -1L), Optional.empty(), 10L);
+        manager.replayFromKRaft(record(11L, 10L, 2, 8L), Optional.empty(), 11L);
+        assertThrows(IllegalStateException.class, () ->
+            manager.replayFromKRaft(record(12L, 11L, 3, 7L), Optional.empty(), 12L));
+    }
+
+    private static CommittedObjectRetirementControlManager manager() {
+        return new CommittedObjectRetirementControlManager(new SnapshotRegistry(new LogContext()));
+    }
+
+    private static CommittedObjectRetirementRecord record(long offset, long previous, int stage, long safeEpoch) {
+        return new CommittedObjectRetirementRecord()
+            .setObjectId(OBJECT_ID)
+            .setAcceptedKRaftOffset(offset)
+            .setPreviousKRaftOffset(previous)
+            .setRetirementEpoch(7L)
+            .setCatalogTopicId(CATALOG)
+            .setCatalogCommitOffset(8L)
+            .setSealedCatalogPositionExclusive(12L)
+            .setObjectSize(4096L)
+            .setObjectChecksum(42L)
+            .setDescriptorSha256(DIGEST)
+            .setStage((byte) stage)
+            .setSafeEpoch(safeEpoch);
+    }
+}
