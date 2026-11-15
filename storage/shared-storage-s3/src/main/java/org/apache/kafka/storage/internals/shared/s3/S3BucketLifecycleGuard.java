@@ -158,6 +158,9 @@ final class S3BucketLifecycleGuard {
         return expiration.expiredObjectDeleteMarker() == null;
     }
 
+    // AWS SDK still exposes legacy prefix-only lifecycle rules through a
+    // deprecated field. Do not silently treat unrelated old rules as global.
+    @SuppressWarnings("deprecation")
     private static String filterPrefix(LifecycleRule rule) {
         LifecycleRuleFilter filter = rule.filter();
         if (filter == null) {
