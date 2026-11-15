@@ -246,6 +246,14 @@ class KafkaOrphanCompactionMinioIntegrationTest {
                             .key(objectConfig.objectKey(objectId)).build()));
                     assertEquals(404, missing.statusCode());
 
+                    // Model a PUT that was already in flight when the owner was fenced.
+                    // The durable CLAIM permits idempotent re-DELETE, never a late COMMIT.
+                    objects.put(objectId, ByteBuffer.wrap(bytes)).get(30, TimeUnit.SECONDS);
+                    objects.delete(objectId).get(30, TimeUnit.SECONDS);
+                    assertEquals(404, assertThrows(S3Exception.class, () -> inspector.headObject(
+                        HeadObjectRequest.builder().bucket(objectConfig.bucket())
+                            .key(objectConfig.objectKey(objectId)).build())).statusCode());
+
                     // The uploader's producer was initialized before PREPARE.
                     // Fencing must forbid the delayed COMMIT, not just hide it on replay.
                     assertThrows(Exception.class, () -> uploader.commit(descriptor));
@@ -271,8 +279,9 @@ class KafkaOrphanCompactionMinioIntegrationTest {
                             .get(30, TimeUnit.SECONDS);
                     }
                 }
-                List<ConsumerRecord<byte[], byte[]>> compacted = awaitSingleKeyCompaction(
-                    bootstrap, topic, key, preparedOffset, claimOffset
+                awaitSingleKeyCompaction(bootstrap, topic, key, preparedOffset, claimOffset);
+                List<ConsumerRecord<byte[], byte[]>> compacted = readTargetRecords(
+                    bootstrap, topic, key, SharedMetadataRecordCodec.objectKey(committedObjectId)
                 );
                 List<SharedObjectMetadata> published = new ArrayList<>();
                 SharedMetadataImage recovered = new SharedMetadataImage(published::add);
@@ -281,8 +290,9 @@ class KafkaOrphanCompactionMinioIntegrationTest {
                 }
                 recovered.markReady();
                 assertTrue(recovered.cleanupClaimed(objectId, createdTimeMs));
-                assertTrue(published.isEmpty(), "The claimed/deleted object must stay invisible after compaction");
                 assertTrue(recovered.committedObject(objectId).isEmpty());
+                assertEquals(List.of(surviving), published,
+                    "Only the object whose COMMIT won may publish a remote read reference");
             } finally {
                 objects.delete(objectId).get(30, TimeUnit.SECONDS);
                 admin.deleteTopics(List.of(topic)).all().get(30, TimeUnit.SECONDS);
