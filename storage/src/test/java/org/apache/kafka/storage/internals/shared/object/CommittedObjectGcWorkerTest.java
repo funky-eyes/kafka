@@ -46,6 +46,48 @@ class CommittedObjectGcWorkerTest {
     private static final long OBJECT_ID = 501L;
 
     @Test
+    void distinctKRaftGrantsAndDrainedReadersShareOnePhysicalDeleteBatch() {
+        TestContext ctx = new TestContext();
+        for (long id : List.of(501L, 502L, 503L)) {
+            ctx.put(id);
+            ctx.authority.add(id);
+        }
+        ctx.fence.fence(501L);
+        ctx.fence.fence(502L);
+        assertEquals(new CommittedObjectGcWorker.SweepStats(3, 1, 2), ctx.worker.sweep().join());
+        assertEquals(List.of(List.of(501L, 502L)), ctx.store.batches);
+        assertFalse(ctx.store.backing.contains(501L));
+        assertFalse(ctx.store.backing.contains(502L));
+        assertTrue(ctx.store.backing.contains(503L));
+        assertEquals(2, ctx.authority.completions.get());
+        assertTrue(ctx.authority.ready.containsKey(503L));
+    }
+
+    @Test
+    void partialPhysicalBatchFailureKeepsEveryKRaftGrantRetryable() {
+        TestContext ctx = new TestContext();
+        for (long id : List.of(501L, 502L)) {
+            ctx.put(id);
+            ctx.authority.add(id);
+            ctx.fence.fence(id);
+        }
+        // Model S3 partially deleting the second key while the first fails.
+        ctx.store.failNext.set(true);
+        assertThrows(CompletionException.class, () -> ctx.worker.sweep().join());
+        assertEquals(0, ctx.authority.completions.get());
+        assertTrue(ctx.authority.ready.containsKey(501L));
+        assertTrue(ctx.authority.ready.containsKey(502L));
+
+        // Both are retried, including whichever physical DELETE succeeded
+        // before the first HTTP/batch failure. DELETE is idempotent.
+        assertEquals(new CommittedObjectGcWorker.SweepStats(2, 0, 2), ctx.worker.sweep().join());
+        assertEquals(List.of(List.of(501L, 502L), List.of(501L, 502L)), ctx.store.batches);
+        assertFalse(ctx.store.backing.contains(501L));
+        assertFalse(ctx.store.backing.contains(502L));
+        assertEquals(2, ctx.authority.completions.get());
+    }
+
+    @Test
     void noDurableDeleteReadyGrantNeverIssuesRemoteDelete() {
         TestContext ctx = new TestContext();
         ctx.put(OBJECT_ID);
@@ -248,6 +290,7 @@ class CommittedObjectGcWorkerTest {
     private static final class TestStore implements ObjectStore {
         private final InMemoryObjectStore backing = new InMemoryObjectStore();
         private final AtomicInteger deletes = new AtomicInteger();
+        private final List<List<Long>> batches = new ArrayList<>();
         private final AtomicBoolean failNext = new AtomicBoolean();
         private volatile CompletableFuture<Void> blockedDelete;
 
@@ -259,6 +302,12 @@ class CommittedObjectGcWorkerTest {
         @Override
         public CompletableFuture<ByteBuffer> rangeRead(long id, long pos, int len) {
             return backing.rangeRead(id, pos, len);
+        }
+
+        @Override
+        public CompletableFuture<Void> deleteBatch(List<Long> ids) {
+            batches.add(List.copyOf(ids));
+            return ObjectStore.super.deleteBatch(ids);
         }
 
         @Override
