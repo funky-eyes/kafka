@@ -629,9 +629,10 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
      * a delayed lower value from replacing the compacted latest value.
      */
     static void rejectUnfencedRetirementWrite(byte[] key) {
-        if (SharedMetadataRecordCodec.decodeKey(key).type() ==
-            SharedMetadataRecordCodec.KeyType.PARTITION_LOG_START) {
-            throw new IllegalArgumentException("Unfenced partition log-start write is disabled");
+        SharedMetadataRecordCodec.KeyType type = SharedMetadataRecordCodec.decodeKey(key).type();
+        if (type == SharedMetadataRecordCodec.KeyType.PARTITION_LOG_START
+            || type == SharedMetadataRecordCodec.KeyType.OBJECT_CATALOG_SEAL) {
+            throw new IllegalArgumentException("Unfenced retirement/catalog seal write is disabled");
         }
     }
 

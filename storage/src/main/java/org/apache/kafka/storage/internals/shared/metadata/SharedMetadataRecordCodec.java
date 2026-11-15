@@ -17,6 +17,10 @@
 package org.apache.kafka.storage.internals.shared.metadata;
 
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -33,6 +37,7 @@ public final class SharedMetadataRecordCodec {
     private static final byte BROKER_SEQUENCE_KEY = 2;
     private static final byte OBJECT_CLEANUP_KEY = 3;
     private static final byte PARTITION_LOG_START_KEY = 4;
+    private static final byte OBJECT_CATALOG_SEAL_KEY = 5;
     private static final int OBJECT_KEY_BYTES = Byte.BYTES + Long.BYTES;
     private static final int PARTITION_LOG_START_KEY_BYTES = Byte.BYTES + 2 * Long.BYTES + Integer.BYTES;
     private static final int BROKER_SEQUENCE_KEY_BYTES = Byte.BYTES + Integer.BYTES;
@@ -44,8 +49,12 @@ public final class SharedMetadataRecordCodec {
     private static final byte OBJECT_CLEANUP_CLAIMED = 4;
     private static final byte OBJECT_CLEANUP_DELETED = 5;
     private static final byte PARTITION_LOG_START_ADVANCED = 6;
+    private static final byte OBJECT_CATALOG_SEALED = 7;
     private static final int VALUE_HEADER_BYTES = Short.BYTES + Byte.BYTES;
     private static final int COMMITTED_OBJECT_HEADER_BYTES = Long.BYTES + Long.BYTES + Integer.BYTES;
+    private static final int CATALOG_SEAL_DIGEST_BYTES = 64;
+    private static final int CATALOG_SEAL_BYTES = VALUE_HEADER_BYTES + Long.BYTES * 4
+        + CATALOG_SEAL_DIGEST_BYTES;
     private static final int RANGE_BYTES = Long.BYTES + Long.BYTES + Integer.BYTES + Integer.BYTES +
         Long.BYTES + Long.BYTES + Long.BYTES + Integer.BYTES + Long.BYTES;
 
@@ -71,6 +80,15 @@ public final class SharedMetadataRecordCodec {
      */
     public static byte[] objectCleanupKey(long objectId) {
         return objectScopedKey(OBJECT_CLEANUP_KEY, objectId);
+    }
+
+    /**
+     * Permanent independent compacted key, ordered in the same Kafka metadata
+     * partition as the object's COMMITTED record. REPLAY ONLY: no production
+     * producer may publish this experimental catalog-seal wire format.
+     */
+    public static byte[] objectCatalogSealKey(long objectId) {
+        return objectScopedKey(OBJECT_CATALOG_SEAL_KEY, objectId);
     }
 
     private static byte[] objectScopedKey(byte type, long objectId) {
@@ -115,13 +133,13 @@ public final class SharedMetadataRecordCodec {
         }
         ByteBuffer buffer = ByteBuffer.wrap(keyBytes);
         byte type = buffer.get();
-        if (type == OBJECT_KEY || type == OBJECT_CLEANUP_KEY) {
+        if (type == OBJECT_KEY || type == OBJECT_CLEANUP_KEY || type == OBJECT_CATALOG_SEAL_KEY) {
             requireLength(keyBytes.length, OBJECT_KEY_BYTES, "object key");
             long objectId = buffer.getLong();
             if (objectId <= 0) {
                 throw corruption("object key contains non-positive objectId " + objectId);
             }
-            return new MetadataKey(type == OBJECT_KEY ? KeyType.OBJECT : KeyType.OBJECT_CLEANUP, objectId);
+            return new MetadataKey(objectKeyType(type), objectId);
         }
         if (type == PARTITION_LOG_START_KEY) {
             requireLength(keyBytes.length, PARTITION_LOG_START_KEY_BYTES, "partition log-start key");
@@ -142,6 +160,15 @@ public final class SharedMetadataRecordCodec {
             return new MetadataKey(KeyType.BROKER_SEQUENCE, brokerId);
         }
         throw corruption("unknown metadata key type " + type);
+    }
+
+    private static KeyType objectKeyType(byte type) {
+        return switch (type) {
+            case OBJECT_KEY -> KeyType.OBJECT;
+            case OBJECT_CLEANUP_KEY -> KeyType.OBJECT_CLEANUP;
+            case OBJECT_CATALOG_SEAL_KEY -> KeyType.OBJECT_CATALOG_SEAL;
+            default -> throw corruption("unknown object key type " + type);
+        };
     }
 
     public static byte[] preparedObjectValue(long createdTimeMs) {
@@ -209,6 +236,45 @@ public final class SharedMetadataRecordCodec {
     }
 
     /**
+     * Canonical SHA-256 over the full encoded COMMITTED descriptor, including
+     * every packed Topic ID, partition, range, and checksum.
+     */
+    public static String committedDescriptorSha256(SharedObjectMetadata metadata) {
+        try {
+            return HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(committedObjectValue(metadata))
+            );
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("JVM lacks the required SHA-256 algorithm", e);
+        }
+    }
+
+    /**
+     * Experimental catalog-seal value. This is ONLY a durable ordering and
+     * descriptor-binding record in the compacted Kafka metadata log; it does
+     * not authorize GC or establish a cross-log KRaft handoff.
+     */
+    public static byte[] objectCatalogSealValue(
+        long originalCommitOffset,
+        long retirementEpoch,
+        SharedObjectMetadata descriptor
+    ) {
+        Objects.requireNonNull(descriptor, "descriptor");
+        if (originalCommitOffset < 0L || retirementEpoch <= 0L) {
+            throw new IllegalArgumentException("Catalog seal needs a valid COMMIT position and retirement epoch");
+        }
+        return ByteBuffer.allocate(CATALOG_SEAL_BYTES)
+            .putShort(VALUE_VERSION)
+            .put(OBJECT_CATALOG_SEALED)
+            .putLong(originalCommitOffset)
+            .putLong(retirementEpoch)
+            .putLong(descriptor.objectSize())
+            .putLong(descriptor.objectChecksum())
+            .put(committedDescriptorSha256(descriptor).getBytes(StandardCharsets.US_ASCII))
+            .array();
+    }
+
+    /**
      * Durable inclusive logical log-start offset, not permission to delete physical objects.
      *
      * <p>Before emission is enabled, all brokers must understand the record and agree on an
@@ -252,6 +318,7 @@ public final class SharedMetadataRecordCodec {
         return switch (key.type()) {
             case OBJECT -> decodeObjectValue(key.id(), type, buffer);
             case OBJECT_CLEANUP -> decodeObjectCleanupValue(type, buffer);
+            case OBJECT_CATALOG_SEAL -> decodeObjectCatalogSealValue(type, buffer);
             case PARTITION_LOG_START -> decodePartitionLogStartValue(type, buffer);
             case BROKER_SEQUENCE -> decodeBrokerSequenceValue(type, buffer);
         };
@@ -276,6 +343,23 @@ public final class SharedMetadataRecordCodec {
             return new CleanupDeletedValue(createdTimeMs);
         }
         throw corruption("object cleanup key has incompatible value type " + type);
+    }
+
+    private static MetadataValue decodeObjectCatalogSealValue(byte type, ByteBuffer buffer) {
+        if (type != OBJECT_CATALOG_SEALED) {
+            throw corruption("object catalog seal key has incompatible value type " + type);
+        }
+        requireRemaining(buffer, CATALOG_SEAL_BYTES - VALUE_HEADER_BYTES, "catalog seal value");
+        return new ObjectCatalogSealValue(
+            buffer.getLong(), buffer.getLong(), buffer.getLong(), buffer.getLong(),
+            new String(readDigest(buffer), StandardCharsets.US_ASCII)
+        );
+    }
+
+    private static byte[] readDigest(ByteBuffer buffer) {
+        byte[] digest = new byte[CATALOG_SEAL_DIGEST_BYTES];
+        buffer.get(digest);
+        return digest;
     }
 
     private static MetadataValue decodePartitionLogStartValue(byte type, ByteBuffer buffer) {
@@ -440,7 +524,8 @@ public final class SharedMetadataRecordCodec {
         OBJECT,
         OBJECT_CLEANUP,
         BROKER_SEQUENCE,
-        PARTITION_LOG_START
+        PARTITION_LOG_START,
+        OBJECT_CATALOG_SEAL
     }
 
     public record MetadataKey(KeyType type, long id, SharedPartitionId partition) {
@@ -475,6 +560,24 @@ public final class SharedMetadataRecordCodec {
     }
 
     public record BrokerSequenceValue(long reservedExclusiveSequence) implements MetadataValue {
+    }
+
+    public record ObjectCatalogSealValue(
+        long originalCommitOffset,
+        long retirementEpoch,
+        long objectSize,
+        long objectChecksum,
+        String descriptorSha256
+    ) implements MetadataValue {
+        public ObjectCatalogSealValue {
+            Objects.requireNonNull(descriptorSha256, "descriptorSha256");
+            if (originalCommitOffset < 0L || retirementEpoch <= 0L) {
+                throw new IllegalArgumentException("Invalid object catalog seal position or epoch");
+            }
+            if (objectSize <= 0L || objectChecksum < 0L || !descriptorSha256.matches("[0-9a-f]{64}")) {
+                throw new IllegalArgumentException("Invalid immutable object catalog descriptor seal");
+            }
+        }
     }
 
     public record PartitionLogStartValue(long startOffset) implements MetadataValue {
