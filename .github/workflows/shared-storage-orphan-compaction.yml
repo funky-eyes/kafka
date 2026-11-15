@@ -20,6 +20,14 @@ on:
     branches:
       - codex/orphan-compaction-ci
       - codex/orphan-claim-safety
+    paths:
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/metadata/SharedMetadataImage.java'
+      - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/metadata/SharedMetadataImageTest.java'
+      - 'storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3/KafkaObjectMetadataStore.java'
+      - 'storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3/S3SharedStorageExtension.java'
+      - 'storage/shared-storage-s3/src/test/java/org/apache/kafka/storage/internals/shared/s3/KafkaObjectMetadataStoreTest.java'
+      - 'storage/shared-storage-s3/src/test/java/org/apache/kafka/storage/internals/shared/s3/KafkaOrphanCompactionMinioIntegrationTest.java'
+      - '.github/workflows/shared-storage-orphan-compaction.yml'
   pull_request:
     paths:
       - 'storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3/KafkaObjectMetadataStore.java'
@@ -104,6 +112,8 @@ jobs:
             :storage:shared-storage-s3:test \
             --tests 'org.apache.kafka.storage.internals.shared.s3.KafkaOrphanCompactionMinioIntegrationTest' \
             --tests 'org.apache.kafka.storage.internals.shared.s3.KafkaObjectMetadataStoreTest' \
+            -x :storage:checkstyleMain -x :storage:checkstyleTest \
+            -x :storage:spotbugsMain -x :storage:spotbugsTest \
             -PmaxParallelForks=1 -Dorg.gradle.jvmargs=-Xmx2g --no-scan
           result="$(find storage/shared-storage-s3/build/test-results build/junit-xml \
             -name 'TEST-org.apache.kafka.storage.internals.shared.s3.KafkaOrphanCompactionMinioIntegrationTest.xml' \
