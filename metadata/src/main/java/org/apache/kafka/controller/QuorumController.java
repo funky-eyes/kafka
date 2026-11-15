@@ -1525,10 +1525,8 @@ public final class QuorumController implements Controller {
                     ((PartitionRecord) message).topicId(), ((PartitionRecord) message).partitionId());
                 break;
             case PARTITION_RETIREMENT_AUTHORITY_RECORD:
-                replayPartitionRetirementAuthority((PartitionRetirementAuthorityRecord) message, snapshotId, offset);
-                break;
             case COMMITTED_OBJECT_RETIREMENT_RECORD:
-                replayCommittedObjectRetirement((CommittedObjectRetirementRecord) message, snapshotId, offset);
+                replayRetirementRecord(message, snapshotId, offset);
                 break;
             case CONFIG_RECORD:
                 configurationControl.replay((ConfigRecord) message);
@@ -1586,12 +1584,8 @@ public final class QuorumController implements Controller {
                 delegationTokenControlManager.replay((RemoveDelegationTokenRecord) message);
                 break;
             case NO_OP_RECORD:
-                // NoOpRecord is an empty record and doesn't need to be replayed
-                break;
             case ZK_MIGRATION_STATE_RECORD:
-                // In 4.0, although migration is no longer supported and ZK has been removed from Kafka,
-                // users might migrate from ZK to KRaft in version 3.x and then perform a rolling upgrade to 4.0.
-                // Therefore, this case needs to be retained but will be a no-op.
+                // No-op records and historical ZK migration records need no replay action.
                 break;
             case BEGIN_TRANSACTION_RECORD:
                 offsetControl.replay((BeginTransactionRecord) message, offset);
@@ -1610,6 +1604,20 @@ public final class QuorumController implements Controller {
                 break;
             default:
                 throw new RuntimeException("Unhandled record type " + type);
+        }
+    }
+
+    /**
+     * Keep both experimental replay paths out of the central Controller switch:
+     * neither may emit authorization or issue a COMMITTED object deletion.
+     */
+    private void replayRetirementRecord(ApiMessage message, Optional<OffsetAndEpoch> snapshotId, long offset) {
+        if (message instanceof PartitionRetirementAuthorityRecord partition) {
+            replayPartitionRetirementAuthority(partition, snapshotId, offset);
+        } else if (message instanceof CommittedObjectRetirementRecord object) {
+            replayCommittedObjectRetirement(object, snapshotId, offset);
+        } else {
+            throw new IllegalArgumentException("Unexpected retirement record type " + message.apiKey());
         }
     }
 
