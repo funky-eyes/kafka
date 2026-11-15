@@ -269,6 +269,11 @@ public class ReplicationControlManager {
         public int numPartitions(long epoch) {
             return parts.size(epoch);
         }
+
+        /** Current immutable partition ID snapshot for one serialized Controller event. */
+        Set<Integer> partitionIds() {
+            return Set.copyOf(parts.keySet());
+        }
     }
 
     /**
