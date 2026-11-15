@@ -94,9 +94,11 @@ class S3BucketLifecycleGuardTest {
     @Test
     void noLifecycleConfigurationAllowsWritesButAccessDeniedFailsClosed() {
         AtomicInteger attempts = new AtomicInteger();
-        S3Exception absent = S3Exception.builder().statusCode(404)
-            .awsErrorDetails(AwsErrorDetails.builder()
-                .errorCode("NoSuchLifecycleConfiguration").build()).build();
+        S3Exception.Builder missingBuilder = S3Exception.builder();
+        missingBuilder.statusCode(404);
+        missingBuilder.awsErrorDetails(AwsErrorDetails.builder()
+            .errorCode("NoSuchLifecycleConfiguration").build());
+        S3Exception absent = missingBuilder.build();
         S3BucketLifecycleGuard noRules = new S3BucketLifecycleGuard(() -> {
             attempts.incrementAndGet();
             throw absent;
