@@ -21,6 +21,7 @@ import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCo
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.CleanupDeletedValue;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.CommittedObjectValue;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.MetadataKey;
+import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.ObjectCatalogSealValue;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.MetadataValue;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.PartitionLogStartValue;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.PreparedObjectValue;
@@ -52,6 +53,8 @@ public final class SharedMetadataImage {
 
     private final Map<Long, PreparedObject> preparedObjects = new HashMap<>();
     private final Map<Long, SharedObjectMetadata> committedObjects = new HashMap<>();
+    private final Map<Long, Long> committedObjectPositions = new HashMap<>();
+    private final Map<Long, CatalogSealEvidence> catalogSeals = new HashMap<>();
     private final Map<Long, CleanupObject> cleanupObjects = new HashMap<>();
     private final Map<Integer, Long> brokerSequenceWatermarks = new HashMap<>();
     private final Map<SharedPartitionId, Long> partitionLogStarts = new HashMap<>();
@@ -69,6 +72,10 @@ public final class SharedMetadataImage {
     }
 
     public synchronized void apply(byte[] keyBytes, byte[] valueBytes) {
+        applyWithOffset(keyBytes, valueBytes, -1L);
+    }
+
+    private void applyWithOffset(byte[] keyBytes, byte[] valueBytes, long recordOffset) {
         if (state == State.FAILED) {
             throw failedState();
         }
@@ -76,8 +83,9 @@ public final class SharedMetadataImage {
             MetadataKey key = SharedMetadataRecordCodec.decodeKey(keyBytes);
             MetadataValue value = SharedMetadataRecordCodec.decodeValue(key, valueBytes);
             switch (key.type()) {
-                case OBJECT -> applyObject(key.id(), value);
+                case OBJECT -> applyObject(key.id(), value, recordOffset);
                 case OBJECT_CLEANUP -> applyCleanup(key.id(), value);
+                case OBJECT_CATALOG_SEAL -> applyObjectCatalogSeal(key.id(), value, recordOffset);
                 case BROKER_SEQUENCE -> applyBrokerSequence(Math.toIntExact(key.id()), value);
                 case PARTITION_LOG_START -> applyPartitionLogStart(key.partition(), value);
             }
@@ -106,7 +114,7 @@ public final class SharedMetadataImage {
                     "metadata consumer offset " + offset + " does not advance " + lastConsumedMetadataOffset
                 );
             }
-            apply(keyBytes, valueBytes);
+            applyWithOffset(keyBytes, valueBytes, offset);
             lastConsumedMetadataOffset = offset;
         } catch (RuntimeException | Error replayFailure) {
             markFailed(replayFailure);
@@ -114,7 +122,7 @@ public final class SharedMetadataImage {
         }
     }
 
-    private void applyObject(long objectId, MetadataValue value) {
+    private void applyObject(long objectId, MetadataValue value, long recordOffset) {
         if (value == TombstoneValue.INSTANCE) {
             applyObjectTombstone(objectId);
             return;
@@ -124,13 +132,18 @@ public final class SharedMetadataImage {
             return;
         }
         if (value instanceof CommittedObjectValue committed) {
-            applyCommittedObject(objectId, committed);
+            applyCommittedObject(objectId, committed, recordOffset);
             return;
         }
         throw corruption("object " + objectId + " has incompatible metadata value " + value.getClass().getName());
     }
 
     private void applyObjectTombstone(long objectId) {
+        if (catalogSeals.containsKey(objectId)) {
+            // A historical COMMITTED tombstone cannot erase a sealed
+            // physical object while its authoritative lifetime is unresolved.
+            throw corruption("Tombstone would erase a sealed COMMITTED object: " + objectId);
+        }
         if (state == State.READY) {
             // Live object tombstones lack KRaft retirement authorization.
             // Fail closed rather than diverging from other replica indexes.
@@ -140,9 +153,15 @@ public final class SharedMetadataImage {
         // No transient COMMITTED reference is exposed before markReady().
         preparedObjects.remove(objectId);
         committedObjects.remove(objectId);
+        committedObjectPositions.remove(objectId);
     }
 
     private void applyPreparedObject(long objectId, PreparedObjectValue prepared) {
+        if (catalogSeals.containsKey(objectId)) {
+            // A prior seal in this authoritative metadata partition fences
+            // duplicate PREPAREs from an old owner, but cannot delete live data.
+            return;
+        }
         CleanupObject cleanup = cleanupObjects.get(objectId);
         if (cleanup != null) {
             validateCleanupTimestamp(objectId, cleanup.createdTimeMs, prepared.createdTimeMs());
@@ -158,11 +177,22 @@ public final class SharedMetadataImage {
         }
     }
 
-    private void applyCommittedObject(long objectId, CommittedObjectValue committed) {
+    private void applyCommittedObject(long objectId, CommittedObjectValue committed, long recordOffset) {
         SharedObjectMetadata metadata = committed.metadata();
         if (metadata.objectId() != objectId) {
             throw corruption(
                 "object key " + objectId + " does not match committed metadata " + metadata.objectId());
+        }
+        CatalogSealEvidence seal = catalogSeals.get(objectId);
+        if (seal != null) {
+            // A late or retried COMMIT cannot publish any new reference after
+            // its durable Kafka catalog seal. Identity mismatch means corrupt
+            // metadata; a matching duplicate loses to the earlier seal.
+            if (!metadata.equals(committedObjects.get(objectId))
+                || !seal.seal().descriptorSha256().equals(SharedMetadataRecordCodec.committedDescriptorSha256(metadata))) {
+                throw corruption("Post-seal object COMMIT has a conflicting descriptor: " + objectId);
+            }
+            return;
         }
         if (cleanupObjects.containsKey(objectId)) {
             // The cleanup record has an earlier offset in the authoritative partition, so this is a losing delayed
@@ -174,10 +204,59 @@ public final class SharedMetadataImage {
             throw corruption("object " + objectId + " has conflicting COMMITTED metadata");
         }
         preparedObjects.remove(objectId);
+        if (existing == null) {
+            committedObjectPositions.put(objectId, recordOffset);
+        }
         if (existing == null && state == State.READY) {
             // Historical replay must finish before publishing its final
             // COMMITTED winners into the broker's remote read index.
             committedObjectListener.accept(metadata);
+        }
+    }
+
+    private void applyObjectCatalogSeal(long objectId, MetadataValue value, long recordOffset) {
+        if (!(value instanceof ObjectCatalogSealValue seal)) {
+            throw corruption("Catalog seal may not be tombstoned or replaced by a different record type");
+        }
+        if (recordOffset < 0L || seal.originalCommitOffset() >= recordOffset) {
+            throw corruption("Catalog seal requires a later, actual read-committed Kafka record offset");
+        }
+        SharedObjectMetadata original = committedObjects.get(objectId);
+        Long committedPosition = committedObjectPositions.get(objectId);
+        if (original == null || committedPosition == null
+            || committedPosition != seal.originalCommitOffset()) {
+            // A compacted-away COMMIT, replay gap or forged position can
+            // never be substituted by a bare sampled LSO.
+            throw corruption("Catalog seal lacks the original replayed COMMITTED record: " + objectId);
+        }
+        if (original.objectSize() != seal.objectSize()
+            || original.objectChecksum() != seal.objectChecksum()
+            || !SharedMetadataRecordCodec.committedDescriptorSha256(original).equals(seal.descriptorSha256())) {
+            throw corruption("Catalog seal changed an immutable packed object descriptor: " + objectId);
+        }
+        CatalogSealEvidence next = new CatalogSealEvidence(recordOffset, seal);
+        CatalogSealEvidence prior = catalogSeals.get(objectId);
+        if (prior != null && !prior.equals(next)) {
+            throw corruption("Conflicting catalog seal generations for object " + objectId);
+        }
+        catalogSeals.putIfAbsent(objectId, next);
+        // Keep existing COMMITTED references readable. This replay fact
+        // DOES NOT retire primary/alternate indexes, drain readers, or
+        // grant DELETE permission.
+    }
+
+    /** Read-only exact COMMIT/seal evidence, not cross-log Controller authority. */
+    public synchronized Optional<CatalogSealEvidence> catalogSeal(long objectId) {
+        requireReady();
+        return Optional.ofNullable(catalogSeals.get(objectId));
+    }
+
+    public record CatalogSealEvidence(long sealRecordOffset, ObjectCatalogSealValue seal) {
+        public CatalogSealEvidence {
+            if (sealRecordOffset < 0L) {
+                throw new IllegalArgumentException("Catalog seal needs an actual Kafka record offset");
+            }
+            Objects.requireNonNull(seal, "seal");
         }
     }
 

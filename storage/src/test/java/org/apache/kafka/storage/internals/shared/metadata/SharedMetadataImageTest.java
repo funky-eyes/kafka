@@ -578,6 +578,109 @@ class SharedMetadataImageTest {
         );
     }
 
+    @Test
+    void catalogSealRequiresActualEarlierCommitRecordAndPreservesReads() {
+        long id = BrokerObjectId.compose(8, 91L);
+        SharedObjectMetadata object = metadata(id, 99L);
+        List<SharedObjectMetadata> announced = new ArrayList<>();
+        SharedMetadataImage image = new SharedMetadataImage(announced::add);
+        byte[] key = SharedMetadataRecordCodec.objectKey(id);
+        byte[] commit = SharedMetadataRecordCodec.committedObjectValue(object);
+        byte[] sealKey = SharedMetadataRecordCodec.objectCatalogSealKey(id);
+        byte[] sealValue = SharedMetadataRecordCodec.objectCatalogSealValue(8L, 17L, object);
+        image.applyFromMetadataLog(key, commit, 8L);
+        image.applyFromMetadataLog(sealKey, sealValue, 9L);
+        image.markReady();
+        assertEquals(List.of(object), image.committedObjects());
+        assertEquals(9L, image.catalogSeal(id).orElseThrow().sealRecordOffset());
+        image.applyFromMetadataLog(key, commit, 10L);
+        assertEquals(List.of(object), image.committedObjects());
+        assertEquals(List.of(object), announced);
+    }
+
+    @Test
+    void catalogSealCannotInventPriorCommittedObjectAfterCompaction() {
+        long id = BrokerObjectId.compose(8, 92L);
+        SharedObjectMetadata object = metadata(id, 101L);
+        SharedMetadataImage image = new SharedMetadataImage();
+        assertThrows(IllegalStateException.class, () ->
+            image.applyFromMetadataLog(SharedMetadataRecordCodec.objectCatalogSealKey(id),
+                SharedMetadataRecordCodec.objectCatalogSealValue(8L, 17L, object), 9L));
+        assertEquals(SharedMetadataImage.State.FAILED, image.state());
+    }
+
+    @Test
+    void catalogSealRejectsForgedOffsetChangedDescriptorAndPrematureWrites() {
+        long id = BrokerObjectId.compose(8, 93L);
+        SharedObjectMetadata object = metadata(id, 103L);
+        SharedMetadataImage image = new SharedMetadataImage();
+        image.applyFromMetadataLog(SharedMetadataRecordCodec.objectKey(id),
+            SharedMetadataRecordCodec.committedObjectValue(object), 8L);
+        byte[] sealKey = SharedMetadataRecordCodec.objectCatalogSealKey(id);
+        assertThrows(IllegalStateException.class, () ->
+            image.applyFromMetadataLog(sealKey,
+                SharedMetadataRecordCodec.objectCatalogSealValue(7L, 17L, object), 9L));
+        assertEquals(SharedMetadataImage.State.FAILED, image.state());
+
+        SharedMetadataImage forged = new SharedMetadataImage();
+        forged.applyFromMetadataLog(SharedMetadataRecordCodec.objectKey(id),
+            SharedMetadataRecordCodec.committedObjectValue(object), 8L);
+        assertThrows(IllegalStateException.class, () ->
+            forged.applyFromMetadataLog(sealKey,
+                SharedMetadataRecordCodec.objectCatalogSealValue(8L, 17L, metadata(id, 104L)), 9L));
+
+        SharedMetadataImage notFromLog = new SharedMetadataImage();
+        notFromLog.apply(SharedMetadataRecordCodec.objectKey(id),
+            SharedMetadataRecordCodec.committedObjectValue(object));
+        assertThrows(IllegalStateException.class, () ->
+            notFromLog.apply(sealKey,
+                SharedMetadataRecordCodec.objectCatalogSealValue(8L, 17L, object)));
+    }
+
+    @Test
+    void compactedLateDuplicateCannotManufactureTheOriginalCommitProof() {
+        long id = BrokerObjectId.compose(8, 95L);
+        SharedObjectMetadata object = metadata(id, 122L);
+        byte[] key = SharedMetadataRecordCodec.objectKey(id);
+        byte[] sealKey = SharedMetadataRecordCodec.objectCatalogSealKey(id);
+        byte[] seal = SharedMetadataRecordCodec.objectCatalogSealValue(8L, 17L, object);
+
+        // Kafka compaction may preserve a newer duplicate COMMIT at offset
+        // 10 and remove its original offset 8. The seal alone cannot prove
+        // the original immutable reference; fail closed rather than GC.
+        SharedMetadataImage recovered = new SharedMetadataImage();
+        assertThrows(IllegalStateException.class, () ->
+            recovered.applyFromMetadataLog(sealKey, seal, 9L));
+        assertEquals(SharedMetadataImage.State.FAILED, recovered.state());
+
+        SharedMetadataImage duplicateOnly = new SharedMetadataImage();
+        duplicateOnly.applyFromMetadataLog(key,
+            SharedMetadataRecordCodec.committedObjectValue(object), 10L);
+        assertThrows(IllegalStateException.class, () ->
+            duplicateOnly.applyFromMetadataLog(sealKey, seal, 11L));
+        assertEquals(SharedMetadataImage.State.FAILED, duplicateOnly.state());
+    }
+
+    @Test
+    void sealedCatalogRejectsHistoricalTombstoneAndConflictingLateCommit() {
+        long id = BrokerObjectId.compose(8, 94L);
+        SharedObjectMetadata original = metadata(id, 120L);
+        SharedMetadataImage conflicting = new SharedMetadataImage();
+        byte[] key = SharedMetadataRecordCodec.objectKey(id);
+        byte[] sealKey = SharedMetadataRecordCodec.objectCatalogSealKey(id);
+        byte[] seal = SharedMetadataRecordCodec.objectCatalogSealValue(8L, 17L, original);
+        conflicting.applyFromMetadataLog(key, SharedMetadataRecordCodec.committedObjectValue(original), 8L);
+        conflicting.applyFromMetadataLog(sealKey, seal, 9L);
+        assertThrows(IllegalStateException.class, () -> conflicting.applyFromMetadataLog(
+            key, SharedMetadataRecordCodec.committedObjectValue(metadata(id, 121L)), 10L));
+
+        SharedMetadataImage tombstone = new SharedMetadataImage();
+        tombstone.applyFromMetadataLog(key, SharedMetadataRecordCodec.committedObjectValue(original), 8L);
+        tombstone.applyFromMetadataLog(sealKey, seal, 9L);
+        assertThrows(IllegalStateException.class, () -> tombstone.applyFromMetadataLog(key, null, 10L));
+        assertEquals(SharedMetadataImage.State.FAILED, tombstone.state());
+    }
+
     private static SharedObjectMetadata metadata(long objectId, long checksum) {
         SharedObjectRange range = new SharedObjectRange(
             new SharedPartitionId(11L, 12L, 0),

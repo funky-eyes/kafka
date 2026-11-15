@@ -55,6 +55,15 @@ class KafkaObjectMetadataStoreTest {
     }
 
     @Test
+    void ordinaryMetadataProducerCannotEmitUnfencedCatalogSeal() {
+        assertThrows(IllegalArgumentException.class, () ->
+            KafkaObjectMetadataStore.rejectUnfencedRetirementWrite(
+                SharedMetadataRecordCodec.objectCatalogSealKey(101L)
+            )
+        );
+    }
+
+    @Test
     void ordinaryMetadataProducerStillAcceptsExistingMetadataKeys() {
         KafkaObjectMetadataStore.rejectUnfencedRetirementWrite(
             org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.objectKey(1L)

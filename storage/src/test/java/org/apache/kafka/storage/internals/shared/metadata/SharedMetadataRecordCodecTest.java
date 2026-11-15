@@ -281,6 +281,38 @@ class SharedMetadataRecordCodecTest {
         );
     }
 
+    @Test
+    void catalogSealRoundTripsOriginalCommitPositionAndFullPackedDescriptor() {
+        SharedObjectMetadata object = metadata(BrokerObjectId.compose(3, 72L));
+        var key = SharedMetadataRecordCodec.decodeKey(
+            SharedMetadataRecordCodec.objectCatalogSealKey(object.objectId()));
+        assertEquals(SharedMetadataRecordCodec.KeyType.OBJECT_CATALOG_SEAL, key.type());
+        assertEquals(object.objectId(), key.id());
+        var value = SharedMetadataRecordCodec.decodeValue(
+            key, SharedMetadataRecordCodec.objectCatalogSealValue(20L, 7L, object));
+        var seal = assertInstanceOf(SharedMetadataRecordCodec.ObjectCatalogSealValue.class, value);
+        assertEquals(20L, seal.originalCommitOffset());
+        assertEquals(7L, seal.retirementEpoch());
+        assertEquals(object.objectSize(), seal.objectSize());
+        assertEquals(object.objectChecksum(), seal.objectChecksum());
+        assertEquals(SharedMetadataRecordCodec.committedDescriptorSha256(object), seal.descriptorSha256());
+    }
+
+    @Test
+    void catalogSealRejectsInvalidIdentityAndUnknownPayload() {
+        SharedObjectMetadata object = metadata(BrokerObjectId.compose(3, 73L));
+        var key = SharedMetadataRecordCodec.decodeKey(
+            SharedMetadataRecordCodec.objectCatalogSealKey(object.objectId()));
+        assertThrows(IllegalArgumentException.class, () ->
+            SharedMetadataRecordCodec.objectCatalogSealValue(-1L, 7L, object));
+        assertThrows(IllegalArgumentException.class, () ->
+            SharedMetadataRecordCodec.objectCatalogSealValue(5L, 0L, object));
+        assertThrows(IllegalArgumentException.class, () ->
+            SharedMetadataRecordCodec.decodeValue(key, SharedMetadataRecordCodec.committedObjectValue(object)));
+        assertThrows(IllegalArgumentException.class, () ->
+            new SharedMetadataRecordCodec.ObjectCatalogSealValue(1L, 2L, 3L, 4L, "INVALID"));
+    }
+
     private static SharedObjectMetadata metadata(long objectId) {
         SharedObjectRange first = new SharedObjectRange(
             new SharedPartitionId(1L, 2L, 0),
