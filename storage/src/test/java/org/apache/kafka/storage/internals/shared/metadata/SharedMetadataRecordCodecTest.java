@@ -299,6 +299,26 @@ class SharedMetadataRecordCodecTest {
     }
 
     @Test
+    void selfContainedCatalogSealRestoresEveryPackedRangeAfterKafkaCompaction() {
+        SharedObjectMetadata original = metadata(BrokerObjectId.compose(3, 74L));
+        var key = SharedMetadataRecordCodec.decodeKey(
+            SharedMetadataRecordCodec.objectCatalogSealKey(original.objectId()));
+        byte[] v2 = SharedMetadataRecordCodec.objectCatalogSealWithDescriptorValue(20L, 7L, original);
+        var seal = assertInstanceOf(SharedMetadataRecordCodec.ObjectCatalogSealValue.class,
+            SharedMetadataRecordCodec.decodeValue(key, v2));
+        assertEquals(20L, seal.originalCommitOffset());
+        assertEquals(7L, seal.retirementEpoch());
+        assertEquals(original, seal.embeddedDescriptor().orElseThrow());
+        assertEquals(SharedMetadataRecordCodec.committedDescriptorSha256(original), seal.descriptorSha256());
+
+        // The v2 payload contains the full original KSO2 range descriptor.
+        // A truncated compacted record can never fabricate a reference.
+        byte[] truncated = java.util.Arrays.copyOf(v2, v2.length - 1);
+        assertThrows(IllegalArgumentException.class,
+            () -> SharedMetadataRecordCodec.decodeValue(key, truncated));
+    }
+
+    @Test
     void catalogSealRejectsInvalidIdentityAndUnknownPayload() {
         SharedObjectMetadata object = metadata(BrokerObjectId.compose(3, 73L));
         var key = SharedMetadataRecordCodec.decodeKey(

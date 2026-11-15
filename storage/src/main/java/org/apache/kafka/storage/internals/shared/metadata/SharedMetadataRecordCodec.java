@@ -24,6 +24,7 @@ import java.util.HexFormat;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * Versioned binary format stored in the compacted {@code __shared_storage_metadata} topic.
@@ -50,6 +51,7 @@ public final class SharedMetadataRecordCodec {
     private static final byte OBJECT_CLEANUP_DELETED = 5;
     private static final byte PARTITION_LOG_START_ADVANCED = 6;
     private static final byte OBJECT_CATALOG_SEALED = 7;
+    private static final byte OBJECT_CATALOG_SEALED_WITH_DESCRIPTOR = 8;
     private static final int VALUE_HEADER_BYTES = Short.BYTES + Byte.BYTES;
     private static final int COMMITTED_OBJECT_HEADER_BYTES = Long.BYTES + Long.BYTES + Integer.BYTES;
     private static final int CATALOG_SEAL_DIGEST_BYTES = 64;
@@ -275,6 +277,39 @@ public final class SharedMetadataRecordCodec {
     }
 
     /**
+     * Experimental self-contained catalog seal. Unlike the legacy digest-only
+     * seal, it preserves the canonical COMMITTED descriptor and every packed
+     * range in the independent compacted key. Its own payload permits a broker
+     * to rebuild reads when Kafka compaction removes the original COMMIT and
+     * retains a later duplicate COMMIT.
+     *
+     * <p>This is replay-format support, NOT a production writer. The embedded
+     * original position is a CLAIM, not an authenticated KRaft cross-log
+     * barrier or permission to perform physical DELETE.</p>
+     */
+    public static byte[] objectCatalogSealWithDescriptorValue(
+        long originalCommitOffset,
+        long retirementEpoch,
+        SharedObjectMetadata descriptor
+    ) {
+        Objects.requireNonNull(descriptor, "descriptor");
+        if (originalCommitOffset < 0L || retirementEpoch <= 0L) {
+            throw new IllegalArgumentException("Catalog seal needs a valid COMMIT position and retirement epoch");
+        }
+        byte[] committed = committedObjectValue(descriptor);
+        if (committed.length > MAX_COMMITTED_OBJECT_VALUE_BYTES) {
+            throw new IllegalArgumentException("Catalog seal descriptor exceeds Kafka metadata value limit");
+        }
+        return ByteBuffer.allocate(VALUE_HEADER_BYTES + 2 * Long.BYTES + committed.length)
+            .putShort(VALUE_VERSION)
+            .put(OBJECT_CATALOG_SEALED_WITH_DESCRIPTOR)
+            .putLong(originalCommitOffset)
+            .putLong(retirementEpoch)
+            .put(committed)
+            .array();
+    }
+
+    /**
      * Durable inclusive logical log-start offset, not permission to delete physical objects.
      *
      * <p>Before emission is enabled, all brokers must understand the record and agree on an
@@ -318,7 +353,7 @@ public final class SharedMetadataRecordCodec {
         return switch (key.type()) {
             case OBJECT -> decodeObjectValue(key.id(), type, buffer);
             case OBJECT_CLEANUP -> decodeObjectCleanupValue(type, buffer);
-            case OBJECT_CATALOG_SEAL -> decodeObjectCatalogSealValue(type, buffer);
+            case OBJECT_CATALOG_SEAL -> decodeObjectCatalogSealValue(key.id(), type, buffer);
             case PARTITION_LOG_START -> decodePartitionLogStartValue(type, buffer);
             case BROKER_SEQUENCE -> decodeBrokerSequenceValue(type, buffer);
         };
@@ -345,14 +380,38 @@ public final class SharedMetadataRecordCodec {
         throw corruption("object cleanup key has incompatible value type " + type);
     }
 
-    private static MetadataValue decodeObjectCatalogSealValue(byte type, ByteBuffer buffer) {
-        if (type != OBJECT_CATALOG_SEALED) {
+    private static MetadataValue decodeObjectCatalogSealValue(long objectId, byte type, ByteBuffer buffer) {
+        if (type == OBJECT_CATALOG_SEALED) {
+            requireRemaining(buffer, CATALOG_SEAL_BYTES - VALUE_HEADER_BYTES, "catalog seal value");
+            return new ObjectCatalogSealValue(
+                buffer.getLong(), buffer.getLong(), buffer.getLong(), buffer.getLong(),
+                new String(readDigest(buffer), StandardCharsets.US_ASCII)
+            );
+        }
+        if (type != OBJECT_CATALOG_SEALED_WITH_DESCRIPTOR) {
             throw corruption("object catalog seal key has incompatible value type " + type);
         }
-        requireRemaining(buffer, CATALOG_SEAL_BYTES - VALUE_HEADER_BYTES, "catalog seal value");
+        requireAtLeastRemaining(buffer, 2 * Long.BYTES + VALUE_HEADER_BYTES
+            + COMMITTED_OBJECT_HEADER_BYTES + RANGE_BYTES, "self-contained catalog seal");
+        long originalOffset = buffer.getLong();
+        long retirementEpoch = buffer.getLong();
+        if (buffer.remaining() > MAX_COMMITTED_OBJECT_VALUE_BYTES) {
+            throw corruption("self-contained catalog seal exceeds maximum COMMITTED descriptor length");
+        }
+        byte[] canonical = new byte[buffer.remaining()];
+        buffer.get(canonical);
+        MetadataValue decoded = decodeValue(new MetadataKey(KeyType.OBJECT, objectId), canonical);
+        if (!(decoded instanceof CommittedObjectValue committed)) {
+            throw corruption("self-contained catalog seal must embed one full COMMITTED value");
+        }
+        SharedObjectMetadata metadata = committed.metadata();
         return new ObjectCatalogSealValue(
-            buffer.getLong(), buffer.getLong(), buffer.getLong(), buffer.getLong(),
-            new String(readDigest(buffer), StandardCharsets.US_ASCII)
+            originalOffset,
+            retirementEpoch,
+            metadata.objectSize(),
+            metadata.objectChecksum(),
+            committedDescriptorSha256(metadata),
+            Optional.of(metadata)
         );
     }
 
@@ -567,16 +626,36 @@ public final class SharedMetadataRecordCodec {
         long retirementEpoch,
         long objectSize,
         long objectChecksum,
-        String descriptorSha256
+        String descriptorSha256,
+        Optional<SharedObjectMetadata> embeddedDescriptor
     ) implements MetadataValue {
+        /** Existing digest-only seals cannot survive compaction of the original COMMIT. */
+        public ObjectCatalogSealValue(
+            long originalCommitOffset,
+            long retirementEpoch,
+            long objectSize,
+            long objectChecksum,
+            String descriptorSha256
+        ) {
+            this(originalCommitOffset, retirementEpoch, objectSize, objectChecksum,
+                descriptorSha256, Optional.empty());
+        }
+
         public ObjectCatalogSealValue {
             Objects.requireNonNull(descriptorSha256, "descriptorSha256");
+            embeddedDescriptor = Objects.requireNonNull(embeddedDescriptor, "embeddedDescriptor");
             if (originalCommitOffset < 0L || retirementEpoch <= 0L) {
                 throw new IllegalArgumentException("Invalid object catalog seal position or epoch");
             }
             if (objectSize <= 0L || objectChecksum < 0L || !descriptorSha256.matches("[0-9a-f]{64}")) {
                 throw new IllegalArgumentException("Invalid immutable object catalog descriptor seal");
             }
+            embeddedDescriptor.ifPresent(descriptor -> {
+                if (descriptor.objectSize() != objectSize || descriptor.objectChecksum() != objectChecksum
+                    || !committedDescriptorSha256(descriptor).equals(descriptorSha256)) {
+                    throw new IllegalArgumentException("Self-contained catalog seal descriptor has changed");
+                }
+            });
         }
     }
 

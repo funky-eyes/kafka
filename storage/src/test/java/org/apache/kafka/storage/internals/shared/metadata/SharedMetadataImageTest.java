@@ -662,6 +662,64 @@ class SharedMetadataImageTest {
     }
 
     @Test
+    void selfContainedSealSurvivesCompactedOriginalAndLateDuplicateCommit() {
+        long id = BrokerObjectId.compose(8, 96L);
+        SharedObjectMetadata object = metadata(id, 123L);
+        byte[] key = SharedMetadataRecordCodec.objectKey(id);
+        byte[] sealKey = SharedMetadataRecordCodec.objectCatalogSealKey(id);
+        byte[] v2 = SharedMetadataRecordCodec.objectCatalogSealWithDescriptorValue(8L, 17L, object);
+        List<SharedObjectMetadata> recovered = new ArrayList<>();
+        SharedMetadataImage image = new SharedMetadataImage(recovered::add);
+
+        // Offset 8 original COMMIT has been compacted away. The distinct seal
+        // at offset 9 retains the descriptor. Offset 10 is a late duplicate.
+        image.applyFromMetadataLog(sealKey, v2, 9L);
+        image.applyFromMetadataLog(key, SharedMetadataRecordCodec.committedObjectValue(object), 10L);
+        image.markReady();
+        assertEquals(List.of(object), image.committedObjects());
+        assertEquals(List.of(object), recovered);
+        assertFalse(image.catalogSeal(id).orElseThrow().originalCommitReplayed());
+    }
+
+    @Test
+    void selfContainedSealWithOriginalCommitRecordsPreciseReplayProvenance() {
+        long id = BrokerObjectId.compose(8, 97L);
+        SharedObjectMetadata object = metadata(id, 124L);
+        SharedMetadataImage image = new SharedMetadataImage();
+        image.applyFromMetadataLog(SharedMetadataRecordCodec.objectKey(id),
+            SharedMetadataRecordCodec.committedObjectValue(object), 8L);
+        image.applyFromMetadataLog(SharedMetadataRecordCodec.objectCatalogSealKey(id),
+            SharedMetadataRecordCodec.objectCatalogSealWithDescriptorValue(8L, 17L, object), 9L);
+        image.markReady();
+        assertTrue(image.catalogSeal(id).orElseThrow().originalCommitReplayed());
+    }
+
+    @Test
+    void selfContainedSealNeverFabricatesNewLiveReferences() {
+        long id = BrokerObjectId.compose(8, 98L);
+        SharedObjectMetadata object = metadata(id, 125L);
+        SharedMetadataImage image = new SharedMetadataImage();
+        image.markReady();
+        assertThrows(IllegalStateException.class, () -> image.applyFromMetadataLog(
+            SharedMetadataRecordCodec.objectCatalogSealKey(id),
+            SharedMetadataRecordCodec.objectCatalogSealWithDescriptorValue(8L, 17L, object), 9L));
+        assertEquals(SharedMetadataImage.State.FAILED, image.state());
+    }
+
+    @Test
+    void selfContainedSealRejectsConflictingLateCommitAfterCompaction() {
+        long id = BrokerObjectId.compose(8, 99L);
+        SharedObjectMetadata object = metadata(id, 126L);
+        SharedMetadataImage image = new SharedMetadataImage();
+        image.applyFromMetadataLog(SharedMetadataRecordCodec.objectCatalogSealKey(id),
+            SharedMetadataRecordCodec.objectCatalogSealWithDescriptorValue(8L, 17L, object), 9L);
+        assertThrows(IllegalStateException.class, () -> image.applyFromMetadataLog(
+            SharedMetadataRecordCodec.objectKey(id),
+            SharedMetadataRecordCodec.committedObjectValue(metadata(id, 127L)), 10L));
+        assertEquals(SharedMetadataImage.State.FAILED, image.state());
+    }
+
+    @Test
     void sealedCatalogRejectsHistoricalTombstoneAndConflictingLateCommit() {
         long id = BrokerObjectId.compose(8, 94L);
         SharedObjectMetadata original = metadata(id, 120L);

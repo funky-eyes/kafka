@@ -223,10 +223,29 @@ public final class SharedMetadataImage {
         }
         SharedObjectMetadata original = committedObjects.get(objectId);
         Long committedPosition = committedObjectPositions.get(objectId);
-        if (original == null || committedPosition == null
-            || committedPosition != seal.originalCommitOffset()) {
-            // A compacted-away COMMIT, replay gap or forged position can
-            // never be substituted by a bare sampled LSO.
+        boolean originalCommitReplayed = original != null && committedPosition != null
+            && committedPosition == seal.originalCommitOffset();
+        if (seal.embeddedDescriptor().isPresent()) {
+            SharedObjectMetadata embedded = seal.embeddedDescriptor().orElseThrow();
+            if (embedded.objectId() != objectId || (original != null && !original.equals(embedded))) {
+                throw corruption("Compacted catalog seal conflicts with original COMMITTED object: " + objectId);
+            }
+            if (original == null) {
+                // A self-contained seal may rebuild a compacted original
+                // ONLY during initial read-committed replay. Live replay must
+                // never manufacture a new readable object without COMMIT.
+                if (state != State.RECOVERING || cleanupObjects.containsKey(objectId)) {
+                    throw corruption("Unproven live catalog seal would resurrect COMMITTED object: " + objectId);
+                }
+                original = embedded;
+                committedObjects.put(objectId, embedded);
+                // -1 means original COMMIT was NOT separately replayed. The
+                // offset inside the seal remains a claim, never a GC grant.
+                committedObjectPositions.put(objectId, -1L);
+            }
+        } else if (!originalCommitReplayed) {
+            // Legacy digest-only seal is not self-contained. After Kafka
+            // compaction, it cannot recover the original descriptor.
             throw corruption("Catalog seal lacks the original replayed COMMITTED record: " + objectId);
         }
         if (original.objectSize() != seal.objectSize()
@@ -234,15 +253,14 @@ public final class SharedMetadataImage {
             || !SharedMetadataRecordCodec.committedDescriptorSha256(original).equals(seal.descriptorSha256())) {
             throw corruption("Catalog seal changed an immutable packed object descriptor: " + objectId);
         }
-        CatalogSealEvidence next = new CatalogSealEvidence(recordOffset, seal);
+        CatalogSealEvidence next = new CatalogSealEvidence(recordOffset, seal, originalCommitReplayed);
         CatalogSealEvidence prior = catalogSeals.get(objectId);
         if (prior != null && !prior.equals(next)) {
             throw corruption("Conflicting catalog seal generations for object " + objectId);
         }
         catalogSeals.putIfAbsent(objectId, next);
-        // Keep existing COMMITTED references readable. This replay fact
-        // DOES NOT retire primary/alternate indexes, drain readers, or
-        // grant DELETE permission.
+        // This only keeps COMMITTED reads recoverable; it NEVER authenticates
+        // the claimed original log offset, KRaft authority, or GC eligibility.
     }
 
     /** Read-only exact COMMIT/seal evidence, not cross-log Controller authority. */
@@ -251,7 +269,11 @@ public final class SharedMetadataImage {
         return Optional.ofNullable(catalogSeals.get(objectId));
     }
 
-    public record CatalogSealEvidence(long sealRecordOffset, ObjectCatalogSealValue seal) {
+    public record CatalogSealEvidence(
+        long sealRecordOffset,
+        ObjectCatalogSealValue seal,
+        boolean originalCommitReplayed
+    ) {
         public CatalogSealEvidence {
             if (sealRecordOffset < 0L) {
                 throw new IllegalArgumentException("Catalog seal needs an actual Kafka record offset");
