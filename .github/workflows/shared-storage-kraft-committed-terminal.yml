@@ -67,4 +67,5 @@ jobs:
             --tests 'org.apache.kafka.controller.CommittedObjectRetirementControlManagerTest' \
             --tests 'org.apache.kafka.controller.QuorumControllerTest.testTerminalObjectRetirementWriterCannotBypassUnnegotiatedFeature' \
             --tests 'org.apache.kafka.controller.QuorumControllerTest.testTerminalBatchCannotBypassUnnegotiatedFeature' \
+            --tests 'org.apache.kafka.controller.QuorumControllerTest.testNegotiatedControllerAtomicallyAppendsOnlyRecordedTerminalBatch' \
             --no-scan --max-workers=2 -PmaxParallelForks=1
