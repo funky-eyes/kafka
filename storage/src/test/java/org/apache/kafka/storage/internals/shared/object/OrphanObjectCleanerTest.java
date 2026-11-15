@@ -26,6 +26,7 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
 import java.util.List;
+import java.util.ArrayList;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CompletableFuture;
@@ -41,6 +42,90 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class OrphanObjectCleanerTest {
+    @Test
+    void durableClaimsAreCombinedIntoS3BulkDeleteRequests() throws Exception {
+        InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
+        List<Integer> batchSizes = new ArrayList<>();
+        CompletableFuture<Void> firstBatch = new CompletableFuture<>();
+        ObjectStore store = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                return CompletableFuture.completedFuture(null);
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long offset, int length) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return CompletableFuture.failedFuture(new AssertionError("Must use batch delete"));
+            }
+
+            @Override
+            public CompletableFuture<Void> deleteBatch(List<Long> objectIds) {
+                batchSizes.add(objectIds.size());
+                return batchSizes.size() == 1 ? firstBatch : CompletableFuture.completedFuture(null);
+            }
+        };
+        for (long objectId = 70_001L; objectId <= 70_010L; objectId++) {
+            metadata.prepare(objectId, 100L).get();
+        }
+        OrphanObjectCleaner cleaner = new OrphanObjectCleaner(store, metadata);
+        CompletableFuture<Integer> cleaning = cleaner.clean(1_000L);
+        assertEquals(List.of(8), batchSizes);
+        assertFalse(cleaning.isDone());
+        firstBatch.complete(null);
+        assertEquals(10, cleaning.get(10, TimeUnit.SECONDS));
+        assertEquals(List.of(8, 2), batchSizes);
+        for (long objectId = 70_001L; objectId <= 70_010L; objectId++) {
+            assertTrue(metadata.isCleanupClaimed(objectId));
+        }
+    }
+
+    @Test
+    void partialS3BulkDeleteFailureRetainsAllClaimsForIdempotentRetry() throws Exception {
+        InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
+        AtomicInteger attempted = new AtomicInteger();
+        ObjectStore store = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                return CompletableFuture.completedFuture(null);
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long offset, int length) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return CompletableFuture.failedFuture(new AssertionError("Must use batch delete"));
+            }
+
+            @Override
+            public CompletableFuture<Void> deleteBatch(List<Long> objectIds) {
+                assertEquals(2, objectIds.size());
+                if (attempted.incrementAndGet() == 1) {
+                    return CompletableFuture.failedFuture(
+                        new IllegalStateException("Some keys were not deleted"));
+                }
+                return CompletableFuture.completedFuture(null);
+            }
+        };
+        metadata.prepare(80_001L, 100L).get();
+        metadata.prepare(80_002L, 101L).get();
+        OrphanObjectCleaner cleaner = new OrphanObjectCleaner(store, metadata);
+        ExecutionException failed = assertThrows(ExecutionException.class,
+            () -> cleaner.clean(1_000L).get(10, TimeUnit.SECONDS));
+        assertTrue(failed.getCause().getMessage().contains("not deleted"));
+        assertTrue(metadata.isCleanupClaimed(80_001L));
+        assertTrue(metadata.isCleanupClaimed(80_002L));
+        assertEquals(2, cleaner.clean(1_000L).get(10, TimeUnit.SECONDS));
+        assertEquals(2, attempted.get());
+    }
+
     @Test
     void orphanGcRunsIndependentDeletesInBoundedParallelBatches() throws Exception {
         InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
