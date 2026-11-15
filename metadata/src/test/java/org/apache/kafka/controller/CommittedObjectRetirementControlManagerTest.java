@@ -19,6 +19,7 @@ package org.apache.kafka.controller;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.metadata.CommittedObjectRetirementRecord;
 import org.apache.kafka.common.utils.LogContext;
+import org.apache.kafka.metadata.CommittedObjectRetirementState;
 import org.apache.kafka.server.common.OffsetAndEpoch;
 import org.apache.kafka.timeline.SnapshotRegistry;
 
@@ -42,7 +43,7 @@ class CommittedObjectRetirementControlManagerTest {
         manager.replayFromKRaft(record(11L, 10L, 2, 7L), Optional.empty(), 11L);
         manager.replayFromKRaft(record(12L, 11L, 3, 7L), Optional.empty(), 12L);
         manager.replayFromKRaft(record(13L, 12L, 4, 7L), Optional.empty(), 13L);
-        assertEquals(CommittedObjectRetirementControlManager.Stage.DELETED, manager.get(OBJECT_ID).stage());
+        assertEquals(CommittedObjectRetirementState.Stage.DELETED, manager.get(OBJECT_ID).stage());
         assertEquals(13L, manager.get(OBJECT_ID).acceptedKRaftOffset());
     }
 
@@ -65,7 +66,7 @@ class CommittedObjectRetirementControlManagerTest {
             manager.replayFromKRaft(record(11L, 9L, 2, 7L), Optional.empty(), 11L));
         assertThrows(IllegalStateException.class, () ->
             manager.replayFromKRaft(record(11L, 10L, 3, 7L), Optional.empty(), 11L));
-        assertEquals(CommittedObjectRetirementControlManager.Stage.RETIRE_INTENT, manager.get(OBJECT_ID).stage());
+        assertEquals(CommittedObjectRetirementState.Stage.RETIRE_INTENT, manager.get(OBJECT_ID).stage());
     }
 
     @Test
@@ -89,7 +90,7 @@ class CommittedObjectRetirementControlManagerTest {
         manager.replayFromKRaft(record(10L, -1L, 1, -1L), Optional.empty(), 10L);
         assertThrows(IllegalArgumentException.class, () ->
             manager.replayFromKRaft(record(11L, 10L, 2, -1L), Optional.empty(), 11L));
-        assertEquals(CommittedObjectRetirementControlManager.Stage.RETIRE_INTENT, manager.get(OBJECT_ID).stage());
+        assertEquals(CommittedObjectRetirementState.Stage.RETIRE_INTENT, manager.get(OBJECT_ID).stage());
     }
 
     @Test
@@ -109,7 +110,7 @@ class CommittedObjectRetirementControlManagerTest {
         assertNull(manager.get(OBJECT_ID));
         manager.replayFromKRaft(record(20L, 19L, 4, 7L),
             Optional.of(new OffsetAndEpoch(21L, 3)), 20L);
-        assertEquals(CommittedObjectRetirementControlManager.Stage.DELETED, manager.get(OBJECT_ID).stage());
+        assertEquals(CommittedObjectRetirementState.Stage.DELETED, manager.get(OBJECT_ID).stage());
         assertThrows(IllegalStateException.class, () ->
             manager.replayFromKRaft(record(20L, 19L, 3, 7L),
                 Optional.of(new OffsetAndEpoch(21L, 3)), 20L));
@@ -123,9 +124,9 @@ class CommittedObjectRetirementControlManagerTest {
         registry.idempotentCreateSnapshot(10L);
         manager.replayFromKRaft(record(11L, 10L, 2, 7L), Optional.empty(), 11L);
         registry.idempotentCreateSnapshot(11L);
-        assertEquals(CommittedObjectRetirementControlManager.Stage.DELETE_READY, manager.get(OBJECT_ID).stage());
+        assertEquals(CommittedObjectRetirementState.Stage.DELETE_READY, manager.get(OBJECT_ID).stage());
         registry.revertToSnapshot(10L);
-        assertEquals(CommittedObjectRetirementControlManager.Stage.RETIRE_INTENT, manager.get(OBJECT_ID).stage());
+        assertEquals(CommittedObjectRetirementState.Stage.RETIRE_INTENT, manager.get(OBJECT_ID).stage());
     }
 
     @Test
