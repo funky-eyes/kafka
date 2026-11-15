@@ -47,8 +47,12 @@ final class WalReplicaDurabilityV1SnapshotReaderObserver {
     private static final short INCREMENTAL_API_KEY =
         new WalReplicaDurabilityCertificateRecord().apiKey();
     private static final int MAX_CHECKPOINT_RECORDS = 65_536;
+    // Limit cumulative nested receipts and WAL spans as well as record count.
+    // A snapshot with many large checkpoints must not amplify standby memory.
+    private static final long MAX_CHECKPOINT_CLAIMS = 262_144L;
 
     private final List<ApiMessageAndVersion> captured = new ArrayList<>();
+    private long capturedClaimCount;
 
     /**
      * Called once for each record from the actual standby SnapshotReader.
@@ -68,13 +72,21 @@ final class WalReplicaDurabilityV1SnapshotReaderObserver {
         if (key != CHECKPOINT_API_KEY) {
             return false;
         }
-        if (!(entry.message() instanceof WalReplicaDurabilityV1CheckpointRecord)) {
+        if (!(entry.message() instanceof WalReplicaDurabilityV1CheckpointRecord checkpoint)) {
             throw new IllegalArgumentException("snapshot V1 checkpoint API key and record type mismatch");
         }
         if (captured.size() >= MAX_CHECKPOINT_RECORDS) {
             throw new IllegalArgumentException("too many WAL checkpoint entries in metadata snapshot");
         }
+        if (checkpoint.replicaReceipts() == null || checkpoint.walSpans() == null) {
+            throw new IllegalArgumentException("missing WAL checkpoint receipt or span claims");
+        }
+        long newClaims = (long) checkpoint.replicaReceipts().size() + checkpoint.walSpans().size();
+        if (newClaims > MAX_CHECKPOINT_CLAIMS - capturedClaimCount) {
+            throw new IllegalArgumentException("too many buffered WAL checkpoint receipt and span claims");
+        }
         captured.add(entry);
+        capturedClaimCount += newClaims;
         return true;
     }
 

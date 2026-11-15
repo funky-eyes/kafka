@@ -170,4 +170,42 @@ class WalReplicaDurabilityV1SnapshotReaderObserverTest {
         assertEquals(200L, state.getUntrusted(key(first)).spans().get(0).endOffset());
         assertEquals(1100L, state.getUntrusted(key(second)).kraftOffset());
     }
+
+    @Test
+    void cumulativeNestedClaimsAreBoundedBeforeSnapshotRestore() {
+        var observer = new WalReplicaDurabilityV1SnapshotReaderObserver();
+        var large = checkpoint(Uuid.randomUuid(), 1000);
+        large.setWalSpans(java.util.List.of(
+            span(1).setEndOffset(150),
+            span(1).setStartOffset(150),
+            span(2).setEndOffset(150),
+            span(2).setStartOffset(150)));
+        var entry = wire(large);
+        // Each checkpoint has two receipts and four spans (six claims).
+        // The 43,691st entry would exceed the 262,144-claim cap, before
+        // hitting the separate 65,536-record limit.
+        for (int i = 0; i < 43_690; i++) {
+            assertTrue(observer.captureIfCheckpoint(entry));
+        }
+        assertThrows(IllegalArgumentException.class,
+            () -> observer.captureIfCheckpoint(entry));
+    }
+
+    @Test
+    void missingNestedClaimListsFailEarlyWithoutPoisoningNextCheckpoint() {
+        var observer = new WalReplicaDurabilityV1SnapshotReaderObserver();
+        var noReceipts = checkpoint(Uuid.randomUuid(), 1000);
+        noReceipts.setReplicaReceipts(null);
+        assertThrows(IllegalArgumentException.class,
+            () -> observer.captureIfCheckpoint(wire(noReceipts)));
+        var noSpans = checkpoint(Uuid.randomUuid(), 1000);
+        noSpans.setWalSpans(null);
+        assertThrows(IllegalArgumentException.class,
+            () -> observer.captureIfCheckpoint(wire(noSpans)));
+        Uuid validTopic = Uuid.randomUuid();
+        assertTrue(observer.captureIfCheckpoint(wire(checkpoint(validTopic, 1000))));
+        var diagnostic = timeline();
+        complete(observer, SNAPSHOT, diagnostic);
+        assertEquals(1000L, diagnostic.getUntrusted(key(validTopic)).kraftOffset());
+    }
 }

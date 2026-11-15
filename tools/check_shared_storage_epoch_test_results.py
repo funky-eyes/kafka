@@ -710,6 +710,8 @@ REQUIRED_TESTS = {
         "malformedLateOrDuplicateCheckpointFailsBeforeDiagnosticReplacement",
         "incrementalCertificateCannotMasqueradeAsSnapshotCheckpointOrWrongWire",
         "restoredEvidenceIsImmutableAndTopicIncarnationsRemainDistinct",
+        "cumulativeNestedClaimsAreBoundedBeforeSnapshotRestore",
+        "missingNestedClaimListsFailEarlyWithoutPoisoningNextCheckpoint",
     ),
     "org.apache.kafka.controller.WalReplicaDurabilityCertificateReplayStateTest": (
         "committedLogReplayFreezesGeneratedRecordAndItsNestedMutableEntries",
