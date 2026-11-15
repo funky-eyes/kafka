@@ -638,6 +638,30 @@ class SharedMetadataImageTest {
     }
 
     @Test
+    void compactedLateDuplicateCannotManufactureTheOriginalCommitProof() {
+        long id = BrokerObjectId.compose(8, 95L);
+        SharedObjectMetadata object = metadata(id, 122L);
+        byte[] key = SharedMetadataRecordCodec.objectKey(id);
+        byte[] sealKey = SharedMetadataRecordCodec.objectCatalogSealKey(id);
+        byte[] seal = SharedMetadataRecordCodec.objectCatalogSealValue(8L, 17L, object);
+
+        // Kafka compaction may preserve a newer duplicate COMMIT at offset
+        // 10 and remove its original offset 8. The seal alone cannot prove
+        // the original immutable reference; fail closed rather than GC.
+        SharedMetadataImage recovered = new SharedMetadataImage();
+        assertThrows(IllegalStateException.class, () ->
+            recovered.applyFromMetadataLog(sealKey, seal, 9L));
+        assertEquals(SharedMetadataImage.State.FAILED, recovered.state());
+
+        SharedMetadataImage duplicateOnly = new SharedMetadataImage();
+        duplicateOnly.applyFromMetadataLog(key,
+            SharedMetadataRecordCodec.committedObjectValue(object), 10L);
+        assertThrows(IllegalStateException.class, () ->
+            duplicateOnly.applyFromMetadataLog(sealKey, seal, 11L));
+        assertEquals(SharedMetadataImage.State.FAILED, duplicateOnly.state());
+    }
+
+    @Test
     void sealedCatalogRejectsHistoricalTombstoneAndConflictingLateCommit() {
         long id = BrokerObjectId.compose(8, 94L);
         SharedObjectMetadata original = metadata(id, 120L);
