@@ -97,6 +97,11 @@ class SharedUploadSchedulerTest {
             )) {
                 assertTrue(scheduler.tryUploadOnce().get(10, TimeUnit.SECONDS).isPresent());
                 scheduler.checkpointRemoteCommitsOnce();
+                // Rapid upload evaluations must not issue fresh lifecycle
+                // control-plane requests: only actual WAL reclaim checks do.
+                scheduler.runScheduledUpload();
+                scheduler.runScheduledUpload();
+                assertEquals(0, policyChecks.get());
                 // Simulate a Bucket policy edited after COMMIT but before
                 // the rotating WAL has had its last local copy reclaimed.
                 bucketExpiryDetected.set(true);

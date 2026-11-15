@@ -67,6 +67,9 @@ import java.util.function.LongSupplier;
 public final class SharedUploadScheduler implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(SharedUploadScheduler.class);
     private static final long CLOSE_WAIT_LOG_INTERVAL_SECONDS = 30L;
+    // Upload evaluation can run every 50ms; a fresh remote Bucket policy
+    // check is required per WAL reclaim, not per upload poll.
+    private static final long MIN_WAL_RECLAIM_INTERVAL_MS = 1_000L;
     static final long DEFAULT_MAX_LINGER_MS = 1_000L;
     static final int DEFAULT_WAL_PRESSURE_PERCENT = 70;
     static final int DEFAULT_MAX_INFLIGHT = 1;
@@ -196,6 +199,10 @@ public final class SharedUploadScheduler implements AutoCloseable {
             maxInflight
         );
         executor.scheduleWithFixedDelay(this::runScheduledUpload, intervalMs, intervalMs, TimeUnit.MILLISECONDS);
+        long reclaimIntervalMs = Math.max(intervalMs, MIN_WAL_RECLAIM_INTERVAL_MS);
+        executor.scheduleWithFixedDelay(
+            () -> reclaimCheckpointedWalOnce(), reclaimIntervalMs, reclaimIntervalMs, TimeUnit.MILLISECONDS
+        );
     }
 
     /**
@@ -826,9 +833,11 @@ public final class SharedUploadScheduler implements AutoCloseable {
         }
     }
 
-    private void runScheduledUpload() {
+    // Keep checkpoint durability on the upload cadence while running
+    // expensive remote-policy checks and WAL reclamation on a separate
+    // bounded cadence using the same single-thread maintenance executor.
+    void runScheduledUpload() {
         checkpointRemoteCommitsOnce();
-        reclaimCheckpointedWalOnce();
         for (int index = 0; index < maxInflight; index++) {
             tryScheduledUploadOnce();
         }
