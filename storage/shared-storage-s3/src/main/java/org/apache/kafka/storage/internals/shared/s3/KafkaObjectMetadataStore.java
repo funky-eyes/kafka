@@ -507,7 +507,12 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
                 configuration.producerProperties(),
                 SharedMetadataClientConfiguration.TOPIC_NAME,
                 configuration.clusterId(),
-                objectId
+                objectId,
+                () -> {
+                    captureReadCommittedReplayHorizon()
+                        .get(15L, java.util.concurrent.TimeUnit.SECONDS);
+                    return !image.objectIdentityKnown(objectId);
+                }
             );
             if (fencedUploads.putIfAbsent(objectId, session) != null) {
                 session.close();
