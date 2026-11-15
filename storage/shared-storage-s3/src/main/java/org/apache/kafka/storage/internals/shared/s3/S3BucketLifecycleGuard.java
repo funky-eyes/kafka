@@ -74,14 +74,32 @@ final class S3BucketLifecycleGuard {
     synchronized void requireSafeForUpload() {
         long now = nanoClock.getAsLong();
         if (!checked || now - lastCheck < 0L || now - lastCheck >= RECHECK_NANOS) {
-            // Publish a cache verdict only after evaluation finishes.
-            // An unexpected JVM Error must not leave a previously safe
-            // verdict reusable for another 30 seconds.
-            RuntimeException newFailure = checkRules();
-            lastFailure = newFailure;
-            lastCheck = now;
-            checked = true;
+            refreshPolicy(now);
         }
+        throwIfUnsafe();
+    }
+
+    /**
+     * A WAL reclaim discards the locally recoverable bytes, unlike a PUT.
+     * Revalidate the remote Bucket rules without using a cached safe verdict.
+     * A separate administrator change remains possible after this call.
+     */
+    synchronized void requireSafeForWalReclaim() {
+        refreshPolicy(nanoClock.getAsLong());
+        throwIfUnsafe();
+    }
+
+    private void refreshPolicy(long now) {
+        // Invalidate the previous safe verdict before any remote call. If a
+        // provider throws an Error, no prior safe cache may be reused.
+        checked = false;
+        RuntimeException newFailure = checkRules();
+        lastFailure = newFailure;
+        lastCheck = now;
+        checked = true;
+    }
+
+    private void throwIfUnsafe() {
         if (lastFailure != null) {
             throw lastFailure;
         }
