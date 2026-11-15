@@ -45,6 +45,9 @@ class SharedMetadataImageTest {
             List.of(new ObjectMetadataStore.PreparedObject(fenced, 20L)),
             image.fencedPreparedObjects()
         );
+        assertTrue(image.fencedPrepared(fenced, 20L));
+        assertFalse(image.fencedPrepared(fenced, 21L));
+        assertFalse(image.fencedPrepared(legacy, 10L));
     }
 
     @Test
@@ -57,6 +60,9 @@ class SharedMetadataImageTest {
         live.applyFromMetadataLog(objectKey, SharedMetadataRecordCodec.fencedPreparedObjectValue(25L), 10L);
         live.applyFromMetadataLog(objectKey, claim, 11L);
         assertTrue(live.cleanupClaimed(objectId, 25L));
+        assertEquals(List.of(new ObjectMetadataStore.PreparedObject(objectId, 25L)),
+            live.fencedCleanupClaimedObjects());
+        assertTrue(live.fencedPreparedObjects().isEmpty());
         assertTrue(live.committedObjects().isEmpty());
 
         // Kafka compaction retains only the last value for a single object key.
@@ -66,6 +72,8 @@ class SharedMetadataImageTest {
         recovered.markReady();
         assertEquals(List.of(new ObjectMetadataStore.PreparedObject(objectId, 25L)),
             recovered.cleanupClaimedObjects());
+        assertEquals(recovered.cleanupClaimedObjects(), recovered.fencedCleanupClaimedObjects());
+        assertFalse(recovered.fencedPrepared(objectId, 25L));
         assertTrue(published.isEmpty());
         IllegalStateException late = assertThrows(IllegalStateException.class, () ->
             recovered.applyFromMetadataLog(objectKey,
