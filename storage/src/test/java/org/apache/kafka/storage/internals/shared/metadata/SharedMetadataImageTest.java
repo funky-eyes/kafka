@@ -31,6 +31,28 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class SharedMetadataImageTest {
 
     @Test
+    void uploadObjectIdentityCannotBeReusedAfterClaimOrCommit() {
+        long preparedId = BrokerObjectId.compose(10, 50L);
+        long claimedId = BrokerObjectId.compose(10, 51L);
+        long committedId = BrokerObjectId.compose(10, 52L);
+        SharedMetadataImage image = new SharedMetadataImage();
+        image.apply(SharedMetadataRecordCodec.objectKey(preparedId),
+            SharedMetadataRecordCodec.fencedPreparedObjectValue(50L));
+        image.apply(SharedMetadataRecordCodec.objectKey(claimedId),
+            SharedMetadataRecordCodec.fencedClaimedObjectValue(51L));
+        image.apply(SharedMetadataRecordCodec.objectKey(committedId),
+            SharedMetadataRecordCodec.committedObjectValue(metadata(committedId, 52L)));
+        image.markReady();
+        assertTrue(image.objectIdentityKnown(preparedId));
+        assertTrue(image.objectIdentityKnown(claimedId));
+        assertTrue(image.objectIdentityKnown(committedId));
+        assertFalse(image.objectIdentityKnown(BrokerObjectId.compose(10, 53L)));
+        assertThrows(IllegalArgumentException.class, () -> image.objectIdentityKnown(0L));
+        image.markFailed(new IllegalStateException("lost metadata horizon"));
+        assertThrows(IllegalStateException.class, () -> image.objectIdentityKnown(preparedId));
+    }
+
+    @Test
     void fencedPreparedCandidatesAreDistinctFromLegacyPreparedObjects() {
         long legacy = BrokerObjectId.compose(9, 40L);
         long fenced = BrokerObjectId.compose(9, 41L);
