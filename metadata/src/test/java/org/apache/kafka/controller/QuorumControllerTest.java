@@ -112,6 +112,7 @@ import org.apache.kafka.server.common.Feature;
 import org.apache.kafka.server.common.KRaftVersion;
 import org.apache.kafka.server.common.MetadataVersion;
 import org.apache.kafka.server.common.OffsetAndEpoch;
+import org.apache.kafka.server.common.PartitionRetirementAuthorityVersion;
 import org.apache.kafka.server.common.TopicIdPartition;
 import org.apache.kafka.snapshot.FileRawSnapshotReader;
 import org.apache.kafka.snapshot.Snapshots;
@@ -196,6 +197,82 @@ public class QuorumControllerTest {
             );
             assertEquals(recordCount, retirementAuthorityRecordCount(clientEnv));
         }
+    }
+
+    @Test
+    public void testNegotiatedControllerAtomicallyAppendsOnlyRecordedTerminalBatch() throws Exception {
+        Uuid catalogTopicId = Uuid.randomUuid();
+        BootstrapMetadata experimental = BootstrapMetadata.fromVersion(
+            MetadataVersion.IBP_4_4_IV0, "experimental terminal retirement fixture"
+        ).copyWithFeatureRecord(PartitionRetirementAuthorityVersion.FEATURE_NAME, (short) 1);
+        try (MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build()) {
+            // These records are actual KRaft log entries, not injected into a
+            // local Controller manager or its read-only metadata snapshot.
+            clientEnv.appendInitialRecords(List.of(
+                new ApiMessageAndVersion(new FeatureLevelRecord()
+                    .setName(MetadataVersion.FEATURE_NAME)
+                    .setFeatureLevel(MetadataVersion.IBP_4_4_IV0.featureLevel()), (short) 0),
+                new ApiMessageAndVersion(new FeatureLevelRecord()
+                    .setName(PartitionRetirementAuthorityVersion.FEATURE_NAME)
+                    .setFeatureLevel((short) 1), (short) 0),
+                new ApiMessageAndVersion(terminalFixtureRecord(501L, 2L, -1L, 1, catalogTopicId), (short) 0),
+                new ApiMessageAndVersion(terminalFixtureRecord(502L, 3L, -1L, 1, catalogTopicId), (short) 0),
+                new ApiMessageAndVersion(terminalFixtureRecord(501L, 4L, 2L, 2, catalogTopicId), (short) 0),
+                new ApiMessageAndVersion(terminalFixtureRecord(502L, 5L, 3L, 2, catalogTopicId), (short) 0),
+                new ApiMessageAndVersion(terminalFixtureRecord(501L, 6L, 4L, 3, catalogTopicId), (short) 0),
+                new ApiMessageAndVersion(terminalFixtureRecord(502L, 7L, 5L, 3, catalogTopicId), (short) 0)
+            ));
+            try (QuorumControllerTestEnv env = new QuorumControllerTestEnv.Builder(clientEnv)
+                .setBootstrapMetadata(experimental).build()) {
+                QuorumController controller = env.activeController();
+                var candidates = List.of(
+                    new CommittedObjectRetirementControlManager.TerminalDeletion(501L, 6L),
+                    new CommittedObjectRetirementControlManager.TerminalDeletion(502L, 7L)
+                );
+                long before = committedRetirementRecordCount(clientEnv);
+                assertEquals(2, controller.finalizeRecordedCommittedObjectDeletionBatch(candidates)
+                    .get(10, TimeUnit.SECONDS));
+                assertEquals(before + 2, committedRetirementRecordCount(clientEnv));
+
+                // The expected generation equals the *actual* appended KRaft
+                // log offset for each record, including any activation records.
+                List<ApiMessageAndVersion> appended = clientEnv.allRecords();
+                int terminalCount = 0;
+                for (int offset = 0; offset < appended.size(); offset++) {
+                    if (appended.get(offset).message() instanceof CommittedObjectRetirementRecord retirement
+                        && retirement.stage() == 4) {
+                        assertEquals((long) offset, retirement.acceptedKRaftOffset());
+                        assertEquals(retirement.objectId() == 501L ? 6L : 7L,
+                            retirement.previousKRaftOffset());
+                        terminalCount++;
+                    }
+                }
+                assertEquals(2, terminalCount);
+                // A stale second attempt cannot resurrect any physical ID or
+                // append duplicate terminal records after the first batch.
+                assertEquals(0, controller.finalizeRecordedCommittedObjectDeletionBatch(candidates)
+                    .get(10, TimeUnit.SECONDS));
+                assertEquals(before + 2, committedRetirementRecordCount(clientEnv));
+            }
+        }
+    }
+
+    private static CommittedObjectRetirementRecord terminalFixtureRecord(
+        long objectId, long acceptedOffset, long previousOffset, int stage, Uuid catalogTopicId
+    ) {
+        return new CommittedObjectRetirementRecord()
+            .setObjectId(objectId)
+            .setAcceptedKRaftOffset(acceptedOffset)
+            .setPreviousKRaftOffset(previousOffset)
+            .setRetirementEpoch(7L)
+            .setCatalogTopicId(catalogTopicId)
+            .setCatalogCommitOffset(1L)
+            .setSealedCatalogPositionExclusive(2L)
+            .setObjectSize(4_096L)
+            .setObjectChecksum(42L)
+            .setDescriptorSha256("0123456789abcdef".repeat(4))
+            .setStage((byte) stage)
+            .setSafeEpoch(stage == 1 ? -1L : 7L);
     }
 
     @Test
