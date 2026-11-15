@@ -36,6 +36,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -49,6 +51,31 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class KafkaObjectMetadataStoreTest {
+    @Test
+    void lifecycleExecutorRejectsOverloadInsteadOfQueuingUnboundedTransactions() throws Exception {
+        ThreadPoolExecutor workers = KafkaObjectMetadataStore.newLifecycleExecutor();
+        CountDownLatch started = new CountDownLatch(4);
+        CountDownLatch release = new CountDownLatch(1);
+        try {
+            for (int i = 0; i < 4; i++) {
+                workers.submit(() -> {
+                    started.countDown();
+                    release.await();
+                    return null;
+                });
+            }
+            assertTrue(started.await(10, TimeUnit.SECONDS));
+            for (int i = 0; i < 256; i++) {
+                workers.execute(() -> { });
+            }
+            assertThrows(RejectedExecutionException.class, () -> workers.execute(() -> { }));
+        } finally {
+            release.countDown();
+            workers.shutdownNow();
+            assertTrue(workers.awaitTermination(10, TimeUnit.SECONDS));
+        }
+    }
+
     @Test
     void concurrentDuplicatePrepareAllocatesOnlyOneTransactionalSlot() throws Exception {
         long objectId = 7_001L;
