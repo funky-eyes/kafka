@@ -34,11 +34,31 @@ import java.util.Map;
 import java.util.Properties;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SharedMetadataClientConfigurationTest {
+    @Test
+    void fencedOrphanLifecycleIsExplicitlyOptInAndRejectsInvalidValues() {
+        Endpoint endpoint = new Endpoint("PLAINTEXT", SecurityProtocol.PLAINTEXT, "localhost", 9092);
+        assertFalse(SharedMetadataClientConfiguration.from(
+            context(List.of(endpoint), Map.of())
+        ).fencedLifecycleEnabled());
+        assertTrue(SharedMetadataClientConfiguration.from(context(List.of(endpoint), Map.of(
+            SharedMetadataClientConfiguration.FENCED_LIFECYCLE_CONFIG, true
+        ))).fencedLifecycleEnabled());
+        assertFalse(SharedMetadataClientConfiguration.from(context(List.of(endpoint), Map.of(
+            SharedMetadataClientConfiguration.FENCED_LIFECYCLE_CONFIG, "false"
+        ))).fencedLifecycleEnabled());
+        assertThrows(IllegalArgumentException.class, () ->
+            SharedMetadataClientConfiguration.from(context(List.of(endpoint), Map.of(
+                SharedMetadataClientConfiguration.FENCED_LIFECYCLE_CONFIG, "enabled"
+            )))
+        );
+    }
+
     @Test
     void derivesBootstrapAndSecurityProtocolFromResolvedListener() {
         Endpoint endpoint = new Endpoint("SASL_SSL", SecurityProtocol.SASL_SSL, "broker.example", 9093);
