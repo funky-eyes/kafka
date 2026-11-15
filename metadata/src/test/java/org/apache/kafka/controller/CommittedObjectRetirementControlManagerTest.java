@@ -37,6 +37,66 @@ class CommittedObjectRetirementControlManagerTest {
     private static final String DIGEST = "0123456789abcdef".repeat(4);
 
     @Test
+    void terminalBatchBuildsOneAtomicOrderedKRaftAppendWithoutPartialMutation() {
+        CommittedObjectRetirementControlManager manager = manager();
+        long otherObjectId = OBJECT_ID + 1L;
+        manager.replayFromKRaft(record(10L, -1L, 1, -1L), Optional.empty(), 10L);
+        manager.replayFromKRaft(record(11L, 10L, 2, 7L), Optional.empty(), 11L);
+        manager.replayFromKRaft(record(12L, 11L, 3, 7L), Optional.empty(), 12L);
+        manager.replayFromKRaft(record(13L, -1L, 1, -1L).setObjectId(otherObjectId),
+            Optional.empty(), 13L);
+        manager.replayFromKRaft(record(14L, 13L, 2, 7L).setObjectId(otherObjectId),
+            Optional.empty(), 14L);
+        manager.replayFromKRaft(record(15L, 14L, 3, 7L).setObjectId(otherObjectId),
+            Optional.empty(), 15L);
+
+        var first = new CommittedObjectRetirementControlManager.TerminalDeletion(OBJECT_ID, 12L);
+        var second = new CommittedObjectRetirementControlManager.TerminalDeletion(otherObjectId, 15L);
+        ControllerResult<Integer> result =
+            manager.finalizeRecordedDeletionBatch(java.util.List.of(first, second), 16L);
+        assertEquals(true, result.isAtomic());
+        assertEquals(2, result.response());
+        assertEquals(2, result.records().size());
+        CommittedObjectRetirementRecord one =
+            (CommittedObjectRetirementRecord) result.records().get(0).message();
+        CommittedObjectRetirementRecord two =
+            (CommittedObjectRetirementRecord) result.records().get(1).message();
+        assertEquals(16L, one.acceptedKRaftOffset());
+        assertEquals(17L, two.acceptedKRaftOffset());
+        assertEquals(12L, one.previousKRaftOffset());
+        assertEquals(15L, two.previousKRaftOffset());
+        assertEquals(CommittedObjectRetirementState.Stage.DELETE_RECORDED, manager.get(OBJECT_ID).stage());
+        assertEquals(CommittedObjectRetirementState.Stage.DELETE_RECORDED, manager.get(otherObjectId).stage());
+
+        manager.replayFromKRaft(one, Optional.empty(), 16L);
+        manager.replayFromKRaft(two, Optional.empty(), 17L);
+        assertEquals(CommittedObjectRetirementState.Stage.DELETED, manager.get(OBJECT_ID).stage());
+        assertEquals(CommittedObjectRetirementState.Stage.DELETED, manager.get(otherObjectId).stage());
+    }
+
+    @Test
+    void staleOrUnfinishedTerminalBatchVetoesEveryPhysicalObject() {
+        CommittedObjectRetirementControlManager manager = manager();
+        manager.replayFromKRaft(record(10L, -1L, 1, -1L), Optional.empty(), 10L);
+        manager.replayFromKRaft(record(11L, 10L, 2, 7L), Optional.empty(), 11L);
+        manager.replayFromKRaft(record(12L, 11L, 3, 7L), Optional.empty(), 12L);
+        var first = new CommittedObjectRetirementControlManager.TerminalDeletion(OBJECT_ID, 12L);
+        var missing = new CommittedObjectRetirementControlManager.TerminalDeletion(OBJECT_ID + 1, 13L);
+        var stale = new CommittedObjectRetirementControlManager.TerminalDeletion(OBJECT_ID, 11L);
+        assertEquals(0, manager.finalizeRecordedDeletionBatch(java.util.List.of(first, missing), 13L)
+            .records().size());
+        assertEquals(0, manager.finalizeRecordedDeletionBatch(java.util.List.of(stale), 13L)
+            .records().size());
+        assertThrows(IllegalArgumentException.class, () ->
+            manager.finalizeRecordedDeletionBatch(java.util.List.of(first, first), 13L));
+        assertThrows(IllegalArgumentException.class, () ->
+            manager.finalizeRecordedDeletionBatch(java.util.Collections.nCopies(65, first), 13L));
+        assertThrows(IllegalStateException.class, () ->
+            manager.finalizeRecordedDeletionBatch(java.util.List.of(first), 12L));
+        assertEquals(CommittedObjectRetirementState.Stage.DELETE_RECORDED, manager.get(OBJECT_ID).stage());
+    }
+
+    @Test
     void terminalWriterOnlyAppendsAfterMatchingRecordedPhysicalDelete() {
         CommittedObjectRetirementControlManager manager = manager();
         assertEquals(false, manager.finalizeRecordedDeletion(OBJECT_ID, 12L, 13L).response());

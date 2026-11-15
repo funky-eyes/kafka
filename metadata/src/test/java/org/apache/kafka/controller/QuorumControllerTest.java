@@ -199,6 +199,24 @@ public class QuorumControllerTest {
     }
 
     @Test
+    public void testTerminalBatchCannotBypassUnnegotiatedFeature() throws Exception {
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv).build()
+        ) {
+            QuorumController controller = controlEnv.activeController();
+            long before = committedRetirementRecordCount(clientEnv);
+            var candidates = java.util.List.of(
+                new CommittedObjectRetirementControlManager.TerminalDeletion(501L, 12L),
+                new CommittedObjectRetirementControlManager.TerminalDeletion(502L, 13L)
+            );
+            assertEquals(0, controller.finalizeRecordedCommittedObjectDeletionBatch(candidates)
+                .get(10, TimeUnit.SECONDS));
+            assertEquals(before, committedRetirementRecordCount(clientEnv));
+        }
+    }
+
+    @Test
     public void testTerminalObjectRetirementWriterCannotBypassUnnegotiatedFeature() throws Exception {
         try (
             MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();

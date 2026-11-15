@@ -1660,6 +1660,24 @@ public final class QuorumController implements Controller {
     }
 
     /**
+     * Batch only the final DELETED bookkeeping transition. A stale candidate
+     * vetoes the whole atomic batch; this never authorizes physical deletion.
+     * Snapshot immutable caller input BEFORE the Controller event is queued.
+     */
+    CompletableFuture<Integer> finalizeRecordedCommittedObjectDeletionBatch(
+        List<CommittedObjectRetirementControlManager.TerminalDeletion> candidates
+    ) {
+        List<CommittedObjectRetirementControlManager.TerminalDeletion> immutable = List.copyOf(candidates);
+        return appendWriteEvent("finalizeRecordedCommittedObjectDeletionBatch", OptionalLong.empty(), () -> {
+            if (!featureControl.isPartitionRetirementAuthorityEnabled()) {
+                return ControllerResult.of(List.of(), 0);
+            }
+            return committedObjectRetirementControl.finalizeRecordedDeletionBatch(
+                immutable, offsetControl.nextWriteOffset());
+        });
+    }
+
+    /**
      * No authenticated catalog handoff or distributed BrokerEpoch safe-epoch
      * attestation exists. DELETE_READY is not a worker permit. Only terminal
      * DELETED bookkeeping may be emitted internally on a negotiated feature

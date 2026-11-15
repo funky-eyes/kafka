@@ -25,9 +25,12 @@ import org.apache.kafka.server.common.OffsetAndEpoch;
 import org.apache.kafka.timeline.SnapshotRegistry;
 import org.apache.kafka.timeline.TimelineHashMap;
 
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Snapshot-rollback-aware KRaft object-lifecycle ledger.
@@ -114,6 +117,66 @@ final class CommittedObjectRetirementControlManager {
         CommittedObjectRetirementState.validateTransition(previous, Entry.fromRecord(record));
         return ControllerResult.atomicOf(
             List.of(new ApiMessageAndVersion(record, (short) 0)), true);
+    }
+
+    /** Each item is one already-recorded physical DELETE, never a delete grant. */
+    record TerminalDeletion(long objectId, long expectedRecordedOffset) {
+        TerminalDeletion {
+            if (objectId <= 0L || expectedRecordedOffset < 0L) {
+                throw new IllegalArgumentException("Invalid terminal deletion object or KRaft generation");
+            }
+        }
+    }
+
+    /**
+     * Bound and atomically append multiple terminal bookkeeping records.
+     *
+     * <p>The controller event queue is the sole writer. A stale, missing or
+     * not-yet-DELETE_RECORDED candidate vetoes the entire request. Adjacent
+     * accepted offsets are derived from one serialized nextWriteOffset, and
+     * each actual KRaft append/replay revalidates the exact log position.</p>
+     */
+    ControllerResult<Integer> finalizeRecordedDeletionBatch(
+        List<TerminalDeletion> candidates, long nextWriteOffset
+    ) {
+        Objects.requireNonNull(candidates, "candidates");
+        if (candidates.size() > 64 || nextWriteOffset < 0L) {
+            throw new IllegalArgumentException("Invalid or unbounded KRaft terminal deletion batch");
+        }
+        if (candidates.isEmpty()) {
+            return ControllerResult.of(List.of(), 0);
+        }
+        List<TerminalDeletion> requested = List.copyOf(candidates);
+        Set<Long> unique = new HashSet<>();
+        List<Entry> previous = new ArrayList<>(requested.size());
+        for (TerminalDeletion candidate : requested) {
+            if (!unique.add(candidate.objectId())) {
+                throw new IllegalArgumentException("Duplicate physical object in KRaft terminal batch");
+            }
+            Entry stored = entries.get(candidate.objectId());
+            if (stored == null || stored.stage() != Stage.DELETE_RECORDED
+                || stored.acceptedKRaftOffset() != candidate.expectedRecordedOffset()) {
+                // No partial writes: the caller must reread committed KRaft
+                // state after any uncertain or losing compare-and-transition.
+                return ControllerResult.of(List.of(), 0);
+            }
+            previous.add(stored);
+        }
+        List<ApiMessageAndVersion> records = new ArrayList<>(requested.size());
+        for (int index = 0; index < requested.size(); index++) {
+            Entry stored = previous.get(index);
+            long accepted = Math.addExact(nextWriteOffset, index);
+            if (accepted <= stored.acceptedKRaftOffset()) {
+                throw new IllegalStateException("KRaft terminal batch generation did not advance");
+            }
+            CommittedObjectRetirementRecord record = stored.toRecord()
+                .setPreviousKRaftOffset(stored.acceptedKRaftOffset())
+                .setAcceptedKRaftOffset(accepted)
+                .setStage((byte) Stage.DELETED.wireId());
+            CommittedObjectRetirementState.validateTransition(stored, Entry.fromRecord(record));
+            records.add(new ApiMessageAndVersion(record, (short) 0));
+        }
+        return ControllerResult.atomicOf(List.copyOf(records), records.size());
     }
 
     Entry get(long objectId) {
