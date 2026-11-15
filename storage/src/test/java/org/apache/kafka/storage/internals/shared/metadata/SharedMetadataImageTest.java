@@ -21,6 +21,9 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -29,6 +32,67 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SharedMetadataImageTest {
+
+    @Test
+    void identityAndFencedPreparedProbesDoNotWaitForMetadataPublicationCallback() throws Exception {
+        long preparedId = BrokerObjectId.compose(11, 61L);
+        long committedId = BrokerObjectId.compose(11, 62L);
+        CountDownLatch publishing = new CountDownLatch(1);
+        CountDownLatch allowPublication = new CountDownLatch(1);
+        SharedMetadataImage image = new SharedMetadataImage(ignored -> {
+            publishing.countDown();
+            try {
+                if (!allowPublication.await(10, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("Metadata publication callback timed out");
+                }
+            } catch (InterruptedException failure) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(failure);
+            }
+        });
+        image.apply(SharedMetadataRecordCodec.objectKey(preparedId),
+            SharedMetadataRecordCodec.fencedPreparedObjectValue(60L));
+        image.markReady();
+
+        CompletableFuture<Void> writer = CompletableFuture.runAsync(() ->
+            image.apply(SharedMetadataRecordCodec.objectKey(committedId),
+                SharedMetadataRecordCodec.committedObjectValue(metadata(committedId, 100L))));
+        try {
+            assertTrue(publishing.await(5, TimeUnit.SECONDS));
+            // The callback holds the single metadata writer monitor.
+            // O(1) identity probes must neither acquire it nor read a HashMap
+            // concurrently with a writer.
+            CompletableFuture<Boolean> knownPrepared = CompletableFuture.supplyAsync(() ->
+                image.objectIdentityKnown(preparedId));
+            CompletableFuture<Boolean> knownCommitted = CompletableFuture.supplyAsync(() ->
+                image.objectIdentityKnown(committedId));
+            CompletableFuture<Boolean> fenced = CompletableFuture.supplyAsync(() ->
+                image.fencedPrepared(preparedId, 60L));
+            assertTrue(knownPrepared.get(3, TimeUnit.SECONDS));
+            assertTrue(knownCommitted.get(3, TimeUnit.SECONDS));
+            assertTrue(fenced.get(3, TimeUnit.SECONDS));
+        } finally {
+            allowPublication.countDown();
+            writer.get(10, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
+    void identityProbeDoesNotObserveAbsentObjectDuringTerminalTransitions() {
+        long objectId = BrokerObjectId.compose(11, 63L);
+        SharedMetadataImage image = new SharedMetadataImage();
+        image.apply(SharedMetadataRecordCodec.objectKey(objectId),
+            SharedMetadataRecordCodec.fencedPreparedObjectValue(63L));
+        image.markReady();
+        assertTrue(image.objectIdentityKnown(objectId));
+        image.apply(SharedMetadataRecordCodec.objectKey(objectId),
+            SharedMetadataRecordCodec.fencedClaimedObjectValue(63L));
+        assertTrue(image.objectIdentityKnown(objectId));
+        assertFalse(image.fencedPrepared(objectId, 63L));
+        image.markFailed(new IllegalStateException("metadata replay failed"));
+        assertThrows(IllegalStateException.class, () -> image.objectIdentityKnown(objectId));
+        assertThrows(IllegalStateException.class, () -> image.fencedPrepared(objectId, 63L));
+    }
 
     @Test
     void uploadObjectIdentityCannotBeReusedAfterClaimOrCommit() {
