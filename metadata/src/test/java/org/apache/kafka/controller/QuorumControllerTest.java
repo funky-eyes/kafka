@@ -54,6 +54,7 @@ import org.apache.kafka.common.metadata.BeginTransactionRecord;
 import org.apache.kafka.common.metadata.BrokerRegistrationChangeRecord;
 import org.apache.kafka.common.metadata.ConfigRecord;
 import org.apache.kafka.common.metadata.EndTransactionRecord;
+import org.apache.kafka.common.metadata.CommittedObjectRetirementRecord;
 import org.apache.kafka.common.metadata.FeatureLevelRecord;
 import org.apache.kafka.common.metadata.PartitionRetirementAuthorityRecord;
 import org.apache.kafka.common.metadata.PartitionRecord;
@@ -194,6 +195,22 @@ public class QuorumControllerTest {
                     .get(10, TimeUnit.SECONDS)
             );
             assertEquals(recordCount, retirementAuthorityRecordCount(clientEnv));
+        }
+    }
+
+    @Test
+    public void testTerminalObjectRetirementWriterCannotBypassUnnegotiatedFeature() throws Exception {
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv).build()
+        ) {
+            QuorumController controller = controlEnv.activeController();
+            long before = committedRetirementRecordCount(clientEnv);
+            assertEquals(false, controller.finalizeRecordedCommittedObjectDeletion(501L, 12L)
+                .get(10, TimeUnit.SECONDS));
+            // Controller bootstrap may legitimately append other metadata:
+            // only a COMMITTED physical-object retirement record is forbidden.
+            assertEquals(before, committedRetirementRecordCount(clientEnv));
         }
     }
 
@@ -632,6 +649,12 @@ public class QuorumControllerTest {
                 .setNativeLogEndOffset(10L)
                 .setWalMutationRevision(12L)
                 .setWalAdmissionRevision(13L));
+    }
+
+    private static long committedRetirementRecordCount(MockRaftClientTestEnv clientEnv) {
+        return clientEnv.allRecords().stream()
+            .filter(record -> record.message() instanceof CommittedObjectRetirementRecord)
+            .count();
     }
 
     private static long retirementAuthorityRecordCount(MockRaftClientTestEnv clientEnv) {

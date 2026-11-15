@@ -58,6 +58,34 @@ final class CommittedObjectGcWorker {
         /** Validate immutable descriptor, generation, ownership and committed KRaft grant again. */
         CompletableFuture<Boolean> stillDeleteReady(DeleteReady candidate);
 
+        /**
+         * Verify an immutable bounded group. A production Controller adapter
+         * may override this with one KRaft snapshot / RPC. The default
+         * reuses independent per-object checks concurrently, with a maximum
+         * fan-out of MAX_DELETE_BATCH. Any failed Future aborts ALL deletes.
+         */
+        default CompletableFuture<List<DeleteReady>> stillDeleteReadyBatch(List<DeleteReady> candidates) {
+            Objects.requireNonNull(candidates, "candidates");
+            if (candidates.size() > MAX_DELETE_BATCH) {
+                return CompletableFuture.failedFuture(new IllegalArgumentException(
+                    "Too many KRaft object retirement candidates for one grant check"));
+            }
+            List<CompletableFuture<Boolean>> checks = new ArrayList<>(candidates.size());
+            for (DeleteReady candidate : candidates) {
+                checks.add(Objects.requireNonNull(stillDeleteReady(candidate), "stillDeleteReady future"));
+            }
+            return CompletableFuture.allOf(checks.toArray(CompletableFuture[]::new))
+                .thenApply(ignored -> {
+                    List<DeleteReady> approved = new ArrayList<>();
+                    for (int index = 0; index < candidates.size(); index++) {
+                        if (Boolean.TRUE.equals(checks.get(index).join())) {
+                            approved.add(candidates.get(index));
+                        }
+                    }
+                    return List.copyOf(approved);
+                });
+        }
+
         /** Complete only after the DELETE_RECORDED KRaft transition has committed. */
         CompletableFuture<Void> recordDeleted(DeleteReady candidate);
     }
@@ -124,22 +152,29 @@ final class CommittedObjectGcWorker {
      */
     private CompletableFuture<SweepStats> deleteCandidates(List<DeleteReady> ready) {
         verifyCandidateBatch(ready);
-        CompletableFuture<List<DeleteReady>> approved = CompletableFuture.completedFuture(new ArrayList<>());
-        for (DeleteReady candidate : ready) {
-            // A local fence is necessary, never sufficient cross-Broker proof.
-            if (!localFence.locallyDrainedAfterFence(candidate.objectId())) {
-                continue;
+        List<DeleteReady> locallyDrained = ready.stream()
+            // A local fence is necessary but NEVER a cross-Broker GC grant.
+            .filter(candidate -> localFence.locallyDrainedAfterFence(candidate.objectId()))
+            .toList();
+        return Objects.requireNonNull(
+            authority.stillDeleteReadyBatch(locallyDrained), "stillDeleteReadyBatch future"
+        ).thenCompose(approved -> {
+            // A buggy or stale Controller adapter must not inject a different
+            // descriptor, generation or object that was not locally drained.
+            verifyApprovedSubset(locallyDrained, approved);
+            return deleteApprovedBatch(ready.size(), approved);
+        });
+    }
+
+    static void verifyApprovedSubset(List<DeleteReady> candidates, List<DeleteReady> approved) {
+        Objects.requireNonNull(approved, "approved");
+        Set<DeleteReady> eligible = new HashSet<>(candidates);
+        Set<Long> unique = new HashSet<>();
+        for (DeleteReady candidate : approved) {
+            if (candidate == null || !eligible.contains(candidate) || !unique.add(candidate.objectId())) {
+                throw new IllegalStateException("KRaft authority returned an unverified GC candidate");
             }
-            approved = approved.thenCompose(winners -> Objects.requireNonNull(
-                authority.stillDeleteReady(candidate), "stillDeleteReady future"
-            ).thenApply(permitted -> {
-                if (Boolean.TRUE.equals(permitted)) {
-                    winners.add(candidate);
-                }
-                return winners;
-            }));
         }
-        return approved.thenCompose(winners -> deleteApprovedBatch(ready.size(), winners));
     }
 
     private CompletableFuture<SweepStats> deleteApprovedBatch(int observed, List<DeleteReady> approved) {
