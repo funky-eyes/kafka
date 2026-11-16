@@ -1649,12 +1649,17 @@ public final class QuorumController implements Controller {
         CommittedObjectRetirementRecord proposed
     ) {
         Objects.requireNonNull(proposed, "proposed");
+        // Caller-owned Kafka messages are mutable. Freeze the proposal BEFORE
+        // enqueueing, so an off-thread mutation cannot replace the catalog
+        // identity after admission but before the Controller event runs.
+        CommittedObjectRetirementRecord immutableProposal =
+            org.apache.kafka.metadata.CommittedObjectRetirementState.Entry.fromRecord(proposed).toRecord();
         return appendWriteEvent("recordUnverifiedCommittedObjectRetirementIntent", OptionalLong.empty(), () -> {
             if (!featureControl.isPartitionRetirementAuthorityEnabled()) {
                 return ControllerResult.of(List.of(), false);
             }
             return committedObjectRetirementControl.recordRetirementIntent(
-                proposed, offsetControl.nextWriteOffset());
+                immutableProposal, offsetControl.nextWriteOffset());
         });
     }
 
