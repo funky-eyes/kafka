@@ -195,6 +195,8 @@ class BrokerMetadataPublisherTest {
   def testKRaftObjectRetirementFenceOnInitialAndIncrementalImages(): Unit = {
     val config = KafkaConfig.fromProps(TestUtils.createBrokerConfig(0))
     val logManager = mock(classOf[LogManager])
+    val fatalHandler = mock(classOf[FaultHandler])
+    val normalHandler = mock(classOf[FaultHandler])
     val publisher = new BrokerMetadataPublisher(
       config,
       new KRaftMetadataCache(0, () => KRaftVersion.KRAFT_VERSION_1),
@@ -210,12 +212,12 @@ class BrokerMetadataPublisherTest {
       mock(classOf[ScramPublisher]),
       mock(classOf[DelegationTokenPublisher]),
       mock(classOf[AclPublisher]),
-      mock(classOf[FaultHandler]),
-      mock(classOf[FaultHandler])
+      fatalHandler,
+      normalHandler
     )
     val catalogueId = Uuid.randomUuid()
-    def entry(id: Long, logPosition: Long, stage: CommittedObjectRetirementState.Stage):
-        CommittedObjectRetirementState.Entry =
+    def entry(id: Long, logPosition: Long,
+              stage: CommittedObjectRetirementState.Stage): CommittedObjectRetirementState.Entry = {
       new CommittedObjectRetirementState.Entry(
         id, logPosition,
         if (stage == CommittedObjectRetirementState.Stage.RETIRE_INTENT) -1L else logPosition - 1L,
@@ -223,6 +225,7 @@ class BrokerMetadataPublisherTest {
         stage,
         if (stage == CommittedObjectRetirementState.Stage.RETIRE_INTENT) -1L else 1L
       )
+    }
     val initial = MetadataImage.EMPTY
     val initialObjects = new util.HashMap[java.lang.Long, CommittedObjectRetirementState.Entry]()
     initialObjects.put(801L, entry(801L, 10L, CommittedObjectRetirementState.Stage.RETIRE_INTENT))
@@ -259,6 +262,18 @@ class BrokerMetadataPublisherTest {
       new MetadataDelta.Builder().setImage(newImage).build(), newImage, manifest)
     verify(logManager, times(1)).fenceCommittedObject(802L)
     verify(logManager, times(1)).fenceCommittedObject(801L)
+
+    // A failed local fence must be fatal, never an ordinary recoverable
+    // metadata publication fault that leaves stale object readers active.
+    doThrow(new IllegalStateException("injected local retirement fence failure"))
+      .when(logManager).fenceCommittedObject(801L)
+    val failingDelta = new MetadataDelta.Builder().setImage(newImage).build()
+    failingDelta.getOrCreateCommittedObjectRetirementDelta().replay(
+      entry(801L, 15L, CommittedObjectRetirementState.Stage.DELETE_RECORDED).toRecord()
+        .setPreviousKRaftOffset(14L))
+    publisher.onMetadataUpdate(failingDelta, failingDelta.apply(MetadataProvenance.EMPTY), manifest)
+    verify(fatalHandler).handleFault(
+      Mockito.eq("Unable to apply KRaft COMMITTED object retirement fence"), any())
   }
 
   @Test
