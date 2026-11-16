@@ -1640,6 +1640,30 @@ public final class QuorumController implements Controller {
     }
 
     /**
+     * Internal-only, non-authorizing first KRaft INTENT for a future trusted
+     * catalog handoff. No public RPC, GC worker adapter, or feature-level
+     * bypass is exposed. A proposed descriptor is NOT a proof of fencing.
+     * The Kafka 4.3.1 baseline cannot negotiate this experimental feature.
+     */
+    CompletableFuture<Boolean> recordUnverifiedCommittedObjectRetirementIntent(
+        CommittedObjectRetirementRecord proposed
+    ) {
+        Objects.requireNonNull(proposed, "proposed");
+        // Caller-owned Kafka messages are mutable. Freeze the proposal BEFORE
+        // enqueueing, so an off-thread mutation cannot replace the catalog
+        // identity after admission but before the Controller event runs.
+        CommittedObjectRetirementRecord immutableProposal =
+            org.apache.kafka.metadata.CommittedObjectRetirementState.Entry.fromRecord(proposed).toRecord();
+        return appendWriteEvent("recordUnverifiedCommittedObjectRetirementIntent", OptionalLong.empty(), () -> {
+            if (!featureControl.isPartitionRetirementAuthorityEnabled()) {
+                return ControllerResult.of(List.of(), false);
+            }
+            return committedObjectRetirementControl.recordRetirementIntent(
+                immutableProposal, offsetControl.nextWriteOffset());
+        });
+    }
+
+    /**
      * Complete the terminal KRaft bookkeeping ONLY after DELETE_RECORDED.
      *
      * <p>Package-private until a version-negotiated Controller protocol has
