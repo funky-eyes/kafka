@@ -111,13 +111,16 @@ class SharedUploadSchedulerTest {
                 // A successful remote-COMMIT checkpoint is unrelated to the
                 // failed S3 policy check: it must not hide the reclaim error.
                 scheduler.checkpointRemoteCommitsOnce();
+                scheduler.runScheduledUpload();
                 assertTrue(scheduler.lastFailure().orElseThrow().getMessage().contains("Bucket expiration"));
-                assertEquals(1, policyChecks.get());
+                assertTrue(scheduler.maintenanceFailurePresent(), "Upload polls must not clear the failed reclaim signal");
+                assertEquals(1, policyChecks.get(), "Upload polls must not recheck Bucket lifecycle");
 
                 bucketExpiryDetected.set(false);
                 scheduler.checkpointRemoteCommitsOnce();
                 scheduler.reclaimCheckpointedWalOnce();
                 assertEquals(2, policyChecks.get());
+                assertFalse(scheduler.maintenanceFailurePresent());
                 assertTrue(scheduler.lastFailure().isEmpty());
             }
         }
