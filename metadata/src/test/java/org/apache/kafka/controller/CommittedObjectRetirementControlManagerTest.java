@@ -79,6 +79,59 @@ class CommittedObjectRetirementControlManagerTest {
     }
 
     @Test
+    void batchFirstIntentsAreAtomicAndReplayOnlyAtTheirActualOffsets() {
+        CommittedObjectRetirementControlManager manager = manager();
+        var first = record(0L, -1L, 1, -1L);
+        var second = record(0L, -1L, 1, -1L).setObjectId(OBJECT_ID + 1L);
+        var planned = manager.recordRetirementIntentBatch(java.util.List.of(first, second), 21L);
+        assertEquals(2, planned.response());
+        assertEquals(true, planned.isAtomic());
+        assertNull(manager.get(OBJECT_ID));
+        assertNull(manager.get(OBJECT_ID + 1L));
+        var one = (CommittedObjectRetirementRecord) planned.records().get(0).message();
+        var two = (CommittedObjectRetirementRecord) planned.records().get(1).message();
+        assertEquals(21L, one.acceptedKRaftOffset());
+        assertEquals(22L, two.acceptedKRaftOffset());
+        assertEquals(-1L, one.safeEpoch());
+        assertEquals(-1L, two.safeEpoch());
+        assertEquals((byte) 1, one.stage());
+        assertEquals((byte) 1, two.stage());
+        assertEquals(0L, first.acceptedKRaftOffset());
+        assertEquals(0L, second.acceptedKRaftOffset());
+        assertThrows(IllegalStateException.class, () ->
+            manager.replayFromKRaft(one, Optional.empty(), 20L));
+        assertNull(manager.get(OBJECT_ID));
+        manager.replayFromKRaft(one, Optional.empty(), 21L);
+        manager.replayFromKRaft(two, Optional.empty(), 22L);
+        assertEquals(CommittedObjectRetirementState.Stage.RETIRE_INTENT, manager.get(OBJECT_ID).stage());
+        assertEquals(CommittedObjectRetirementState.Stage.RETIRE_INTENT, manager.get(OBJECT_ID + 1L).stage());
+        assertEquals(0, manager.recordRetirementIntentBatch(
+            java.util.List.of(first, second), 23L).records().size());
+    }
+
+    @Test
+    void invalidAndDuplicateFirstIntentsVetoEntireBatch() {
+        CommittedObjectRetirementControlManager manager = manager();
+        var first = record(0L, -1L, 1, -1L);
+        var second = record(0L, -1L, 1, -1L).setObjectId(OBJECT_ID + 1L);
+        assertThrows(IllegalArgumentException.class, () ->
+            manager.recordRetirementIntentBatch(java.util.List.of(first, first), 20L));
+        assertThrows(IllegalArgumentException.class, () ->
+            manager.recordRetirementIntentBatch(
+                java.util.Collections.nCopies(65, first), 20L));
+        assertThrows(IllegalArgumentException.class, () ->
+            manager.recordRetirementIntentBatch(java.util.List.of(first, second.setStage((byte) 2)), 20L));
+        assertEquals(0, manager.recordRetirementIntentBatch(java.util.List.of(), 20L).response());
+        assertNull(manager.get(OBJECT_ID));
+        manager.replayFromKRaft(record(10L, -1L, 1, -1L).setObjectId(OBJECT_ID + 1L),
+            Optional.empty(), 10L);
+        assertEquals(0, manager.recordRetirementIntentBatch(
+            java.util.List.of(first, record(0L, -1L, 1, -1L).setObjectId(OBJECT_ID + 1L)),
+            20L).records().size());
+        assertNull(manager.get(OBJECT_ID));
+    }
+
+    @Test
     void terminalBatchBuildsOneAtomicOrderedKRaftAppendWithoutPartialMutation() {
         CommittedObjectRetirementControlManager manager = manager();
         long otherObjectId = OBJECT_ID + 1L;
