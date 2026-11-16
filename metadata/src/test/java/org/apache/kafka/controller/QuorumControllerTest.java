@@ -128,6 +128,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
@@ -282,6 +283,80 @@ public class QuorumControllerTest {
             .setDescriptorSha256("0123456789abcdef".repeat(4))
             .setStage((byte) stage)
             .setSafeEpoch(stage == 1 ? -1L : 7L);
+    }
+
+    @Test
+    public void testNegotiatedControllerAppendsAtomicIntentBatchAtActualOffsets() throws Exception {
+        BootstrapMetadata experimental = BootstrapMetadata.fromVersion(
+            MetadataVersion.IBP_4_4_IV0, "experimental batch retirement intent fixture"
+        ).copyWithFeatureRecord(PartitionRetirementAuthorityVersion.FEATURE_NAME, (short) 1);
+        try (MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build()) {
+            clientEnv.appendInitialRecords(List.of(
+                new ApiMessageAndVersion(new FeatureLevelRecord()
+                    .setName(MetadataVersion.FEATURE_NAME)
+                    .setFeatureLevel(MetadataVersion.IBP_4_4_IV0.featureLevel()), (short) 0),
+                new ApiMessageAndVersion(new FeatureLevelRecord()
+                    .setName(PartitionRetirementAuthorityVersion.FEATURE_NAME)
+                    .setFeatureLevel((short) 1), (short) 0)
+            ));
+            try (QuorumControllerTestEnv env = new QuorumControllerTestEnv.Builder(clientEnv)
+                .setBootstrapMetadata(experimental).build()) {
+                QuorumController controller = env.activeController(true);
+                long before = committedRetirementRecordCount(clientEnv);
+                Uuid catalogTopicId = Uuid.randomUuid();
+                var first = terminalFixtureRecord(704L, 0L, -1L, 1, catalogTopicId);
+                var second = terminalFixtureRecord(705L, 0L, -1L, 1, catalogTopicId);
+                var candidates = new ArrayList<>(List.of(first, second));
+                CountDownLatch entered = new CountDownLatch(1);
+                CountDownLatch release = new CountDownLatch(1);
+                controller.appendControlEvent("holdBeforeIntentBatch", () -> {
+                    entered.countDown();
+                    try {
+                        if (!release.await(10, TimeUnit.SECONDS)) {
+                            throw new AssertionError("Intent batch event queue gate timed out");
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new RuntimeException(e);
+                    }
+                });
+                CompletableFuture<Integer> pending;
+                try {
+                    assertTrue(entered.await(10, TimeUnit.SECONDS));
+                    pending = controller.recordUnverifiedCommittedObjectRetirementIntentBatch(candidates);
+                    assertFalse(pending.isDone());
+                    first.setDescriptorSha256("f".repeat(64));
+                    candidates.clear();
+                } finally {
+                    release.countDown();
+                }
+                assertEquals(2, pending.get(10, TimeUnit.SECONDS));
+                assertEquals(before + 2, committedRetirementRecordCount(clientEnv));
+                List<ApiMessageAndVersion> records = clientEnv.allRecords();
+                List<Long> offsets = clientEnv.allRecordOffsets();
+                List<Long> accepted = new ArrayList<>();
+                for (int index = 0; index < records.size(); index++) {
+                    if (records.get(index).message() instanceof CommittedObjectRetirementRecord saved) {
+                        assertEquals(704L + accepted.size(), saved.objectId());
+                        assertEquals((byte) 1, saved.stage());
+                        assertEquals(-1L, saved.safeEpoch());
+                        assertEquals("0123456789abcdef".repeat(4), saved.descriptorSha256());
+                        assertEquals(offsets.get(index), saved.acceptedKRaftOffset());
+                        accepted.add(saved.acceptedKRaftOffset());
+                    }
+                }
+                assertEquals(2, accepted.size());
+                assertEquals(accepted.get(0) + 1L, accepted.get(1).longValue());
+
+                // An existing ID must reject the entire batch, including a new ID.
+                var newCandidate = terminalFixtureRecord(706L, 0L, -1L, 1, catalogTopicId);
+                assertEquals(0, controller.recordUnverifiedCommittedObjectRetirementIntentBatch(
+                    List.of(newCandidate, second)).get(10, TimeUnit.SECONDS));
+                assertEquals(before + 2, committedRetirementRecordCount(clientEnv));
+                assertEquals(true, controller.recordUnverifiedCommittedObjectRetirementIntent(newCandidate)
+                    .get(10, TimeUnit.SECONDS), "Rejected batch must not partially record the new object");
+            }
+        }
     }
 
     @Test
