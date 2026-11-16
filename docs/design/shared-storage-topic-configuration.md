@@ -87,8 +87,10 @@ Use the following binary upgrade phase:
 1. Inventory the existing Topic IDs and effective classic/shared choices. Preserve
    the exact selector settings, WAL directories, object-store namespace and metadata
    Topic. Resolve selector differences across brokers before proceeding.
-2. Freeze Topic creation, deletion/recreation and reassignment while old and new
-   binaries coexist. The new Topic key cannot coordinate routing with old binaries.
+2. Freeze Topic creation, deletion/recreation, reassignment, broker expansion and
+   creation of replicas on empty disks while old and new binaries coexist. Do not
+   replace or clear WAL directories or Kafka log directories during this phase.
+   The new Topic key cannot coordinate routing with old binaries.
 3. On every upgraded broker, set
    `shared.storage.legacy.selectors.enabled=true` and retain its existing selectors.
    When the Topic key is absent, this explicit compatibility mode retains the old
@@ -100,12 +102,20 @@ Use the following binary upgrade phase:
    activation, with selectors unchanged.
 5. Keep this legacy cluster at feature level zero. Compatibility-mode brokers do
    not advertise support for activating Topic mode, even when their binaries know
-   the new configuration. This prevents a newly assigned broker with no old local
-   marker from misinterpreting an absent Topic key as classic.
+   the new configuration. This prevents activating a Topic-mode cluster that still
+   includes brokers using legacy selection; it does not identify a missing legacy
+   setting on an empty broker in a feature-zero cluster.
 6. Resume only operations supported by the unchanged legacy deployment. Use the
    separate migration procedure below to move to Topic-managed storage. Do not
    remove the compatibility setting or selectors merely because all binaries are
    now new.
+
+Until the legacy deployment is retired or migrated, every broker, including any
+broker added after the binary-roll freeze ends, must retain the complete legacy
+configuration and consistent selectors. Legacy Topic metadata does not record the
+storage mode. A broker with an empty WAL/log directory has no local mode marker,
+so it cannot reconstruct that historical choice from an absent Topic key. Local
+marker checks do not make arbitrary legacy configuration mixtures safe.
 
 The freeze and selector inventory are operator requirements; this change does not
 introduce a cluster maintenance lock or prove the correctness of an operator's

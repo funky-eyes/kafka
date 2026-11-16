@@ -34,6 +34,7 @@ import org.apache.kafka.common.config.ConfigResource;
 import org.apache.kafka.common.config.TopicConfig;
 import org.apache.kafka.common.errors.InvalidConfigurationException;
 import org.apache.kafka.common.errors.InvalidUpdateVersionException;
+import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.apache.kafka.common.test.KafkaClusterTestKit;
@@ -133,10 +134,11 @@ public class SharedStorageTopicConfigurationTest {
                 .contains(topic), 30_000L, "Deleted Topic remained visible");
             List<Integer> activeReplicas = cluster.brokers().keySet().stream()
                 .filter(id -> !id.equals(stopped.getKey())).toList();
-            admin.createTopics(List.of(new NewTopic(topic, Map.of(0, activeReplicas))))
-                .all().get(30, TimeUnit.SECONDS);
-            assertNotEquals(oldId, admin.describeTopics(List.of(topic)).allTopicNames()
-                .get(30, TimeUnit.SECONDS).get(topic).topicId());
+            var recreated = admin.createTopics(List.of(new NewTopic(topic, Map.of(0, activeReplicas))));
+            recreated.all().get(30, TimeUnit.SECONDS);
+            Uuid newId = recreated.topicId(topic).get(30, TimeUnit.SECONDS);
+            assertNotEquals(oldId, newId);
+            awaitTopicId(admin, topic, newId);
             roundTrip(cluster.bootstrapServers(), topic, "new-classic");
 
             // This broker still has the old shared directory and missed both metadata operations.
@@ -206,10 +208,9 @@ public class SharedStorageTopicConfigurationTest {
             admin.deleteTopics(List.of("selected-topic")).all().get(30, TimeUnit.SECONDS);
             TestUtils.waitForCondition(() -> !admin.listTopics().names().get(10, TimeUnit.SECONDS)
                 .contains("selected-topic"), 30_000L, "Deleted topic remained visible");
-            createTopic(admin, "selected-topic", Map.of());
-            Uuid newId = admin.describeTopics(List.of("selected-topic")).allTopicNames()
-                .get(30, TimeUnit.SECONDS).get("selected-topic").topicId();
+            Uuid newId = createTopic(admin, "selected-topic", Map.of());
             assertNotEquals(oldId, newId);
+            awaitTopicId(admin, "selected-topic", newId);
             assertLogMode(cluster, "selected-topic", false);
             roundTrip(cluster.bootstrapServers(), "selected-topic", "recreated-classic");
         }
@@ -254,9 +255,33 @@ public class SharedStorageTopicConfigurationTest {
             new UpdateFeaturesOptions()).all().get(30, TimeUnit.SECONDS);
     }
 
-    private static void createTopic(Admin admin, String topic, Map<String, String> configs) throws Exception {
-        admin.createTopics(List.of(new NewTopic(topic, 1, (short) 1).configs(configs)))
-            .all().get(30, TimeUnit.SECONDS);
+    private static Uuid createTopic(Admin admin, String topic, Map<String, String> configs) throws Exception {
+        var creation = admin.createTopics(List.of(new NewTopic(topic, 1, (short) 1).configs(configs)));
+        creation.all().get(30, TimeUnit.SECONDS);
+        return creation.topicId(topic).get(30, TimeUnit.SECONDS);
+    }
+
+    private static void awaitTopicId(Admin admin, String topic, Uuid expectedId) throws Exception {
+        long startNanos = System.nanoTime();
+        Uuid observedId = null;
+        // CreateTopics acknowledges controller persistence before every broker has
+        // published the new metadata. Only absence is retryable; an old ID cannot
+        // satisfy this wait and any other Admin failure must remain a test failure.
+        while (System.nanoTime() - startNanos < TimeUnit.SECONDS.toNanos(30)) {
+            try {
+                observedId = admin.describeTopics(List.of(topic)).allTopicNames()
+                    .get(10, TimeUnit.SECONDS).get(topic).topicId();
+                if (expectedId.equals(observedId)) {
+                    return;
+                }
+            } catch (ExecutionException failure) {
+                if (!(failure.getCause() instanceof UnknownTopicOrPartitionException)) {
+                    throw failure;
+                }
+            }
+            Thread.sleep(100);
+        }
+        assertEquals(expectedId, observedId, "Created Topic ID did not become visible for " + topic);
     }
 
     private static ConfigEntry describeMode(Admin admin, String topic) throws Exception {
