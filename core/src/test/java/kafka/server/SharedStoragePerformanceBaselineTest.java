@@ -110,6 +110,7 @@ public class SharedStoragePerformanceBaselineTest {
             .setNumDisksPerBroker(1)
             .build();
         KafkaClusterTestKit.Builder builder = new KafkaClusterTestKit.Builder(nodes)
+            .setConfigProp("shared.storage.legacy.selectors.enabled", true)
             .setConfigProp("storage.extension.class",
                 "org.apache.kafka.storage.internals.shared.s3.S3SharedStorageExtension")
             .setConfigProp("shared.storage.topic.pattern", "shared-performance-shared-.*")

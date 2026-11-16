@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.storage.internals.shared.kafka;
 
+import org.apache.kafka.common.TopicIdPartition;
 import org.apache.kafka.common.replica.PartitionRetirementSourceProbe;
 import org.apache.kafka.storage.internals.log.KafkaStorageExtension;
 import org.apache.kafka.storage.internals.log.StorageExtensionBrokerContext;
@@ -34,6 +35,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 import java.util.function.Function;
+import java.util.function.Predicate;
 
 /**
  * Broker-wide shared WAL extension.
@@ -42,13 +44,29 @@ import java.util.function.Function;
  * that physical WAL; topic routing only controls which UnifiedLog implementation is created.</p>
  */
 public final class SharedStorageExtension implements KafkaStorageExtension {
+    private final Optional<Predicate<TopicIdPartition>> roleSelectionOverride;
     private SharedStorageEngine storage;
+    private SharedStorageConfiguration storageConfiguration;
     private SharedCommitProgress commitProgress;
     private UnifiedLogFactory unifiedLogFactory;
     private SharedPartitionRoleListener partitionRoleListener;
     private int startedBrokerId = -1;
     private boolean brokerReadyObserved;
     private BrokerStartupReplayObservation brokerStartupReplayObservation;
+
+    public SharedStorageExtension() {
+        roleSelectionOverride = Optional.empty();
+    }
+
+    // Test seam for source/WAL diagnostics whose native source log is synthetic.
+    SharedStorageExtension(Predicate<TopicIdPartition> roleSelectionOverride) {
+        this.roleSelectionOverride = Optional.of(Objects.requireNonNull(roleSelectionOverride, "roleSelectionOverride"));
+    }
+
+    @Override
+    public synchronized boolean supportsTopicStorageConfiguration() {
+        return storage != null && storageConfiguration != null && !storageConfiguration.legacySelectorsEnabled();
+    }
 
     @Override
     public synchronized void start(StorageExtensionContext context) throws IOException {
@@ -58,20 +76,23 @@ public final class SharedStorageExtension implements KafkaStorageExtension {
         }
 
         SharedStorageConfiguration configuration = SharedStorageConfiguration.from(context);
+        SharedStorageModeMarker.initializeWalDirectory(configuration);
         SharedWal wal = SharedStorageWalFactory.create(configuration);
         try {
             storage = new SharedStorageEngine(wal);
+            storageConfiguration = configuration;
             commitProgress = new SharedCommitProgress();
-            unifiedLogFactory = new RoutingUnifiedLogFactory(
-                configuration,
-                new SharedUnifiedLogFactory(storage, commitProgress)
+            SharedUnifiedLogFactory sharedFactory = new SharedUnifiedLogFactory(storage, commitProgress, configuration.legacySelectorsEnabled());
+            unifiedLogFactory = new RoutingUnifiedLogFactory(configuration, sharedFactory);
+            partitionRoleListener = new SharedPartitionRoleListener(
+                roleSelectionOverride.orElse(sharedFactory::isSharedPartition), commitProgress, sharedFactory::forgetPartition
             );
-            partitionRoleListener = new SharedPartitionRoleListener(configuration, commitProgress);
             startedBrokerId = context.brokerId();
             brokerReadyObserved = false;
             brokerStartupReplayObservation = null;
         } catch (Throwable t) {
             storage = null;
+            storageConfiguration = null;
             commitProgress = null;
             unifiedLogFactory = null;
             partitionRoleListener = null;
@@ -280,6 +301,7 @@ public final class SharedStorageExtension implements KafkaStorageExtension {
     public synchronized void close() throws IOException {
         SharedStorageEngine currentStorage = storage;
         storage = null;
+        storageConfiguration = null;
         commitProgress = null;
         unifiedLogFactory = null;
         partitionRoleListener = null;

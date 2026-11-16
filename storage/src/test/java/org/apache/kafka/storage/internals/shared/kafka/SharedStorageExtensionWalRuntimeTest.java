@@ -51,8 +51,10 @@ class SharedStorageExtensionWalRuntimeTest {
         Path logDir = Files.createDirectory(tempDir.resolve("kafka-log-ring"));
         Path walDir = tempDir.resolve("shared-wal-ring");
         SharedStorageExtension extension = new SharedStorageExtension();
+        assertFalse(extension.supportsTopicStorageConfiguration());
         try {
             extension.start(context(logDir, walDir, Map.of()));
+            assertTrue(extension.supportsTopicStorageConfiguration());
 
             Path ringWal = SharedStorageWalFactory.ringWalPath(walDir);
             assertTrue(Files.isRegularFile(ringWal));
@@ -60,6 +62,20 @@ class SharedStorageExtensionWalRuntimeTest {
         } finally {
             extension.close();
         }
+    }
+
+    @Test
+    void legacyRuntimeCannotAdvertiseTopicConfigurationCapability() throws Exception {
+        Path logDir = Files.createDirectory(tempDir.resolve("kafka-log-legacy"));
+        SharedStorageExtension extension = new SharedStorageExtension();
+        try {
+            extension.start(context(logDir, tempDir.resolve("shared-wal-legacy"),
+                Map.of(SharedStorageConfiguration.LEGACY_SELECTORS_ENABLED_CONFIG, true)));
+            assertFalse(extension.supportsTopicStorageConfiguration());
+        } finally {
+            extension.close();
+        }
+        assertFalse(extension.supportsTopicStorageConfiguration());
     }
 
     @Test

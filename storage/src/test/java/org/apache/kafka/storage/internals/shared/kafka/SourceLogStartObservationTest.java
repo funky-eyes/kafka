@@ -19,15 +19,11 @@ package org.apache.kafka.storage.internals.shared.kafka;
 import org.apache.kafka.common.TopicIdPartition;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
-import org.apache.kafka.common.utils.MockTime;
-import org.apache.kafka.storage.internals.log.StorageExtensionContext;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
-import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -46,9 +42,6 @@ class SourceLogStartObservationTest {
     private static final SharedPartitionId SHARED_PARTITION = new SharedPartitionId(
         TOPIC_ID.getMostSignificantBits(), TOPIC_ID.getLeastSignificantBits(), 0
     );
-
-    @TempDir
-    Path tempDir;
 
     @Test
     void capturesCurrentEpochAndNativeKafkaSourceBounds() throws IOException {
@@ -191,10 +184,7 @@ class SourceLogStartObservationTest {
     }
 
     private SharedPartitionRoleListener roles() {
-        SharedStorageConfiguration config = SharedStorageConfiguration.from(new StorageExtensionContext(
-            Map.of(), List.of(tempDir.toFile()), 1, new MockTime()
-        ));
-        return new SharedPartitionRoleListener(config, new SharedCommitProgress());
+        return new SharedPartitionRoleListener(KAFKA_PARTITION::equals, new SharedCommitProgress());
     }
 
     private static void elect(SharedPartitionRoleListener roles, int epoch) {

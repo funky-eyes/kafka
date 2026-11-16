@@ -42,6 +42,7 @@ import org.apache.kafka.server.metrics.KafkaMetricsGroup
 import org.apache.kafka.server.util.{FileLock, Scheduler}
 import org.apache.kafka.storage.internals.log.{CleanerConfig, IncompleteLogInitializationException, LogCleaner, LogConfig, LogDirFailureChannel, LogManager => JLogManager, LogOffsetsListener, ProducerStateManagerConfig, RemoteIndexCache, StoragePartitionRoleListener, UnifiedLog, UnifiedLogCreationContext, UnifiedLogFactory}
 import org.apache.kafka.storage.internals.checkpoint.{CleanShutdownFileHandler, OffsetCheckpointFile}
+import org.apache.kafka.storage.internals.shared.kafka.SharedStorageModeMarker
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats
 
 import java.util
@@ -473,7 +474,9 @@ class LogManager(logDirs: Seq[File],
   /**
    * Recover and load all logs in the given data directories
    */
-  private[log] def loadLogs(defaultConfig: LogConfig, topicConfigOverrides: Map[String, LogConfig], isStray: UnifiedLog => Boolean): Unit = {
+  private[log] def loadLogs(defaultConfig: LogConfig, topicConfigOverrides: Map[String, LogConfig],
+                           isStray: UnifiedLog => Boolean,
+                           isStrayById: Option[TopicIdPartition => Boolean] = None): Unit = {
     info(s"Loading logs from log dirs $liveLogDirs")
     val startMs = time.hiResClockMs()
     val threadPools = ArrayBuffer.empty[ExecutorService]
@@ -553,8 +556,10 @@ class LogManager(logDirs: Seq[File],
             var log = None: Option[UnifiedLog]
             val logLoadStartMs = time.hiResClockMs()
             try {
-              log = Some(loadLog(logDir, hadCleanShutdown, recoveryPoints, logStartOffsets,
-                defaultConfig, topicConfigOverrides, numRemainingSegments, isStray))
+              if (!quarantineObsoleteStorageLog(logDir, isStrayById)) {
+                log = Some(loadLog(logDir, hadCleanShutdown, recoveryPoints, logStartOffsets,
+                  defaultConfig, topicConfigOverrides, numRemainingSegments, isStray))
+              }
             } catch {
               case e: IncompleteLogInitializationException =>
                 warn(s"Skipping crash-interrupted log initialization in $logDir: ${e.getMessage}")
@@ -571,7 +576,7 @@ class LogManager(logDirs: Seq[File],
                 case Some(loadedLog) => info(s"Completed load of $loadedLog with ${loadedLog.numberOfSegments} segments, " +
                   s"local-log-start-offset ${loadedLog.localLogStartOffset()} and log-end-offset ${loadedLog.logEndOffset} in ${logLoadDurationMs}ms " +
                   s"($currentNumLoaded/${logsToLoad.length} completed in $logDirAbsolutePath)")
-                case None => info(s"Error while loading logs in $logDir in ${logLoadDurationMs}ms ($currentNumLoaded/${logsToLoad.length} completed in $logDirAbsolutePath)")
+                case None => info(s"No active log opened in $logDir in ${logLoadDurationMs}ms ($currentNumLoaded/${logsToLoad.length} completed in $logDirAbsolutePath)")
               }
 
               if (remainingLogs == 0) {
@@ -640,10 +645,35 @@ class LogManager(logDirs: Seq[File],
   /**
    *  Start the background threads to flush logs and do log cleanup
    */
-  def startup(topicNames: Set[String], isStray: UnifiedLog => Boolean = _ => false): Unit = {
+  def startup(topicNames: Set[String], isStray: UnifiedLog => Boolean = _ => false,
+              isStrayById: Option[TopicIdPartition => Boolean] = None): Unit = {
     // ensure consistency between default config and overrides
     val defaultConfig = currentDefaultConfig
-    startupWithConfigOverrides(defaultConfig, fetchTopicConfigOverrides(defaultConfig, topicNames), isStray)
+    startupWithConfigOverrides(defaultConfig, fetchTopicConfigOverrides(defaultConfig, topicNames), isStray, isStrayById)
+  }
+
+  /**
+   * A broker may miss a delete/recreate while offline. The new Topic's configuration cannot
+   * select a physical reader for the old Topic ID. Preserve marked obsolete directories as
+   * strays before opening any files; only the current metadata image may prove them obsolete.
+   */
+  private def quarantineObsoleteStorageLog(logDir: File,
+                                          isStrayById: Option[TopicIdPartition => Boolean]): Boolean = {
+    val persistedId = SharedStorageModeMarker.persistedTopicId(logDir, logDirFailureChannel)
+    if (persistedId.isEmpty) return false
+    val topicPartition = UnifiedLog.parseTopicPartitionName(logDir)
+    val isAlreadyStray = logDir.getName.endsWith(UnifiedLog.STRAY_DIR_SUFFIX)
+    val obsolete = isStrayById.exists(predicate => predicate(new TopicIdPartition(persistedId.get(), topicPartition)))
+    if (isAlreadyStray || obsolete) {
+      if (!isAlreadyStray) {
+        val target = new File(logDir.getParentFile, UnifiedLog.logStrayDirName(topicPartition))
+        Utils.atomicMoveWithFallback(logDir.toPath, target.toPath)
+        warn(s"Preserved obsolete storage directory $logDir as $target for Topic ID ${persistedId.get()}")
+      }
+      true
+    } else {
+      false
+    }
   }
 
   // visible for testing
@@ -671,8 +701,9 @@ class LogManager(logDirs: Seq[File],
   private[log] def startupWithConfigOverrides(
     defaultConfig: LogConfig,
     topicConfigOverrides: Map[String, LogConfig],
-    isStray: UnifiedLog => Boolean): Unit = {
-    loadLogs(defaultConfig, topicConfigOverrides, isStray) // this could take a while if shutdown was not clean
+    isStray: UnifiedLog => Boolean,
+    isStrayById: Option[TopicIdPartition => Boolean] = None): Unit = {
+    loadLogs(defaultConfig, topicConfigOverrides, isStray, isStrayById) // this could take a while if shutdown was not clean
 
     /* Schedule the cleanup task to delete old logs */
     if (scheduler != null) {

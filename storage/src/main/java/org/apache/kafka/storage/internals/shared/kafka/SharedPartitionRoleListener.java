@@ -28,16 +28,19 @@ import java.util.Collection;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.Consumer;
+import java.util.function.Predicate;
 
 /**
  * Routes Kafka replica-role and assignment notifications into the shared-storage commit tracker.
  *
- * <p>Only topics selected for shared storage are tracked. The callbacks perform bounded in-memory map updates only;
- * they never start object-store or metadata-store I/O on Kafka's metadata application thread.</p>
+ * <p>Only exact topic IDs with a successfully instantiated shared log are tracked. The callbacks perform bounded
+ * in-memory map updates only; they never start object-store or metadata-store I/O on Kafka's metadata thread.</p>
  */
 public final class SharedPartitionRoleListener implements StoragePartitionRoleListener {
     private static final Logger LOG = LoggerFactory.getLogger(SharedPartitionRoleListener.class);
-    private final SharedStorageConfiguration configuration;
+    private final Predicate<TopicIdPartition> sharedPartition;
+    private final Consumer<TopicIdPartition> partitionRemoved;
     private final SharedCommitProgress commitProgress;
     private final LocalRetirementLeadershipFence retirementFence;
     // Keep remove/reassign and upload-role publication ordered per listener,
@@ -45,20 +48,38 @@ public final class SharedPartitionRoleListener implements StoragePartitionRoleLi
     private final Object roleCallbackLock = new Object();
 
     public SharedPartitionRoleListener(
-        SharedStorageConfiguration configuration,
+        Predicate<TopicIdPartition> sharedPartition,
         SharedCommitProgress commitProgress
     ) {
-        this(configuration, commitProgress, new LocalRetirementLeadershipFence());
+        this(sharedPartition, commitProgress, ignored -> { });
+    }
+
+    public SharedPartitionRoleListener(
+        Predicate<TopicIdPartition> sharedPartition,
+        SharedCommitProgress commitProgress,
+        Consumer<TopicIdPartition> partitionRemoved
+    ) {
+        this(sharedPartition, commitProgress, new LocalRetirementLeadershipFence(), partitionRemoved);
     }
 
     SharedPartitionRoleListener(
-        SharedStorageConfiguration configuration,
+        Predicate<TopicIdPartition> sharedPartition,
         SharedCommitProgress commitProgress,
         LocalRetirementLeadershipFence retirementFence
     ) {
-        this.configuration = Objects.requireNonNull(configuration, "configuration");
+        this(sharedPartition, commitProgress, retirementFence, ignored -> { });
+    }
+
+    private SharedPartitionRoleListener(
+        Predicate<TopicIdPartition> sharedPartition,
+        SharedCommitProgress commitProgress,
+        LocalRetirementLeadershipFence retirementFence,
+        Consumer<TopicIdPartition> partitionRemoved
+    ) {
+        this.sharedPartition = Objects.requireNonNull(sharedPartition, "sharedPartition");
         this.commitProgress = Objects.requireNonNull(commitProgress, "commitProgress");
         this.retirementFence = Objects.requireNonNull(retirementFence, "retirementFence");
+        this.partitionRemoved = Objects.requireNonNull(partitionRemoved, "partitionRemoved");
     }
 
     @Override
@@ -89,10 +110,13 @@ public final class SharedPartitionRoleListener implements StoragePartitionRoleLi
         synchronized (roleCallbackLock) {
             partitions.forEach(partition -> {
                 Objects.requireNonNull(partition, "partition");
-                if (configuration.useSharedStorage(partition.topic())) {
-                    SharedPartitionId id = sharedPartitionId(partition);
+                SharedPartitionId id = sharedPartitionId(partition);
+                // A deleted topic name may already resolve to a new classic Topic ID. Always revoke
+                // an existing shared progress entry, even if it is no longer in the loaded-log registry.
+                if (sharedPartition.test(partition) || commitProgress.partitionProgress(id).isPresent()) {
                     retirementFence.onRemoved(id);
                     commitProgress.remove(id);
+                    partitionRemoved.accept(partition);
                 }
             });
             disableUploadsIfQuarantined();
@@ -101,12 +125,13 @@ public final class SharedPartitionRoleListener implements StoragePartitionRoleLi
 
     private void updateRole(TopicIdPartition partition, boolean leader, int leaderEpoch) {
         Objects.requireNonNull(partition, "partition");
-        if (!configuration.useSharedStorage(partition.topic())) {
-            return;
-        }
-        SharedPartitionId sharedPartition = sharedPartitionId(partition);
+        SharedPartitionId id = sharedPartitionId(partition);
         synchronized (roleCallbackLock) {
-            applyRoleCallback(sharedPartition, leader, leaderEpoch);
+            // Check under the removal lock: a callback that observed membership before removal
+            // must not recreate an upload window after the loaded-log identity was forgotten.
+            if (sharedPartition.test(partition)) {
+                applyRoleCallback(id, leader, leaderEpoch);
+            }
         }
     }
 

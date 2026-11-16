@@ -14,7 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-set -euo pipefail
+set -Eeuo pipefail
+trap 'printf "MinIO fixture test failed at %s:%s (exit %s): %s\n" "${BASH_SOURCE[0]}" "${LINENO}" "$?" "${BASH_COMMAND}" >&2' ERR
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FIXTURE="${ROOT}/tools/shared_storage_minio_fixture.sh"
@@ -80,11 +81,29 @@ pid_file="${STATE_DIR}/minio.pid"
 mkdir -p "$(dirname "${minio_bin}")" "${STATE_DIR}"
 
 cache_probe="${TMP}/cache-probe"
-cp /bin/sleep "${cache_probe}"
+# Ubuntu can supply sleep through a multicall binary that stops working when
+# renamed. Prefer its separately installed GNU companion where available; every
+# copied process below must remain the same executable with any basename.
+sleep_binary="$(type -P gnusleep || type -P sleep)"
+cp "${sleep_binary}" "${cache_probe}"
 chmod 0755 "${cache_probe}"
 cache_probe_sha="$(sha256sum "${cache_probe}" | awk '{print $1}')"
+if ! cache_probe_version="$("${cache_probe}" --version 2>&1)"; then
+  echo "Copied sleep executable cannot report its version after renaming: ${sleep_binary}" >&2
+  echo "${cache_probe_version}" >&2
+  exit 1
+fi
+cache_probe_release="${cache_probe_version%%$'\n'*}"
+if [ -z "${cache_probe_release}" ]; then
+  echo "Copied sleep executable reported an empty version: ${sleep_binary}" >&2
+  exit 1
+fi
+if ! "${cache_probe}" 0; then
+  echo "Sleep executable must still implement sleep after renaming: ${sleep_binary}" >&2
+  exit 1
+fi
 
-binary_valid "${cache_probe}" "sleep (GNU coreutils)" "${cache_probe_sha}"
+binary_valid "${cache_probe}" "${cache_probe_release}" "${cache_probe_sha}"
 
 # Regression: a correctly checksummed, pinned binary may print additional
 # text after the expected version. grep -q under pipefail used to close early
@@ -136,7 +155,7 @@ if compgen -G "${download_target}.download.*" >/dev/null; then
   exit 1
 fi
 
-if binary_valid "${cache_probe}" "sleep (GNU coreutils)"     "0000000000000000000000000000000000000000000000000000000000000000"; then
+if binary_valid "${cache_probe}" "${cache_probe_release}"     "0000000000000000000000000000000000000000000000000000000000000000"; then
   echo "Cache validation accepted an incorrect SHA-256" >&2
   exit 1
 fi
@@ -147,7 +166,7 @@ fi
 
 # Use a copied ELF executable so /proc/<pid>/exe resolves to the exact
 # path the fixture considers its MinIO binary without requiring network access.
-cp /bin/sleep "${minio_bin}"
+cp "${cache_probe}" "${minio_bin}"
 chmod 0755 "${minio_bin}"
 
 bash -c 'sleep 0.2; exec "$1" 60' _ "${minio_bin}" &

@@ -419,7 +419,8 @@ public class FormatterTest {
             formatter1.formatter.setFeatureLevel("nonexistent.feature", (short) 1);
             assertEquals("Unsupported feature: nonexistent.feature. Supported features " +
                     "are: eligible.leader.replicas.version, group.version, kraft.version, " +
-                    "share.version, streams.version, test.feature.version, transaction.version",
+                    "partition.retirement.authority.version, share.version, shared.storage.version, " +
+                    "streams.version, test.feature.version, transaction.version, wal.replica.durability.version",
                 assertThrows(FormatterException.class,
                     formatter1.formatter::run).
                         getMessage());

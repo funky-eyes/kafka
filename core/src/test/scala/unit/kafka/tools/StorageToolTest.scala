@@ -339,7 +339,8 @@ Found problem:
     properties.putAll(defaultStaticQuorumProperties)
     properties.setProperty("log.dirs", availableDirs.mkString(","))
     assertEquals("Unsupported feature: non.existent.feature. Supported features are: " +
-      "eligible.leader.replicas.version, group.version, kraft.version, share.version, streams.version, transaction.version",
+      "eligible.leader.replicas.version, group.version, kraft.version, partition.retirement.authority.version, " +
+      "share.version, shared.storage.version, streams.version, transaction.version, wal.replica.durability.version",
         assertThrows(classOf[FormatterException], () =>
           runFormatCommand(new ByteArrayOutputStream(), properties,
             Seq("--feature", "non.existent.feature=20"))).getMessage)

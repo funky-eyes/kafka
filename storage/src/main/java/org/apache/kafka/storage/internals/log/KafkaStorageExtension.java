@@ -33,6 +33,15 @@ public interface KafkaStorageExtension extends AutoCloseable {
     UnifiedLogFactory unifiedLogFactory();
 
     /**
+     * Whether this started extension implements the Topic-configured shared storage contract.
+     * Brokers without this capability must not advertise shared.storage.version: the controller
+     * uses the existing feature barrier to exclude incompatible replicas during rolling upgrades.
+     */
+    default boolean supportsTopicStorageConfiguration() {
+        return false;
+    }
+
+    /**
      * Returns the non-blocking observer for Kafka's completed local leader/follower transitions.
      *
      * <p>The default is a no-op so classic storage and extensions that do not need role ownership are unchanged.</p>

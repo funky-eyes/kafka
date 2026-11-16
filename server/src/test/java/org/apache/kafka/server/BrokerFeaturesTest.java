@@ -19,6 +19,9 @@ package org.apache.kafka.server;
 import org.apache.kafka.common.feature.Features;
 import org.apache.kafka.common.feature.SupportedVersionRange;
 import org.apache.kafka.server.common.MetadataVersion;
+import org.apache.kafka.server.common.PartitionRetirementAuthorityVersion;
+import org.apache.kafka.server.common.SharedStorageVersion;
+import org.apache.kafka.server.common.WalReplicaDurabilityVersion;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -94,7 +97,7 @@ public class BrokerFeaturesTest {
         Features<SupportedVersionRange> supportedFeatures = Features.supportedFeatures(newFeatures);
         BrokerFeatures brokerFeatures = BrokerFeatures.createDefault(true, supportedFeatures);
 
-        Map<String, Short> expectedFeatures = Map.of(
+        Map<String, Short> expectedFeatures = new HashMap<>(Map.of(
                 MetadataVersion.FEATURE_NAME, MetadataVersion.latestTesting().featureLevel(),
                 TRANSACTION_VERSION.featureName(), TRANSACTION_VERSION.latestTesting(),
                 GROUP_VERSION.featureName(), GROUP_VERSION.latestTesting(),
@@ -105,7 +108,10 @@ public class BrokerFeaturesTest {
                 "test_feature_1", (short) 4,
                 "test_feature_2", (short) 3,
                 "test_feature_3", (short) 7
-        );
+        ));
+        expectedFeatures.put(SharedStorageVersion.FEATURE_NAME, (short) 0);
+        expectedFeatures.put(PartitionRetirementAuthorityVersion.FEATURE_NAME, (short) 1);
+        expectedFeatures.put(WalReplicaDurabilityVersion.FEATURE_NAME, (short) 1);
 
         assertEquals(expectedFeatures, brokerFeatures.defaultFinalizedFeatures());
     }

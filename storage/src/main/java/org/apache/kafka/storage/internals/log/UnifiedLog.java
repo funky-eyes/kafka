@@ -21,6 +21,7 @@ import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.compress.Compression;
+import org.apache.kafka.common.config.TopicConfig;
 import org.apache.kafka.common.errors.CorruptRecordException;
 import org.apache.kafka.common.errors.InconsistentTopicIdException;
 import org.apache.kafka.common.errors.InvalidProducerEpochException;
@@ -521,8 +522,21 @@ public class UnifiedLog implements AutoCloseable {
 
     public LogConfig updateConfig(LogConfig newConfig) {
         LogConfig oldConfig = localLog.config();
+        // A metadata update cannot replace a live log implementation or migrate its bytes.
+        String storageMode = TopicConfig.SHARED_STORAGE_ENABLE_CONFIG;
+        if (oldConfig.sharedStorageEnable() != newConfig.sharedStorageEnable()
+            || (newConfig.originals().containsKey(storageMode)
+                && newConfig.sharedStorageEnable() != usesSharedStorage())) {
+            throw new IllegalArgumentException(storageMode + " cannot be changed for an existing log "
+                + topicPartition() + "; create a new Topic and migrate the data explicitly");
+        }
         localLog.updateConfig(newConfig);
         return oldConfig;
+    }
+
+    /** Physical implementation, independent of an absent legacy Topic configuration. */
+    protected boolean usesSharedStorage() {
+        return false;
     }
 
     public long highWatermark() {

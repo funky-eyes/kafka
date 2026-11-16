@@ -54,6 +54,7 @@ public class FeatureCommandTest {
 
         List<String> features = Arrays.stream(commandOutput.split("\n")).sorted().toList();
 
+        assertEquals(9, features.size());
         assertFeatureOutput(
                 "eligible.leader.replicas.version", "0", "1", "0",
                 outputWithoutEpoch(features.get(0))
@@ -71,16 +72,24 @@ public class FeatureCommandTest {
                 outputWithoutEpoch(features.get(3))
         );
         assertFeatureOutput(
-                "share.version", "0", "1", "0",
+                "partition.retirement.authority.version", "0", "1", "0",
                 outputWithoutEpoch(features.get(4))
         );
         assertFeatureOutput(
-                "streams.version", "0", "1", "0",
+                "share.version", "0", "1", "0",
                 outputWithoutEpoch(features.get(5))
         );
         assertFeatureOutput(
-                "transaction.version", "0", "2", "0",
+                "streams.version", "0", "1", "0",
                 outputWithoutEpoch(features.get(6))
+        );
+        assertFeatureOutput(
+                "transaction.version", "0", "2", "0",
+                outputWithoutEpoch(features.get(7))
+        );
+        assertFeatureOutput(
+                "wal.replica.durability.version", "0", "1", "0",
+                outputWithoutEpoch(features.get(8))
         );
     }
 
@@ -94,6 +103,7 @@ public class FeatureCommandTest {
         List<String> features = Arrays.stream(commandOutput.split("\n")).sorted().toList();
 
         // Change expected message to reflect latest MetadataVersion (SupportedMaxVersion increases when adding a new version)
+        assertEquals(10, features.size());
         assertFeatureOutput(
                 "eligible.leader.replicas.version", "0", "1", "0",
                 outputWithoutEpoch(features.get(0))
@@ -111,16 +121,28 @@ public class FeatureCommandTest {
                 outputWithoutEpoch(features.get(3))
         );
         assertFeatureOutput(
-                "share.version", "0", "1", "0",
+                "partition.retirement.authority.version", "0", "1", "0",
                 outputWithoutEpoch(features.get(4))
         );
         assertFeatureOutput(
-                "streams.version", "0", "1", "0",
+                "share.version", "0", "1", "0",
                 outputWithoutEpoch(features.get(5))
         );
         assertFeatureOutput(
-                "transaction.version", "0", "2", "0",
+                "shared.storage.version", "0", "1", "0",
                 outputWithoutEpoch(features.get(6))
+        );
+        assertFeatureOutput(
+                "streams.version", "0", "1", "0",
+                outputWithoutEpoch(features.get(7))
+        );
+        assertFeatureOutput(
+                "transaction.version", "0", "2", "0",
+                outputWithoutEpoch(features.get(8))
+        );
+        assertFeatureOutput(
+                "wal.replica.durability.version", "0", "1", "0",
+                outputWithoutEpoch(features.get(9))
         );
     }
 
@@ -151,6 +173,7 @@ public class FeatureCommandTest {
         List<String> featuresWithUnstable = Arrays.stream(commandOutput.split("\n")).sorted().toList();
 
         // Change expected message to reflect latest MetadataVersion (SupportedMaxVersion increases when adding a new version)
+        assertEquals(10, featuresWithUnstable.size());
         assertFeatureOutput(
                 "eligible.leader.replicas.version", "0", "1", "0",
                 outputWithoutEpoch(featuresWithUnstable.get(0))
@@ -168,16 +191,28 @@ public class FeatureCommandTest {
                 outputWithoutEpoch(featuresWithUnstable.get(3))
         );
         assertFeatureOutput(
-                "share.version", "0", "1", "0",
+                "partition.retirement.authority.version", "0", "1", "0",
                 outputWithoutEpoch(featuresWithUnstable.get(4))
         );
         assertFeatureOutput(
-                "streams.version", "0", "1", "0",
+                "share.version", "0", "1", "0",
                 outputWithoutEpoch(featuresWithUnstable.get(5))
         );
         assertFeatureOutput(
-                "transaction.version", "0", "2", "0",
+                "shared.storage.version", "0", "1", "0",
                 outputWithoutEpoch(featuresWithUnstable.get(6))
+        );
+        assertFeatureOutput(
+                "streams.version", "0", "1", "0",
+                outputWithoutEpoch(featuresWithUnstable.get(7))
+        );
+        assertFeatureOutput(
+                "transaction.version", "0", "2", "0",
+                outputWithoutEpoch(featuresWithUnstable.get(8))
+        );
+        assertFeatureOutput(
+                "wal.replica.durability.version", "0", "1", "0",
+                outputWithoutEpoch(featuresWithUnstable.get(9))
         );
 
         commandOutput = ToolsTestUtils.captureStandardOut(() ->
@@ -188,6 +223,7 @@ public class FeatureCommandTest {
         );
         List<String> featuresWithoutUnstable = Arrays.stream(commandOutput.split("\n")).sorted().toList();
 
+        assertEquals(8, featuresWithoutUnstable.size());
         assertFeatureOutput(
                 "eligible.leader.replicas.version", "0", "1", "0",
                 outputWithoutEpoch(featuresWithoutUnstable.get(0))
@@ -209,12 +245,16 @@ public class FeatureCommandTest {
                 outputWithoutEpoch(featuresWithoutUnstable.get(4))
         );
         assertFeatureOutput(
-                "streams.version", "0", "1", "0",
+                "shared.storage.version", "0", "1", "0",
                 outputWithoutEpoch(featuresWithoutUnstable.get(5))
         );
         assertFeatureOutput(
-                "transaction.version", "0", "2", "0",
+                "streams.version", "0", "1", "0",
                 outputWithoutEpoch(featuresWithoutUnstable.get(6))
+        );
+        assertFeatureOutput(
+                "transaction.version", "0", "2", "0",
+                outputWithoutEpoch(featuresWithoutUnstable.get(7))
         );
     }
 
@@ -245,6 +285,7 @@ public class FeatureCommandTest {
         List<String> featuresWithUnstable = Arrays.stream(commandOutput.split("\n")).sorted().toList();
 
         // Change expected message to reflect latest MetadataVersion (SupportedMaxVersion increases when adding a new version)
+        assertEquals(9, featuresWithUnstable.size());
         assertFeatureOutput(
                 "eligible.leader.replicas.version", "0", "1", "0",
                 outputWithoutEpoch(featuresWithUnstable.get(0))
@@ -262,16 +303,24 @@ public class FeatureCommandTest {
                 outputWithoutEpoch(featuresWithUnstable.get(3))
         );
         assertFeatureOutput(
-                "share.version", "0", "1", "0",
+                "partition.retirement.authority.version", "0", "1", "0",
                 outputWithoutEpoch(featuresWithUnstable.get(4))
         );
         assertFeatureOutput(
-                "streams.version", "0", "1", "0",
+                "share.version", "0", "1", "0",
                 outputWithoutEpoch(featuresWithUnstable.get(5))
         );
         assertFeatureOutput(
-                "transaction.version", "0", "2", "0",
+                "streams.version", "0", "1", "0",
                 outputWithoutEpoch(featuresWithUnstable.get(6))
+        );
+        assertFeatureOutput(
+                "transaction.version", "0", "2", "0",
+                outputWithoutEpoch(featuresWithUnstable.get(7))
+        );
+        assertFeatureOutput(
+                "wal.replica.durability.version", "0", "1", "0",
+                outputWithoutEpoch(featuresWithUnstable.get(8))
         );
 
         commandOutput = ToolsTestUtils.captureStandardOut(() ->
@@ -282,6 +331,7 @@ public class FeatureCommandTest {
         );
         List<String> featuresWithoutUnstable = Arrays.stream(commandOutput.split("\n")).sorted().toList();
 
+        assertEquals(7, featuresWithoutUnstable.size());
         assertFeatureOutput(
                 "eligible.leader.replicas.version", "0", "1", "0",
                 outputWithoutEpoch(featuresWithoutUnstable.get(0))
@@ -406,9 +456,12 @@ public class FeatureCommandTest {
                 "group.version was downgraded to 0.\n" +
                 "kraft.version was downgraded to 0.\n" +
                 "metadata.version was downgraded to 18.\n" +
+                "partition.retirement.authority.version was downgraded to 0.\n" +
                 "share.version was downgraded to 0.\n" +
+                "shared.storage.version was downgraded to 0.\n" +
                 "streams.version was downgraded to 0.\n" +
-                "transaction.version was downgraded to 0.", commandOutput);
+                "transaction.version was downgraded to 0.\n" +
+                "wal.replica.durability.version was downgraded to 0.", commandOutput);
     }
 
     private String outputWithoutEpoch(String output) {

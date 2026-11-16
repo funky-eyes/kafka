@@ -376,6 +376,7 @@ public class SharedStorageAcksOneIndependentProcessTest {
             "group.initial.rebalance.delay.ms=0",
             "auto.create.topics.enable=false",
             "unclean.leader.election.enable=false",
+            "shared.storage.legacy.selectors.enabled=true",
             "storage.extension.class=org.apache.kafka.storage.internals.shared.s3.S3SharedStorageExtension",
             "shared.storage.topics=" + TOPIC,
             "shared.storage.wal.dir=" + walDir.toAbsolutePath(),
