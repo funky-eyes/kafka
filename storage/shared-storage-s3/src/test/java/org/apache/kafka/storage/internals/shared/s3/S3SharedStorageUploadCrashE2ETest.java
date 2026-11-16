@@ -240,20 +240,11 @@ class S3SharedStorageUploadCrashE2ETest {
                             keyPrefix
                         );
                     } else {
-                        waitForCondition(
-                            () -> cleanupClaimed(bootstrapServers, crashObjectId) &&
-                                objectMissing(verifier, crashObjectId),
-                            90_000L,
-                            () -> "Non-authoritative object " + crashObjectId +
-                                " from " + crashPhase + " was not cleanup-fenced and deleted"
+                        // No durable cross-broker COMMIT/CLAIM arbiter exists yet. The safe
+                        // outcome is an unretired PREPARED record, not an S3 DELETE.
+                        assertUnretiredOrphanSurvivesGraceWindow(
+                            crashPhase, bootstrapServers, verifier, evidence, initiallyPhysical, keyPrefix
                         );
-                        assertFalse(
-                            metadataSnapshot(bootstrapServers).committedObjects().containsKey(crashObjectId),
-                            "Cleanup-fenced object must never be resurrected as COMMITTED"
-                        );
-                        System.out.println("UPLOAD_CRASH_ORPHAN_CLEANED phase=" + crashPhase +
-                            " objectId=" + crashObjectId + " initiallyPhysical=" + initiallyPhysical +
-                            " key=" + keyPrefix + "/" + crashObjectId);
                     }
 
                     System.out.println("UPLOAD_CRASH_" + crashPhase + "_RECOVERED oldLeader=" + oldLeader +
@@ -428,6 +419,37 @@ class S3SharedStorageUploadCrashE2ETest {
         );
         System.out.println("UPLOAD_CRASH_COMMITTED_OBJECT_RETAINED phase=AFTER_COMMIT objectId=" + objectId +
             " key=" + keyPrefix + "/" + objectId);
+    }
+
+    private static void assertUnretiredOrphanSurvivesGraceWindow(
+        SharedObjectUploadHook.Phase crashPhase,
+        String bootstrapServers,
+        S3ObjectStore verifier,
+        BarrierEvidence evidence,
+        boolean initiallyPhysical,
+        String keyPrefix
+    ) throws Exception {
+        assertTrue(crashPhase == SharedObjectUploadHook.Phase.AFTER_PREPARE ||
+            crashPhase == SharedObjectUploadHook.Phase.AFTER_PUT);
+        // Observe beyond the previously configured cleanup grace and scan cadence.
+        // Even a delayed cleanup must not claim or physically delete without authority.
+        Thread.sleep(ORPHAN_GRACE_MS + (4L * ORPHAN_CLEANUP_INTERVAL_MS) + 2_000L);
+        MetadataSnapshot snapshot = metadataSnapshot(bootstrapServers);
+        assertPrepared(snapshot, evidence);
+        assertFalse(snapshot.committedObjects().containsKey(evidence.objectId()),
+            "An interrupted PREPARE must not become an authoritative COMMIT");
+        assertFalse(snapshot.cleanupStates().containsKey(evidence.objectId()),
+            "An unfenced orphan must not acquire CLAIMED or DELETED metadata");
+        if (initiallyPhysical) {
+            assertTrue(objectExists(verifier, evidence.objectId()),
+                "An uncommitted AFTER_PUT object must be retained until a durable cleanup grant exists");
+        } else {
+            assertTrue(objectMissing(verifier, evidence.objectId()),
+                "AFTER_PREPARE must not create a physical object after the leader was killed");
+        }
+        System.out.println("UPLOAD_CRASH_ORPHAN_UNRETIRED phase=" + crashPhase +
+            " objectId=" + evidence.objectId() + " initiallyPhysical=" + initiallyPhysical +
+            " key=" + keyPrefix + "/" + evidence.objectId());
     }
 
     private Path writeBrokerConfig(
@@ -746,13 +768,6 @@ class S3SharedStorageUploadCrashE2ETest {
                 .forEach(range -> coverage.add(range.offsets()));
         }
         return coverage;
-    }
-
-    private static boolean cleanupClaimed(String bootstrapServers, long objectId) {
-        SharedMetadataRecordCodec.MetadataValue value =
-            metadataSnapshot(bootstrapServers).cleanupStates().get(objectId);
-        return value instanceof SharedMetadataRecordCodec.CleanupClaimedValue ||
-            value instanceof SharedMetadataRecordCodec.CleanupDeletedValue;
     }
 
     private static MetadataSnapshot metadataSnapshot(String bootstrapServers) {
