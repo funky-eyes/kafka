@@ -92,6 +92,56 @@ class CommittedObjectGcWorkerTest {
     }
 
     @Test
+    void atomicKRaftBatchAcknowledgementWaitsForSuccessfulPhysicalDelete() {
+        TestContext ctx = new TestContext();
+        for (long id : List.of(501L, 502L)) {
+            ctx.put(id);
+            ctx.authority.add(id);
+            ctx.fence.fence(id);
+        }
+        ctx.authority.atomicCompletion.set(true);
+        CompletableFuture<Void> remote = new CompletableFuture<>();
+        ctx.store.blockedDelete = remote;
+
+        CompletableFuture<CommittedObjectGcWorker.SweepStats> pending = ctx.worker.sweep();
+        assertFalse(pending.isDone());
+        assertEquals(0, ctx.authority.completionBatches.get());
+        assertEquals(0, ctx.authority.completions.get());
+
+        remote.complete(null);
+        assertEquals(new CommittedObjectGcWorker.SweepStats(2, 0, 2), pending.join());
+        assertEquals(1, ctx.authority.completionBatches.get());
+        assertEquals(2, ctx.authority.completions.get());
+        assertEquals(List.of(List.of(501L, 502L)), ctx.store.batches);
+    }
+
+    @Test
+    void uncertainAtomicKRaftBatchCommitRetainsAllDeleteReadyRetries() {
+        TestContext ctx = new TestContext();
+        for (long id : List.of(501L, 502L)) {
+            ctx.put(id);
+            ctx.authority.add(id);
+            ctx.fence.fence(id);
+        }
+        ctx.authority.atomicCompletion.set(true);
+        ctx.authority.failCompletion.set(true);
+
+        assertThrows(CompletionException.class, () -> ctx.worker.sweep().join());
+        assertEquals(1, ctx.authority.completionBatches.get());
+        assertEquals(0, ctx.authority.completions.get());
+        assertEquals(2, ctx.authority.ready.size());
+        assertFalse(ctx.store.backing.contains(501L));
+        assertFalse(ctx.store.backing.contains(502L));
+
+        // The remote DELETE succeeded, but the KRaft outcome was uncertain:
+        // retry the same idempotent delete batch and revalidate both grants.
+        assertEquals(new CommittedObjectGcWorker.SweepStats(2, 0, 2), ctx.worker.sweep().join());
+        assertEquals(2, ctx.authority.completionBatches.get());
+        assertEquals(2, ctx.authority.completions.get());
+        assertEquals(List.of(List.of(501L, 502L), List.of(501L, 502L)), ctx.store.batches);
+    }
+
+    @Test
     void controllerBatchMustNotInventObjectOrSwitchRetirementGeneration() {
         CommittedObjectGcWorker.DeleteReady original = ready(501L);
         assertThrows(IllegalStateException.class, () ->
@@ -312,7 +362,9 @@ class CommittedObjectGcWorkerTest {
     private static final class TestAuthority implements CommittedObjectGcWorker.DeleteAuthority {
         private final Map<Long, CommittedObjectGcWorker.DeleteReady> ready = new LinkedHashMap<>();
         private final AtomicBoolean failCompletion = new AtomicBoolean();
+        private final AtomicBoolean atomicCompletion = new AtomicBoolean();
         private final AtomicInteger completions = new AtomicInteger();
+        private final AtomicInteger completionBatches = new AtomicInteger();
         private final Map<Long, CompletableFuture<Boolean>> validationGates = new LinkedHashMap<>();
         private final List<Long> checked = new ArrayList<>();
         private List<CommittedObjectGcWorker.DeleteReady> override;
@@ -339,6 +391,29 @@ class CommittedObjectGcWorkerTest {
             return CompletableFuture.completedFuture(
                 permit && candidate.equals(ready.get(candidate.objectId()))
             );
+        }
+
+        @Override
+        public CompletableFuture<Void> recordDeletedBatch(
+            List<CommittedObjectGcWorker.DeleteReady> candidates
+        ) {
+            if (!atomicCompletion.get()) {
+                return CommittedObjectGcWorker.DeleteAuthority.super.recordDeletedBatch(candidates);
+            }
+            completionBatches.incrementAndGet();
+            if (failCompletion.compareAndSet(true, false)) {
+                return CompletableFuture.failedFuture(new IllegalStateException("injected atomic KRaft timeout"));
+            }
+            for (CommittedObjectGcWorker.DeleteReady candidate : candidates) {
+                if (!candidate.equals(ready.get(candidate.objectId()))) {
+                    return CompletableFuture.failedFuture(new IllegalStateException("stale batch KRaft grant"));
+                }
+            }
+            for (CommittedObjectGcWorker.DeleteReady candidate : candidates) {
+                ready.remove(candidate.objectId());
+                completions.incrementAndGet();
+            }
+            return CompletableFuture.completedFuture(null);
         }
 
         @Override

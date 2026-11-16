@@ -1640,6 +1640,52 @@ public final class QuorumController implements Controller {
     }
 
     /**
+     * Internal-only, non-authorizing first KRaft INTENT for a future trusted
+     * catalog handoff. No public RPC, GC worker adapter, or feature-level
+     * bypass is exposed. A proposed descriptor is NOT a proof of fencing.
+     * The Kafka 4.3.1 baseline cannot negotiate this experimental feature.
+     */
+    CompletableFuture<Boolean> recordUnverifiedCommittedObjectRetirementIntent(
+        CommittedObjectRetirementRecord proposed
+    ) {
+        Objects.requireNonNull(proposed, "proposed");
+        // Caller-owned Kafka messages are mutable. Freeze the proposal BEFORE
+        // enqueueing, so an off-thread mutation cannot replace the catalog
+        // identity after admission but before the Controller event runs.
+        CommittedObjectRetirementRecord immutableProposal =
+            org.apache.kafka.metadata.CommittedObjectRetirementState.Entry.fromRecord(proposed).toRecord();
+        return appendWriteEvent("recordUnverifiedCommittedObjectRetirementIntent", OptionalLong.empty(), () -> {
+            if (!featureControl.isPartitionRetirementAuthorityEnabled()) {
+                return ControllerResult.of(List.of(), false);
+            }
+            return committedObjectRetirementControl.recordRetirementIntent(
+                immutableProposal, offsetControl.nextWriteOffset());
+        });
+    }
+
+    /**
+     * Bounded, non-authorizing batch equivalent of the first INTENT.
+     * Freeze every mutable input before Controller queue submission. No
+     * authenticated handoff or physical DELETE authority is introduced.
+     */
+    CompletableFuture<Integer> recordUnverifiedCommittedObjectRetirementIntentBatch(
+        List<CommittedObjectRetirementRecord> proposed
+    ) {
+        List<CommittedObjectRetirementRecord> immutable = Objects.requireNonNull(proposed, "proposed")
+            .stream()
+            .map(candidate -> org.apache.kafka.metadata.CommittedObjectRetirementState.Entry
+                .fromRecord(candidate).toRecord())
+            .toList();
+        return appendWriteEvent("recordUnverifiedCommittedObjectRetirementIntentBatch", OptionalLong.empty(), () -> {
+            if (!featureControl.isPartitionRetirementAuthorityEnabled()) {
+                return ControllerResult.of(List.of(), 0);
+            }
+            return committedObjectRetirementControl.recordRetirementIntentBatch(
+                immutable, offsetControl.nextWriteOffset());
+        });
+    }
+
+    /**
      * Complete the terminal KRaft bookkeeping ONLY after DELETE_RECORDED.
      *
      * <p>Package-private until a version-negotiated Controller protocol has
@@ -1656,6 +1702,24 @@ public final class QuorumController implements Controller {
             }
             return committedObjectRetirementControl.finalizeRecordedDeletion(
                 objectId, expectedRecordedOffset, offsetControl.nextWriteOffset());
+        });
+    }
+
+    /**
+     * Batch only the final DELETED bookkeeping transition. A stale candidate
+     * vetoes the whole atomic batch; this never authorizes physical deletion.
+     * Snapshot immutable caller input BEFORE the Controller event is queued.
+     */
+    CompletableFuture<Integer> finalizeRecordedCommittedObjectDeletionBatch(
+        List<CommittedObjectRetirementControlManager.TerminalDeletion> candidates
+    ) {
+        List<CommittedObjectRetirementControlManager.TerminalDeletion> immutable = List.copyOf(candidates);
+        return appendWriteEvent("finalizeRecordedCommittedObjectDeletionBatch", OptionalLong.empty(), () -> {
+            if (!featureControl.isPartitionRetirementAuthorityEnabled()) {
+                return ControllerResult.of(List.of(), 0);
+            }
+            return committedObjectRetirementControl.finalizeRecordedDeletionBatch(
+                immutable, offsetControl.nextWriteOffset());
         });
     }
 

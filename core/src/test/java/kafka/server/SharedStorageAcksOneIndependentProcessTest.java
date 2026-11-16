@@ -290,6 +290,16 @@ public class SharedStorageAcksOneIndependentProcessTest {
         RecordMetadata acknowledged = produceOne(bootstrapServers, 1);
         assertEquals(1L, acknowledged.offset());
         waitForReplicasAtHighWatermark(admin, replicas);
+        // A zero DescribeLogDirs.offsetLag is relative to the current HW:
+        // it cannot prove that the just-acked acks=1 offset has entered HW.
+        // Fetch both values before SIGKILL. Kafka Fetch only exposes
+        // high-watermark-committed records, so this also proves the new
+        // record has been fetched by the required ISR replicas.
+        assertExpectedValues(
+            consumeAll(bootstrapServers, 2),
+            2,
+            "The second acks=1 record must become high-watermark visible before leader SIGKILL"
+        );
         assertFalse(
             hasCommittedCoverage(bootstrapServers, partition, new OffsetRange(1, 2)),
             "Replicated acks=1 test record must still be WAL-only before the leader crash"

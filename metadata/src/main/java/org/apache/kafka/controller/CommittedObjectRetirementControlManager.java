@@ -25,9 +25,12 @@ import org.apache.kafka.server.common.OffsetAndEpoch;
 import org.apache.kafka.timeline.SnapshotRegistry;
 import org.apache.kafka.timeline.TimelineHashMap;
 
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Snapshot-rollback-aware KRaft object-lifecycle ledger.
@@ -77,6 +80,92 @@ final class CommittedObjectRetirementControlManager {
     }
 
     /**
+     * Stage only the first, non-authorizing KRaft retirement INTENT.
+     *
+     * <p>Package-private and intentionally not connected to any external RPC
+     * or production catalog observer. The caller's record is an untrusted
+     * identity claim; KRaft is authoritative only about the existence and
+     * CAS ordering of the intent, NOT its catalog proof. A separate trusted
+     * handoff must authenticate the source before this can be enabled in
+     * production. No call from here can advance DELETE_READY or issue S3 I/O.</p>
+     *
+     * <p>Only the controller event queue supplies the actual next write
+     * position. Repeated requests lose the single-writer CAS, including if
+     * the proposed descriptor matches an existing intent exactly.</p>
+     */
+    ControllerResult<Boolean> recordRetirementIntent(
+        CommittedObjectRetirementRecord proposed, long nextWriteOffset
+    ) {
+        Objects.requireNonNull(proposed, "proposed");
+        if (nextWriteOffset < 0L) {
+            throw new IllegalArgumentException("Negative KRaft next offset");
+        }
+        if (proposed.stage() != (byte) Stage.RETIRE_INTENT.wireId()
+            || proposed.previousKRaftOffset() != -1L
+            || proposed.safeEpoch() != -1L) {
+            throw new IllegalArgumentException("Only an ungranted first RETIRE_INTENT is supported");
+        }
+        if (entries.get(proposed.objectId()) != null) {
+            return ControllerResult.of(List.of(), false);
+        }
+        // Copy caller-controlled identity rather than modifying its mutable
+        // record. Never trust its accepted offset, safe epoch or next stage.
+        CommittedObjectRetirementRecord intent = new CommittedObjectRetirementRecord()
+            .setObjectId(proposed.objectId())
+            .setAcceptedKRaftOffset(nextWriteOffset)
+            .setPreviousKRaftOffset(-1L)
+            .setRetirementEpoch(proposed.retirementEpoch())
+            .setCatalogTopicId(proposed.catalogTopicId())
+            .setCatalogCommitOffset(proposed.catalogCommitOffset())
+            .setSealedCatalogPositionExclusive(proposed.sealedCatalogPositionExclusive())
+            .setObjectSize(proposed.objectSize())
+            .setObjectChecksum(proposed.objectChecksum())
+            .setDescriptorSha256(proposed.descriptorSha256())
+            .setStage((byte) Stage.RETIRE_INTENT.wireId())
+            .setSafeEpoch(-1L);
+        Entry next = Entry.fromRecord(intent);
+        CommittedObjectRetirementState.validateTransition(null, next);
+        return ControllerResult.atomicOf(
+            List.of(new ApiMessageAndVersion(intent, (short) 0)), true);
+    }
+
+    /**
+     * Prepare a single atomic, bounded batch of first-stage intentions.
+     *
+     * <p>Each proposed identity remains UNVERIFIED and cannot grant physical
+     * deletion. Reuse the same single-intent validation, reject duplicates
+     * and existing KRaft entries, and generate consecutive real log offsets.
+     * Nothing is applied until KRaft replay commits every record.</p>
+     */
+    ControllerResult<Integer> recordRetirementIntentBatch(
+        List<CommittedObjectRetirementRecord> proposed, long nextWriteOffset
+    ) {
+        Objects.requireNonNull(proposed, "proposed");
+        if (proposed.size() > 64 || nextWriteOffset < 0L) {
+            throw new IllegalArgumentException("Invalid or unbounded KRaft intent batch");
+        }
+        if (proposed.isEmpty()) {
+            return ControllerResult.of(List.of(), 0);
+        }
+        Set<Long> unique = new HashSet<>();
+        List<ApiMessageAndVersion> records = new ArrayList<>(proposed.size());
+        for (CommittedObjectRetirementRecord candidate : proposed) {
+            Objects.requireNonNull(candidate, "candidate");
+            if (!unique.add(candidate.objectId())) {
+                throw new IllegalArgumentException("Duplicate object in KRaft intent batch");
+            }
+            long accepted = Math.addExact(nextWriteOffset, records.size());
+            ControllerResult<Boolean> single = recordRetirementIntent(candidate, accepted);
+            if (!single.response()) {
+                // A competing KRaft generation vetoes the entire batch.
+                return ControllerResult.of(List.of(), 0);
+            }
+            records.addAll(single.records());
+        }
+        return ControllerResult.atomicOf(List.copyOf(records), records.size());
+    }
+
+    /**
      * Terminalize an already durably DELETE_RECORDED object in the same KRaft
      * event queue that serializes its lifecycle CAS.
      *
@@ -114,6 +203,66 @@ final class CommittedObjectRetirementControlManager {
         CommittedObjectRetirementState.validateTransition(previous, Entry.fromRecord(record));
         return ControllerResult.atomicOf(
             List.of(new ApiMessageAndVersion(record, (short) 0)), true);
+    }
+
+    /** Each item is one already-recorded physical DELETE, never a delete grant. */
+    record TerminalDeletion(long objectId, long expectedRecordedOffset) {
+        TerminalDeletion {
+            if (objectId <= 0L || expectedRecordedOffset < 0L) {
+                throw new IllegalArgumentException("Invalid terminal deletion object or KRaft generation");
+            }
+        }
+    }
+
+    /**
+     * Bound and atomically append multiple terminal bookkeeping records.
+     *
+     * <p>The controller event queue is the sole writer. A stale, missing or
+     * not-yet-DELETE_RECORDED candidate vetoes the entire request. Adjacent
+     * accepted offsets are derived from one serialized nextWriteOffset, and
+     * each actual KRaft append/replay revalidates the exact log position.</p>
+     */
+    ControllerResult<Integer> finalizeRecordedDeletionBatch(
+        List<TerminalDeletion> candidates, long nextWriteOffset
+    ) {
+        Objects.requireNonNull(candidates, "candidates");
+        if (candidates.size() > 64 || nextWriteOffset < 0L) {
+            throw new IllegalArgumentException("Invalid or unbounded KRaft terminal deletion batch");
+        }
+        if (candidates.isEmpty()) {
+            return ControllerResult.of(List.of(), 0);
+        }
+        List<TerminalDeletion> requested = List.copyOf(candidates);
+        Set<Long> unique = new HashSet<>();
+        List<Entry> previous = new ArrayList<>(requested.size());
+        for (TerminalDeletion candidate : requested) {
+            if (!unique.add(candidate.objectId())) {
+                throw new IllegalArgumentException("Duplicate physical object in KRaft terminal batch");
+            }
+            Entry stored = entries.get(candidate.objectId());
+            if (stored == null || stored.stage() != Stage.DELETE_RECORDED
+                || stored.acceptedKRaftOffset() != candidate.expectedRecordedOffset()) {
+                // No partial writes: the caller must reread committed KRaft
+                // state after any uncertain or losing compare-and-transition.
+                return ControllerResult.of(List.of(), 0);
+            }
+            previous.add(stored);
+        }
+        List<ApiMessageAndVersion> records = new ArrayList<>(requested.size());
+        for (int index = 0; index < requested.size(); index++) {
+            Entry stored = previous.get(index);
+            long accepted = Math.addExact(nextWriteOffset, index);
+            if (accepted <= stored.acceptedKRaftOffset()) {
+                throw new IllegalStateException("KRaft terminal batch generation did not advance");
+            }
+            CommittedObjectRetirementRecord record = stored.toRecord()
+                .setPreviousKRaftOffset(stored.acceptedKRaftOffset())
+                .setAcceptedKRaftOffset(accepted)
+                .setStage((byte) Stage.DELETED.wireId());
+            CommittedObjectRetirementState.validateTransition(stored, Entry.fromRecord(record));
+            records.add(new ApiMessageAndVersion(record, (short) 0));
+        }
+        return ControllerResult.atomicOf(List.copyOf(records), records.size());
     }
 
     Entry get(long objectId) {

@@ -27,6 +27,7 @@ import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.FencedPreparedObjectValue;
+import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.CommittedObjectValue;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.MetadataValue;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
 
@@ -84,7 +85,13 @@ final class FencedObjectLifecycleArbiter {
         Uploader(Properties original, String topic, String namespace, long objectId) {
             // The test-only fixture verifies the same rule by scanning Kafka.
             this(original, topic, namespace, objectId,
-                () -> readLatestAfterFence(original, topic, objectId) == null);
+                () -> {
+                    CatalogSnapshot catalog = readCatalogAfterFence(original, topic, objectId);
+                    // Compaction may remove a former COMMIT key while the
+                    // independent catalog-seal fence still survives. Never
+                    // allow an object ID to be recycled in that situation.
+                    return catalog.value() == null && !catalog.sealed();
+                });
         }
 
         Uploader(Properties original, String topic, String namespace, long objectId,
@@ -120,7 +127,7 @@ final class FencedObjectLifecycleArbiter {
             if (!prepared || committed || metadata.objectId() != objectId) {
                 throw new IllegalStateException("Object has no matching fenced PREPARE");
             }
-            long offset = append(SharedMetadataRecordCodec.committedObjectValue(metadata));
+            long offset = append(SharedMetadataRecordCodec.fencedCommittedObjectValue(metadata));
             committed = true;
             return offset;
         }
@@ -201,7 +208,81 @@ final class FencedObjectLifecycleArbiter {
         }
     }
 
+    /**
+     * Experimental catalog seal writer, deliberately NOT exposed by the
+     * production metadata store. The same object-scoped transactional.id
+     * fences the v2 PREPARE/COMMIT producer before sampling Kafka's
+     * read_committed horizon. The original COMMIT must still be present at
+     * exactly the expected offset with the complete immutable descriptor.
+     *
+     * <p>A seal is a durable Kafka catalog fact only. It is not a KRaft
+     * RETIRE_INTENT or DELETE_READY grant, and does not establish all-Broker
+     * read/write draining. Production use additionally requires a negotiated
+     * mixed-version gate, an authenticated Controller handoff, and local
+     * upload/reader fencing. This package-local primitive is intentionally
+     * exercised only by integration tests until those contracts exist.</p>
+     */
+    static OptionalLong sealCommittedAfterFencing(
+        Properties original,
+        String topic,
+        String namespace,
+        SharedObjectMetadata descriptor,
+        long expectedCommitOffset,
+        long retirementEpoch
+    ) throws Exception {
+        Objects.requireNonNull(descriptor, "descriptor");
+        if (expectedCommitOffset < 0L || retirementEpoch <= 0L) {
+            throw new IllegalArgumentException("Catalog seal requires a committed offset and retirement epoch");
+        }
+        long objectId = descriptor.objectId();
+        try (KafkaProducer<byte[], byte[]> sealer = new KafkaProducer<>(
+            transactionalProperties(original, namespace, objectId)
+        )) {
+            // Kafka fences every older object-scoped transactional generation.
+            // The read_committed scan MUST run after this call completes.
+            sealer.initTransactions();
+            CatalogSnapshot snapshot = readCatalogAfterFence(original, topic, objectId);
+            if (snapshot.sealed()
+                || snapshot.objectOffset() != expectedCommitOffset
+                || !(snapshot.value() instanceof CommittedObjectValue committed)
+                || !committed.fenced()
+                || !descriptor.equals(committed.metadata())) {
+                return OptionalLong.empty();
+            }
+            sealer.beginTransaction();
+            try {
+                long offset = sealer.send(new ProducerRecord<>(
+                    topic, 0, SharedMetadataRecordCodec.objectCatalogSealKey(objectId),
+                    SharedMetadataRecordCodec.objectCatalogSealValue(
+                        expectedCommitOffset, retirementEpoch, descriptor)
+                )).get(IO_TIMEOUT_SECONDS, TimeUnit.SECONDS).offset();
+                sealer.commitTransaction();
+                return OptionalLong.of(offset);
+            } catch (Exception failure) {
+                try {
+                    sealer.abortTransaction();
+                } catch (RuntimeException abortFailure) {
+                    failure.addSuppressed(abortFailure);
+                }
+                throw failure;
+            }
+        }
+    }
+
+    private record CatalogSnapshot(MetadataValue value, long objectOffset, boolean sealed) {
+    }
+
     private static MetadataValue readLatestAfterFence(Properties original, String topic, long objectId) {
+        return readCatalogAfterFence(original, topic, objectId).value();
+    }
+
+    /**
+     * Bounded-memory Kafka scan of one read_committed partition. We track
+     * both compacted keys: a COMMITTED record cannot be borrowed from a
+     * prior incarnation or overridden by a pre-existing catalog seal.
+     * Object offsets are the actual Kafka offsets, not consumer positions.
+     */
+    private static CatalogSnapshot readCatalogAfterFence(Properties original, String topic, long objectId) {
         Properties consumerProperties = new Properties();
         consumerProperties.putAll(original);
         consumerProperties.remove(ProducerConfig.TRANSACTIONAL_ID_CONFIG);
@@ -211,7 +292,10 @@ final class FencedObjectLifecycleArbiter {
         consumerProperties.put(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_committed");
         TopicPartition partition = new TopicPartition(topic, 0);
         byte[] key = SharedMetadataRecordCodec.objectKey(objectId);
+        byte[] sealKey = SharedMetadataRecordCodec.objectCatalogSealKey(objectId);
         MetadataValue latest = null;
+        long objectOffset = -1L;
+        boolean sealed = false;
         try (KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<>(consumerProperties)) {
             consumer.assign(List.of(partition));
             consumer.seekToBeginning(List.of(partition));
@@ -221,9 +305,24 @@ final class FencedObjectLifecycleArbiter {
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(IO_TIMEOUT_SECONDS);
             while (consumer.position(partition) < end && System.nanoTime() < deadline) {
                 for (ConsumerRecord<byte[], byte[]> record : consumer.poll(Duration.ofMillis(200L))) {
+                    // poll() may return data appended after our captured LSO;
+                    // only the frozen read_committed horizon is evidence.
+                    if (record.offset() >= end) {
+                        continue;
+                    }
                     if (Arrays.equals(record.key(), key)) {
                         latest = SharedMetadataRecordCodec.decodeValue(
                             SharedMetadataRecordCodec.decodeKey(record.key()), record.value());
+                        objectOffset = record.offset();
+                    } else if (Arrays.equals(record.key(), sealKey)) {
+                        // Decode even when the value is not needed, so a
+                        // malformed or tombstoned seal never becomes evidence.
+                        MetadataValue seal = SharedMetadataRecordCodec.decodeValue(
+                            SharedMetadataRecordCodec.decodeKey(record.key()), record.value());
+                        if (!(seal instanceof SharedMetadataRecordCodec.ObjectCatalogSealValue)) {
+                            throw new IllegalStateException("Unexpected compacted catalog seal value");
+                        }
+                        sealed = true;
                     }
                 }
             }
@@ -231,6 +330,6 @@ final class FencedObjectLifecycleArbiter {
                 throw new IllegalStateException("Post-fence read-committed catalog replay did not complete");
             }
         }
-        return latest;
+        return new CatalogSnapshot(latest, objectOffset, sealed);
     }
 }

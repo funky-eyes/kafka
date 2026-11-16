@@ -45,3 +45,17 @@ does NOT make an unauthenticated KRaft replay claim trustworthy.
 
 Do not relax the feature gate or accept a caller-provided safe epoch to
 skip any missing proof. Heavyweight verification stays on GitHub Actions.
+
+## Bounded terminal batch
+
+The Controller may terminalize up to 64 distinct, already
+`DELETE_RECORDED` physical object IDs in one **atomic KRaft append**.
+Every candidate carries its own expected accepted offset. Validation occurs
+in one serialized Controller event; any missing, stale, duplicate or
+not-yet-recorded object aborts the entire request. The Controller assigns
+contiguous expected Raft offsets to the immutable records, and replay
+rechecks each actual position. No per-object network roundtrip is required
+for the final bookkeeping edge.
+
+This is not a substitute for authenticated `DELETE_READY` or an S3
+delete; the batch includes **only** already completed physical deletions.

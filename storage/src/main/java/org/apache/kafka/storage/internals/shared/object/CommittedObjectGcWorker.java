@@ -88,6 +88,31 @@ final class CommittedObjectGcWorker {
 
         /** Complete only after the DELETE_RECORDED KRaft transition has committed. */
         CompletableFuture<Void> recordDeleted(DeleteReady candidate);
+
+        /**
+         * Durably acknowledge a bounded set only AFTER their physical DELETE
+         * batch succeeds. A Controller adapter may override this method with
+         * one atomic KRaft write; until then, preserve the original serial
+         * per-object completion and its retry semantics.
+         *
+         * <p>Failure or an uncertain commit must leave unacknowledged objects
+         * discoverable through durable DELETE_READY on retry. The default may
+         * have committed an earlier prefix; a future adapter must revalidate
+         * each candidate against current KRaft state before retrying.</p>
+         */
+        default CompletableFuture<Void> recordDeletedBatch(List<DeleteReady> candidates) {
+            List<DeleteReady> requested = List.copyOf(Objects.requireNonNull(candidates, "candidates"));
+            if (requested.size() > MAX_DELETE_BATCH) {
+                return CompletableFuture.failedFuture(
+                    new IllegalArgumentException("Unbounded KRaft physical delete completion batch"));
+            }
+            CompletableFuture<Void> recorded = CompletableFuture.completedFuture(null);
+            for (DeleteReady candidate : requested) {
+                recorded = recorded.thenCompose(ignored -> Objects.requireNonNull(
+                    recordDeleted(candidate), "recordDeleted future"));
+            }
+            return recorded;
+        }
     }
 
     record DeleteReady(SharedObjectMetadata descriptor, long retirementGeneration, long readyRecordOffset) {
@@ -148,7 +173,8 @@ final class CommittedObjectGcWorker {
     /**
      * KRaft grants remain per-object and are revalidated independently.
      * Only already-fenced, still-authorized objects enter a bulk S3 request.
-     * The KRaft completion records remain individually durable/retryable.
+     * The KRaft completion records remain durable/retryable; a future
+     * Controller adapter can persist their completion as one atomic batch.
      */
     private CompletableFuture<SweepStats> deleteCandidates(List<DeleteReady> ready) {
         verifyCandidateBatch(ready);
@@ -183,15 +209,10 @@ final class CommittedObjectGcWorker {
         }
         List<Long> ids = approved.stream().map(DeleteReady::objectId).toList();
         return Objects.requireNonNull(objects.deleteBatch(ids), "ObjectStore DELETE batch future")
-            .thenCompose(ignored -> {
-                CompletableFuture<Void> recorded = CompletableFuture.completedFuture(null);
-                for (DeleteReady candidate : approved) {
-                    recorded = recorded.thenCompose(done -> Objects.requireNonNull(
-                        authority.recordDeleted(candidate), "recordDeleted future"));
-                }
-                return recorded.thenApply(done -> new SweepStats(
-                    observed, observed - approved.size(), approved.size()));
-            });
+            .thenCompose(ignored -> Objects.requireNonNull(
+                authority.recordDeletedBatch(approved), "recordDeletedBatch future"
+            ).thenApply(done -> new SweepStats(
+                observed, observed - approved.size(), approved.size())));
     }
 
     private static void verifyCandidateBatch(List<DeleteReady> ready) {
