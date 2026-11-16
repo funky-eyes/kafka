@@ -92,6 +92,8 @@ jobs:
           set -euo pipefail
           ./gradlew :storage:shared-storage-s3:test \
             --tests 'org.apache.kafka.storage.internals.shared.s3.KafkaCatalogSealFencingIntegrationTest' \
+            -x :storage:shared-storage-s3:checkstyleMain -x :storage:shared-storage-s3:checkstyleTest \
+            -x :storage:shared-storage-s3:spotbugsMain -x :storage:shared-storage-s3:spotbugsTest \
             -PmaxParallelForks=1 -Dorg.gradle.jvmargs=-Xmx2g --no-scan
           report='storage/shared-storage-s3/build/test-results/test/TEST-org.apache.kafka.storage.internals.shared.s3.KafkaCatalogSealFencingIntegrationTest.xml'
           python3 - "$report" <<'PY'
