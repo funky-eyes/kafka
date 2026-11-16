@@ -66,6 +66,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 /**
  * Authoritative shared-object metadata store backed by the classic compacted Kafka topic
@@ -106,6 +107,7 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
     // Single-flight CAS admission happens before any expensive initTransactions.
     private final Set<Long> initializingFencedUploads = ConcurrentHashMap.newKeySet();
     private final Set<Long> claimingFencedObjects = ConcurrentHashMap.newKeySet();
+    private final Set<Long> sealingFencedObjects = ConcurrentHashMap.newKeySet();
     // No unbounded executor queue: under overload, reject and retry later
     // rather than retaining unlimited transactional producers / request state.
     private final ExecutorService lifecycleExecutor = newLifecycleExecutor();
@@ -681,6 +683,134 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
         } catch (RuntimeException failure) {
             claimingFencedObjects.remove(objectId);
             return CompletableFuture.failedFuture(failure);
+        }
+    }
+
+    /**
+     * Experimental local catalog operation only. There is no production caller
+     * or Controller handoff. Payload v2 flags and this local replay cannot
+     * authenticate the writer, fence legacy writers, or authorize deletion.
+     * A failure after the Kafka transaction may mean the seal was committed.
+     * An existing seal, including one from a prior uncertain attempt, is
+     * rejected rather than returned as this attempt's successful append.
+     */
+    CompletableFuture<OptionalLong> sealCommittedForExperiment(
+        SharedObjectMetadata descriptor, long expectedCommitOffset, long retirementEpoch
+    ) {
+        Objects.requireNonNull(descriptor, "descriptor");
+        if (expectedCommitOffset < 0L || retirementEpoch <= 0L) {
+            return CompletableFuture.failedFuture(new IllegalArgumentException("Invalid experimental catalog seal"));
+        }
+        if (!configuration.fencedLifecycleEnabled() || closed.get() || !image.isReady()) {
+            return CompletableFuture.failedFuture(new IllegalStateException("Fenced catalog is not ready"));
+        }
+        long objectId = descriptor.objectId();
+        if (!sealingFencedObjects.add(objectId)) {
+            return CompletableFuture.failedFuture(new IllegalStateException("Catalog seal already in progress"));
+        }
+        try {
+            CompletableFuture<OptionalLong> operation = CompletableFuture.supplyAsync(
+                () -> appendExperimentalCatalogSeal(descriptor, expectedCommitOffset, retirementEpoch),
+                lifecycleExecutor
+            ).thenCompose(offset -> confirmExperimentalCatalogSeal(
+                descriptor.objectId(), expectedCommitOffset, retirementEpoch, offset
+            )).whenComplete((ignored, failure) -> sealingFencedObjects.remove(objectId));
+            // A caller may cancel without stopping an in-flight Kafka transaction.
+            // Keep the single-flight admission until the underlying work ends.
+            return operation.thenApply(result -> result);
+        } catch (RuntimeException failure) {
+            sealingFencedObjects.remove(objectId);
+            return CompletableFuture.failedFuture(failure);
+        }
+    }
+
+    private OptionalLong appendExperimentalCatalogSeal(
+        SharedObjectMetadata descriptor, long expectedCommitOffset, long retirementEpoch
+    ) {
+        if (closed.get() || !image.isReady()) {
+            throw new IllegalStateException("Fenced catalog is no longer ready");
+        }
+        try {
+            return FencedObjectLifecycleArbiter.sealCommittedAfterFencing(
+                configuration.producerProperties(), SharedMetadataClientConfiguration.TOPIC_NAME,
+                configuration.clusterId(), descriptor, expectedCommitOffset, retirementEpoch,
+                () -> awaitCatalogCandidateAfterFence(image, descriptor, expectedCommitOffset,
+                    this::captureReadCommittedReplayHorizon, 15L, TimeUnit.SECONDS),
+                () -> !closed.get() && image.isReady()
+            );
+        } catch (InterruptedException failure) {
+            Thread.currentThread().interrupt();
+            throw new CompletionException(failure);
+        } catch (Exception failure) {
+            throw new CompletionException(failure);
+        }
+    }
+
+    private CompletableFuture<OptionalLong> confirmExperimentalCatalogSeal(
+        long objectId, long expectedCommitOffset, long retirementEpoch, OptionalLong offset
+    ) {
+        if (offset.isEmpty()) {
+            return CompletableFuture.completedFuture(offset);
+        }
+        return confirmExperimentalCatalogSeal(image, objectId, expectedCommitOffset, retirementEpoch,
+            offset.getAsLong(), captureReadCommittedReplayHorizon(), 15L, TimeUnit.SECONDS);
+    }
+
+    static CompletableFuture<OptionalLong> confirmExperimentalCatalogSeal(
+        SharedMetadataImage image,
+        long objectId,
+        long expectedCommitOffset,
+        long retirementEpoch,
+        long sealOffset,
+        CompletableFuture<ReadCommittedReplayHorizon> horizon,
+        long timeout,
+        TimeUnit unit
+    ) {
+        Objects.requireNonNull(image, "image");
+        Objects.requireNonNull(horizon, "horizon");
+        Objects.requireNonNull(unit, "unit");
+        // A committed transaction can still be behind another open transaction
+        // at the LSO. A timeout or stale horizon is an uncertain outcome, not
+        // proof that Kafka did not commit the seal.
+        return horizon.orTimeout(timeout, unit).thenApply(captured -> {
+            if (captured.capturedStableEndExclusive() <= sealOffset
+                || captured.appliedPositionExclusive() <= sealOffset) {
+                throw new IllegalStateException("Catalog seal outcome is not yet visible at the stable horizon");
+            }
+            SharedMetadataImage.CatalogSealEvidence seal = image.catalogSeal(objectId).orElseThrow(
+                () -> new IllegalStateException("Committed catalog seal was not replayed"));
+            if (seal.sealRecordOffset() != sealOffset
+                || seal.seal().originalCommitOffset() != expectedCommitOffset
+                || seal.seal().retirementEpoch() != retirementEpoch) {
+                throw new IllegalStateException("Replayed catalog seal differs from the local append");
+            }
+            return OptionalLong.of(sealOffset);
+        });
+    }
+
+    static boolean awaitCatalogCandidateAfterFence(
+        SharedMetadataImage image,
+        SharedObjectMetadata descriptor,
+        long expectedCommitOffset,
+        Supplier<CompletableFuture<ReadCommittedReplayHorizon>> requestHorizon,
+        long timeout,
+        TimeUnit unit
+    ) throws Exception {
+        Objects.requireNonNull(image, "image");
+        Objects.requireNonNull(descriptor, "descriptor");
+        Objects.requireNonNull(requestHorizon, "requestHorizon");
+        Objects.requireNonNull(unit, "unit");
+        CompletableFuture<ReadCommittedReplayHorizon> pending =
+            Objects.requireNonNull(requestHorizon.get(), "horizon future");
+        try {
+            ReadCommittedReplayHorizon horizon = pending.get(timeout, unit);
+            return horizon.capturedStableEndExclusive() > expectedCommitOffset
+                && image.matchesUnsealedFencedCommit(descriptor, expectedCommitOffset);
+        } finally {
+            // Release the bounded mailbox slot on timeout or interruption.
+            if (!pending.isDone()) {
+                pending.cancel(false);
+            }
         }
     }
 

@@ -424,6 +424,22 @@ class KafkaOrphanCompactionMinioIntegrationTest {
                     assertThrows(Exception.class, () -> pendingUploader.commit(pending),
                         "The old PREPARED uploader must be fenced before a late COMMIT");
                 }
+
+                long callbackObjectId = objectId + 4L;
+                SharedObjectMetadata callbackObject = new SharedObjectMetadata(
+                    callbackObjectId, 128L, 71L, descriptor.ranges());
+                try (FencedObjectLifecycleArbiter.Uploader oldUploader =
+                         new FencedObjectLifecycleArbiter.Uploader(
+                             properties, topic, namespace, callbackObjectId)) {
+                    long offset = oldUploader.prepare(3_000L);
+                    assertFalse(FencedObjectLifecycleArbiter.sealCommittedAfterFencing(
+                        properties, topic, namespace, callbackObject, offset, epoch, () -> {
+                            // The witness cannot run before the actual Kafka
+                            // transaction has fenced the previous producer.
+                            assertThrows(Exception.class, () -> oldUploader.commit(callbackObject));
+                            return false;
+                        }).isPresent());
+                }
             } finally {
                 admin.deleteTopics(List.of(topic)).all().get(30, TimeUnit.SECONDS);
             }

@@ -20,6 +20,7 @@ import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.TopicPartition;
@@ -39,6 +40,7 @@ import java.util.OptionalLong;
 import java.util.Properties;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
 
 /**
  * Experimental Kafka-transaction lifecycle writer; orphan cleanup is NOT enabled by this type.
@@ -231,41 +233,115 @@ final class FencedObjectLifecycleArbiter {
         long retirementEpoch
     ) throws Exception {
         Objects.requireNonNull(descriptor, "descriptor");
+        return sealCommittedAfterFencing(original, topic, namespace, descriptor, expectedCommitOffset, retirementEpoch,
+            () -> {
+                CatalogSnapshot snapshot = readCatalogAfterFence(original, topic, descriptor.objectId());
+                return !snapshot.sealed()
+                    && snapshot.objectOffset() == expectedCommitOffset
+                    && snapshot.value() instanceof CommittedObjectValue committed
+                    && committed.fenced()
+                    && descriptor.equals(committed.metadata());
+            });
+    }
+
+    /** The witness must be sampled after fencing and applied by the owning metadata consumer. */
+    static OptionalLong sealCommittedAfterFencing(
+        Properties original,
+        String topic,
+        String namespace,
+        SharedObjectMetadata descriptor,
+        long expectedCommitOffset,
+        long retirementEpoch,
+        Callable<Boolean> postFenceReadCommittedCandidate
+    ) throws Exception {
+        return sealCommittedAfterFencing(original, topic, namespace, descriptor, expectedCommitOffset,
+            retirementEpoch, postFenceReadCommittedCandidate, () -> true);
+    }
+
+    static OptionalLong sealCommittedAfterFencing(
+        Properties original,
+        String topic,
+        String namespace,
+        SharedObjectMetadata descriptor,
+        long expectedCommitOffset,
+        long retirementEpoch,
+        Callable<Boolean> postFenceReadCommittedCandidate,
+        BooleanSupplier mayCommit
+    ) throws Exception {
+        Objects.requireNonNull(descriptor, "descriptor");
         if (expectedCommitOffset < 0L || retirementEpoch <= 0L) {
             throw new IllegalArgumentException("Catalog seal requires a committed offset and retirement epoch");
         }
-        long objectId = descriptor.objectId();
-        try (KafkaProducer<byte[], byte[]> sealer = new KafkaProducer<>(
-            transactionalProperties(original, namespace, objectId)
-        )) {
-            // Kafka fences every older object-scoped transactional generation.
-            // The read_committed scan MUST run after this call completes.
-            sealer.initTransactions();
-            CatalogSnapshot snapshot = readCatalogAfterFence(original, topic, objectId);
-            if (snapshot.sealed()
-                || snapshot.objectOffset() != expectedCommitOffset
-                || !(snapshot.value() instanceof CommittedObjectValue committed)
-                || !committed.fenced()
-                || !descriptor.equals(committed.metadata())) {
-                return OptionalLong.empty();
-            }
-            sealer.beginTransaction();
+        Objects.requireNonNull(postFenceReadCommittedCandidate, "postFenceReadCommittedCandidate");
+        KafkaProducer<byte[], byte[]> sealer = new KafkaProducer<>(
+            transactionalProperties(original, namespace, descriptor.objectId()));
+        // Bound the graceful wait for pending work. Kafka's subsequent
+        // force-close thread join is not covered by this duration.
+        try (AutoCloseable ignored = () -> sealer.close(Duration.ofSeconds(2L))) {
+            return sealCommittedAfterFencing(sealer, topic, descriptor, expectedCommitOffset, retirementEpoch,
+                postFenceReadCommittedCandidate, mayCommit);
+        }
+    }
+
+    static OptionalLong sealCommittedAfterFencing(
+        Producer<byte[], byte[]> sealer,
+        String topic,
+        SharedObjectMetadata descriptor,
+        long expectedCommitOffset,
+        long retirementEpoch,
+        Callable<Boolean> postFenceReadCommittedCandidate
+    ) throws Exception {
+        return sealCommittedAfterFencing(sealer, topic, descriptor, expectedCommitOffset, retirementEpoch,
+            postFenceReadCommittedCandidate, () -> true);
+    }
+
+    static OptionalLong sealCommittedAfterFencing(
+        Producer<byte[], byte[]> sealer,
+        String topic,
+        SharedObjectMetadata descriptor,
+        long expectedCommitOffset,
+        long retirementEpoch,
+        Callable<Boolean> postFenceReadCommittedCandidate,
+        BooleanSupplier mayCommit
+    ) throws Exception {
+        Objects.requireNonNull(sealer, "sealer");
+        Objects.requireNonNull(topic, "topic");
+        Objects.requireNonNull(descriptor, "descriptor");
+        Objects.requireNonNull(postFenceReadCommittedCandidate, "postFenceReadCommittedCandidate");
+        Objects.requireNonNull(mayCommit, "mayCommit");
+        if (expectedCommitOffset < 0L || retirementEpoch <= 0L) {
+            throw new IllegalArgumentException("Catalog seal requires a committed offset and retirement epoch");
+        }
+        // These checks are best-effort admission checks, not a distributed
+        // cancellation guarantee. Close or replay failure can race a Kafka
+        // transaction; any such outcome must be treated as uncertain.
+        if (!mayCommit.getAsBoolean()) {
+            return OptionalLong.empty();
+        }
+        sealer.initTransactions();
+        // The callback MUST capture its read_committed horizon after the
+        // transaction initialization; a pre-fence cursor is insufficient.
+        if (!Boolean.TRUE.equals(postFenceReadCommittedCandidate.call())) {
+            return OptionalLong.empty();
+        }
+        if (!mayCommit.getAsBoolean()) {
+            return OptionalLong.empty();
+        }
+        sealer.beginTransaction();
+        try {
+            long offset = sealer.send(new ProducerRecord<>(
+                topic, 0, SharedMetadataRecordCodec.objectCatalogSealKey(descriptor.objectId()),
+                SharedMetadataRecordCodec.objectCatalogSealValue(expectedCommitOffset, retirementEpoch, descriptor)
+            )).get(IO_TIMEOUT_SECONDS, TimeUnit.SECONDS).offset();
+            sealer.commitTransaction();
+            return OptionalLong.of(offset);
+        } catch (Exception failure) {
             try {
-                long offset = sealer.send(new ProducerRecord<>(
-                    topic, 0, SharedMetadataRecordCodec.objectCatalogSealKey(objectId),
-                    SharedMetadataRecordCodec.objectCatalogSealValue(
-                        expectedCommitOffset, retirementEpoch, descriptor)
-                )).get(IO_TIMEOUT_SECONDS, TimeUnit.SECONDS).offset();
-                sealer.commitTransaction();
-                return OptionalLong.of(offset);
-            } catch (Exception failure) {
-                try {
-                    sealer.abortTransaction();
-                } catch (RuntimeException abortFailure) {
-                    failure.addSuppressed(abortFailure);
-                }
-                throw failure;
+                sealer.abortTransaction();
+            } catch (RuntimeException abortFailure) {
+                failure.addSuppressed(abortFailure);
             }
+            throw failure;
         }
     }
 

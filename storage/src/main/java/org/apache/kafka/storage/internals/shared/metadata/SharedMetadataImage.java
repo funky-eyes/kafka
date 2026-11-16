@@ -61,7 +61,7 @@ public final class SharedMetadataImage {
     private final Map<Long, SharedObjectMetadata> committedObjects = new ConcurrentHashMap<>();
     private final Map<Long, CommitProvenance> committedObjectPositions = new HashMap<>();
 
-    private record CommitProvenance(long offset, boolean fenced) {
+    private record CommitProvenance(long offset, long latestOffset, boolean fenced) {
     }
     private final Map<Long, CatalogSealEvidence> catalogSeals = new ConcurrentHashMap<>();
     private final Map<Long, CleanupObject> cleanupObjects = new ConcurrentHashMap<>();
@@ -231,9 +231,9 @@ public final class SharedMetadataImage {
         SharedObjectMetadata existing = committedObjects.putIfAbsent(objectId, metadata);
         validateExistingCommit(objectId, existing, committed);
         preparedObjects.remove(objectId);
-        if (existing == null) {
-            committedObjectPositions.put(objectId, new CommitProvenance(recordOffset, committed.fenced()));
-        }
+        CommitProvenance original = committedObjectPositions.get(objectId);
+        committedObjectPositions.put(objectId, new CommitProvenance(
+            original == null ? recordOffset : original.offset(), recordOffset, committed.fenced()));
         if (existing == null && state == State.READY) {
             // Historical replay must finish before publishing its final
             // COMMITTED winners into the broker's remote read index.
@@ -323,6 +323,30 @@ public final class SharedMetadataImage {
             || !SharedMetadataRecordCodec.committedDescriptorSha256(original).equals(seal.descriptorSha256())) {
             throw corruption("Catalog seal changed an immutable packed object descriptor: " + objectId);
         }
+    }
+
+    /**
+     * Checks one candidate against this image at a single replay point. The caller
+     * must first fence the writer and replay a newly captured read-committed
+     * horizon. This is only a local necessary condition: the payload's v2 flag
+     * does not authenticate its producer, compaction can hide older records,
+     * and this check grants neither catalog-seal nor deletion authority.
+     *
+     * <p>Reject repeated COMMIT records because the original and the latest
+     * retained object record must both be the expected Kafka position. An image
+     * update without a Kafka offset cannot establish this condition.</p>
+     */
+    public synchronized boolean matchesUnsealedFencedCommit(SharedObjectMetadata descriptor, long expectedCommitOffset) {
+        requireReady();
+        Objects.requireNonNull(descriptor, "descriptor");
+        if (expectedCommitOffset < 0L) {
+            return false;
+        }
+        long objectId = descriptor.objectId();
+        CommitProvenance position = committedObjectPositions.get(objectId);
+        return position != null && position.fenced()
+            && position.offset() == expectedCommitOffset && position.latestOffset() == expectedCommitOffset
+            && descriptor.equals(committedObjects.get(objectId)) && !catalogSeals.containsKey(objectId);
     }
 
     /** Read-only exact COMMIT/seal evidence, not cross-log Controller authority. */
