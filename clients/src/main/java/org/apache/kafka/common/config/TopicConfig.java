@@ -80,6 +80,13 @@ public class TopicConfig {
         "operates independently of \"segment.ms\" and \"segment.bytes\" configurations. " +
         "Moreover, it triggers the rolling of new segment if the retention.ms condition is satisfied.";
 
+    public static final String SHARED_STORAGE_ENABLE_CONFIG = "shared.storage.enable";
+    public static final String SHARED_STORAGE_ENABLE_DOC = "Select shared WAL storage when creating a topic. " +
+            "The default is false, which keeps Kafka's ordinary local log storage. Explicitly setting this configuration " +
+            "requires activation of shared.storage.version=1; enabling it also requires the shared storage extension. " +
+            "The effective storage mode cannot be changed on an existing topic. Shared storage and " +
+            "remote.storage.enable cannot be enabled together.";
+
     public static final String REMOTE_LOG_STORAGE_ENABLE_CONFIG = "remote.storage.enable";
     public static final String REMOTE_LOG_STORAGE_ENABLE_DOC = "To enable tiered storage for a topic, set this configuration to true. " +
             "To disable tiered storage for a topic that has it enabled, set this configuration to false. " +

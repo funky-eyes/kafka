@@ -28,6 +28,7 @@ import org.apache.kafka.storage.internals.shared.kafka.SharedCommitProgress;
 import org.apache.kafka.storage.internals.shared.kafka.SharedPartitionRoleListener;
 import org.apache.kafka.storage.internals.shared.kafka.SharedStorageConfiguration;
 import org.apache.kafka.storage.internals.shared.kafka.SharedStorageMetrics;
+import org.apache.kafka.storage.internals.shared.kafka.SharedStorageModeMarker;
 import org.apache.kafka.storage.internals.shared.kafka.SharedStorageWalFactory;
 import org.apache.kafka.storage.internals.shared.kafka.SharedUnifiedLogFactory;
 import org.apache.kafka.storage.internals.shared.kafka.SharedUploadScheduler;
@@ -98,6 +99,11 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
     private boolean closed;
 
     @Override
+    public synchronized boolean supportsTopicStorageConfiguration() {
+        return storage != null && storageConfiguration != null && !storageConfiguration.legacySelectorsEnabled();
+    }
+
+    @Override
     public synchronized void start(StorageExtensionContext context) throws IOException {
         Objects.requireNonNull(context, "context");
         if (storage != null || closed) {
@@ -105,6 +111,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         }
 
         SharedStorageConfiguration configuration = SharedStorageConfiguration.from(context);
+        SharedStorageModeMarker.initializeWalDirectory(configuration);
         SharedWal wal = createWal(configuration);
         S3ObjectStore newObjectStore = null;
         SharedStorageMetrics newMetrics = null;
@@ -123,13 +130,14 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
 
             SharedCommitProgress newCommitProgress = new SharedCommitProgress();
             SharedUnifiedLogFactory newSharedUnifiedLogFactory =
-                new SharedUnifiedLogFactory(newStorage, newCommitProgress);
+                new SharedUnifiedLogFactory(newStorage, newCommitProgress, configuration.legacySelectorsEnabled());
             UnifiedLogFactory newFactory = new RoutingUnifiedLogFactory(
                 configuration,
                 newSharedUnifiedLogFactory
             );
             StoragePartitionRoleListener newPartitionRoleListener =
-                new SharedPartitionRoleListener(configuration, newCommitProgress);
+                new SharedPartitionRoleListener(newSharedUnifiedLogFactory::isSharedPartition,
+                    newCommitProgress, newSharedUnifiedLogFactory::forgetPartition);
             ExecutorService newBootstrapExecutor = Executors.newSingleThreadExecutor(runnable -> {
                 Thread thread = new Thread(runnable, "kafka-shared-storage-bootstrap");
                 thread.setDaemon(true);

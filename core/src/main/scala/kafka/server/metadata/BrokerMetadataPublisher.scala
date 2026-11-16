@@ -325,7 +325,11 @@ class BrokerMetadataPublisher(
             val replicas = newImage.topics.partitionReplicas(log.topicId.get, log.topicPartition.partition)
             JLogManager.isStrayReplica(replicas, brokerId, log)
           }
-        }
+        },
+        isStrayById = Some(partition => {
+          val replicas = newImage.topics.partitionReplicas(partition.topicId(), partition.partition())
+          replicas.isEmpty || !replicas.contains(brokerId)
+        })
       )
 
       // Rename all future replicas which are in the same directory as the

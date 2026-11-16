@@ -20,6 +20,18 @@ on:
     branches:
       - shared-wal-s3-4.3.1
     paths:
+      - 'metadata/src/test/java/org/apache/kafka/controller/SharedStorageConfigurationControlManagerTest.java'
+      - 'metadata/src/test/java/org/apache/kafka/controller/SharedStorageFeatureControlManagerTest.java'
+      - 'metadata/src/test/java/org/apache/kafka/controller/ReplicationControlManagerTest.java'
+      - 'server-common/src/test/java/org/apache/kafka/server/common/SharedStorageVersionTest.java'
+      - 'server-common/src/test/java/org/apache/kafka/server/common/FeatureTest.java'
+      - 'server/src/test/java/org/apache/kafka/server/SharedStorageBrokerFeaturesTest.java'
+      - 'storage/src/test/java/org/apache/kafka/storage/internals/log/SharedStorageLogConfigTest.java'
+      - 'clients/src/main/java/org/apache/kafka/common/config/TopicConfig.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/ConfigurationControlManager.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/ReplicationControlManager.java'
+      - 'server-common/src/main/java/org/apache/kafka/server/common/SharedStorageVersion.java'
+      - 'server/src/main/java/org/apache/kafka/server/BrokerFeatures.java'
       - 'server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java'
       - 'server/src/main/java/org/apache/kafka/server/BrokerHeartbeatSourceWalReportDispatch.java'
       - 'server-common/src/main/java/org/apache/kafka/server/common/NodeToControllerChannelManager.java'
@@ -145,6 +157,20 @@ on:
       - '.github/workflows/shared-storage.yml'
   pull_request:
     paths:
+      - 'core/src/main/scala/kafka/server/metadata/BrokerMetadataPublisher.scala'
+      - 'metadata/src/test/java/org/apache/kafka/controller/SharedStorageConfigurationControlManagerTest.java'
+      - 'metadata/src/test/java/org/apache/kafka/controller/SharedStorageFeatureControlManagerTest.java'
+      - 'metadata/src/test/java/org/apache/kafka/controller/ReplicationControlManagerTest.java'
+      - 'server-common/src/test/java/org/apache/kafka/server/common/SharedStorageVersionTest.java'
+      - 'server-common/src/test/java/org/apache/kafka/server/common/FeatureTest.java'
+      - 'server/src/test/java/org/apache/kafka/server/SharedStorageBrokerFeaturesTest.java'
+      - 'storage/src/test/java/org/apache/kafka/storage/internals/log/SharedStorageLogConfigTest.java'
+      - 'clients/src/main/java/org/apache/kafka/common/config/TopicConfig.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/ConfigurationControlManager.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/ReplicationControlManager.java'
+      - 'server-common/src/main/java/org/apache/kafka/server/common/SharedStorageVersion.java'
+      - 'server/src/main/java/org/apache/kafka/server/BrokerFeatures.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/log/LogConfig.java'
       - 'server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java'
       - 'server/src/main/java/org/apache/kafka/server/BrokerHeartbeatSourceWalReportDispatch.java'
       - 'server-common/src/main/java/org/apache/kafka/server/common/NodeToControllerChannelManager.java'
@@ -337,6 +363,7 @@ jobs:
           ./gradlew :server:checkstyleMain :server:spotbugsMain :server:test --no-scan \
             --tests 'org.apache.kafka.server.BrokerHeartbeatSourceProbeChallengeGateTest' \
             --tests 'org.apache.kafka.server.BrokerHeartbeatSourceProbeCaptureStateTest' \
+            --tests 'org.apache.kafka.server.SharedStorageBrokerFeaturesTest' \
             2>&1 | tee shared-storage-broker-probe-test.log
           python3 - <<'PY'
           from pathlib import Path
@@ -429,6 +456,7 @@ jobs:
             --tests 'kafka.server.ControllerApisTest.testForwardedAndPlaintextReportsNeverAcquireAuthenticatedChannelIdentity' \
             --tests 'kafka.server.ControllerApisTest.testLegacyBrokerHeartbeatStillTraversesUnmodifiedControllerPath' \
             --tests 'kafka.server.BrokerSourceWalProbeAdapterTest' \
+            --tests 'kafka.server.SharedStorageTopicConfigurationTest' \
             --no-scan 2>&1 | tee shared-storage-logmanager-regression.log
           python3 - <<'PY'
           from pathlib import Path
@@ -481,6 +509,7 @@ jobs:
             --tests 'org.apache.kafka.storage.internals.shared.wal.*' \
             --tests 'org.apache.kafka.storage.internals.log.StorageExtensionLoaderTest' \
             --tests 'org.apache.kafka.storage.internals.log.StorageExtensionBrokerContextTest' \
+            --tests 'org.apache.kafka.storage.internals.log.SharedStorageLogConfigTest' \
             --tests 'org.apache.kafka.storage.internals.log.StoragePartitionRoleListenerEpochCompatibilityTest' \
             2>&1 | tee shared-storage-test.log
 
@@ -525,6 +554,9 @@ jobs:
             --tests 'org.apache.kafka.controller.WalReplicaDurabilityV1SnapshotReaderObserverTest' \
             --tests 'org.apache.kafka.controller.WalReplicaDurabilityCertificateReplayStateTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementControlManagerTest' \
+            --tests 'org.apache.kafka.controller.SharedStorageConfigurationControlManagerTest' \
+            --tests 'org.apache.kafka.controller.SharedStorageFeatureControlManagerTest' \
+            --tests 'org.apache.kafka.controller.ReplicationControlManagerTest.testSharedStorage*' \
             --tests 'org.apache.kafka.controller.PartitionRetirementCandidatePrecheckTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementFeatureGateTest' \
             --tests 'org.apache.kafka.controller.WalReplicaDurabilityFeatureGateTest' \
@@ -539,6 +571,8 @@ jobs:
           ./gradlew :server-common:test --no-scan \
             --tests 'org.apache.kafka.server.common.PartitionRetirementAuthorityVersionTest' \
             --tests 'org.apache.kafka.server.common.WalReplicaDurabilityVersionTest' \
+            --tests 'org.apache.kafka.server.common.SharedStorageVersionTest' \
+            --tests 'org.apache.kafka.server.common.FeatureTest' \
             2>&1 | tee shared-storage-retirement-feature-test.log
 
       - name: Require leadership and epoch JUnit evidence
@@ -549,6 +583,38 @@ jobs:
             storage/build/test-results/test metadata/build/test-results/test \
             server-common/build/test-results/test \
             core/build/test-results/test
+
+      - name: Require Topic mode, Admin API and feature barrier evidence
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          suites = {
+              'core': ['kafka.server.SharedStorageTopicConfigurationTest'],
+              'metadata': ['org.apache.kafka.controller.SharedStorageConfigurationControlManagerTest',
+                           'org.apache.kafka.controller.SharedStorageFeatureControlManagerTest'],
+              'storage': ['org.apache.kafka.storage.internals.log.SharedStorageLogConfigTest'],
+              'server': ['org.apache.kafka.server.SharedStorageBrokerFeaturesTest'],
+              'server-common': ['org.apache.kafka.server.common.SharedStorageVersionTest'],
+          }
+          for module, names in suites.items():
+              for name in names:
+                  path = Path(module) / 'build/test-results/test' / ('TEST-' + name + '.xml')
+                  suite = ET.parse(path).getroot()
+                  assert suite.get('name') == name
+                  assert int(suite.get('tests', '0')) > 0, str(path)
+                  assert all(suite.get(field) == '0' for field in ('skipped', 'failures', 'errors')), str(path)
+                  assert all(case.find('skipped') is None for case in suite.findall('testcase')), str(path)
+          core = ET.parse(Path('core/build/test-results/test/TEST-kafka.server.SharedStorageTopicConfigurationTest.xml')).getroot()
+          expected = {'ordinaryKafkaRemainsClassicAndCannotActivateWithoutExtension',
+                      'legacyDefaultAllRoutingCannotActivateTopicMode',
+                      'offlineReplicaDiscardsOldModeBeforeRecreatedTopicAssignment',
+                      'explicitTopicModeSurvivesRestartAndDoesNotLeakAcrossRecreation'}
+          actual = {case.get('name', '').removesuffix('()') for case in core.findall('testcase')}
+          assert expected <= actual, sorted(expected - actual)
+          print('PASS: Topic routing, real Admin mutation, restart and recreation; zero skipped tests')
+          PY
 
       - name: Run S3 module tests
         shell: bash

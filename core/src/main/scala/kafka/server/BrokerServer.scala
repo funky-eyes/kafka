@@ -176,7 +176,7 @@ class BrokerServer(
 
   var brokerRegistrationTracker: BrokerRegistrationTracker = _
 
-  val brokerFeatures: BrokerFeatures = BrokerFeatures.createDefault(config.unstableFeatureVersionsEnabled)
+  var brokerFeatures: BrokerFeatures = BrokerFeatures.createDefault(config.unstableFeatureVersionsEnabled, false)
 
   def kafkaYammerMetrics: KafkaYammerMetrics = KafkaYammerMetrics.INSTANCE
 
@@ -251,6 +251,8 @@ class BrokerServer(
         logManager.setUnifiedLogFactory(storageExtension.get().unifiedLogFactory())
         logManager.setStoragePartitionRoleListener(storageExtension.get().partitionRoleListener())
       }
+      brokerFeatures = BrokerFeatures.createDefault(config.unstableFeatureVersionsEnabled,
+        storageExtensionOpt.exists(_.supportsTopicStorageConfiguration()))
 
       lifecycleManager = new BrokerLifecycleManager(
         config,

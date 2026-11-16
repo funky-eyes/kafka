@@ -57,6 +57,11 @@ public enum Feature {
         WalReplicaDurabilityVersion.values(),
         WalReplicaDurabilityVersion.LATEST_PRODUCTION
     ),
+    SHARED_STORAGE_VERSION(
+        SharedStorageVersion.FEATURE_NAME,
+        SharedStorageVersion.values(),
+        SharedStorageVersion.LATEST_PRODUCTION
+    ),
     STREAMS_VERSION(StreamsVersion.FEATURE_NAME, StreamsVersion.values(), StreamsVersion.LATEST_PRODUCTION),
 
     /**
@@ -198,6 +203,12 @@ public enum Feature {
      * @return the default version given the feature and provided metadata version
      */
     public FeatureVersion defaultVersion(MetadataVersion metadataVersion) {
+        // Storage format selection must be an explicit cluster operation, including
+        // when formatting with the newest metadata version. Never enroll ordinary
+        // Kafka clusters merely by upgrading or reformatting their binaries.
+        if (this == SHARED_STORAGE_VERSION) {
+            return SharedStorageVersion.SSV_0;
+        }
         FeatureVersion version = featureVersions[0];
         for (Iterator<FeatureVersion> it = Arrays.stream(featureVersions).iterator(); it.hasNext(); ) {
             FeatureVersion feature = it.next();

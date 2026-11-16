@@ -468,6 +468,7 @@ class S3SharedStorageUploadCrashE2ETest {
             "group.initial.rebalance.delay.ms=0",
             "auto.create.topics.enable=false",
             "storage.extension.class=org.apache.kafka.storage.internals.shared.s3.S3SharedStorageExtension",
+            "shared.storage.legacy.selectors.enabled=true",
             "shared.storage.topics=" + TOPIC,
             "shared.storage.wal.dir=" + walDir.toAbsolutePath(),
             "shared.storage.wal.engine=ring",

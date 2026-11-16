@@ -133,6 +133,7 @@ public class LogConfig extends AbstractConfig {
     public static final boolean DEFAULT_UNCLEAN_LEADER_ELECTION_ENABLE = false;
     public static final boolean DEFAULT_PREALLOCATE = false;
 
+    public static final boolean DEFAULT_SHARED_STORAGE_ENABLE = false;
     public static final boolean DEFAULT_REMOTE_STORAGE_ENABLE = false;
     public static final boolean DEFAULT_REMOTE_LOG_COPY_DISABLE_CONFIG = false;
     public static final boolean DEFAULT_REMOTE_LOG_DELETE_ON_DISABLE_CONFIG = false;
@@ -240,6 +241,8 @@ public class LogConfig extends AbstractConfig {
                         ThrottledReplicaListValidator.INSTANCE, MEDIUM, QuotaConfig.LEADER_REPLICATION_THROTTLED_REPLICAS_DOC)
                 .define(QuotaConfig.FOLLOWER_REPLICATION_THROTTLED_REPLICAS_CONFIG, LIST, QuotaConfig.FOLLOWER_REPLICATION_THROTTLED_REPLICAS_DEFAULT,
                         ThrottledReplicaListValidator.INSTANCE, MEDIUM, QuotaConfig.FOLLOWER_REPLICATION_THROTTLED_REPLICAS_DOC)
+                .define(TopicConfig.SHARED_STORAGE_ENABLE_CONFIG, BOOLEAN, DEFAULT_SHARED_STORAGE_ENABLE,
+                        MEDIUM, TopicConfig.SHARED_STORAGE_ENABLE_DOC)
                 .define(TopicConfig.REMOTE_LOG_STORAGE_ENABLE_CONFIG, BOOLEAN, DEFAULT_REMOTE_STORAGE_ENABLE, null,
                         MEDIUM, TopicConfig.REMOTE_LOG_STORAGE_ENABLE_DOC)
                 .define(TopicConfig.LOCAL_LOG_RETENTION_MS_CONFIG, LONG, DEFAULT_LOCAL_RETENTION_MS, atLeast(-2), MEDIUM,
@@ -288,6 +291,7 @@ public class LogConfig extends AbstractConfig {
     public final List<String> followerReplicationThrottledReplicas;
 
     private final RemoteLogConfig remoteLogConfig;
+    private final boolean sharedStorageEnable;
     private final int maxMessageSize;
     private final Map<?, ?> props;
 
@@ -337,6 +341,7 @@ public class LogConfig extends AbstractConfig {
         this.followerReplicationThrottledReplicas = Collections.unmodifiableList(getList(QuotaConfig.FOLLOWER_REPLICATION_THROTTLED_REPLICAS_CONFIG));
 
         remoteLogConfig = new RemoteLogConfig(this);
+        sharedStorageEnable = getBoolean(TopicConfig.SHARED_STORAGE_ENABLE_CONFIG);
     }
 
     private Optional<Compression> getCompression() {
@@ -385,6 +390,10 @@ public class LogConfig extends AbstractConfig {
             return segmentSize();
         else
             return 0;
+    }
+
+    public boolean sharedStorageEnable() {
+        return sharedStorageEnable;
     }
 
     public boolean remoteStorageEnable() {
@@ -469,6 +478,11 @@ public class LogConfig extends AbstractConfig {
      * @param props The properties to be validated
      */
     public static void validateValues(Map<String, ?> props) {
+        if (Boolean.TRUE.equals(props.get(TopicConfig.SHARED_STORAGE_ENABLE_CONFIG)) &&
+                Boolean.TRUE.equals(props.get(TopicConfig.REMOTE_LOG_STORAGE_ENABLE_CONFIG))) {
+            throw new InvalidConfigurationException(TopicConfig.SHARED_STORAGE_ENABLE_CONFIG + " and " +
+                    TopicConfig.REMOTE_LOG_STORAGE_ENABLE_CONFIG + " cannot both be enabled.");
+        }
         long minCompactionLag = (Long) props.get(TopicConfig.MIN_COMPACTION_LAG_MS_CONFIG);
         long maxCompactionLag = (Long) props.get(TopicConfig.MAX_COMPACTION_LAG_MS_CONFIG);
         if (minCompactionLag > maxCompactionLag) {

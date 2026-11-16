@@ -16,7 +16,11 @@
  */
 package org.apache.kafka.storage.internals.log;
 
+import org.apache.kafka.common.Uuid;
+import org.apache.kafka.storage.internals.shared.kafka.SharedStorageModeMarker;
+
 import java.io.IOException;
+import java.util.Optional;
 
 /**
  * Narrow creation seam for {@link UnifiedLog} implementations.
@@ -26,24 +30,27 @@ import java.io.IOException;
  */
 @FunctionalInterface
 public interface UnifiedLogFactory {
-    UnifiedLogFactory DEFAULT = context -> UnifiedLog.create(
-        context.dir(),
-        context.config(),
-        context.logStartOffset(),
-        context.recoveryPoint(),
-        context.scheduler(),
-        context.brokerTopicStats(),
-        context.time(),
-        context.maxTransactionTimeoutMs(),
-        context.producerStateManagerConfig(),
-        context.producerIdExpirationCheckIntervalMs(),
-        context.logDirFailureChannel(),
-        context.lastShutdownClean(),
-        context.topicId(),
-        context.numRemainingSegments(),
-        context.remoteStorageSystemEnable(),
-        context.logOffsetsListener()
-    );
+    UnifiedLogFactory DEFAULT = context -> {
+        Optional<Uuid> topicId = SharedStorageModeMarker.validateClassic(context);
+        return UnifiedLog.create(
+            context.dir(),
+            context.config(),
+            context.logStartOffset(),
+            context.recoveryPoint(),
+            context.scheduler(),
+            context.brokerTopicStats(),
+            context.time(),
+            context.maxTransactionTimeoutMs(),
+            context.producerStateManagerConfig(),
+            context.producerIdExpirationCheckIntervalMs(),
+            context.logDirFailureChannel(),
+            context.lastShutdownClean(),
+            topicId,
+            context.numRemainingSegments(),
+            context.remoteStorageSystemEnable(),
+            context.logOffsetsListener()
+        );
+    };
 
     UnifiedLog create(UnifiedLogCreationContext context) throws IOException;
 }

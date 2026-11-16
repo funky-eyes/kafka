@@ -938,7 +938,7 @@ class BrokerLocalStartupReplayPrecheckTest {
                 ).join();
             }
         }
-        SharedStorageExtension extension = new SharedStorageExtension();
+        SharedStorageExtension extension = new SharedStorageExtension(KAFKA_PARTITION::equals);
         extension.start(context(logDir, walDir));
         if (registered) {
             extension.onBrokerReady(registered(54L, new Uuid(10L, 11L))).join();

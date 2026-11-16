@@ -20,6 +20,13 @@ on:
     branches:
       - shared-wal-s3-4.3.1
     paths:
+      - 'clients/src/main/java/org/apache/kafka/common/config/TopicConfig.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/ConfigurationControlManager.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/FeatureControlManager.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/ReplicationControlManager.java'
+      - 'server-common/src/main/java/org/apache/kafka/server/common/Feature.java'
+      - 'server-common/src/main/java/org/apache/kafka/server/common/SharedStorageVersion.java'
+      - 'server/src/main/java/org/apache/kafka/server/BrokerFeatures.java'
       - 'server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/QuorumController.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/ControllerRequestContext.java'
@@ -54,6 +61,15 @@ on:
       - '.github/actions/setup-gradle/**'
       - '.github/actions/setup-minio/**'
       - 'tools/shared_storage_minio_fixture.sh'
+      - '.github/workflows/shared-storage-rolling-upgrade.yml'
+  pull_request:
+    paths:
+      - 'clients/src/main/java/org/apache/kafka/common/config/TopicConfig.java'
+      - 'server-common/src/main/java/org/apache/kafka/server/common/SharedStorageVersion.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/RoutingUnifiedLogFactory.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedStorageConfiguration.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/kafka/SharedStorageModeMarker.java'
+      - 'core/src/test/java/kafka/server/SharedStorageRollingUpgradeE2ETest.java'
       - '.github/workflows/shared-storage-rolling-upgrade.yml'
   workflow_dispatch:
     inputs:
@@ -180,6 +196,27 @@ jobs:
             -x :core:spotbugsMain \
             -x :core:spotbugsTest \
             --no-scan 2>&1 | tee shared-storage-rolling-upgrade.log
+
+      - name: Require executed old-new-old rolling evidence
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          name = 'kafka.server.SharedStorageRollingUpgradeE2ETest'
+          suite = ET.parse(Path('core/build/test-results/test/TEST-' + name + '.xml')).getroot()
+          assert suite.get('name') == name
+          assert all(suite.get(field) == '0' for field in ('skipped', 'failures', 'errors'))
+          cases = suite.findall('testcase')
+          assert any(case.get('name', '').removesuffix('()') ==
+                     'oldAndNewBinariesRemainCompatibleAcrossRollingUpgradeAndRollback' for case in cases)
+          assert all(case.find('skipped') is None for case in cases)
+          output = '\n'.join(node.text or '' for node in suite.iter('system-out'))
+          assert 'ROLLING_UPGRADE_NEW_REMOTE_COMMIT' in output
+          assert 'ROLLING_UPGRADE_ROLLBACK_OK' in output
+          assert 'ROLLING_UPGRADE_SUCCESS' in output
+          print('PASS: old/new/old rollback, full new cluster and remote coverage; zero skips')
+          PY
 
       - name: Record remote object evidence
         if: always()

@@ -74,7 +74,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * <p>The old and new brokers are started from independent Kafka distributions and independent shared-storage plugin
  * runtimes. The test performs an OLD -> NEW -> OLD rollback probe after the new broker has durably published remote
  * metadata, then upgrades all brokers one at a time while forcing each upgraded broker to lead its preferred partition.
- * Client-visible records are verified after every transition.</p>
+ * Client-visible records are verified after every transition. Legacy selector compatibility remains explicitly enabled
+ * throughout this binary-only rollout; activating Topic-level storage is a separate, irreversible feature step.</p>
  */
 @Tag("integration")
 @Timeout(value = 20, unit = TimeUnit.MINUTES)
@@ -248,6 +249,7 @@ public class SharedStorageRollingUpgradeE2ETest {
             "unclean.leader.election.enable=false",
             "storage.extension.class=org.apache.kafka.storage.internals.shared.s3.S3SharedStorageExtension",
             "shared.storage.topics=" + TOPIC,
+            "shared.storage.legacy.selectors.enabled=true",
             "shared.storage.wal.dir=" + walDir.toAbsolutePath(),
             "shared.storage.wal.engine=ring",
             "shared.storage.wal.capacity.bytes=" + WAL_CAPACITY_BYTES,

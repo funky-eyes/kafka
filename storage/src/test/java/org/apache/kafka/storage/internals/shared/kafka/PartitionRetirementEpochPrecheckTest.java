@@ -19,8 +19,6 @@ package org.apache.kafka.storage.internals.shared.kafka;
 import org.apache.kafka.common.TopicIdPartition;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
-import org.apache.kafka.common.utils.MockTime;
-import org.apache.kafka.storage.internals.log.StorageExtensionContext;
 import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
 import org.apache.kafka.storage.internals.shared.metadata.PartitionLogStartAdvancePrecheck;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataImage;
@@ -28,10 +26,8 @@ import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCo
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
-import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -50,9 +46,6 @@ class PartitionRetirementEpochPrecheckTest {
     private static final Uuid TOPIC_ID = new Uuid(1L, 2L);
     private static final TopicIdPartition KAFKA_PARTITION =
         new TopicIdPartition(TOPIC_ID, new TopicPartition("shared-topic", 0));
-
-    @TempDir
-    Path tempDir;
 
     @Test
     void matchingSourceEpochOnlyProducesAnAdvisoryValueFinding() {
@@ -375,10 +368,7 @@ class PartitionRetirementEpochPrecheckTest {
     }
 
     private SharedPartitionRoleListener nativeRoles() {
-        SharedStorageConfiguration configuration = SharedStorageConfiguration.from(new StorageExtensionContext(
-            Map.of(), List.of(tempDir.toFile()), 1, new MockTime()
-        ));
-        return new SharedPartitionRoleListener(configuration, new SharedCommitProgress());
+        return new SharedPartitionRoleListener(KAFKA_PARTITION::equals, new SharedCommitProgress());
     }
 
     private static void elect(SharedPartitionRoleListener roles, int epoch) {

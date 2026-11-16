@@ -54,6 +54,11 @@ public final class SharedUnifiedLog extends UnifiedLog {
     private volatile long remoteCommittedHighWatermarkFloor;
     private volatile SourceLogStartCallbackFence sourceLogStartTracker;
 
+    @Override
+    protected boolean usesSharedStorage() {
+        return true;
+    }
+
     public SharedUnifiedLog(
         long logStartOffset,
         SharedLocalLog localLog,

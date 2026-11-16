@@ -16,6 +16,8 @@
  */
 package org.apache.kafka.storage.internals.shared.kafka;
 
+import org.apache.kafka.common.config.TopicConfig;
+import org.apache.kafka.storage.internals.log.LogConfig;
 import org.apache.kafka.storage.internals.log.StorageExtensionContext;
 
 import java.io.File;
@@ -47,6 +49,7 @@ public final class SharedStorageConfiguration {
     public static final String UPLOAD_MAX_INFLIGHT_CONFIG = "shared.storage.upload.max.inflight";
     public static final String ORPHAN_CLEANUP_INTERVAL_MS_CONFIG = "shared.storage.orphan.cleanup.interval.ms";
     public static final String ORPHAN_GRACE_MS_CONFIG = "shared.storage.orphan.grace.ms";
+    public static final String LEGACY_SELECTORS_ENABLED_CONFIG = "shared.storage.legacy.selectors.enabled";
     public static final String TOPICS_CONFIG = "shared.storage.topics";
     public static final String TOPIC_PATTERN_CONFIG = "shared.storage.topic.pattern";
 
@@ -82,6 +85,7 @@ public final class SharedStorageConfiguration {
     private final int uploadMaxInflight;
     private final long orphanCleanupIntervalMs;
     private final long orphanGraceMs;
+    private final boolean legacySelectorsEnabled;
     private final Set<String> topics;
     private final Pattern topicPattern;
 
@@ -97,8 +101,7 @@ public final class SharedStorageConfiguration {
         ReadCacheConfiguration readCache,
         UploadConfiguration upload,
         OrphanConfiguration orphan,
-        Set<String> topics,
-        Pattern topicPattern
+        TopicSelection topicSelection
     ) {
         this.walDir = walDir;
         this.walEngine = walEngine;
@@ -116,8 +119,9 @@ public final class SharedStorageConfiguration {
         this.uploadMaxInflight = upload.maxInflight();
         this.orphanCleanupIntervalMs = orphan.cleanupIntervalMs();
         this.orphanGraceMs = orphan.graceMs();
-        this.topics = topics;
-        this.topicPattern = topicPattern;
+        this.legacySelectorsEnabled = topicSelection.legacyEnabled();
+        this.topics = topicSelection.topics();
+        this.topicPattern = topicSelection.pattern();
     }
 
     public static SharedStorageConfiguration from(StorageExtensionContext context) {
@@ -207,8 +211,14 @@ public final class SharedStorageConfiguration {
             )
         );
 
+        boolean legacySelectorsEnabled = booleanValue(
+            context.originals().get(LEGACY_SELECTORS_ENABLED_CONFIG), LEGACY_SELECTORS_ENABLED_CONFIG);
         Set<String> topics = parseTopics(context.originals().get(TOPICS_CONFIG));
         Pattern topicPattern = parsePattern(context.originals().get(TOPIC_PATTERN_CONFIG));
+        if (!legacySelectorsEnabled && (!topics.isEmpty() || topicPattern != null)) {
+            throw new IllegalArgumentException("Broker topic selectors require " + LEGACY_SELECTORS_ENABLED_CONFIG +
+                "=true during migration; use Topic " + TopicConfig.SHARED_STORAGE_ENABLE_CONFIG + " for new deployments");
+        }
         return new SharedStorageConfiguration(
             walDir,
             walEngine,
@@ -221,8 +231,7 @@ public final class SharedStorageConfiguration {
             readCache,
             upload,
             orphan,
-            topics,
-            topicPattern
+            new TopicSelection(legacySelectorsEnabled, topics, topicPattern)
         );
     }
 
@@ -315,21 +324,50 @@ public final class SharedStorageConfiguration {
         return orphanGraceMs;
     }
 
-    /**
-     * Returns whether a user topic should use shared storage.
-     *
-     * <p>Kafka internal topics are always classic. If no selector is configured, all non-internal topics are shared.
-     * When selectors are present, exact-name and regex selectors are combined as a union.</p>
-     */
+    public boolean legacySelectorsEnabled() {
+        return legacySelectorsEnabled;
+    }
+
+    /** Topic configuration is authoritative; absent configuration defaults to classic outside explicit migration. */
+    public boolean useSharedStorage(String topic, LogConfig config) {
+        Objects.requireNonNull(topic, "topic");
+        Objects.requireNonNull(config, "config");
+        if (topic.startsWith("__")) {
+            if (config.sharedStorageEnable()) {
+                throw new IllegalArgumentException("Kafka internal topics cannot use shared storage: " + topic);
+            }
+            return false;
+        }
+        if (config.originals().containsKey(TopicConfig.SHARED_STORAGE_ENABLE_CONFIG)) {
+            return config.sharedStorageEnable();
+        }
+        return useSharedStorage(topic);
+    }
+
+    /** Legacy selector only. Never determines runtime upload ownership, which is bound to loaded Topic IDs. */
     public boolean useSharedStorage(String topic) {
         Objects.requireNonNull(topic, "topic");
-        if (topic.startsWith("__")) {
+        if (!legacySelectorsEnabled || topic.startsWith("__")) {
             return false;
         }
         if (topics.isEmpty() && topicPattern == null) {
             return true;
         }
         return topics.contains(topic) || (topicPattern != null && topicPattern.matcher(topic).matches());
+    }
+
+    private static boolean booleanValue(Object value, String name) {
+        if (value == null) {
+            return false;
+        }
+        String text = value.toString().trim();
+        if (text.equalsIgnoreCase("true")) {
+            return true;
+        }
+        if (text.equalsIgnoreCase("false")) {
+            return false;
+        }
+        throw new IllegalArgumentException(name + " must be true or false");
     }
 
     private static long positiveLong(Object value, long defaultValue, String name) {
@@ -402,6 +440,9 @@ public final class SharedStorageConfiguration {
         } catch (PatternSyntaxException e) {
             throw new IllegalArgumentException("Invalid " + TOPIC_PATTERN_CONFIG + ": " + value, e);
         }
+    }
+
+    private record TopicSelection(boolean legacyEnabled, Set<String> topics, Pattern pattern) {
     }
 
     private record ReadCacheConfiguration(int indexEntries, long dataBlockBytes) {

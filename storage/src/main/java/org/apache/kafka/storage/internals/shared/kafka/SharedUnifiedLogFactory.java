@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.storage.internals.shared.kafka;
 
+import org.apache.kafka.common.TopicIdPartition;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.errors.InconsistentTopicIdException;
@@ -44,6 +45,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -59,15 +61,23 @@ import java.util.stream.Stream;
 public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
     private final SharedStorageEngine storage;
     private final SharedCommitProgress commitProgress;
+    private final boolean legacyAdoption;
     private final ConcurrentMap<File, LoadedSharedLog> loadedLogs = new ConcurrentHashMap<>();
+    private final ConcurrentMap<SharedPartitionId, Set<File>> loadedPartitionDirs = new ConcurrentHashMap<>();
 
     public SharedUnifiedLogFactory(SharedStorageEngine storage) {
         this(storage, new SharedCommitProgress());
     }
 
     public SharedUnifiedLogFactory(SharedStorageEngine storage, SharedCommitProgress commitProgress) {
+        this(storage, commitProgress, false);
+    }
+
+    public SharedUnifiedLogFactory(SharedStorageEngine storage, SharedCommitProgress commitProgress,
+                                   boolean legacyAdoption) {
         this.storage = Objects.requireNonNull(storage, "storage");
         this.commitProgress = Objects.requireNonNull(commitProgress, "commitProgress");
+        this.legacyAdoption = legacyAdoption;
     }
 
     @Override
@@ -85,10 +95,11 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
                 "Kafka tiered storage and shared WAL/S3 storage cannot both be enabled for " + topicPartition);
         }
 
+        Optional<Uuid> durableTopicId = SharedStorageModeMarker.prepareShared(context, legacyAdoption);
         Uuid effectiveTopicId = resolveAndPersistTopicId(
             dir,
             topicPartition,
-            context.topicId(),
+            durableTopicId,
             context.logDirFailureChannel()
         );
         SharedPartitionId sharedPartition = new SharedPartitionId(
@@ -176,7 +187,30 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
                 new AtomicLong(remoteIndexRevisionAtLoad)
             )
         );
+        // Publish only after the complete shared log has been instantiated. Role callbacks use
+        // this exact Topic ID registry, never the mutable topic name or a Broker selector.
+        loadedPartitionDirs.computeIfAbsent(sharedPartition, ignored -> ConcurrentHashMap.newKeySet())
+            .add(dir.getAbsoluteFile());
         return log;
+    }
+
+    public boolean isSharedPartition(TopicIdPartition partition) {
+        Objects.requireNonNull(partition, "partition");
+        return loadedPartitionDirs.containsKey(sharedPartitionId(partition));
+    }
+
+    public void forgetPartition(TopicIdPartition partition) {
+        SharedPartitionId id = sharedPartitionId(Objects.requireNonNull(partition, "partition"));
+        Set<File> dirs = loadedPartitionDirs.remove(id);
+        if (dirs != null) {
+            dirs.forEach(dir -> loadedLogs.computeIfPresent(dir,
+                (ignored, loaded) -> loaded.partition().equals(id) ? null : loaded));
+        }
+    }
+
+    private static SharedPartitionId sharedPartitionId(TopicIdPartition partition) {
+        return new SharedPartitionId(partition.topicId().getMostSignificantBits(),
+            partition.topicId().getLeastSignificantBits(), partition.partition());
     }
 
     /**
