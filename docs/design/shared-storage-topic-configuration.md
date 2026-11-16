@@ -163,14 +163,30 @@ The focused CI coverage includes:
   and same-name recreation as a classic Topic with a new Topic ID. A separate
   three-broker case keeps one shared replica offline during deletion/recreation,
   restarts it and reassigns the new classic Topic to all three brokers.
+- Real broker startup and registration after feature activation. A broker with no
+  extension, legacy selectors enabled, or an extension that does not advertise
+  Topic-mode support receives a controller registration rejection and cannot take
+  a replica assignment; the existing shared Topic remains readable. These cases
+  use current broker binaries, including an incompatible-capability extension
+  fixture. The separate historical-binary rolling test covers feature level zero.
 - Runtime routing, mode-marker rejection, Topic-ID-bound partition-role tracking
   and legacy selector compatibility.
+- Real three-broker S3/MinIO failover in both legacy selection and activated Topic
+  mode. The Topic-mode case checks the physical log implementation on every
+  broker, `acks=all` writes and complete reads for ordinary and shared Topics,
+  and remote coverage uploaded by the shared Topic's new leader. A separate
+  `SharedObjectReader` reads those new-leader objects through real S3 GET requests
+  and verifies the acknowledged WAL tail's offsets and values. After upload
+  scheduling and these reads complete, a full committed metadata snapshot must
+  contain no shared object ranges for the ordinary Topic ID.
 - The existing independent old/new distribution rolling test, with explicit legacy
   compatibility, plus the existing shared WAL/S3 Topic lifecycle tests.
 
-The main CI gate requires executed JUnit results with zero skips. Production
-fingerprints and workflow triggers include the new controller, feature, broker and
-Topic configuration paths, so older GA evidence cannot be reused for this change.
+The main CI gate requires executed JUnit results with zero skips. The MinIO job
+separately requires both named RF3 failover cases and a success marker emitted only
+after the Topic-mode case's assertions, and retains their JUnit XML as evidence.
+Production fingerprints and workflow triggers include the new controller, feature,
+broker and Topic configuration paths, so older GA evidence cannot be reused for this change.
 
 CI results must be read from the exact candidate run. This document does not claim
 that online migration, post-activation rollback, mixed-version Topic administration

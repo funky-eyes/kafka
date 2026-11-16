@@ -17,6 +17,7 @@
 package kafka.server;
 
 import org.apache.kafka.clients.admin.Admin;
+import org.apache.kafka.clients.admin.AdminClientConfig;
 import org.apache.kafka.clients.admin.AlterConfigOp;
 import org.apache.kafka.clients.admin.ConfigEntry;
 import org.apache.kafka.clients.admin.FeatureUpdate;
@@ -33,28 +34,40 @@ import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.config.ConfigResource;
 import org.apache.kafka.common.config.TopicConfig;
 import org.apache.kafka.common.errors.InvalidConfigurationException;
+import org.apache.kafka.common.errors.InvalidReplicaAssignmentException;
 import org.apache.kafka.common.errors.InvalidUpdateVersionException;
 import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.apache.kafka.common.test.KafkaClusterTestKit;
 import org.apache.kafka.common.test.TestKitNodes;
+import org.apache.kafka.common.utils.LogCaptureAppender;
+import org.apache.kafka.raft.KRaftConfigs;
+import org.apache.kafka.server.BrokerLifecycleManager;
 import org.apache.kafka.server.common.SharedStorageVersion;
+import org.apache.kafka.storage.internals.log.KafkaStorageExtension;
+import org.apache.kafka.storage.internals.log.StorageExtensionContext;
 import org.apache.kafka.storage.internals.log.UnifiedLog;
+import org.apache.kafka.storage.internals.log.UnifiedLogFactory;
 import org.apache.kafka.storage.internals.shared.kafka.SharedStorageExtension;
 import org.apache.kafka.storage.internals.shared.kafka.SharedUnifiedLog;
 import org.apache.kafka.test.TestUtils;
 
+import org.apache.logging.log4j.Level;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
@@ -63,6 +76,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Exercises the real Admin/controller/broker boundary without S3 or a legacy topic selector. */
 @Tag("integration")
@@ -103,6 +117,111 @@ public class SharedStorageTopicConfigurationTest {
             assertInstanceOf(InvalidUpdateVersionException.class, activationFailure.getCause());
             assertModeChangeRejected(admin, "legacy-default-all", AlterConfigOp.OpType.SET, "true");
             assertModeChangeRejected(admin, "legacy-default-all", AlterConfigOp.OpType.SET, "false");
+        }
+    }
+
+    @Test
+    public void missingExtensionBrokerCannotJoinActivatedTopicMode() throws Exception {
+        assertIncompatibleBrokerCannotJoin(Map.of());
+    }
+
+    @Test
+    public void legacySelectorBrokerCannotJoinActivatedTopicMode() throws Exception {
+        assertIncompatibleBrokerCannotJoin(Map.of(
+            "storage.extension.class", SharedStorageExtension.class.getName(),
+            "shared.storage.wal.capacity.bytes", "8388608",
+            "shared.storage.legacy.selectors.enabled", "true"));
+    }
+
+    @Test
+    public void incompatibleExtensionBrokerCannotJoinActivatedTopicMode() throws Exception {
+        // This exercises an extension without the new capability, not a historical broker binary.
+        assertIncompatibleBrokerCannotJoin(Map.of(
+            "storage.extension.class", UnsupportedTopicStorageExtension.class.getName()));
+    }
+
+    private static void assertIncompatibleBrokerCannotJoin(Map<String, String> extensionConfigs) throws Exception {
+        Map<String, String> joiningConfigs = new HashMap<>(extensionConfigs);
+        joiningConfigs.put(KRaftConfigs.INITIAL_BROKER_REGISTRATION_TIMEOUT_MS_CONFIG, "10000");
+        joiningConfigs.put(KRaftConfigs.SERVER_MAX_STARTUP_TIME_MS_CONFIG, "60000");
+        TestKitNodes nodes = new TestKitNodes.Builder()
+            .setNumBrokerNodes(2).setNumControllerNodes(1)
+            .setPerServerProperties(Map.of(
+                0, Map.of("storage.extension.class", SharedStorageExtension.class.getName(),
+                    "shared.storage.wal.capacity.bytes", "8388608"),
+                1, joiningConfigs))
+            .build();
+        try (KafkaClusterTestKit cluster = new KafkaClusterTestKit.Builder(nodes).build()) {
+            cluster.format();
+            for (ControllerServer controller : cluster.controllers().values()) {
+                controller.startup();
+            }
+            BrokerServer ready = cluster.brokers().get(0);
+            BrokerServer joining = cluster.brokers().get(1);
+            ready.startup();
+            cluster.waitForActiveController().waitForReadyBrokers(1).get(30, TimeUnit.SECONDS);
+            String bootstrapServers = "localhost:" + ready.boundPort(nodes.brokerListenerName());
+            // The second broker has never registered. It is intentionally absent from activation's support check.
+            try (Admin admin = Admin.create(Map.of(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers))) {
+                activateTopicStorage(admin);
+                String topic = "shared-before-incompatible-join";
+                TopicPartition partition = new TopicPartition(topic, 0);
+                createTopic(admin, topic, Map.of(MODE, "true"));
+                roundTrip(bootstrapServers, topic, "shared");
+                assertInstanceOf(SharedUnifiedLog.class, ready.logManager().getLog(partition, false).get());
+
+                try (LogCaptureAppender appender = LogCaptureAppender.createAndRegister(BrokerLifecycleManager.class)) {
+                    appender.setClassLogger(BrokerLifecycleManager.class, Level.INFO);
+                    RuntimeException failure = assertThrows(RuntimeException.class, joining::startup);
+                    assertInstanceOf(CancellationException.class, failure.getCause());
+                    assertTrue(appender.getMessages().stream().anyMatch(message -> message.contains(
+                        "Unable to register broker 1 because the controller returned error UNSUPPORTED_VERSION")),
+                        "Startup must observe a real incompatible-version registration response, not only a timeout");
+                    assertTrue(appender.getMessages().stream().anyMatch(message -> message.contains(
+                        "Shutting down because we were unable to register with the controller quorum.")),
+                        "The broker must reach its initial registration deadline and terminate startup");
+                }
+
+                // Check final failure, not a broker that is merely still waiting to register.
+                assertTrue(joining.isShutdown());
+                assertEquals(-1L, joining.lifecycleManager().brokerEpoch());
+                assertTrue(joining.lifecycleManager().initialCatchUpFuture().isCompletedExceptionally());
+                assertFalse(joining.brokerFeatures().supportedFeatures().features().containsKey(SharedStorageVersion.FEATURE_NAME));
+                assertFalse(joining.logManager().getLog(partition, false).isDefined());
+                for (String directory : nodes.brokerNodes().get(1).logDataDirectories()) {
+                    assertFalse(Files.exists(Path.of(directory, topic + "-0")), "Rejected broker created a Topic log");
+                }
+                assertEquals(List.of(0), admin.describeCluster().nodes().get(30, TimeUnit.SECONDS)
+                    .stream().map(node -> node.id()).sorted().toList());
+
+                ExecutionException reassignment = assertThrows(ExecutionException.class,
+                    () -> admin.alterPartitionReassignments(Map.of(partition, Optional.of(
+                        new NewPartitionReassignment(List.of(0, 1)))))
+                        .all().get(30, TimeUnit.SECONDS));
+                assertInstanceOf(InvalidReplicaAssignmentException.class, reassignment.getCause());
+                var description = admin.describeTopics(List.of(topic)).allTopicNames()
+                    .get(30, TimeUnit.SECONDS).get(topic).partitions().get(0);
+                assertEquals(List.of(0), description.replicas().stream().map(node -> node.id()).toList());
+                assertEquals(List.of(0), description.isr().stream().map(node -> node.id()).toList());
+                assertValues(bootstrapServers, topic, List.of("shared-0", "shared-1", "shared-2"));
+                assertInstanceOf(SharedUnifiedLog.class, ready.logManager().getLog(partition, false).get());
+            }
+        }
+    }
+
+    /** A loadable pre-capability extension fixture; it deliberately inherits capability=false. */
+    public static final class UnsupportedTopicStorageExtension implements KafkaStorageExtension {
+        @Override
+        public void start(StorageExtensionContext context) {
+        }
+
+        @Override
+        public UnifiedLogFactory unifiedLogFactory() {
+            return UnifiedLogFactory.DEFAULT;
+        }
+
+        @Override
+        public void close() {
         }
     }
 

@@ -17,8 +17,10 @@
 package kafka.server;
 
 import org.apache.kafka.clients.admin.Admin;
+import org.apache.kafka.clients.admin.FeatureUpdate;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.admin.TopicDescription;
+import org.apache.kafka.clients.admin.UpdateFeaturesOptions;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
@@ -29,23 +31,33 @@ import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.config.TopicConfig;
+import org.apache.kafka.common.record.MemoryRecords;
+import org.apache.kafka.common.record.Record;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.apache.kafka.common.test.KafkaClusterTestKit;
 import org.apache.kafka.common.test.TestKitNodes;
+import org.apache.kafka.server.common.SharedStorageVersion;
+import org.apache.kafka.storage.internals.log.UnifiedLog;
+import org.apache.kafka.storage.internals.shared.kafka.SharedUnifiedLog;
 import org.apache.kafka.storage.internals.shared.metadata.BrokerObjectId;
 import org.apache.kafka.storage.internals.shared.metadata.OffsetRange;
 import org.apache.kafka.storage.internals.shared.metadata.PartitionRemoteCoverage;
+import org.apache.kafka.storage.internals.shared.metadata.RemoteObjectIndex;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
+import org.apache.kafka.storage.internals.shared.object.ObjectStore;
+import org.apache.kafka.storage.internals.shared.object.SharedObjectReader;
 import org.apache.kafka.test.TestUtils;
 
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -61,6 +73,7 @@ import java.util.stream.Stream;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
@@ -76,6 +89,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 @Timeout(value = 4, unit = TimeUnit.MINUTES)
 public class SharedStorageKRaftIntegrationTest {
     private static final String TOPIC = "shared-wal-failover";
+    private static final String ORDINARY_TOPIC = "ordinary-native-failover";
     private static final String METADATA_TOPIC = "__shared_storage_metadata";
     private static final int WARMUP_RECORDS = 20;
     private static final int FAILOVER_RECORDS = 40;
@@ -84,10 +98,28 @@ public class SharedStorageKRaftIntegrationTest {
 
     @Test
     public void acksAllCommittedWalTailIsUploadedByNewLeaderAfterFailover() throws Exception {
+        runFailoverScenario(false);
+    }
+
+    @Test
+    public void topicConfigurationKeepsOrdinaryTopicsNativeDuringS3Failover() throws Exception {
+        runFailoverScenario(true);
+        System.out.println("TOPIC_CONFIG_S3_FAILOVER_OK");
+    }
+
+    private static void runFailoverScenario(boolean topicConfiguration) throws Exception {
         String s3Endpoint = System.getenv("SHARED_STORAGE_S3_ENDPOINT");
         assumeTrue(s3Endpoint != null && !s3Endpoint.isBlank(), "S3/MinIO integration endpoint is not configured");
         String bucket = environment("SHARED_STORAGE_S3_BUCKET", "kafka-shared-storage-e2e");
         String region = environment("SHARED_STORAGE_S3_REGION", "us-east-1");
+        Map<String, Object> s3Config = Map.of(
+            "shared.storage.s3.endpoint", s3Endpoint,
+            "shared.storage.s3.region", region,
+            "shared.storage.s3.bucket", bucket,
+            "shared.storage.s3.key.prefix", "kraft-failover/" + UUID.randomUUID() + "/objects",
+            "shared.storage.s3.path.style", true,
+            "shared.storage.s3.io.threads", 2
+        );
 
         TestKitNodes nodes = new TestKitNodes.Builder()
             .setNumBrokerNodes(3)
@@ -95,24 +127,23 @@ public class SharedStorageKRaftIntegrationTest {
             .setNumDisksPerBroker(1)
             .build();
 
-        try (KafkaClusterTestKit cluster = new KafkaClusterTestKit.Builder(nodes)
-            .setConfigProp("shared.storage.legacy.selectors.enabled", true)
+        KafkaClusterTestKit.Builder builder = new KafkaClusterTestKit.Builder(nodes)
             .setConfigProp("storage.extension.class",
                 "org.apache.kafka.storage.internals.shared.s3.S3SharedStorageExtension")
-            .setConfigProp("shared.storage.topics", TOPIC)
             .setConfigProp("shared.storage.wal.engine", "ring")
             .setConfigProp("shared.storage.wal.capacity.bytes", 64L * 1024 * 1024)
             .setConfigProp("shared.storage.wal.segment.bytes", 4L * 1024 * 1024)
             .setConfigProp("shared.storage.object.target.bytes", 1024L * 1024)
             .setConfigProp("shared.storage.upload.interval.ms", UPLOAD_INTERVAL_MS)
             .setConfigProp("shared.storage.metadata.replication.factor", 3)
-            .setConfigProp("shared.storage.metadata.min.insync.replicas", 2)
-            .setConfigProp("shared.storage.s3.endpoint", s3Endpoint)
-            .setConfigProp("shared.storage.s3.region", region)
-            .setConfigProp("shared.storage.s3.bucket", bucket)
-            .setConfigProp("shared.storage.s3.path.style", true)
-            .setConfigProp("shared.storage.s3.io.threads", 2)
-            .build()) {
+            .setConfigProp("shared.storage.metadata.min.insync.replicas", 2);
+        s3Config.forEach(builder::setConfigProp);
+        if (!topicConfiguration) {
+            builder.setConfigProp("shared.storage.legacy.selectors.enabled", true)
+                .setConfigProp("shared.storage.topics", TOPIC);
+        }
+
+        try (KafkaClusterTestKit cluster = builder.build()) {
 
             cluster.format();
             cluster.startup();
@@ -122,15 +153,41 @@ public class SharedStorageKRaftIntegrationTest {
 
             try (Admin admin = cluster.admin();
                  KafkaProducer<String, String> producer = producer(bootstrapServers)) {
+                Map<String, String> topicConfig = new LinkedHashMap<>();
+                topicConfig.put(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2");
+                if (topicConfiguration) {
+                    // Leave broker legacy mode and selectors unset: only the Admin-controlled Topic flag opts in.
+                    admin.updateFeatures(Map.of(SharedStorageVersion.FEATURE_NAME,
+                        new FeatureUpdate((short) 1, FeatureUpdate.UpgradeType.UPGRADE)),
+                        new UpdateFeaturesOptions()).all().get(30, TimeUnit.SECONDS);
+                    topicConfig.put(TopicConfig.SHARED_STORAGE_ENABLE_CONFIG, "true");
+                }
                 admin.createTopics(List.of(new NewTopic(TOPIC, 1, (short) 3)
-                    .configs(Map.of(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2"))))
+                    .configs(topicConfig)))
                     .all().get(30, TimeUnit.SECONDS);
 
                 TopicDescription topic = waitForTopicReady(admin, TOPIC);
                 SharedPartitionId partition = sharedPartitionId(topic.topicId(), 0);
                 int oldLeader = topic.partitions().get(0).leader().id();
+                assertLogMode(cluster, TOPIC, true, -1);
 
-                OffsetRange warmupRange = produceRange(producer, 0, WARMUP_RECORDS);
+                if (topicConfiguration) {
+                    // Put both initial leaders on the broker that will stop, so native Kafka also exercises failover.
+                    List<Integer> replicas = new ArrayList<>();
+                    replicas.add(oldLeader);
+                    topic.partitions().get(0).replicas().stream().map(replica -> replica.id())
+                        .filter(id -> id != oldLeader).forEach(replicas::add);
+                    admin.createTopics(List.of(new NewTopic(ORDINARY_TOPIC, Map.of(0, replicas))
+                        .configs(Map.of(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2"))))
+                        .all().get(30, TimeUnit.SECONDS);
+                    assertEquals(oldLeader, waitForTopicReady(admin, ORDINARY_TOPIC).partitions().get(0).leader().id());
+                    assertLogMode(cluster, ORDINARY_TOPIC, false, -1);
+                    assertEquals(new OffsetRange(0, WARMUP_RECORDS),
+                        produceRange(producer, ORDINARY_TOPIC, 0, WARMUP_RECORDS));
+                    assertAcknowledgedRecords(bootstrapServers, ORDINARY_TOPIC, WARMUP_RECORDS);
+                }
+
+                OffsetRange warmupRange = produceRange(producer, TOPIC, 0, WARMUP_RECORDS);
                 assertEquals(new OffsetRange(0L, WARMUP_RECORDS), warmupRange);
 
                 // Establish a known scheduler tick by waiting until the original leader has remotely committed warmup.
@@ -140,7 +197,11 @@ public class SharedStorageKRaftIntegrationTest {
                     () -> "Old leader " + oldLeader + " never remotely committed warmup range " + warmupRange
                 );
 
-                OffsetRange failoverRange = produceRange(producer, WARMUP_RECORDS, FAILOVER_RECORDS);
+                if (topicConfiguration) {
+                    assertEquals(new OffsetRange(WARMUP_RECORDS, WARMUP_RECORDS + FAILOVER_RECORDS),
+                        produceRange(producer, ORDINARY_TOPIC, WARMUP_RECORDS, FAILOVER_RECORDS));
+                }
+                OffsetRange failoverRange = produceRange(producer, TOPIC, WARMUP_RECORDS, FAILOVER_RECORDS);
                 assertEquals(
                     new OffsetRange(WARMUP_RECORDS, WARMUP_RECORDS + FAILOVER_RECORDS),
                     failoverRange
@@ -154,11 +215,17 @@ public class SharedStorageKRaftIntegrationTest {
                 );
 
                 cluster.brokers().get(oldLeader).shutdown();
-                int newLeader = waitForNewLeader(admin, oldLeader);
+                int newLeader = waitForNewLeader(admin, TOPIC, oldLeader);
                 assertNotEquals(oldLeader, newLeader);
+                if (topicConfiguration) {
+                    assertNotEquals(oldLeader, waitForNewLeader(admin, ORDINARY_TOPIC, oldLeader));
+                    assertLogMode(cluster, TOPIC, true, oldLeader);
+                    assertLogMode(cluster, ORDINARY_TOPIC, false, oldLeader);
+                }
 
                 OffsetRange postFailoverRange = produceRange(
                     producer,
+                    TOPIC,
                     WARMUP_RECORDS + FAILOVER_RECORDS,
                     POST_FAILOVER_RECORDS
                 );
@@ -169,6 +236,10 @@ public class SharedStorageKRaftIntegrationTest {
                     ),
                     postFailoverRange
                 );
+                if (topicConfiguration) {
+                    assertEquals(postFailoverRange, produceRange(producer, ORDINARY_TOPIC,
+                        WARMUP_RECORDS + FAILOVER_RECORDS, POST_FAILOVER_RECORDS));
+                }
 
                 // This is the key recovery assertion: data acknowledged before the old leader stopped is uploaded from
                 // the new leader's replicated WAL, proven by the broker ID embedded in the committed object IDs.
@@ -178,15 +249,86 @@ public class SharedStorageKRaftIntegrationTest {
                     () -> "New leader " + newLeader + " never uploaded replicated failover range " + failoverRange
                 );
 
-                List<String> consumed = consumeAll(
-                    bootstrapServers,
-                    WARMUP_RECORDS + FAILOVER_RECORDS + POST_FAILOVER_RECORDS
-                );
-                List<String> expected = new ArrayList<>(consumed.size());
-                for (int i = 0; i < consumed.size(); i++) {
-                    expected.add(value(i));
+                int totalRecords = WARMUP_RECORDS + FAILOVER_RECORDS + POST_FAILOVER_RECORDS;
+                assertAcknowledgedRecords(bootstrapServers, TOPIC, totalRecords);
+                if (topicConfiguration) {
+                    assertAcknowledgedRecords(bootstrapServers, ORDINARY_TOPIC, totalRecords);
+                    OffsetRange completeRange = new OffsetRange(0, totalRecords);
+                    TestUtils.waitForCondition(
+                        () -> allCoverage(bootstrapServers, partition).covers(completeRange),
+                        90_000L,
+                        () -> "Shared Topic never remotely committed its complete acknowledged history"
+                    );
+                    List<SharedObjectMetadata> objects = committedObjects(bootstrapServers);
+                    assertRemoteRecords(s3Config, objects, partition, newLeader, failoverRange);
+                    SharedPartitionId ordinaryPartition = sharedPartitionId(describeTopic(admin, ORDINARY_TOPIC).topicId(), 0);
+                    assertFalse(objects.stream().flatMap(object -> object.ranges().stream())
+                        .anyMatch(range -> range.partition().equals(ordinaryPartition)),
+                        "The default ordinary Topic must never enter shared upload scheduling");
                 }
-                assertEquals(expected, consumed, "Acknowledged records must be visible exactly once and in offset order");
+            }
+        }
+    }
+
+    private static void assertLogMode(
+        KafkaClusterTestKit cluster,
+        String topic,
+        boolean shared,
+        int stoppedBroker
+    ) throws Exception {
+        TopicPartition partition = new TopicPartition(topic, 0);
+        TestUtils.waitForCondition(() -> cluster.brokers().entrySet().stream()
+            .filter(broker -> broker.getKey() != stoppedBroker)
+            .allMatch(broker -> {
+                scala.Option<UnifiedLog> log = broker.getValue().logManager().getLog(partition, false);
+                return log.isDefined() && (shared
+                    ? log.get() instanceof SharedUnifiedLog
+                    : log.get().getClass().equals(UnifiedLog.class));
+            }), 30_000L, "Unexpected physical log implementation for " + topic);
+    }
+
+    private static void assertAcknowledgedRecords(String bootstrapServers, String topic, int expectedRecords) {
+        List<String> expected = new ArrayList<>(expectedRecords);
+        for (int i = 0; i < expectedRecords; i++) {
+            expected.add(value(i));
+        }
+        assertEquals(expected, consumeAll(bootstrapServers, topic, expectedRecords),
+            "Acknowledged records must be visible exactly once and in offset order for " + topic);
+    }
+
+    private static void assertRemoteRecords(
+        Map<String, Object> s3Config,
+        List<SharedObjectMetadata> objects,
+        SharedPartitionId partition,
+        int newLeader,
+        OffsetRange offsets
+    ) throws Exception {
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        objects.stream().filter(object -> BrokerObjectId.brokerId(object.objectId()) == newLeader)
+            .forEach(index::add);
+        assertTrue(index.coverage(partition).covers(offsets), "New leader objects must cover the acknowledged WAL tail");
+
+        // The S3 module is deliberately a core testRuntimeOnly dependency; use its public factory and ObjectStore API.
+        Class<?> configClass = Class.forName("org.apache.kafka.storage.internals.shared.s3.S3ObjectStoreConfig");
+        Object config = configClass.getMethod("from", Map.class).invoke(null, s3Config);
+        Class<?> storeClass = Class.forName("org.apache.kafka.storage.internals.shared.s3.S3ObjectStore");
+        try (ObjectStore store = (ObjectStore) storeClass.getConstructor(configClass).newInstance(config)) {
+            SharedObjectReader reader = new SharedObjectReader(store, index);
+            long nextOffset = offsets.startOffset();
+            while (nextOffset < offsets.endOffset()) {
+                long requestedOffset = nextOffset;
+                ByteBuffer batch = reader.read(partition, requestedOffset).get(30, TimeUnit.SECONDS)
+                    .orElseThrow(() -> new AssertionError("No S3 batch for acknowledged offset " + requestedOffset));
+                for (Record record : MemoryRecords.readableRecords(batch).records()) {
+                    if (record.offset() < requestedOffset || record.offset() >= offsets.endOffset()) {
+                        continue;
+                    }
+                    assertEquals(nextOffset, record.offset(), "S3 records must remain contiguous");
+                    assertEquals(value(Math.toIntExact(nextOffset)), StandardCharsets.UTF_8.decode(record.value()).toString(),
+                        "S3 must contain the original acknowledged value");
+                    nextOffset++;
+                }
+                assertTrue(nextOffset > requestedOffset, "S3 read must make progress through the acknowledged WAL tail");
             }
         }
     }
@@ -203,6 +345,7 @@ public class SharedStorageKRaftIntegrationTest {
 
     private static OffsetRange produceRange(
         KafkaProducer<String, String> producer,
+        String topic,
         int valueStart,
         int count
     ) throws Exception {
@@ -210,7 +353,7 @@ public class SharedStorageKRaftIntegrationTest {
         long lastOffset = -1L;
         for (int i = 0; i < count; i++) {
             int sequence = valueStart + i;
-            RecordMetadata metadata = producer.send(new ProducerRecord<>(TOPIC, 0, Integer.toString(sequence), value(sequence)))
+            RecordMetadata metadata = producer.send(new ProducerRecord<>(topic, 0, Integer.toString(sequence), value(sequence)))
                 .get(30, TimeUnit.SECONDS);
             if (firstOffset < 0) {
                 firstOffset = metadata.offset();
@@ -251,11 +394,11 @@ public class SharedStorageKRaftIntegrationTest {
         return ready[0];
     }
 
-    private static int waitForNewLeader(Admin admin, int oldLeader) throws Exception {
+    private static int waitForNewLeader(Admin admin, String topic, int oldLeader) throws Exception {
         final int[] leader = {-1};
         TestUtils.waitForCondition(() -> {
             try {
-                TopicDescription description = describeTopic(admin, TOPIC);
+                TopicDescription description = describeTopic(admin, topic);
                 if (description == null || description.partitions().isEmpty()) {
                     return false;
                 }
@@ -268,7 +411,7 @@ public class SharedStorageKRaftIntegrationTest {
             } catch (Exception ignored) {
                 return false;
             }
-        }, 60_000L, () -> "No new leader elected after stopping broker " + oldLeader);
+        }, 60_000L, () -> "No new leader for " + topic + " after stopping broker " + oldLeader);
         return leader[0];
     }
 
@@ -378,11 +521,13 @@ public class SharedStorageKRaftIntegrationTest {
                     }
                 }
             }
+            assertTrue(consumer.position(metadataPartition) >= endOffset,
+                "Timed out before reading the complete committed metadata snapshot");
         }
         return List.copyOf(latestCommitted.values());
     }
 
-    private static List<String> consumeAll(String bootstrapServers, int expectedRecords) {
+    private static List<String> consumeAll(String bootstrapServers, String topic, int expectedRecords) {
         Properties properties = new Properties();
         properties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
         properties.put(ConsumerConfig.CLIENT_ID_CONFIG, "shared-storage-e2e-consumer-" + UUID.randomUUID());
@@ -393,7 +538,7 @@ public class SharedStorageKRaftIntegrationTest {
         properties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         properties.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
 
-        TopicPartition partition = new TopicPartition(TOPIC, 0);
+        TopicPartition partition = new TopicPartition(topic, 0);
         List<String> values = new ArrayList<>(expectedRecords);
         try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(properties)) {
             consumer.assign(List.of(partition));
@@ -405,6 +550,8 @@ public class SharedStorageKRaftIntegrationTest {
                     values.add(record.value());
                 }
             }
+            assertEquals(expectedRecords, consumer.endOffsets(List.of(partition)).get(partition).longValue(),
+                "The acknowledged history must not contain extra records");
         }
         assertEquals(expectedRecords, values.size(), "Timed out waiting for all acknowledged records");
         return values;

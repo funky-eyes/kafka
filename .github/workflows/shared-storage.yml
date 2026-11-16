@@ -637,10 +637,13 @@ jobs:
           expected = {'ordinaryKafkaRemainsClassicAndCannotActivateWithoutExtension',
                       'legacyDefaultAllRoutingCannotActivateTopicMode',
                       'offlineReplicaDiscardsOldModeBeforeRecreatedTopicAssignment',
-                      'explicitTopicModeSurvivesRestartAndDoesNotLeakAcrossRecreation'}
+                      'explicitTopicModeSurvivesRestartAndDoesNotLeakAcrossRecreation',
+                      'missingExtensionBrokerCannotJoinActivatedTopicMode',
+                      'legacySelectorBrokerCannotJoinActivatedTopicMode',
+                      'incompatibleExtensionBrokerCannotJoinActivatedTopicMode'}
           actual = {case.get('name', '').removesuffix('()') for case in core.findall('testcase')}
           assert expected <= actual, sorted(expected - actual)
-          print('PASS: Topic routing, real Admin mutation, restart and recreation; zero skipped tests')
+          print('PASS: Topic routing, real Admin mutation, restart, recreation and incompatible-broker registration; zero skipped tests')
           PY
 
       - name: Run S3 module tests
@@ -779,6 +782,31 @@ jobs:
             -x :core:spotbugsTest \
             --no-scan 2>&1 | tee shared-storage-kraft-e2e.log
 
+      - name: Require executed legacy and Topic mode S3 failover evidence
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          name = 'kafka.server.SharedStorageKRaftIntegrationTest'
+          path = Path('core/build/test-results/test/TEST-' + name + '.xml')
+          suite = ET.parse(path).getroot()
+          expected = {
+              'acksAllCommittedWalTailIsUploadedByNewLeaderAfterFailover',
+              'topicConfigurationKeepsOrdinaryTopicsNativeDuringS3Failover',
+          }
+          assert suite.tag == 'testsuite' and suite.get('name') == name, str(path)
+          assert int(suite.get('tests', '0')) >= len(expected), str(path)
+          assert all(suite.get(field) == '0' for field in ('skipped', 'failures', 'errors')), str(path)
+          cases = suite.findall('testcase')
+          actual = {case.get('name', '').removesuffix('()') for case in cases}
+          assert expected <= actual, sorted(expected - actual)
+          assert all(case.find('skipped') is None for case in cases), str(path)
+          output = '\n'.join(node.text or '' for node in suite.iter('system-out'))
+          assert 'TOPIC_CONFIG_S3_FAILOVER_OK' in output
+          print('PASS: RF3 legacy and feature-one Topic mode, native ordinary logs, S3 failover; zero skips')
+          PY
+
       - name: Show committed S3 objects
         if: always()
         shell: bash
@@ -796,6 +824,7 @@ jobs:
             storage/shared-storage-s3/build/reports/tests/test
             storage/shared-storage-s3/build/test-results/test
             core/build/reports/tests/test
+            core/build/test-results/test
           if-no-files-found: ignore
           retention-days: 7
 
