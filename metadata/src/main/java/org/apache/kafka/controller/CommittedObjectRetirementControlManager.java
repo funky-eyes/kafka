@@ -80,6 +80,56 @@ final class CommittedObjectRetirementControlManager {
     }
 
     /**
+     * Stage only the first, non-authorizing KRaft retirement INTENT.
+     *
+     * <p>Package-private and intentionally not connected to any external RPC
+     * or production catalog observer. The caller's record is an untrusted
+     * identity claim; KRaft is authoritative only about the existence and
+     * CAS ordering of the intent, NOT its catalog proof. A separate trusted
+     * handoff must authenticate the source before this can be enabled in
+     * production. No call from here can advance DELETE_READY or issue S3 I/O.</p>
+     *
+     * <p>Only the controller event queue supplies the actual next write
+     * position. Repeated requests lose the single-writer CAS, including if
+     * the proposed descriptor matches an existing intent exactly.</p>
+     */
+    ControllerResult<Boolean> recordRetirementIntent(
+        CommittedObjectRetirementRecord proposed, long nextWriteOffset
+    ) {
+        Objects.requireNonNull(proposed, "proposed");
+        if (nextWriteOffset < 0L) {
+            throw new IllegalArgumentException("Negative KRaft next offset");
+        }
+        if (proposed.stage() != (byte) Stage.RETIRE_INTENT.wireId()
+            || proposed.previousKRaftOffset() != -1L
+            || proposed.safeEpoch() != -1L) {
+            throw new IllegalArgumentException("Only an ungranted first RETIRE_INTENT is supported");
+        }
+        if (entries.get(proposed.objectId()) != null) {
+            return ControllerResult.of(List.of(), false);
+        }
+        // Copy caller-controlled identity rather than modifying its mutable
+        // record. Never trust its accepted offset, safe epoch or next stage.
+        CommittedObjectRetirementRecord intent = new CommittedObjectRetirementRecord()
+            .setObjectId(proposed.objectId())
+            .setAcceptedKRaftOffset(nextWriteOffset)
+            .setPreviousKRaftOffset(-1L)
+            .setRetirementEpoch(proposed.retirementEpoch())
+            .setCatalogTopicId(proposed.catalogTopicId())
+            .setCatalogCommitOffset(proposed.catalogCommitOffset())
+            .setSealedCatalogPositionExclusive(proposed.sealedCatalogPositionExclusive())
+            .setObjectSize(proposed.objectSize())
+            .setObjectChecksum(proposed.objectChecksum())
+            .setDescriptorSha256(proposed.descriptorSha256())
+            .setStage((byte) Stage.RETIRE_INTENT.wireId())
+            .setSafeEpoch(-1L);
+        Entry next = Entry.fromRecord(intent);
+        CommittedObjectRetirementState.validateTransition(null, next);
+        return ControllerResult.atomicOf(
+            List.of(new ApiMessageAndVersion(intent, (short) 0)), true);
+    }
+
+    /**
      * Terminalize an already durably DELETE_RECORDED object in the same KRaft
      * event queue that serializes its lifecycle CAS.
      *
