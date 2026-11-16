@@ -299,6 +299,11 @@ final class FencedObjectLifecycleArbiter {
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(IO_TIMEOUT_SECONDS);
             while (consumer.position(partition) < end && System.nanoTime() < deadline) {
                 for (ConsumerRecord<byte[], byte[]> record : consumer.poll(Duration.ofMillis(200L))) {
+                    // poll() may return data appended after our captured LSO;
+                    // only the frozen read_committed horizon is evidence.
+                    if (record.offset() >= end) {
+                        continue;
+                    }
                     if (Arrays.equals(record.key(), key)) {
                         latest = SharedMetadataRecordCodec.decodeValue(
                             SharedMetadataRecordCodec.decodeKey(record.key()), record.value());
