@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-name: Shared Storage Orphan Compaction Recovery
+name: Shared Storage Orphan Compaction Recovery (Repository Broker)
 
 on:
   push:
@@ -57,7 +57,7 @@ permissions:
 jobs:
   compaction-recovery:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
         with:
@@ -67,6 +67,34 @@ jobs:
         uses: ./.github/actions/setup-minio
         with:
           bucket: kafka-orphan-compaction-test
+
+      - name: Setup Gradle
+        uses: ./.github/actions/setup-gradle
+        with:
+          java-version: 25
+          gradle-cache-read-only: true
+
+      - name: Build broker image from this checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew :core:releaseTarGz --no-scan
+          mapfile -t archives < <(find "$PWD/core/build/distributions" -maxdepth 1 -type f \
+            \( -name '*.tgz' -o -name '*.tar.gz' \) ! -name '*site-docs*' | sort)
+          test "${#archives[@]}" -eq 1
+          archive="${archives[0]}"
+          sha256sum "$archive"
+          echo "Broker checkout: $(git rev-parse HEAD)"
+          # Use the repository's Docker build context and the locally built
+          # archive. The runtime image uses JRE 21; release classes target 17.
+          PYTHONPATH="$PWD/docker" python3 - "$archive" <<'PY'
+          import sys
+          from common import build_docker_image_runner
+          build_docker_image_runner(
+              'docker build -f $DOCKER_FILE -t kafka-orphan-local:ci --progress=plain $DOCKER_DIR',
+              'jvm', sys.argv[1])
+          PY
+          docker image inspect kafka-orphan-local:ci --format '{{.Id}}'
 
       - name: Start three isolated Kafka brokers
         shell: bash
@@ -92,7 +120,7 @@ jobs:
               -e KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=2 \
               -e KAFKA_LOG_CLEANER_BACKOFF_MS=1000 \
               -e KAFKA_HEAP_OPTS='-Xms128m -Xmx512m' \
-              apache/kafka:4.3.1
+              kafka-orphan-local:ci
           done
           for attempt in $(seq 1 90); do
             if docker exec orphan-kafka-1 /opt/kafka/bin/kafka-broker-api-versions.sh \
@@ -103,12 +131,6 @@ jobs:
           done
           echo 'Kafka did not become ready' >&2
           exit 1
-
-      - name: Setup Gradle
-        uses: ./.github/actions/setup-gradle
-        with:
-          java-version: 25
-          gradle-cache-read-only: true
 
       - name: Run metadata and real Kafka/MinIO recovery tests
         shell: bash
