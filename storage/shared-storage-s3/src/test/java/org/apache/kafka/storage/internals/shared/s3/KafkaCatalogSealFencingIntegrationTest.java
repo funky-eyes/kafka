@@ -48,6 +48,7 @@ import java.util.OptionalLong;
 import java.util.Properties;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -133,6 +134,7 @@ class KafkaCatalogSealFencingIntegrationTest {
                     assertFalse(store.sealCommittedForExperiment(object, commit.offset(), epoch)
                         .get(60, TimeUnit.SECONDS).isPresent());
                     assertRecreatedCatalogRejectsSeal(admin, config, store, topic, topicId, object);
+                    assertIdentityCheckDetectsRecreationDuringReplay(admin, config, topic);
                 }
             } finally {
                 admin.deleteTopics(List.of(topic)).all().get(30, TimeUnit.SECONDS);
@@ -158,6 +160,43 @@ class KafkaCatalogSealFencingIntegrationTest {
         store.prepare(next.objectId(), 1_001L).get(30, TimeUnit.SECONDS);
         store.commit(next).get(30, TimeUnit.SECONDS);
         long offset = latestRecord(config, SharedMetadataRecordCodec.objectKey(next.objectId())).offset();
+        recreateCatalog(admin, config, topic, originalTopicId);
+        // Consumer failure, observed identity change, or an absent candidate
+        // all fail closed; none may report a successful seal of the old COMMIT.
+        try {
+            assertTrue(store.sealCommittedForExperiment(next, offset, 10L)
+                .get(60, TimeUnit.SECONDS).isEmpty());
+        } catch (ExecutionException expected) {
+            assertTrue(expected.getCause() instanceof IllegalStateException);
+        }
+    }
+
+    private static void assertIdentityCheckDetectsRecreationDuringReplay(
+        Admin admin, SharedMetadataClientConfiguration config, String topic
+    ) throws Exception {
+        Uuid originalId = admin.describeTopics(List.of(topic)).allTopicNames().get(30, TimeUnit.SECONDS)
+            .get(topic).topicId();
+        assertNotEquals(Uuid.ZERO_UUID, originalId);
+        AtomicInteger lookups = new AtomicInteger();
+        // This exercises the identity helper with a real Admin and controlled
+        // replay boundary; it does not make name-based writes atomic.
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+            () -> KafkaObjectMetadataStore.checkCatalogIdentityAroundReplay(originalId, () -> {
+                lookups.incrementAndGet();
+                return admin.describeTopics(List.of(topic)).allTopicNames().get(30, TimeUnit.SECONDS)
+                    .get(topic).topicId();
+            }, () -> {
+                assertEquals(1, lookups.get(), "The first identity check must precede replay");
+                recreateCatalog(admin, config, topic, originalId);
+                return true;
+            }));
+        assertEquals("Catalog Topic ID is missing or changed", failure.getMessage());
+        assertEquals(2, lookups.get(), "The replacement ID must be checked after replay");
+    }
+
+    private static void recreateCatalog(
+        Admin admin, SharedMetadataClientConfiguration config, String topic, Uuid originalTopicId
+    ) throws Exception {
         admin.deleteTopics(List.of(topic)).all().get(30, TimeUnit.SECONDS);
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
         boolean created = false;
@@ -174,14 +213,6 @@ class KafkaCatalogSealFencingIntegrationTest {
         }
         assertTrue(created, "The old catalog topic must be deleted before recreation");
         awaitReplacementTopicId(admin, topic, originalTopicId);
-        // Consumer failure, observed identity change, or an absent candidate
-        // all fail closed; none may report a successful seal of the old COMMIT.
-        try {
-            assertTrue(store.sealCommittedForExperiment(next, offset, 10L)
-                .get(60, TimeUnit.SECONDS).isEmpty());
-        } catch (ExecutionException expected) {
-            assertTrue(expected.getCause() instanceof IllegalStateException);
-        }
     }
 
     private static void awaitReplacementTopicId(Admin admin, String topic, Uuid oldId) throws Exception {
