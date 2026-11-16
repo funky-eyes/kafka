@@ -222,27 +222,14 @@ public final class SharedMetadataImage {
         }
         CatalogSealEvidence seal = catalogSeals.get(objectId);
         if (seal != null) {
-            // A late or retried COMMIT cannot publish any new reference after
-            // its durable Kafka catalog seal. Identity mismatch means corrupt
-            // metadata; a matching duplicate loses to the earlier seal.
-            if (!committed.fenced()
-                || !metadata.equals(committedObjects.get(objectId))
-                || !seal.seal().descriptorSha256().equals(SharedMetadataRecordCodec.committedDescriptorSha256(metadata))) {
-                throw corruption("Post-seal object COMMIT has a conflicting descriptor: " + objectId);
-            }
+            validatePostSealCommit(objectId, committed, seal);
             return;
         }
         if (suppressCommitAfterCleanup(objectId)) {
             return;
         }
         SharedObjectMetadata existing = committedObjects.putIfAbsent(objectId, metadata);
-        if (existing != null && !existing.equals(metadata)) {
-            throw corruption("object " + objectId + " has conflicting COMMITTED metadata");
-        }
-        if (existing != null && committedObjectPositions.containsKey(objectId)
-            && committedObjectPositions.get(objectId).fenced() != committed.fenced()) {
-            throw corruption("COMMIT changed its original v2 fencing provenance: " + objectId);
-        }
+        validateExistingCommit(objectId, existing, committed);
         preparedObjects.remove(objectId);
         if (existing == null) {
             committedObjectPositions.put(objectId, new CommitProvenance(recordOffset, committed.fenced()));
@@ -251,6 +238,34 @@ public final class SharedMetadataImage {
             // Historical replay must finish before publishing its final
             // COMMITTED winners into the broker's remote read index.
             committedObjectListener.accept(metadata);
+        }
+    }
+
+    /**
+     * Post-seal identical retries must never replace the original COMMIT or
+     * downgrade its transactional v2 provenance after log compaction.
+     */
+    private void validatePostSealCommit(
+        long objectId, CommittedObjectValue committed, CatalogSealEvidence seal
+    ) {
+        SharedObjectMetadata metadata = committed.metadata();
+        if (!committed.fenced()
+            || !metadata.equals(committedObjects.get(objectId))
+            || !seal.seal().descriptorSha256().equals(SharedMetadataRecordCodec.committedDescriptorSha256(metadata))) {
+            throw corruption("Post-seal object COMMIT has a conflicting descriptor: " + objectId);
+        }
+    }
+
+    private void validateExistingCommit(long objectId, SharedObjectMetadata existing, CommittedObjectValue incoming) {
+        if (existing == null) {
+            return;
+        }
+        if (!existing.equals(incoming.metadata())) {
+            throw corruption("object " + objectId + " has conflicting COMMITTED metadata");
+        }
+        CommitProvenance original = committedObjectPositions.get(objectId);
+        if (original != null && original.fenced() != incoming.fenced()) {
+            throw corruption("COMMIT changed its original v2 fencing provenance: " + objectId);
         }
     }
 
@@ -277,6 +292,19 @@ public final class SharedMetadataImage {
         if (recordOffset < 0L || seal.originalCommitOffset() >= recordOffset) {
             throw corruption("Catalog seal requires a later, actual read-committed Kafka record offset");
         }
+        validateOriginalCommitForSeal(objectId, seal);
+        CatalogSealEvidence next = new CatalogSealEvidence(recordOffset, seal);
+        CatalogSealEvidence prior = catalogSeals.get(objectId);
+        if (prior != null && !prior.equals(next)) {
+            throw corruption("Conflicting catalog seal generations for object " + objectId);
+        }
+        catalogSeals.putIfAbsent(objectId, next);
+        // Keep existing COMMITTED references readable. This replay fact
+        // DOES NOT retire primary/alternate indexes, drain readers, or
+        // grant DELETE permission.
+    }
+
+    private void validateOriginalCommitForSeal(long objectId, ObjectCatalogSealValue seal) {
         SharedObjectMetadata original = committedObjects.get(objectId);
         CommitProvenance committedPosition = committedObjectPositions.get(objectId);
         if (original == null || committedPosition == null
@@ -295,15 +323,6 @@ public final class SharedMetadataImage {
             || !SharedMetadataRecordCodec.committedDescriptorSha256(original).equals(seal.descriptorSha256())) {
             throw corruption("Catalog seal changed an immutable packed object descriptor: " + objectId);
         }
-        CatalogSealEvidence next = new CatalogSealEvidence(recordOffset, seal);
-        CatalogSealEvidence prior = catalogSeals.get(objectId);
-        if (prior != null && !prior.equals(next)) {
-            throw corruption("Conflicting catalog seal generations for object " + objectId);
-        }
-        catalogSeals.putIfAbsent(objectId, next);
-        // Keep existing COMMITTED references readable. This replay fact
-        // DOES NOT retire primary/alternate indexes, drain readers, or
-        // grant DELETE permission.
     }
 
     /** Read-only exact COMMIT/seal evidence, not cross-log Controller authority. */
