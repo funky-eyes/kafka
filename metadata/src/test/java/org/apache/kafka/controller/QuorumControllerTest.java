@@ -285,6 +285,21 @@ public class QuorumControllerTest {
     }
 
     @Test
+    public void testCommittedObjectIntentBatchCannotBypassUnnegotiatedFeature() throws Exception {
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv env = new QuorumControllerTestEnv.Builder(clientEnv).build()
+        ) {
+            QuorumController controller = env.activeController(true);
+            long before = committedRetirementRecordCount(clientEnv);
+            var candidate = terminalFixtureRecord(703L, 0L, -1L, 1, Uuid.randomUuid());
+            assertEquals(0, controller.recordUnverifiedCommittedObjectRetirementIntentBatch(
+                List.of(candidate)).get(10, TimeUnit.SECONDS));
+            assertEquals(before, committedRetirementRecordCount(clientEnv));
+        }
+    }
+
+    @Test
     public void testCommittedObjectIntentCannotBypassUnnegotiatedFeature() throws Exception {
         try (
             MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();

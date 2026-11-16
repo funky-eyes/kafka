@@ -1664,6 +1664,28 @@ public final class QuorumController implements Controller {
     }
 
     /**
+     * Bounded, non-authorizing batch equivalent of the first INTENT.
+     * Freeze every mutable input before Controller queue submission. No
+     * authenticated handoff or physical DELETE authority is introduced.
+     */
+    CompletableFuture<Integer> recordUnverifiedCommittedObjectRetirementIntentBatch(
+        List<CommittedObjectRetirementRecord> proposed
+    ) {
+        List<CommittedObjectRetirementRecord> immutable = Objects.requireNonNull(proposed, "proposed")
+            .stream()
+            .map(candidate -> org.apache.kafka.metadata.CommittedObjectRetirementState.Entry
+                .fromRecord(candidate).toRecord())
+            .toList();
+        return appendWriteEvent("recordUnverifiedCommittedObjectRetirementIntentBatch", OptionalLong.empty(), () -> {
+            if (!featureControl.isPartitionRetirementAuthorityEnabled()) {
+                return ControllerResult.of(List.of(), 0);
+            }
+            return committedObjectRetirementControl.recordRetirementIntentBatch(
+                immutable, offsetControl.nextWriteOffset());
+        });
+    }
+
+    /**
      * Complete the terminal KRaft bookkeeping ONLY after DELETE_RECORDED.
      *
      * <p>Package-private until a version-negotiated Controller protocol has
