@@ -139,7 +139,11 @@ public final class SharedStorageModeMarker {
         if (legacyAdoption && Files.isDirectory(dir)) {
             try (Stream<Path> entries = Files.list(dir)) {
                 for (Path entry : entries.toList()) {
-                    if (entry.getFileName().toString().endsWith(".log") && Files.size(entry) != 0) {
+                    Path fileName = entry.getFileName();
+                    if (fileName == null) {
+                        throw new IOException("Invalid entry in shared log directory: " + entry);
+                    }
+                    if (fileName.toString().endsWith(".log") && Files.size(entry) != 0) {
                         throw new IOException("Cannot adopt native Kafka payloads as shared storage: " + entry);
                     }
                 }
@@ -179,7 +183,10 @@ public final class SharedStorageModeMarker {
         }
         Set<String> ignoredNames = Set.of(ignored);
         try (Stream<Path> entries = Files.list(dir)) {
-            return entries.anyMatch(entry -> !ignoredNames.contains(entry.getFileName().toString()));
+            return entries.anyMatch(entry -> {
+                Path fileName = entry.getFileName();
+                return fileName == null || !ignoredNames.contains(fileName.toString());
+            });
         }
     }
 

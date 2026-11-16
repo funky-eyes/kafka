@@ -20,6 +20,10 @@ on:
     branches:
       - shared-wal-s3-4.3.1
     paths:
+      - 'metadata/src/test/java/org/apache/kafka/metadata/storage/FormatterTest.java'
+      - 'metadata/src/test/java/org/apache/kafka/controller/QuorumFeaturesTest.java'
+      - 'core/src/test/scala/unit/kafka/tools/StorageToolTest.scala'
+      - 'tools/src/test/java/org/apache/kafka/tools/FeatureCommandTest.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/SharedStorageConfigurationControlManagerTest.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/SharedStorageFeatureControlManagerTest.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/ReplicationControlManagerTest.java'
@@ -157,6 +161,10 @@ on:
       - '.github/workflows/shared-storage.yml'
   pull_request:
     paths:
+      - 'metadata/src/test/java/org/apache/kafka/metadata/storage/FormatterTest.java'
+      - 'metadata/src/test/java/org/apache/kafka/controller/QuorumFeaturesTest.java'
+      - 'core/src/test/scala/unit/kafka/tools/StorageToolTest.scala'
+      - 'tools/src/test/java/org/apache/kafka/tools/FeatureCommandTest.java'
       - 'core/src/main/scala/kafka/server/metadata/BrokerMetadataPublisher.scala'
       - 'metadata/src/test/java/org/apache/kafka/controller/SharedStorageConfigurationControlManagerTest.java'
       - 'metadata/src/test/java/org/apache/kafka/controller/SharedStorageFeatureControlManagerTest.java'
@@ -457,6 +465,7 @@ jobs:
             --tests 'kafka.server.ControllerApisTest.testLegacyBrokerHeartbeatStillTraversesUnmodifiedControllerPath' \
             --tests 'kafka.server.BrokerSourceWalProbeAdapterTest' \
             --tests 'kafka.server.SharedStorageTopicConfigurationTest' \
+            --tests 'kafka.tools.StorageToolTest' \
             --no-scan 2>&1 | tee shared-storage-logmanager-regression.log
           python3 - <<'PY'
           from pathlib import Path
@@ -498,11 +507,21 @@ jobs:
           print(f'PASS: {len(broker_methods)} Broker native Source/WAL lookup tests')
           PY
 
-      - name: Run shared storage tests
+      - name: Run Kafka feature command compatibility tests
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -o pipefail
-          ./gradlew :storage:test --no-scan \
+          ./gradlew :tools:test --no-scan \
+            --tests 'org.apache.kafka.tools.FeatureCommandTest' \
+            2>&1 | tee shared-storage-feature-command-test.log
+
+      - name: Run shared storage tests
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew :storage:test --continue --no-scan \
             --tests 'org.apache.kafka.storage.internals.shared.*' \
             --tests 'org.apache.kafka.storage.internals.shared.metadata.*' \
             --tests 'org.apache.kafka.storage.internals.shared.object.*' \
@@ -514,6 +533,7 @@ jobs:
             2>&1 | tee shared-storage-test.log
 
       - name: Run KRaft controller retirement source preflight tests
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -o pipefail
@@ -556,6 +576,8 @@ jobs:
             --tests 'org.apache.kafka.controller.PartitionRetirementControlManagerTest' \
             --tests 'org.apache.kafka.controller.SharedStorageConfigurationControlManagerTest' \
             --tests 'org.apache.kafka.controller.SharedStorageFeatureControlManagerTest' \
+            --tests 'org.apache.kafka.controller.QuorumFeaturesTest' \
+            --tests 'org.apache.kafka.metadata.storage.FormatterTest' \
             --tests 'org.apache.kafka.controller.ReplicationControlManagerTest.testSharedStorage*' \
             --tests 'org.apache.kafka.controller.PartitionRetirementCandidatePrecheckTest' \
             --tests 'org.apache.kafka.controller.PartitionRetirementFeatureGateTest' \
@@ -565,6 +587,7 @@ jobs:
             2>&1 | tee shared-storage-controller-retirement-test.log
 
       - name: Run KRaft retirement feature version compatibility tests
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -o pipefail
@@ -591,12 +614,15 @@ jobs:
           from pathlib import Path
           import xml.etree.ElementTree as ET
           suites = {
-              'core': ['kafka.server.SharedStorageTopicConfigurationTest'],
+              'core': ['kafka.server.SharedStorageTopicConfigurationTest', 'kafka.tools.StorageToolTest'],
               'metadata': ['org.apache.kafka.controller.SharedStorageConfigurationControlManagerTest',
-                           'org.apache.kafka.controller.SharedStorageFeatureControlManagerTest'],
+                           'org.apache.kafka.controller.SharedStorageFeatureControlManagerTest',
+                           'org.apache.kafka.controller.QuorumFeaturesTest',
+                           'org.apache.kafka.metadata.storage.FormatterTest'],
               'storage': ['org.apache.kafka.storage.internals.log.SharedStorageLogConfigTest'],
               'server': ['org.apache.kafka.server.SharedStorageBrokerFeaturesTest'],
               'server-common': ['org.apache.kafka.server.common.SharedStorageVersionTest'],
+              'tools': ['org.apache.kafka.tools.FeatureCommandTest'],
           }
           for module, names in suites.items():
               for name in names:
@@ -606,6 +632,7 @@ jobs:
                   assert int(suite.get('tests', '0')) > 0, str(path)
                   assert all(suite.get(field) == '0' for field in ('skipped', 'failures', 'errors')), str(path)
                   assert all(case.find('skipped') is None for case in suite.findall('testcase')), str(path)
+                  print(f"PASS: {name}: {suite.get('tests')} tests; zero skips")
           core = ET.parse(Path('core/build/test-results/test/TEST-kafka.server.SharedStorageTopicConfigurationTest.xml')).getroot()
           expected = {'ordinaryKafkaRemainsClassicAndCannotActivateWithoutExtension',
                       'legacyDefaultAllRoutingCannotActivateTopicMode',
@@ -639,6 +666,7 @@ jobs:
             shared-storage-test.log
             shared-storage-source-probe-wire-test.log
             shared-storage-broker-probe-test.log
+            shared-storage-feature-command-test.log
             shared-storage-controller-retirement-test.log
             shared-storage-retirement-feature-test.log
             shared-storage-s3-test.log
@@ -655,6 +683,8 @@ jobs:
             storage/build/reports/checkstyle
             metadata/build/reports/checkstyle
             metadata/build/reports/spotbugs
+            tools/build/reports/checkstyle
+            tools/build/reports/spotbugs
             storage/shared-storage-s3/build/reports/spotbugs
             storage/shared-storage-s3/build/reports/checkstyle
           if-no-files-found: ignore
@@ -679,6 +709,8 @@ jobs:
             storage/shared-storage-s3/build/reports/tests/test
             core/build/reports/tests/test
             core/build/test-results/test
+            tools/build/reports/tests/test
+            tools/build/test-results/test
           if-no-files-found: ignore
           retention-days: 7
 

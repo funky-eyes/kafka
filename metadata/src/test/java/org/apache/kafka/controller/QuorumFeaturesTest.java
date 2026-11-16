@@ -70,7 +70,8 @@ public class QuorumFeaturesTest {
             MetadataVersion.MINIMUM_VERSION.featureLevel(),
             MetadataVersion.latestTesting().featureLevel()));
         for (Feature feature : Feature.PRODUCTION_FEATURES) {
-            short maxVersion = feature.defaultLevel(MetadataVersion.latestTesting());
+            // Supported capability is independent of a feature's activation default.
+            short maxVersion = feature.latestTesting();
             if (maxVersion > 0) {
                 expectedFeatures.put(feature.featureName(), VersionRange.of(
                     feature.minimumProduction(),
