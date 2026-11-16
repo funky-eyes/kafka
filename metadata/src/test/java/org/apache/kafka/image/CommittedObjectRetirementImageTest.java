@@ -111,6 +111,26 @@ class CommittedObjectRetirementImageTest {
     }
 
     @Test
+    void metadataDeltaExposesOnlyChangedKRaftObjectEntries() {
+        MetadataDelta snapshot = negotiated();
+        assertEquals(null, snapshot.committedObjectRetirementDelta());
+        snapshot.replay(record(100L, 10L, -1L, 1, -1L));
+        snapshot.replay(record(101L, 11L, -1L, 1, -1L));
+        assertEquals(2, snapshot.committedObjectRetirementDelta().changedEntries().size());
+        assertEquals(CommittedObjectRetirementState.Stage.RETIRE_INTENT,
+            snapshot.committedObjectRetirementDelta().changedEntries().get(100L).stage());
+
+        MetadataDelta incremental = new MetadataDelta.Builder()
+            .setImage(snapshot.apply(MetadataProvenance.EMPTY)).build();
+        assertEquals(null, incremental.committedObjectRetirementDelta());
+        incremental.replay(record(100L, 12L, 10L, 2, 30L));
+        Map<Long, Entry> changed = incremental.committedObjectRetirementDelta().changedEntries();
+        assertEquals(1, changed.size());
+        assertEquals(CommittedObjectRetirementState.Stage.DELETE_READY, changed.get(100L).stage());
+        assertThrows(UnsupportedOperationException.class, () -> changed.clear());
+    }
+
+    @Test
     void incompleteSnapshotCannotRemoveUnmentionedObjectsInOrdinaryDelta() {
         Entry first = Entry.fromRecord(record(100L, 10L, -1L, 1, -1L));
         Entry second = Entry.fromRecord(record(101L, 11L, -1L, 1, -1L));

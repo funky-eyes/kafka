@@ -31,7 +31,7 @@ import org.apache.kafka.coordinator.transaction.TransactionLogConfig
 import org.apache.kafka.image.loader.LoaderManifest
 import org.apache.kafka.image.publisher.MetadataPublisher
 import org.apache.kafka.image.{MetadataDelta, MetadataImage, TopicDelta}
-import org.apache.kafka.metadata.KRaftMetadataCache
+import org.apache.kafka.metadata.{CommittedObjectRetirementState, KRaftMetadataCache}
 import org.apache.kafka.metadata.publisher.{AclPublisher, DelegationTokenPublisher, DynamicClientQuotaPublisher, DynamicTopicClusterQuotaPublisher, ScramPublisher}
 import org.apache.kafka.server.common.MetadataVersion.MINIMUM_VERSION
 import org.apache.kafka.server.common.{FinalizedFeatures, ShareVersion}
@@ -128,6 +128,23 @@ class BrokerMetadataPublisher(
 
       // Publish the new metadata image to the metadata cache.
       metadataCache.setImage(newImage)
+
+      // Before LogManager recovery (initial snapshot) or replica publication
+      // (incremental update), restore irreversible local admission fences.
+      // Only KRaft DELETE_READY and later block reads/uploads; a first
+      // RETIRE_INTENT is not a physical retirement authorization.
+      // In steady state this reads ONLY the changed KRaft object entries.
+      if (_firstPublish || delta.committedObjectRetirementDelta() != null) {
+        val entries = if (_firstPublish)
+          newImage.committedObjectRetirements().entries().values()
+        else
+          delta.committedObjectRetirementDelta().changedEntries().values()
+        entries.asScala.foreach { entry =>
+          if (entry.stage() != CommittedObjectRetirementState.Stage.RETIRE_INTENT) {
+            logManager.fenceCommittedObject(entry.objectId())
+          }
+        }
+      }
 
       def metadataVersionLogMsg = s"metadata.version ${newImage.features().metadataVersion()}"
 
