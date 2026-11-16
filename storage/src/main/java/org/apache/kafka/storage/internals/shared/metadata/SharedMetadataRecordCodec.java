@@ -52,6 +52,9 @@ public final class SharedMetadataRecordCodec {
     private static final byte OBJECT_CATALOG_SEALED = 7;
     private static final byte OBJECT_FENCED_PREPARED = 8;
     private static final byte OBJECT_FENCED_CLAIMED = 9;
+    // Experimental opt-in: the replayable v2 COMMIT marker must never be
+    // confused with an unfenced legacy COMMIT in catalog sealing.
+    private static final byte OBJECT_FENCED_COMMITTED = 10;
     private static final int VALUE_HEADER_BYTES = Short.BYTES + Byte.BYTES;
     private static final int COMMITTED_OBJECT_HEADER_BYTES = Long.BYTES + Long.BYTES + Integer.BYTES;
     private static final int CATALOG_SEAL_DIGEST_BYTES = 64;
@@ -208,6 +211,17 @@ public final class SharedMetadataRecordCodec {
             .array();
     }
 
+    /**
+     * Same immutable descriptor as the legacy COMMIT, but with an explicit
+     * opt-in fenced producer provenance marker surviving key compaction.
+     * The marker alone is NOT proof of the Kafka transactional producer ID.
+     */
+    public static byte[] fencedCommittedObjectValue(SharedObjectMetadata metadata) {
+        byte[] value = committedObjectValue(metadata);
+        value[Short.BYTES] = OBJECT_FENCED_COMMITTED;
+        return value;
+    }
+
     public static byte[] committedObjectValue(SharedObjectMetadata metadata) {
         Objects.requireNonNull(metadata, "metadata");
         if (metadata.objectId() <= 0) {
@@ -345,8 +359,8 @@ public final class SharedMetadataRecordCodec {
         if (type == OBJECT_FENCED_CLAIMED) {
             return new FencedClaimedObjectValue(decodeCreatedTime(buffer, "fenced claimed object value"));
         }
-        if (type == OBJECT_COMMITTED) {
-            return decodeCommittedObject(objectId, buffer);
+        if (type == OBJECT_COMMITTED || type == OBJECT_FENCED_COMMITTED) {
+            return decodeCommittedObject(objectId, buffer, type == OBJECT_FENCED_COMMITTED);
         }
         throw corruption("object key has incompatible value type " + type);
     }
@@ -412,7 +426,9 @@ public final class SharedMetadataRecordCodec {
         return createdTimeMs;
     }
 
-    private static CommittedObjectValue decodeCommittedObject(long objectId, ByteBuffer buffer) {
+    private static CommittedObjectValue decodeCommittedObject(
+        long objectId, ByteBuffer buffer, boolean fenced
+    ) {
         requireAtLeastRemaining(buffer, COMMITTED_OBJECT_HEADER_BYTES, "committed object header");
         long objectSize = buffer.getLong();
         long objectChecksum = buffer.getLong();
@@ -462,7 +478,7 @@ public final class SharedMetadataRecordCodec {
                 objectSize,
                 objectChecksum,
                 ranges
-            ));
+            ), fenced);
         } catch (IllegalArgumentException e) {
             throw corruption("invalid committed object metadata", e);
         }
@@ -570,9 +586,13 @@ public final class SharedMetadataRecordCodec {
     public record FencedClaimedObjectValue(long createdTimeMs) implements MetadataValue {
     }
 
-    public record CommittedObjectValue(SharedObjectMetadata metadata) implements MetadataValue {
+    public record CommittedObjectValue(SharedObjectMetadata metadata, boolean fenced) implements MetadataValue {
         public CommittedObjectValue {
             Objects.requireNonNull(metadata, "metadata");
+        }
+
+        public CommittedObjectValue(SharedObjectMetadata metadata) {
+            this(metadata, false);
         }
     }
 
