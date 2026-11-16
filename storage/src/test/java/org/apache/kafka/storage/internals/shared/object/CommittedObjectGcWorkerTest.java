@@ -313,6 +313,41 @@ class CommittedObjectGcWorkerTest {
     }
 
     @Test
+    void synchronousDeleteFailureWaitsForPreviouslyStartedDeleteBeforeRetry() {
+        TestContext ctx = new TestContext();
+        for (long id : List.of(501L, 502L)) {
+            ctx.put(id);
+            ctx.authority.add(id);
+            ctx.fence.fence(id);
+        }
+        CompletableFuture<Void> firstDelete = new CompletableFuture<>();
+        ctx.store.blockedDelete = firstDelete;
+        ctx.store.throwOnDeleteId = 502L;
+
+        CompletableFuture<CommittedObjectGcWorker.SweepStats> pending = ctx.worker.sweep();
+        assertFalse(pending.isDone(), "A synchronous failure must not abandon the first physical DELETE");
+        assertThrows(CompletionException.class, () -> ctx.worker.sweep().join());
+        assertEquals(0, ctx.authority.completions.get());
+        ctx.store.blockedDelete = null;
+        ctx.store.throwOnDeleteId = -1L;
+        firstDelete.complete(null);
+        assertThrows(CompletionException.class, pending::join);
+        assertEquals(0, ctx.authority.completions.get());
+        assertEquals(2, ctx.authority.ready.size());
+        assertEquals(new CommittedObjectGcWorker.SweepStats(2, 0, 2), ctx.worker.sweep().join());
+    }
+
+    @Test
+    void defaultBatchValidatesEveryIdBeforeStartingDeletes() {
+        TestStore store = new TestStore();
+        List<Long> ids = new ArrayList<>();
+        ids.add(501L);
+        ids.add(null);
+        assertThrows(NullPointerException.class, () -> store.defaultBatch(ids));
+        assertEquals(0, store.deletes.get());
+    }
+
+    @Test
     void duplicateAndOversizedAuthorityBatchesAreRejectedBeforeAnyDelete() {
         TestContext ctx = new TestContext();
         ctx.put(OBJECT_ID);
@@ -435,6 +470,7 @@ class CommittedObjectGcWorkerTest {
         private final List<List<Long>> batches = new ArrayList<>();
         private final AtomicBoolean failNext = new AtomicBoolean();
         private volatile CompletableFuture<Void> blockedDelete;
+        private volatile long throwOnDeleteId = -1L;
 
         @Override
         public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
@@ -452,9 +488,16 @@ class CommittedObjectGcWorkerTest {
             return ObjectStore.super.deleteBatch(ids);
         }
 
+        private CompletableFuture<Void> defaultBatch(List<Long> ids) {
+            return ObjectStore.super.deleteBatch(ids);
+        }
+
         @Override
         public CompletableFuture<Void> delete(long id) {
             deletes.incrementAndGet();
+            if (id == throwOnDeleteId) {
+                throw new IllegalStateException("injected synchronous DELETE failure");
+            }
             if (failNext.compareAndSet(true, false)) {
                 return CompletableFuture.failedFuture(new IllegalStateException("injected MinIO DELETE failure"));
             }

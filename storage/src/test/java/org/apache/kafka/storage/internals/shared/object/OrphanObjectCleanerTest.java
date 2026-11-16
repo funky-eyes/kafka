@@ -206,6 +206,46 @@ class OrphanObjectCleanerTest {
     }
 
     @Test
+    void synchronousBatchFailureKeepsOrphanIdsInFlightUntilEarlierDeleteCompletes() throws Exception {
+        InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
+        metadata.prepare(60_101L, 50L).get();
+        metadata.prepare(60_102L, 50L).get();
+        CompletableFuture<Void> firstDelete = new CompletableFuture<>();
+        AtomicBoolean failSecond = new AtomicBoolean(true);
+        AtomicInteger attempts = new AtomicInteger();
+        ObjectStore store = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long id, ByteBuffer data) {
+                return CompletableFuture.completedFuture(null);
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long id, long position, int length) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long id) {
+                attempts.incrementAndGet();
+                if (id == 60_102L && failSecond.get()) {
+                    throw new IllegalStateException("injected synchronous DELETE failure");
+                }
+                return id == 60_101L ? firstDelete : CompletableFuture.completedFuture(null);
+            }
+        };
+        OrphanObjectCleaner cleaner = new OrphanObjectCleaner(store, metadata);
+        CompletableFuture<Integer> pending = cleaner.clean(1_000L);
+        assertFalse(pending.isDone());
+        assertEquals(0, cleaner.clean(1_000L).get(10, TimeUnit.SECONDS));
+        assertEquals(2, attempts.get());
+        failSecond.set(false);
+        firstDelete.complete(null);
+        assertThrows(ExecutionException.class, () -> pending.get(10, TimeUnit.SECONDS));
+        assertEquals(2, cleaner.clean(1_000L).get(10, TimeUnit.SECONDS));
+        assertEquals(4, attempts.get());
+    }
+
+    @Test
     void committedObjectIsNeverClaimedOrDeleted() throws Exception {
         InMemoryObjectStore objects = new InMemoryObjectStore();
         InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
