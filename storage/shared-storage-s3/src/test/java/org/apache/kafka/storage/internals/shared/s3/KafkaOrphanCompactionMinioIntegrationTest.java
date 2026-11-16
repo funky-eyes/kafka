@@ -375,6 +375,23 @@ class KafkaOrphanCompactionMinioIntegrationTest {
                 assertEquals(epoch, evidence.seal().retirementEpoch());
                 assertEquals(SharedMetadataRecordCodec.committedDescriptorSha256(descriptor),
                     evidence.seal().descriptorSha256());
+
+                // A PREPARED-only uploader must not turn a sampled catalog
+                // into a fake COMMITTED seal. Initializing the sealer still
+                // fences that uploader's producer before its late COMMIT.
+                long pendingObjectId = objectId + 1L;
+                SharedObjectMetadata pending = new SharedObjectMetadata(
+                    pendingObjectId, 128L, 71L, descriptor.ranges());
+                try (FencedObjectLifecycleArbiter.Uploader pendingUploader =
+                         new FencedObjectLifecycleArbiter.Uploader(
+                             properties, topic, namespace, pendingObjectId)) {
+                    long preparedOffset = pendingUploader.prepare(2_000L);
+                    assertFalse(FencedObjectLifecycleArbiter.sealCommittedAfterFencing(
+                        properties, topic, namespace, pending, preparedOffset, epoch
+                    ).isPresent(), "PREPARED is never a COMMITTED catalog seal");
+                    assertThrows(Exception.class, () -> pendingUploader.commit(pending),
+                        "The old PREPARED uploader must be fenced before a late COMMIT");
+                }
             } finally {
                 admin.deleteTopics(List.of(topic)).all().get(30, TimeUnit.SECONDS);
             }
