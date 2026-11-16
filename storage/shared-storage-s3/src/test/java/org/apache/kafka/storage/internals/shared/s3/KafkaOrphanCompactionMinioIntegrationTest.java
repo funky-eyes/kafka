@@ -89,7 +89,7 @@ class KafkaOrphanCompactionMinioIntegrationTest {
      */
     @Test
     @Timeout(value = 6, unit = TimeUnit.MINUTES)
-    void staleUploaderEpochErrorCannotReviveClaimAfterAbort() throws Exception {
+    void staleUploaderEpochAndFencedAbortCannotReviveClaim() throws Exception {
         String bootstrap = System.getenv("SHARED_STORAGE_KAFKA_BOOTSTRAP_SERVERS");
         String endpoint = System.getenv("SHARED_STORAGE_S3_ENDPOINT");
         assumeTrue(bootstrap != null && !bootstrap.isBlank(), "Kafka integration brokers are not configured");
@@ -191,7 +191,7 @@ class KafkaOrphanCompactionMinioIntegrationTest {
             ExecutionException oldEpoch = assertThrows(ExecutionException.class,
                 () -> oldCommit.get(60, TimeUnit.SECONDS));
             assertTrue(hasInvalidEpochCause(oldEpoch), "The uploader itself must receive INVALID_PRODUCER_EPOCH");
-            assertNoSuppressedAbortFailure(oldEpoch);
+            assertAbortWasFenced(oldEpoch);
             assertClaimRetained(bootstrap, topic, objectKey);
             for (int attempt = 0; attempt < 3; attempt++) {
                 Exception failure = assertThrows(Exception.class, () -> uploader.commit(descriptor));
@@ -224,10 +224,22 @@ class KafkaOrphanCompactionMinioIntegrationTest {
         return false;
     }
 
-    private static void assertNoSuppressedAbortFailure(Throwable failure) {
+    private static void assertAbortWasFenced(Throwable failure) {
+        List<Throwable> suppressed = new ArrayList<>();
         for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
-            assertEquals(0, cause.getSuppressed().length, "Uploader abort must return normally");
+            suppressed.addAll(Arrays.asList(cause.getSuppressed()));
         }
+        assertEquals(1, suppressed.size(), "Expected one abort failure, got: " + suppressed);
+        assertTrue(hasProducerFencedCause(suppressed.get(0)), "Abort must be rejected by fencing: " + suppressed);
+    }
+
+    private static boolean hasProducerFencedCause(Throwable failure) {
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            if (cause instanceof ProducerFencedException) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static void assertClaimRetained(String bootstrap, String topic, byte[] objectKey) {
