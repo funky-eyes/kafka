@@ -37,6 +37,48 @@ class CommittedObjectRetirementControlManagerTest {
     private static final String DIGEST = "0123456789abcdef".repeat(4);
 
     @Test
+    void firstIntentIsAtomicAndReplayedAtExactKRaftOffset() {
+        CommittedObjectRetirementControlManager manager = manager();
+        CommittedObjectRetirementRecord claim = record(0L, -1L, 1, -1L);
+        ControllerResult<Boolean> planned = manager.recordRetirementIntent(claim, 11L);
+        assertEquals(true, planned.response());
+        assertEquals(true, planned.isAtomic());
+        assertNull(manager.get(OBJECT_ID));
+        assertEquals(0L, claim.acceptedKRaftOffset(), "Never mutate the caller's record");
+        CommittedObjectRetirementRecord intent =
+            (CommittedObjectRetirementRecord) planned.records().get(0).message();
+        assertEquals(11L, intent.acceptedKRaftOffset());
+        assertEquals(-1L, intent.previousKRaftOffset());
+        assertEquals(-1L, intent.safeEpoch());
+        assertEquals((byte) 1, intent.stage());
+        assertThrows(IllegalStateException.class, () ->
+            manager.replayFromKRaft(intent, Optional.empty(), 12L));
+        assertNull(manager.get(OBJECT_ID));
+        manager.replayFromKRaft(intent, Optional.empty(), 11L);
+        assertEquals(CommittedObjectRetirementState.Stage.RETIRE_INTENT, manager.get(OBJECT_ID).stage());
+        assertEquals(false, manager.recordRetirementIntent(claim, 12L).response());
+        assertEquals(0, manager.recordRetirementIntent(claim, 12L).records().size());
+    }
+
+    @Test
+    void firstIntentRejectsForgedLaterStagesAndInvalidImmutableIdentity() {
+        CommittedObjectRetirementControlManager manager = manager();
+        assertThrows(IllegalArgumentException.class, () ->
+            manager.recordRetirementIntent(record(0L, -1L, 2, 7L), 11L));
+        assertThrows(IllegalArgumentException.class, () ->
+            manager.recordRetirementIntent(record(0L, 8L, 1, -1L), 11L));
+        assertThrows(IllegalArgumentException.class, () ->
+            manager.recordRetirementIntent(record(0L, -1L, 1, 7L), 11L));
+        assertThrows(IllegalArgumentException.class, () ->
+            manager.recordRetirementIntent(record(0L, -1L, 1, -1L).setDescriptorSha256("bad"), 11L));
+        assertThrows(IllegalArgumentException.class, () ->
+            manager.recordRetirementIntent(record(0L, -1L, 1, -1L).setCatalogTopicId(Uuid.ZERO_UUID), 11L));
+        assertThrows(IllegalArgumentException.class, () ->
+            manager.recordRetirementIntent(record(0L, -1L, 1, -1L), -1L));
+        assertNull(manager.get(OBJECT_ID));
+    }
+
+    @Test
     void terminalBatchBuildsOneAtomicOrderedKRaftAppendWithoutPartialMutation() {
         CommittedObjectRetirementControlManager manager = manager();
         long otherObjectId = OBJECT_ID + 1L;
