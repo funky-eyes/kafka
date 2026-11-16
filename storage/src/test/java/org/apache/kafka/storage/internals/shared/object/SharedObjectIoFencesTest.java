@@ -28,7 +28,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.zip.CRC32C;
 
-import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -80,7 +79,6 @@ class SharedObjectIoFencesTest {
         assertFalse(shared.locallyDrainedAfterFence(objectId));
 
         physicalGet.complete(ByteBuffer.wrap(data));
-        assertTrue(shared.locallyDrainedAfterFence(objectId));
         assertTrue(shared.locallyDrainedAfterFence(objectId));
         assertFalse(shared.uploads().contains(objectId));
 
