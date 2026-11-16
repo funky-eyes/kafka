@@ -273,7 +273,7 @@ class BrokerMetadataPublisherTest {
         .setPreviousKRaftOffset(14L))
     publisher.onMetadataUpdate(failingDelta, failingDelta.apply(MetadataProvenance.EMPTY), manifest)
     verify(fatalHandler).handleFault(
-      Mockito.eq("Unable to apply KRaft COMMITTED object retirement fence"), any())
+      org.mockito.ArgumentMatchers.eq("Unable to apply KRaft COMMITTED object retirement fence"), any())
   }
 
   @Test
