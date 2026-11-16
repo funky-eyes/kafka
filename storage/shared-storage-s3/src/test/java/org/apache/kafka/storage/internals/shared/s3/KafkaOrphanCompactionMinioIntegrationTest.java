@@ -24,16 +24,23 @@ import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.clients.producer.RecordMetadata;
+import org.apache.kafka.common.Endpoint;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.config.TopicConfig;
+import org.apache.kafka.common.errors.ProducerFencedException;
+import org.apache.kafka.common.security.auth.SecurityProtocol;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
+import org.apache.kafka.common.utils.Time;
+import org.apache.kafka.storage.internals.log.StorageExtensionBrokerContext;
 import org.apache.kafka.storage.internals.shared.metadata.OffsetRange;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataImage;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectRange;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
+import org.apache.kafka.storage.internals.shared.object.OrphanObjectCleaner;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -57,6 +64,11 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.OptionalLong;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -67,6 +79,253 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /** Exercises replay of actually compacted Kafka records after an actual S3 object delete. */
 class KafkaOrphanCompactionMinioIntegrationTest {
+    /**
+     * Use the production metadata store and cleaner with independent broker identities.
+     * This test owns the fixed metadata topic and therefore requires a dedicated cluster.
+     */
+    @Test
+    @Timeout(value = 6, unit = TimeUnit.MINUTES)
+    void productionCleanerRecoversClaimAndRetriesLatePutAcrossStoreRestart() throws Exception {
+        String bootstrap = System.getenv("SHARED_STORAGE_KAFKA_BOOTSTRAP_SERVERS");
+        String endpoint = System.getenv("SHARED_STORAGE_S3_ENDPOINT");
+        assumeTrue(bootstrap != null && !bootstrap.isBlank(), "Kafka integration brokers are not configured");
+        assumeTrue(endpoint != null && !endpoint.isBlank(), "MinIO integration endpoint is not configured");
+        assumeTrue("true".equals(System.getenv("SHARED_STORAGE_ISOLATED_TEST_CLUSTER")),
+            "An isolated Kafka cluster is required to own the shared metadata topic");
+
+        String topic = SharedMetadataClientConfiguration.TOPIC_NAME;
+        String namespace = UUID.randomUUID().toString();
+        long orphanId = 9_211L;
+        long liveId = 9_212L;
+        long createdTimeMs = 3_000L;
+        byte[] bytes = new byte[] {1, 3, 5, 7};
+        SharedObjectMetadata orphan = new SharedObjectMetadata(orphanId, bytes.length, 11L, List.of(
+            new SharedObjectRange(new SharedPartitionId(1L, 2L, 0),
+                new OffsetRange(0L, 1L), 0, 0L, bytes.length, 11L)
+        ));
+        SharedObjectMetadata live = new SharedObjectMetadata(liveId, bytes.length, 12L, List.of(
+            new SharedObjectRange(new SharedPartitionId(1L, 2L, 1),
+                new OffsetRange(0L, 1L), 0, 0L, bytes.length, 12L)
+        ));
+        Map<String, Object> options = new HashMap<>();
+        options.put(S3ObjectStoreConfig.BUCKET_CONFIG, "kafka-orphan-compaction-test");
+        options.put(S3ObjectStoreConfig.REGION_CONFIG, "us-east-1");
+        options.put(S3ObjectStoreConfig.ENDPOINT_CONFIG, endpoint);
+        options.put(S3ObjectStoreConfig.PATH_STYLE_ACCESS_CONFIG, true);
+        options.put(S3ObjectStoreConfig.KEY_PREFIX_CONFIG, "production-recovery/" + UUID.randomUUID());
+        S3ObjectStoreConfig objectConfig = S3ObjectStoreConfig.from(options);
+        Properties properties = producerProperties(bootstrap);
+        boolean createdTopic = false;
+        try (Admin admin = Admin.create(properties);
+             S3ObjectStore objects = new S3ObjectStore(objectConfig);
+             S3Client inspector = S3Client.builder().region(Region.US_EAST_1)
+                 .endpointOverride(objectConfig.endpoint().orElseThrow())
+                 .credentialsProvider(DefaultCredentialsProvider.builder().build())
+                 .httpClientBuilder(UrlConnectionHttpClient.builder())
+                 .serviceConfiguration(S3Configuration.builder().pathStyleAccessEnabled(true).build())
+                 .build()) {
+            awaitThreeRegisteredBrokers(admin);
+            try {
+                inspector.createBucket(CreateBucketRequest.builder().bucket(objectConfig.bucket()).build());
+            } catch (S3Exception e) {
+                if (e.statusCode() != 409) {
+                    throw e;
+                }
+            }
+            // If the fixed topic already exists, fail rather than modifying or deleting it.
+            admin.createTopics(List.of(new NewTopic(topic, 1, (short) 3).configs(Map.of(
+                TopicConfig.CLEANUP_POLICY_CONFIG, TopicConfig.CLEANUP_POLICY_COMPACT,
+                TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2",
+                TopicConfig.MAX_MESSAGE_BYTES_CONFIG, "1048576",
+                TopicConfig.SEGMENT_BYTES_CONFIG, "1048576",
+                TopicConfig.SEGMENT_MS_CONFIG, "1000",
+                TopicConfig.MIN_CLEANABLE_DIRTY_RATIO_CONFIG, "0.01",
+                TopicConfig.MAX_COMPACTION_LAG_MS_CONFIG, "3000"
+            )))).all().get(30, TimeUnit.SECONDS);
+            createdTopic = true;
+            try {
+                byte[] orphanKey = SharedMetadataRecordCodec.objectKey(orphanId);
+                long preparedOffset;
+                long claimOffset;
+                try (KafkaObjectMetadataStore owner = KafkaObjectMetadataStore.open(
+                         productionStoreConfiguration(bootstrap, namespace, 101));
+                     KafkaObjectMetadataStore first = KafkaObjectMetadataStore.open(
+                         productionStoreConfiguration(bootstrap, namespace, 102));
+                     KafkaObjectMetadataStore second = KafkaObjectMetadataStore.open(
+                         productionStoreConfiguration(bootstrap, namespace, 103))) {
+                    owner.prepare(orphanId, createdTimeMs).get(30, TimeUnit.SECONDS);
+                    List<ConsumerRecord<byte[], byte[]>> preparedRecords =
+                        readTargetRecords(bootstrap, topic, orphanKey, orphanKey);
+                    assertEquals(1, preparedRecords.size());
+                    preparedOffset = preparedRecords.get(0).offset();
+                    objects.put(orphanId, ByteBuffer.wrap(bytes)).get(30, TimeUnit.SECONDS);
+                    owner.prepare(liveId, createdTimeMs + 1L).get(30, TimeUnit.SECONDS);
+                    objects.put(liveId, ByteBuffer.wrap(bytes)).get(30, TimeUnit.SECONDS);
+                    owner.commit(live).get(30, TimeUnit.SECONDS);
+                    first.captureReadCommittedReplayHorizon().get(30, TimeUnit.SECONDS);
+                    second.captureReadCommittedReplayHorizon().get(30, TimeUnit.SECONDS);
+
+                    assertAtMostOneClaimResponse(first, second, orphanId, createdTimeMs);
+
+                    ExecutionException fenced = assertThrows(ExecutionException.class,
+                        () -> owner.commit(orphan).get(30, TimeUnit.SECONDS));
+                    assertTrue(hasProducerFencedCause(fenced),
+                        "The older uploader must be fenced, not merely fail for an unrelated reason");
+                    owner.releaseUpload(orphanId);
+                    first.captureReadCommittedReplayHorizon().get(30, TimeUnit.SECONDS);
+                    assertTrue(first.cleanupClaimedObjects().stream()
+                        .anyMatch(object -> object.objectId() == orphanId),
+                        "At least one CLAIM must be durably visible, including after an uncertain response");
+                    List<ConsumerRecord<byte[], byte[]>> claimedRecords =
+                        readTargetRecords(bootstrap, topic, orphanKey, orphanKey);
+                    List<ConsumerRecord<byte[], byte[]>> claims = claimedRecords.stream()
+                        .filter(record -> SharedMetadataRecordCodec.decodeValue(
+                            SharedMetadataRecordCodec.decodeKey(orphanKey), record.value()
+                        ) instanceof SharedMetadataRecordCodec.FencedClaimedObjectValue)
+                        .toList();
+                    assertEquals(1, claims.size(), "The object key must retain one CLAIM");
+                    claimOffset = claims.get(0).offset();
+                    assertTrue(claimOffset > preparedOffset);
+                    assertFalse(first.claimCleanup(liveId, createdTimeMs + 1L).get(60, TimeUnit.SECONDS));
+                    assertEquals(1, new OrphanObjectCleaner(objects, first).clean(createdTimeMs + 1L)
+                        .get(60, TimeUnit.SECONDS));
+                    assertEquals(404, assertThrows(S3Exception.class, () -> inspector.headObject(
+                        HeadObjectRequest.builder().bucket(objectConfig.bucket())
+                            .key(objectConfig.objectKey(orphanId)).build())).statusCode());
+
+                    // A deliberately late physical PUT models an upload whose
+                    // completion was delayed beyond the first successful DELETE.
+                    objects.put(orphanId, ByteBuffer.wrap(bytes)).get(30, TimeUnit.SECONDS);
+                }
+
+                // Roll segments with valid metadata records: a store restart
+                // must be able to replay the compacted topic, including filler.
+                writeCompactionFiller(properties, topic);
+                awaitSingleKeyCompaction(bootstrap, topic, orphanKey, preparedOffset, claimOffset);
+
+                List<SharedObjectMetadata> replayed = new ArrayList<>();
+                try (KafkaObjectMetadataStore restarted = KafkaObjectMetadataStore.open(
+                    productionStoreConfiguration(bootstrap, namespace, 102), replayed::add)) {
+                    assertTrue(restarted.cleanupClaimedObjects().stream()
+                        .anyMatch(object -> object.objectId() == orphanId));
+                    assertTrue(restarted.committedObject(orphanId).isEmpty());
+                    assertEquals(live, restarted.committedObject(liveId).orElseThrow());
+                    assertFalse(replayed.contains(orphan), "A claimed object must never be republished on replay");
+                    assertEquals(1, new OrphanObjectCleaner(objects, restarted).clean(createdTimeMs + 1L)
+                        .get(60, TimeUnit.SECONDS));
+                    assertEquals(404, assertThrows(S3Exception.class, () -> inspector.headObject(
+                        HeadObjectRequest.builder().bucket(objectConfig.bucket())
+                            .key(objectConfig.objectKey(orphanId)).build())).statusCode());
+                    inspector.headObject(HeadObjectRequest.builder().bucket(objectConfig.bucket())
+                        .key(objectConfig.objectKey(liveId)).build());
+                }
+            } finally {
+                objects.delete(orphanId).get(30, TimeUnit.SECONDS);
+                objects.delete(liveId).get(30, TimeUnit.SECONDS);
+                if (createdTopic) {
+                    admin.deleteTopics(List.of(topic)).all().get(30, TimeUnit.SECONDS);
+                }
+            }
+        }
+    }
+
+    private static void awaitThreeRegisteredBrokers(Admin admin) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
+        int count;
+        do {
+            count = admin.describeCluster().nodes().get(10, TimeUnit.SECONDS).size();
+            if (count < 3) {
+                Thread.sleep(250L);
+            }
+        } while (count < 3 && System.nanoTime() < deadline);
+        assertTrue(count >= 3, "The recovery test requires three registered Kafka brokers");
+    }
+
+    private static void assertAtMostOneClaimResponse(
+        KafkaObjectMetadataStore first, KafkaObjectMetadataStore second, long objectId, long createdTimeMs
+    ) throws Exception {
+        ExecutorService claimants = Executors.newFixedThreadPool(2);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            Future<Boolean> firstClaim = claimants.submit(() -> claimAfterStart(first, objectId, createdTimeMs,
+                ready, start));
+            Future<Boolean> secondClaim = claimants.submit(() -> claimAfterStart(second, objectId, createdTimeMs,
+                ready, start));
+            assertTrue(ready.await(10, TimeUnit.SECONDS));
+            start.countDown();
+            int winners = (claimWonOrWasFenced(firstClaim) ? 1 : 0)
+                + (claimWonOrWasFenced(secondClaim) ? 1 : 0);
+            assertTrue(winners <= 1, "Concurrent claimants must not both report a winning CLAIM");
+        } finally {
+            start.countDown();
+            claimants.shutdownNow();
+            assertTrue(claimants.awaitTermination(10, TimeUnit.SECONDS));
+        }
+    }
+
+    private static boolean claimAfterStart(KafkaObjectMetadataStore store, long objectId, long createdTimeMs,
+                                           CountDownLatch ready, CountDownLatch start) throws Exception {
+        ready.countDown();
+        if (!start.await(10, TimeUnit.SECONDS)) {
+            throw new IllegalStateException("Claim start timed out");
+        }
+        return store.claimCleanup(objectId, createdTimeMs).get(60, TimeUnit.SECONDS);
+    }
+
+    private static void writeCompactionFiller(Properties properties, String topic) throws Exception {
+        try (KafkaProducer<byte[], byte[]> filler = new KafkaProducer<>(properties)) {
+            byte[] fillerKey = SharedMetadataRecordCodec.brokerSequenceKey(999);
+            List<Future<RecordMetadata>> sends = new ArrayList<>();
+            for (long i = 1; i <= 100_000L; i++) {
+                sends.add(filler.send(new ProducerRecord<>(topic, 0, fillerKey,
+                    SharedMetadataRecordCodec.brokerSequenceValue(i))));
+            }
+            filler.flush();
+            for (Future<RecordMetadata> send : sends) {
+                send.get(30, TimeUnit.SECONDS);
+            }
+            // Segment age alone does not roll the active segment until the
+            // next append. Ensure the original object records are cleanable.
+            Thread.sleep(1_200L);
+            filler.send(new ProducerRecord<>(topic, 0, fillerKey,
+                SharedMetadataRecordCodec.brokerSequenceValue(100_001L))).get(30, TimeUnit.SECONDS);
+        }
+    }
+
+    private static SharedMetadataClientConfiguration productionStoreConfiguration(
+        String bootstrap, String clusterId, int brokerId
+    ) {
+        return SharedMetadataClientConfiguration.from(new StorageExtensionBrokerContext(
+            clusterId, brokerId,
+            List.of(new Endpoint("PLAINTEXT", SecurityProtocol.PLAINTEXT, "127.0.0.1", 1)),
+            Map.of(
+                SharedMetadataClientConfiguration.CLIENT_PREFIX + "bootstrap.servers", bootstrap,
+                SharedMetadataClientConfiguration.FENCED_LIFECYCLE_CONFIG, true
+            ), Time.SYSTEM
+        ));
+    }
+
+    private static boolean claimWonOrWasFenced(Future<Boolean> result) throws Exception {
+        try {
+            return result.get(75, TimeUnit.SECONDS);
+        } catch (ExecutionException e) {
+            if (hasProducerFencedCause(e)) {
+                return false;
+            }
+            throw e;
+        }
+    }
+
+    private static boolean hasProducerFencedCause(Throwable failure) {
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            if (cause instanceof ProducerFencedException) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     @Test
     @Timeout(value = 6, unit = TimeUnit.MINUTES)
     void ambiguousOrphanHistoryFailsClosedAfterKafkaCompaction() throws Exception {
