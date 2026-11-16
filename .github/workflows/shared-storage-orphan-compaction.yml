@@ -77,6 +77,7 @@ jobs:
             port=$((19090 + id))
             controller_port=$((19100 + id))
             docker run -d --network host --name "orphan-kafka-${id}" \
+              --label kafka.orphan.restart-test=true \
               -e CLUSTER_ID=4L6g3nShT-eMCtK--X86sw \
               -e KAFKA_NODE_ID="$id" \
               -e KAFKA_PROCESS_ROLES=broker,controller \
@@ -118,6 +119,7 @@ jobs:
           SHARED_STORAGE_S3_ENDPOINT: http://127.0.0.1:9000
           SHARED_STORAGE_KAFKA_BOOTSTRAP_SERVERS: 127.0.0.1:19091,127.0.0.1:19092,127.0.0.1:19093
           SHARED_STORAGE_ISOLATED_TEST_CLUSTER: 'true'
+          SHARED_STORAGE_BROKER_RESTART_TEST: 'true'
         run: |
           set -euo pipefail
           ./gradlew :storage:test \
@@ -135,6 +137,8 @@ jobs:
           grep -q 'failures="0"' "$result"
           grep -q 'errors="0"' "$result"
           grep -q 'skipped="0"' "$result"
+          grep -q 'name="productionCleanerRecoversClaimAndRetriesLatePutAcrossStoreRestart"' "$result"
+          grep -q 'BROKER_RESTART_AND_CLAIM_RECOVERY_VERIFIED' "$result"
 
       - name: Capture Kafka logs on failure
         if: failure()
