@@ -138,7 +138,9 @@ class KafkaOrphanCompactionMinioIntegrationTest {
             try {
                 try (FencedObjectLifecycleArbiter.Uploader uploader =
                          new FencedObjectLifecycleArbiter.Uploader(
-                             uploaderProperties, topic, namespace, objectId)) {
+                             uploaderProperties, topic, namespace, objectId,
+                             () -> readTargetRecords(bootstrap, topic, objectKey,
+                                 SharedMetadataRecordCodec.objectCatalogSealKey(objectId)).isEmpty())) {
                     uploader.prepare(createdTimeMs);
                     objects.put(objectId, ByteBuffer.wrap(bytes)).get(30, TimeUnit.SECONDS);
                     exerciseEpochRace(bootstrap, plainProperties, topic, namespace, objectKey,
