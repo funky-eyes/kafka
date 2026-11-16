@@ -88,7 +88,7 @@ mkdir -p "$(dirname "${minio_bin}")" "${STATE_DIR}"
 cache_probe="${TMP}/cache-probe"
 cat > "${cache_probe}" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\\n' 'fixture-test-release-v1'
+printf '%s\n' 'fixture-test-release-v1'
 EOF
 chmod 0755 "${cache_probe}"
 cache_probe_sha="$(sha256sum "${cache_probe}" | awk '{print $1}')"
