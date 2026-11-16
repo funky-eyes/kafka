@@ -121,7 +121,7 @@ final class FencedObjectLifecycleArbiter {
             if (!prepared || committed || metadata.objectId() != objectId) {
                 throw new IllegalStateException("Object has no matching fenced PREPARE");
             }
-            long offset = append(SharedMetadataRecordCodec.committedObjectValue(metadata));
+            long offset = append(SharedMetadataRecordCodec.fencedCommittedObjectValue(metadata));
             committed = true;
             return offset;
         }
@@ -239,6 +239,7 @@ final class FencedObjectLifecycleArbiter {
             if (snapshot.sealed()
                 || snapshot.objectOffset() != expectedCommitOffset
                 || !(snapshot.value() instanceof CommittedObjectValue committed)
+                || !committed.fenced()
                 || !descriptor.equals(committed.metadata())) {
                 return OptionalLong.empty();
             }

@@ -376,6 +376,21 @@ class KafkaOrphanCompactionMinioIntegrationTest {
                 assertEquals(SharedMetadataRecordCodec.committedDescriptorSha256(descriptor),
                     evidence.seal().descriptorSha256());
 
+                // A matching legacy COMMIT is NOT an object-scoped
+                // transactional v2 COMMIT, even with the right Kafka offset.
+                long legacyObjectId = objectId + 2L;
+                SharedObjectMetadata legacy = new SharedObjectMetadata(
+                    legacyObjectId, 128L, 71L, descriptor.ranges());
+                try (KafkaProducer<byte[], byte[]> legacyProducer = new KafkaProducer<>(properties)) {
+                    long legacyOffset = legacyProducer.send(new ProducerRecord<>(
+                        topic, 0, SharedMetadataRecordCodec.objectKey(legacyObjectId),
+                        SharedMetadataRecordCodec.committedObjectValue(legacy)
+                    )).get(30, TimeUnit.SECONDS).offset();
+                    assertFalse(FencedObjectLifecycleArbiter.sealCommittedAfterFencing(
+                        properties, topic, namespace, legacy, legacyOffset, epoch
+                    ).isPresent(), "Legacy COMMIT must never be promoted to fenced catalog seal");
+                }
+
                 // A PREPARED-only uploader must not turn a sampled catalog
                 // into a fake COMMITTED seal. Initializing the sealer still
                 // fences that uploader's producer before its late COMMIT.

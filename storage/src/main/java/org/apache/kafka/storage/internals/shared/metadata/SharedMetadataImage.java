@@ -59,7 +59,10 @@ public final class SharedMetadataImage {
     // contending with expensive catalog callbacks or whole-image snapshots.
     private final Map<Long, PreparedObject> preparedObjects = new ConcurrentHashMap<>();
     private final Map<Long, SharedObjectMetadata> committedObjects = new ConcurrentHashMap<>();
-    private final Map<Long, Long> committedObjectPositions = new HashMap<>();
+    private final Map<Long, CommitProvenance> committedObjectPositions = new HashMap<>();
+
+    private record CommitProvenance(long offset, boolean fenced) {
+    }
     private final Map<Long, CatalogSealEvidence> catalogSeals = new ConcurrentHashMap<>();
     private final Map<Long, CleanupObject> cleanupObjects = new ConcurrentHashMap<>();
     private final Map<Integer, Long> brokerSequenceWatermarks = new HashMap<>();
@@ -235,9 +238,13 @@ public final class SharedMetadataImage {
         if (existing != null && !existing.equals(metadata)) {
             throw corruption("object " + objectId + " has conflicting COMMITTED metadata");
         }
+        if (existing != null && committedObjectPositions.containsKey(objectId)
+            && committedObjectPositions.get(objectId).fenced() != committed.fenced()) {
+            throw corruption("COMMIT changed its original v2 fencing provenance: " + objectId);
+        }
         preparedObjects.remove(objectId);
         if (existing == null) {
-            committedObjectPositions.put(objectId, recordOffset);
+            committedObjectPositions.put(objectId, new CommitProvenance(recordOffset, committed.fenced()));
         }
         if (existing == null && state == State.READY) {
             // Historical replay must finish before publishing its final
@@ -270,12 +277,17 @@ public final class SharedMetadataImage {
             throw corruption("Catalog seal requires a later, actual read-committed Kafka record offset");
         }
         SharedObjectMetadata original = committedObjects.get(objectId);
-        Long committedPosition = committedObjectPositions.get(objectId);
+        CommitProvenance committedPosition = committedObjectPositions.get(objectId);
         if (original == null || committedPosition == null
-            || committedPosition != seal.originalCommitOffset()) {
+            || committedPosition.offset() != seal.originalCommitOffset()) {
             // A compacted-away COMMIT, replay gap or forged position can
             // never be substituted by a bare sampled LSO.
             throw corruption("Catalog seal lacks the original replayed COMMITTED record: " + objectId);
+        }
+        // A plain legacy COMMIT carries no v2 fencing provenance. The
+        // experimental catalog seal cannot certify it after compaction.
+        if (!committedPosition.fenced()) {
+            throw corruption("Catalog seal requires the original v2 fenced COMMIT: " + objectId);
         }
         if (original.objectSize() != seal.objectSize()
             || original.objectChecksum() != seal.objectChecksum()

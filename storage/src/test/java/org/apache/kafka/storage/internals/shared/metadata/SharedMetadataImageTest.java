@@ -805,7 +805,7 @@ class SharedMetadataImageTest {
         List<SharedObjectMetadata> announced = new ArrayList<>();
         SharedMetadataImage image = new SharedMetadataImage(announced::add);
         byte[] key = SharedMetadataRecordCodec.objectKey(id);
-        byte[] commit = SharedMetadataRecordCodec.committedObjectValue(object);
+        byte[] commit = SharedMetadataRecordCodec.fencedCommittedObjectValue(object);
         byte[] sealKey = SharedMetadataRecordCodec.objectCatalogSealKey(id);
         byte[] sealValue = SharedMetadataRecordCodec.objectCatalogSealValue(8L, 17L, object);
         image.applyFromMetadataLog(key, commit, 8L);
@@ -816,6 +816,20 @@ class SharedMetadataImageTest {
         image.applyFromMetadataLog(key, commit, 10L);
         assertEquals(List.of(object), image.committedObjects());
         assertEquals(List.of(object), announced);
+    }
+
+    @Test
+    void catalogSealRejectsLegacyCommitEvenWithMatchingOffsetAndDigest() {
+        long id = BrokerObjectId.compose(8, 96L);
+        SharedObjectMetadata object = metadata(id, 123L);
+        SharedMetadataImage image = new SharedMetadataImage();
+        image.applyFromMetadataLog(SharedMetadataRecordCodec.objectKey(id),
+            SharedMetadataRecordCodec.committedObjectValue(object), 8L);
+        IllegalStateException failure = assertThrows(IllegalStateException.class, () ->
+            image.applyFromMetadataLog(SharedMetadataRecordCodec.objectCatalogSealKey(id),
+                SharedMetadataRecordCodec.objectCatalogSealValue(8L, 17L, object), 9L));
+        assertTrue(failure.getMessage().contains("v2 fenced COMMIT"));
+        assertEquals(SharedMetadataImage.State.FAILED, image.state());
     }
 
     @Test
@@ -835,7 +849,7 @@ class SharedMetadataImageTest {
         SharedObjectMetadata object = metadata(id, 103L);
         SharedMetadataImage image = new SharedMetadataImage();
         image.applyFromMetadataLog(SharedMetadataRecordCodec.objectKey(id),
-            SharedMetadataRecordCodec.committedObjectValue(object), 8L);
+            SharedMetadataRecordCodec.fencedCommittedObjectValue(object), 8L);
         byte[] sealKey = SharedMetadataRecordCodec.objectCatalogSealKey(id);
         assertThrows(IllegalStateException.class, () ->
             image.applyFromMetadataLog(sealKey,
@@ -844,14 +858,14 @@ class SharedMetadataImageTest {
 
         SharedMetadataImage forged = new SharedMetadataImage();
         forged.applyFromMetadataLog(SharedMetadataRecordCodec.objectKey(id),
-            SharedMetadataRecordCodec.committedObjectValue(object), 8L);
+            SharedMetadataRecordCodec.fencedCommittedObjectValue(object), 8L);
         assertThrows(IllegalStateException.class, () ->
             forged.applyFromMetadataLog(sealKey,
                 SharedMetadataRecordCodec.objectCatalogSealValue(8L, 17L, metadata(id, 104L)), 9L));
 
         SharedMetadataImage notFromLog = new SharedMetadataImage();
         notFromLog.apply(SharedMetadataRecordCodec.objectKey(id),
-            SharedMetadataRecordCodec.committedObjectValue(object));
+            SharedMetadataRecordCodec.fencedCommittedObjectValue(object));
         assertThrows(IllegalStateException.class, () ->
             notFromLog.apply(sealKey,
                 SharedMetadataRecordCodec.objectCatalogSealValue(8L, 17L, object)));
@@ -875,7 +889,7 @@ class SharedMetadataImageTest {
 
         SharedMetadataImage duplicateOnly = new SharedMetadataImage();
         duplicateOnly.applyFromMetadataLog(key,
-            SharedMetadataRecordCodec.committedObjectValue(object), 10L);
+            SharedMetadataRecordCodec.fencedCommittedObjectValue(object), 10L);
         assertThrows(IllegalStateException.class, () ->
             duplicateOnly.applyFromMetadataLog(sealKey, seal, 11L));
         assertEquals(SharedMetadataImage.State.FAILED, duplicateOnly.state());
@@ -889,13 +903,13 @@ class SharedMetadataImageTest {
         byte[] key = SharedMetadataRecordCodec.objectKey(id);
         byte[] sealKey = SharedMetadataRecordCodec.objectCatalogSealKey(id);
         byte[] seal = SharedMetadataRecordCodec.objectCatalogSealValue(8L, 17L, original);
-        conflicting.applyFromMetadataLog(key, SharedMetadataRecordCodec.committedObjectValue(original), 8L);
+        conflicting.applyFromMetadataLog(key, SharedMetadataRecordCodec.fencedCommittedObjectValue(original), 8L);
         conflicting.applyFromMetadataLog(sealKey, seal, 9L);
         assertThrows(IllegalStateException.class, () -> conflicting.applyFromMetadataLog(
-            key, SharedMetadataRecordCodec.committedObjectValue(metadata(id, 121L)), 10L));
+            key, SharedMetadataRecordCodec.fencedCommittedObjectValue(metadata(id, 121L)), 10L));
 
         SharedMetadataImage tombstone = new SharedMetadataImage();
-        tombstone.applyFromMetadataLog(key, SharedMetadataRecordCodec.committedObjectValue(original), 8L);
+        tombstone.applyFromMetadataLog(key, SharedMetadataRecordCodec.fencedCommittedObjectValue(original), 8L);
         tombstone.applyFromMetadataLog(sealKey, seal, 9L);
         assertThrows(IllegalStateException.class, () -> tombstone.applyFromMetadataLog(key, null, 10L));
         assertEquals(SharedMetadataImage.State.FAILED, tombstone.state());

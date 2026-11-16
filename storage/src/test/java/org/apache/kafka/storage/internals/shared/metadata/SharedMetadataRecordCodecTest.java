@@ -129,6 +129,23 @@ class SharedMetadataRecordCodecTest {
             )
         );
         assertEquals(metadata, committed.metadata());
+        assertFalse(committed.fenced());
+
+        SharedMetadataRecordCodec.CommittedObjectValue v2 = assertInstanceOf(
+            SharedMetadataRecordCodec.CommittedObjectValue.class,
+            SharedMetadataRecordCodec.decodeValue(
+                key, SharedMetadataRecordCodec.fencedCommittedObjectValue(metadata)
+            )
+        );
+        assertEquals(metadata, v2.metadata());
+        assertTrue(v2.fenced());
+        assertFalse(java.util.Arrays.equals(
+            SharedMetadataRecordCodec.committedObjectValue(metadata),
+            SharedMetadataRecordCodec.fencedCommittedObjectValue(metadata)
+        ));
+        // Do not fork the existing canonical descriptor digest for v2.
+        assertEquals(SharedMetadataRecordCodec.committedDescriptorSha256(metadata),
+            SharedMetadataRecordCodec.committedDescriptorSha256(v2.metadata()));
 
         assertSame(
             SharedMetadataRecordCodec.TombstoneValue.INSTANCE,
