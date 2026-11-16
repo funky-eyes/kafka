@@ -126,11 +126,10 @@ class BrokerMetadataPublisher(
         trace(s"Publishing delta $delta with highest offset $highestOffsetAndEpoch")
       }
 
-      // Publish the new metadata image to the metadata cache.
-      metadataCache.setImage(newImage)
-
-      // Before LogManager recovery (initial snapshot) or replica publication
-      // (incremental update), restore irreversible local admission fences.
+      // Before exposing the new image to readers or starting LogManager
+      // recovery, restore irreversible local admission fences. A failure
+      // here must not publish a KRaft DELETE_READY image without the
+      // corresponding local read/PUT veto.
       // Only KRaft DELETE_READY and later block reads/uploads; a first
       // RETIRE_INTENT is not a physical retirement authorization.
       // In steady state this reads ONLY the changed KRaft object entries.
@@ -145,6 +144,9 @@ class BrokerMetadataPublisher(
           }
         }
       }
+
+      // Publish only after the local retirement fence is installed.
+      metadataCache.setImage(newImage)
 
       def metadataVersionLogMsg = s"metadata.version ${newImage.features().metadataVersion()}"
 
