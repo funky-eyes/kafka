@@ -134,14 +134,23 @@ class BrokerMetadataPublisher(
       // RETIRE_INTENT is not a physical retirement authorization.
       // In steady state this reads ONLY the changed KRaft object entries.
       if (_firstPublish || delta.committedObjectRetirementDelta() != null) {
-        val entries = if (_firstPublish)
-          newImage.committedObjectRetirements().entries().values()
-        else
-          delta.committedObjectRetirementDelta().changedEntries().values()
-        entries.asScala.foreach { entry =>
-          if (entry.stage() != CommittedObjectRetirementState.Stage.RETIRE_INTENT) {
-            logManager.fenceCommittedObject(entry.objectId())
+        try {
+          val entries = if (_firstPublish)
+            newImage.committedObjectRetirements().entries().values()
+          else
+            delta.committedObjectRetirementDelta().changedEntries().values()
+          entries.asScala.foreach { entry =>
+            if (entry.stage() != CommittedObjectRetirementState.Stage.RETIRE_INTENT) {
+              logManager.fenceCommittedObject(entry.objectId())
+            }
           }
+        } catch {
+          case t: Throwable =>
+            // No remote deletion is allowed while even one Broker can still
+            // admit an old object. Use the fatal handler, not the ordinary
+            // recoverable metadata-update handler, if this safety veto fails.
+            fatalFaultHandler.handleFault("Unable to apply KRaft COMMITTED object retirement fence", t)
+            throw t
         }
       }
 
