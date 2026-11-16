@@ -85,7 +85,13 @@ final class FencedObjectLifecycleArbiter {
         Uploader(Properties original, String topic, String namespace, long objectId) {
             // The test-only fixture verifies the same rule by scanning Kafka.
             this(original, topic, namespace, objectId,
-                () -> readLatestAfterFence(original, topic, objectId) == null);
+                () -> {
+                    CatalogSnapshot catalog = readCatalogAfterFence(original, topic, objectId);
+                    // Compaction may remove a former COMMIT key while the
+                    // independent catalog-seal fence still survives. Never
+                    // allow an object ID to be recycled in that situation.
+                    return catalog.value() == null && !catalog.sealed();
+                });
         }
 
         Uploader(Properties original, String topic, String namespace, long objectId,
