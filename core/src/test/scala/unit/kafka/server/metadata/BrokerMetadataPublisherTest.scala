@@ -37,9 +37,9 @@ import org.apache.kafka.common.test.{KafkaClusterTestKit, TestKitNodes}
 import org.apache.kafka.common.utils.Exit
 import org.apache.kafka.coordinator.group.GroupCoordinator
 import org.apache.kafka.coordinator.share.ShareCoordinator
-import org.apache.kafka.image.{AclsImage, ClientQuotasImage, ClusterImageTest, ConfigurationsImage, DelegationTokenImage, FeaturesImage, MetadataDelta, MetadataImage, MetadataImageTest, MetadataProvenance, ProducerIdsImage, ScramImage, TopicsImage}
+import org.apache.kafka.image.{AclsImage, ClientQuotasImage, ClusterImageTest, CommittedObjectRetirementImage, ConfigurationsImage, DelegationTokenImage, FeaturesImage, MetadataDelta, MetadataImage, MetadataImageTest, MetadataProvenance, ProducerIdsImage, ScramImage, TopicsImage}
 import org.apache.kafka.image.loader.LogDeltaManifest
-import org.apache.kafka.metadata.KRaftMetadataCache
+import org.apache.kafka.metadata.{CommittedObjectRetirementState, KRaftMetadataCache}
 import org.apache.kafka.metadata.publisher.{AclPublisher, DelegationTokenPublisher, DynamicClientQuotaPublisher, DynamicTopicClusterQuotaPublisher, ScramPublisher}
 import org.apache.kafka.network.SocketServerConfigs
 import org.apache.kafka.raft.LeaderAndEpoch
@@ -49,7 +49,7 @@ import org.junit.jupiter.api.Assertions.{assertEquals, assertNotNull, assertTrue
 import org.junit.jupiter.api.{AfterEach, BeforeEach, Test}
 import org.mockito.ArgumentMatchers.any
 import org.mockito.Mockito
-import org.mockito.Mockito.{doThrow, mock, verify}
+import org.mockito.Mockito.{doThrow, mock, times, verify}
 import org.mockito.invocation.InvocationOnMock
 import org.mockito.stubbing.Answer
 
@@ -184,6 +184,96 @@ class BrokerMetadataPublisherTest {
       cluster.nonFatalFaultHandler().setIgnore(true)
       cluster.close()
     }
+  }
+
+  /**
+   * Replaying a KRaft terminal fence must happen before logs can be
+   * recovered or published. A first INTENT must never fence a still-live
+   * object; an unrelated metadata delta must not rescan all old fences.
+   */
+  @Test
+  def testKRaftObjectRetirementFenceOnInitialAndIncrementalImages(): Unit = {
+    val config = KafkaConfig.fromProps(TestUtils.createBrokerConfig(0))
+    val logManager = mock(classOf[LogManager])
+    val fatalHandler = mock(classOf[FaultHandler])
+    val normalHandler = mock(classOf[FaultHandler])
+    val publisher = new BrokerMetadataPublisher(
+      config,
+      new KRaftMetadataCache(0, () => KRaftVersion.KRAFT_VERSION_1),
+      logManager,
+      mock(classOf[ReplicaManager]),
+      mock(classOf[GroupCoordinator]),
+      mock(classOf[TransactionCoordinator]),
+      mock(classOf[ShareCoordinator]),
+      mock(classOf[SharePartitionManager]),
+      mock(classOf[DynamicConfigPublisher]),
+      mock(classOf[DynamicClientQuotaPublisher]),
+      mock(classOf[DynamicTopicClusterQuotaPublisher]),
+      mock(classOf[ScramPublisher]),
+      mock(classOf[DelegationTokenPublisher]),
+      mock(classOf[AclPublisher]),
+      fatalHandler,
+      normalHandler
+    )
+    val catalogueId = Uuid.randomUuid()
+    def entry(id: Long, logPosition: Long,
+              stage: CommittedObjectRetirementState.Stage): CommittedObjectRetirementState.Entry = {
+      new CommittedObjectRetirementState.Entry(
+        id, logPosition,
+        if (stage == CommittedObjectRetirementState.Stage.RETIRE_INTENT) -1L else logPosition - 1L,
+        1L, catalogueId, 0L, 1L, 128L, 1L, "a" * 64,
+        stage,
+        if (stage == CommittedObjectRetirementState.Stage.RETIRE_INTENT) -1L else 1L
+      )
+    }
+    val initial = MetadataImage.EMPTY
+    val initialObjects = new util.HashMap[java.lang.Long, CommittedObjectRetirementState.Entry]()
+    initialObjects.put(801L, entry(801L, 10L, CommittedObjectRetirementState.Stage.RETIRE_INTENT))
+    initialObjects.put(802L, entry(802L, 13L, CommittedObjectRetirementState.Stage.DELETED))
+    val image = new MetadataImage(
+      initial.provenance(), initial.features(), initial.cluster(), initial.topics(),
+      initial.configs(), initial.clientQuotas(), initial.producerIds(),
+      initial.acls(), initial.scram(), initial.delegationTokens(),
+      initial.partitionRetirements(), new CommittedObjectRetirementImage(initialObjects)
+    )
+    val manifest = LogDeltaManifest.newBuilder()
+      .provenance(MetadataProvenance.EMPTY)
+      .leaderAndEpoch(LeaderAndEpoch.UNKNOWN)
+      .numBatches(1)
+      .elapsedNs(100)
+      .numBytes(42)
+      .build()
+
+    publisher.onMetadataUpdate(new MetadataDelta.Builder().setImage(image).build(), image, manifest)
+    verify(logManager).fenceCommittedObject(802L)
+    verify(logManager, Mockito.never()).fenceCommittedObject(801L)
+
+    publisher._firstPublish = false
+    val delta = new MetadataDelta.Builder().setImage(image).build()
+    delta.getOrCreateCommittedObjectRetirementDelta().replay(
+      entry(801L, 14L, CommittedObjectRetirementState.Stage.DELETE_READY).toRecord()
+        .setPreviousKRaftOffset(10L))
+    val newImage = delta.apply(MetadataProvenance.EMPTY)
+    publisher.onMetadataUpdate(delta, newImage, manifest)
+    verify(logManager).fenceCommittedObject(801L)
+
+    // An unrelated metadata update must not O(N) rescan persisted fences.
+    publisher.onMetadataUpdate(
+      new MetadataDelta.Builder().setImage(newImage).build(), newImage, manifest)
+    verify(logManager, times(1)).fenceCommittedObject(802L)
+    verify(logManager, times(1)).fenceCommittedObject(801L)
+
+    // A failed local fence must be fatal, never an ordinary recoverable
+    // metadata publication fault that leaves stale object readers active.
+    doThrow(new IllegalStateException("injected local retirement fence failure"))
+      .when(logManager).fenceCommittedObject(801L)
+    val failingDelta = new MetadataDelta.Builder().setImage(newImage).build()
+    failingDelta.getOrCreateCommittedObjectRetirementDelta().replay(
+      entry(801L, 15L, CommittedObjectRetirementState.Stage.DELETE_RECORDED).toRecord()
+        .setPreviousKRaftOffset(14L))
+    publisher.onMetadataUpdate(failingDelta, failingDelta.apply(MetadataProvenance.EMPTY), manifest)
+    verify(fatalHandler).handleFault(
+      org.mockito.ArgumentMatchers.eq("Unable to apply KRaft COMMITTED object retirement fence"), any())
   }
 
   @Test

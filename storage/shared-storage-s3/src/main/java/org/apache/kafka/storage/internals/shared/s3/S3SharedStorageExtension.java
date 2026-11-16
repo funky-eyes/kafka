@@ -185,6 +185,20 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         return partitionRoleListener;
     }
 
+    /**
+     * Reapply a durable KRaft DELETE_READY-or-later object fence before
+     * restart recovery can load a stale local physical read checkpoint.
+     * This rejects new in-process reads and uploads, but never grants a
+     * Controller delete or asserts that any other Broker has drained.
+     */
+    @Override
+    public synchronized void fenceCommittedObject(long objectId) {
+        if (closed || ioFences == null) {
+            throw new IllegalStateException("Cannot restore COMMITTED KRaft fence before storage startup");
+        }
+        ioFences.fence(objectId);
+    }
+
     @Override
     public synchronized CompletableFuture<Void> onBrokerReady(StorageExtensionBrokerContext context) {
         Objects.requireNonNull(context, "context");

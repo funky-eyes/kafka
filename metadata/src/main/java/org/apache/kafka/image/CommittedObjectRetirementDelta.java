@@ -68,6 +68,11 @@ public final class CommittedObjectRetirementDelta {
         snapshot = true;
     }
 
+    /** Immutable changed entries only: do not rescan all retired objects on every metadata delta. */
+    public Map<Long, Entry> changedEntries() {
+        return Map.copyOf(changed);
+    }
+
     public CommittedObjectRetirementImage apply() {
         Map<Long, Entry> merged = new HashMap<>();
         if (!snapshot) {

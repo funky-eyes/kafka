@@ -42,6 +42,19 @@ public interface KafkaStorageExtension extends AutoCloseable {
     }
 
     /**
+     * Irreversibly fence a physical COMMITTED object after the Broker's
+     * authoritative KRaft metadata publisher replays DELETE_READY or later.
+     *
+     * <p>Called on initial metadata image BEFORE LogManager loads partitions,
+     * and on incremental KRaft deltas before topic/replica publication. This
+     * is a local safety veto, not an all-Broker drained certificate or
+     * permission to invoke object-store DELETE. Classic extensions have
+     * no COMMITTED KSO2 objects and retain their no-op default.</p>
+     */
+    default void fenceCommittedObject(long objectId) {
+    }
+
+    /**
      * Called after Kafka has opened its SocketServer acceptors but before BrokerServer transitions to STARTED.
      *
      * <p>Extensions that need ordinary Kafka clients can initialize them here. Broker startup waits for the returned

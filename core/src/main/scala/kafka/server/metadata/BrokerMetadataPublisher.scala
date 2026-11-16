@@ -31,7 +31,7 @@ import org.apache.kafka.coordinator.transaction.TransactionLogConfig
 import org.apache.kafka.image.loader.LoaderManifest
 import org.apache.kafka.image.publisher.MetadataPublisher
 import org.apache.kafka.image.{MetadataDelta, MetadataImage, TopicDelta}
-import org.apache.kafka.metadata.KRaftMetadataCache
+import org.apache.kafka.metadata.{CommittedObjectRetirementState, KRaftMetadataCache}
 import org.apache.kafka.metadata.publisher.{AclPublisher, DelegationTokenPublisher, DynamicClientQuotaPublisher, DynamicTopicClusterQuotaPublisher, ScramPublisher}
 import org.apache.kafka.server.common.MetadataVersion.MINIMUM_VERSION
 import org.apache.kafka.server.common.{FinalizedFeatures, ShareVersion}
@@ -126,7 +126,35 @@ class BrokerMetadataPublisher(
         trace(s"Publishing delta $delta with highest offset $highestOffsetAndEpoch")
       }
 
-      // Publish the new metadata image to the metadata cache.
+      // Before exposing the new image to readers or starting LogManager
+      // recovery, restore irreversible local admission fences. A failure
+      // here must not publish a KRaft DELETE_READY image without the
+      // corresponding local read/PUT veto.
+      // Only KRaft DELETE_READY and later block reads/uploads; a first
+      // RETIRE_INTENT is not a physical retirement authorization.
+      // In steady state this reads ONLY the changed KRaft object entries.
+      if (_firstPublish || delta.committedObjectRetirementDelta() != null) {
+        try {
+          val entries = if (_firstPublish)
+            newImage.committedObjectRetirements().entries().values()
+          else
+            delta.committedObjectRetirementDelta().changedEntries().values()
+          entries.asScala.foreach { entry =>
+            if (entry.stage() != CommittedObjectRetirementState.Stage.RETIRE_INTENT) {
+              logManager.fenceCommittedObject(entry.objectId())
+            }
+          }
+        } catch {
+          case t: Throwable =>
+            // No remote deletion is allowed while even one Broker can still
+            // admit an old object. Use the fatal handler, not the ordinary
+            // recoverable metadata-update handler, if this safety veto fails.
+            fatalFaultHandler.handleFault("Unable to apply KRaft COMMITTED object retirement fence", t)
+            throw t
+        }
+      }
+
+      // Publish only after the local retirement fence is installed.
       metadataCache.setImage(newImage)
 
       def metadataVersionLogMsg = s"metadata.version ${newImage.features().metadataVersion()}"
