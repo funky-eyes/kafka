@@ -27,6 +27,7 @@ import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.errors.ProducerFencedException;
 import org.apache.kafka.common.errors.TopicExistsException;
+import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
 import org.apache.kafka.common.security.auth.SecurityProtocol;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.storage.internals.log.StorageExtensionBrokerContext;
@@ -172,9 +173,7 @@ class KafkaCatalogSealFencingIntegrationTest {
             }
         }
         assertTrue(created, "The old catalog topic must be deleted before recreation");
-        Uuid replacement = admin.describeTopics(List.of(topic)).allTopicNames().get(30, TimeUnit.SECONDS)
-            .get(topic).topicId();
-        assertNotEquals(originalTopicId, replacement, "The replacement must have a new Topic ID");
+        awaitReplacementTopicId(admin, topic, originalTopicId);
         // Consumer failure, observed identity change, or an absent candidate
         // all fail closed; none may report a successful seal of the old COMMIT.
         try {
@@ -183,6 +182,26 @@ class KafkaCatalogSealFencingIntegrationTest {
         } catch (ExecutionException expected) {
             assertTrue(expected.getCause() instanceof IllegalStateException);
         }
+    }
+
+    private static void awaitReplacementTopicId(Admin admin, String topic, Uuid oldId) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
+        while (System.nanoTime() < deadline) {
+            try {
+                var description = admin.describeTopics(List.of(topic)).allTopicNames()
+                    .get(10, TimeUnit.SECONDS).get(topic);
+                Uuid current = description == null ? null : description.topicId();
+                if (current != null && !Uuid.ZERO_UUID.equals(current) && !oldId.equals(current)) {
+                    return;
+                }
+            } catch (ExecutionException failure) {
+                if (!(failure.getCause() instanceof UnknownTopicOrPartitionException)) {
+                    throw failure;
+                }
+            }
+            Thread.sleep(250L);
+        }
+        throw new AssertionError("The recreated catalog topic did not expose a new Topic ID");
     }
 
     private static SharedMetadataClientConfiguration configuration(String bootstrap, String namespace) {
