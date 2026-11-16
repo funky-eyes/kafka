@@ -82,15 +82,17 @@ minio_bin="${CACHE_DIR}/${platform}/minio.${platform}.RELEASE.2025-07-23T15-54-0
 pid_file="${STATE_DIR}/minio.pid"
 mkdir -p "$(dirname "${minio_bin}")" "${STATE_DIR}"
 
+# Version and checksum tests use a deterministic executable independent
+# of the runner's /bin/sleep implementation (some runners reject --version).
+# The real ELF ownership test below still copies /bin/sleep into MINIO_BIN.
 cache_probe="${TMP}/cache-probe"
-cp /bin/sleep "${cache_probe}"
+cat > "${cache_probe}" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\\n' 'fixture-test-release-v1'
+EOF
 chmod 0755 "${cache_probe}"
 cache_probe_sha="$(sha256sum "${cache_probe}" | awk '{print $1}')"
-# Use the runner's actual GNU/BusyBox/coreutils release string; the
-# self-test is about SHA/version mismatch rejection, not pinning /bin/sleep.
-cache_probe_version="$("${cache_probe}" --version 2>&1)"
-[ -n "${cache_probe_version}" ] || { echo "Missing cache probe version" >&2; exit 1; }
-binary_valid "${cache_probe}" "${cache_probe_version}" "${cache_probe_sha}"
+binary_valid "${cache_probe}" "fixture-test-release-v1" "${cache_probe_sha}"
 
 # Regression: a correctly checksummed, pinned binary may print additional
 # text after the expected version. grep -q under pipefail used to close early
