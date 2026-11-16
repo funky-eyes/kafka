@@ -31,6 +31,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Stream;
 
 /** Durable local guard against reopening shared placeholders as ordinary Kafka payload files. */
@@ -130,7 +131,8 @@ public final class SharedStorageModeMarker {
             }
             return Optional.of(marker.get().topicId());
         }
-        if (!legacyAdoption && hasEntriesExcept(dir, FILE_NAME + ".tmp")) {
+        if (!legacyAdoption && hasEntriesExcept(dir, FILE_NAME + ".tmp",
+            PartitionMetadataFile.newFile(context.dir()).getName() + ".tmp")) {
             throw new IOException("Existing unmarked log requires explicit legacy migration before shared storage: " + dir);
         }
         // Legacy logical .log files are empty placeholders. Non-empty native payloads are never migration input.
@@ -147,7 +149,7 @@ public final class SharedStorageModeMarker {
             Files.createDirectories(dir);
             write(dir, new Marker(true, topicId.get()));
         }
-        // The caller's existing incomplete-initialization handling removes only an empty unbound directory.
+        // The caller removes an unbound directory only when it is empty or contains these known temporary files.
         return topicId;
     }
 
@@ -171,12 +173,13 @@ public final class SharedStorageModeMarker {
         }
     }
 
-    private static boolean hasEntriesExcept(Path dir, String ignored) throws IOException {
+    private static boolean hasEntriesExcept(Path dir, String... ignored) throws IOException {
         if (!Files.exists(dir)) {
             return false;
         }
+        Set<String> ignoredNames = Set.of(ignored);
         try (Stream<Path> entries = Files.list(dir)) {
-            return entries.anyMatch(entry -> !entry.getFileName().toString().equals(ignored));
+            return entries.anyMatch(entry -> !ignoredNames.contains(entry.getFileName().toString()));
         }
     }
 

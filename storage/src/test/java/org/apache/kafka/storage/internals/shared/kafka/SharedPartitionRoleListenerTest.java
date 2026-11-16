@@ -110,7 +110,8 @@ class SharedPartitionRoleListenerTest {
     }
 
     @Test
-    void explicitUserTopicPredicateNeverTracksInternalTopics() {
+    void defaultAllUserTopicRoutingStillNeverTracksInternalTopics() {
+        // Explicitly model the legacy default-all predicate; production defaults are tested separately.
         Predicate<TopicIdPartition> configuration = configuration(Map.of());
         SharedCommitProgress progress = new SharedCommitProgress();
         SharedPartitionRoleListener listener = new SharedPartitionRoleListener(configuration, progress);

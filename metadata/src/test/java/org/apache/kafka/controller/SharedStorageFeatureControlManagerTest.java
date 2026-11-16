@@ -151,4 +151,48 @@ class SharedStorageFeatureControlManagerTest {
         assertTrue(result.records().isEmpty());
         assertTrue(manager.isSharedStorageEnabled());
     }
+
+    @ParameterizedTest
+    @EnumSource(value = FeatureUpdate.UpgradeType.class, names = {"SAFE_DOWNGRADE", "UNSAFE_DOWNGRADE"})
+    void cannotRemoveControllerRegistrationBoundaryAfterActivation(FeatureUpdate.UpgradeType type) {
+        FeatureControlManager manager = manager(MetadataVersion.LATEST_PRODUCTION,
+            Map.of(1, SUPPORT), Map.of(1, SUPPORT));
+        RecordTestUtils.replayAll(manager, activate(manager, false).records());
+        ControllerResult<ApiError> result = manager.updateFeatures(
+            Map.of(MetadataVersion.FEATURE_NAME, MetadataVersion.IBP_3_6_IV2.featureLevel()),
+            Map.of(MetadataVersion.FEATURE_NAME, type), false, 0);
+        assertEquals(Errors.INVALID_UPDATE_VERSION, result.response().error());
+        assertTrue(result.response().message().contains("shared.storage.version=1 requires controller registration"));
+        assertTrue(result.records().isEmpty());
+        assertEquals(MetadataVersion.LATEST_PRODUCTION, manager.metadataVersionOrThrow());
+        assertTrue(manager.isSharedStorageEnabled());
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = FeatureUpdate.UpgradeType.class, names = {"SAFE_DOWNGRADE", "UNSAFE_DOWNGRADE"})
+    void combinedDowngradeCannotDiscardExistingFeatureProtection(FeatureUpdate.UpgradeType type) {
+        FeatureControlManager manager = manager(MetadataVersion.LATEST_PRODUCTION,
+            Map.of(1, SUPPORT), Map.of(1, SUPPORT));
+        RecordTestUtils.replayAll(manager, activate(manager, false).records());
+        ControllerResult<ApiError> result = manager.updateFeatures(Map.of(
+            MetadataVersion.FEATURE_NAME, MetadataVersion.IBP_3_6_IV2.featureLevel(), FEATURE, (short) 0),
+            Map.of(MetadataVersion.FEATURE_NAME, type, FEATURE, type), false, 0);
+        assertEquals(Errors.INVALID_UPDATE_VERSION, result.response().error());
+        assertTrue(result.records().isEmpty());
+        assertEquals(MetadataVersion.LATEST_PRODUCTION, manager.metadataVersionOrThrow());
+        assertTrue(manager.isSharedStorageEnabled());
+    }
+
+    @Test
+    void ordinaryMetadataDowngradeRetainsExistingKafkaBehavior() {
+        FeatureControlManager manager = manager(MetadataVersion.IBP_3_6_IV0,
+            Map.of(1, SUPPORT), Map.of(1, SUPPORT));
+        ControllerResult<ApiError> result = manager.updateFeatures(
+            Map.of(MetadataVersion.FEATURE_NAME, MetadataVersion.IBP_3_5_IV2.featureLevel()),
+            Map.of(MetadataVersion.FEATURE_NAME, FeatureUpdate.UpgradeType.SAFE_DOWNGRADE), false, 0);
+        assertEquals(ApiError.NONE, result.response());
+        RecordTestUtils.replayAll(manager, result.records());
+        assertEquals(MetadataVersion.IBP_3_5_IV2, manager.metadataVersionOrThrow());
+        assertFalse(manager.isSharedStorageEnabled());
+    }
 }

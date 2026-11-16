@@ -16,10 +16,13 @@
  */
 package org.apache.kafka.storage.internals.shared.kafka;
 
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.config.TopicConfig;
 import org.apache.kafka.common.errors.InconsistentTopicIdException;
 import org.apache.kafka.common.utils.Time;
+import org.apache.kafka.storage.internals.checkpoint.PartitionMetadataFile;
+import org.apache.kafka.storage.internals.log.IncompleteLogInitializationException;
 import org.apache.kafka.storage.internals.log.LogConfig;
 import org.apache.kafka.storage.internals.log.LogDirFailureChannel;
 import org.apache.kafka.storage.internals.log.StorageExtensionContext;
@@ -140,6 +143,37 @@ class SharedStorageModeMarkerTest {
         assertThrows(IOException.class, () -> SharedStorageModeMarker.initializeWalDirectory(configuration(walDir, true)));
         SharedStorageModeMarker.initializeWalDirectory(configuration(walDir, false));
         assertTrue(Files.readString(walDir.resolve(SharedStorageModeMarker.WAL_FORMAT_FILE_NAME)).contains("topic"));
+    }
+
+    @Test
+    void temporaryModeAndPartitionMetadataFilesPreserveIncompleteInitializationRecovery() throws Exception {
+        for (List<String> names : List.of(List.of(SharedStorageModeMarker.FILE_NAME + ".tmp"),
+            List.of("partition.metadata.tmp"), List.of(SharedStorageModeMarker.FILE_NAME + ".tmp", "partition.metadata.tmp"))) {
+            Path dir = Files.createTempDirectory(tempDir, "incomplete-");
+            for (String name : names) {
+                Files.writeString(dir.resolve(name), "partial");
+            }
+            UnifiedLogCreationContext context = context(dir, Optional.empty(), true);
+            Optional<Uuid> id = SharedStorageModeMarker.prepareShared(context, false);
+            assertTrue(id.isEmpty());
+            assertThrows(IncompleteLogInitializationException.class, () -> SharedUnifiedLogFactory.resolveAndPersistTopicId(
+                dir.toFile(), new TopicPartition("events", 0), id, context.logDirFailureChannel()));
+            assertFalse(Files.exists(dir));
+        }
+    }
+
+    @Test
+    void temporaryModeFileNeverAuthorizesDeletingAnyExistingLogArtifact() throws Exception {
+        Path dir = Files.createDirectory(tempDir.resolve("existing-0"));
+        Path data = Files.createFile(dir.resolve("00000000000000000000.log"));
+        Files.writeString(dir.resolve(SharedStorageModeMarker.FILE_NAME + ".tmp"), "partial");
+        Files.writeString(Path.of(PartitionMetadataFile.newFile(dir.toFile()) + ".tmp"), "partial");
+        UnifiedLogCreationContext context = context(dir, Optional.empty(), true);
+        assertThrows(IOException.class, () -> SharedStorageModeMarker.prepareShared(context, false));
+        assertThrows(IOException.class, () -> SharedUnifiedLogFactory.resolveAndPersistTopicId(
+            dir.toFile(), new TopicPartition("events", 0), Optional.empty(), context.logDirFailureChannel()));
+        assertTrue(Files.exists(data));
+        assertTrue(Files.exists(dir.resolve(SharedStorageModeMarker.FILE_NAME + ".tmp")));
     }
 
     private SharedStorageConfiguration configuration(Path walDir, boolean legacy) {

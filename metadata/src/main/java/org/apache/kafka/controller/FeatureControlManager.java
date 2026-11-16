@@ -411,6 +411,11 @@ public class FeatureControlManager {
                 + MetadataVersion.MINIMUM_VERSION.featureLevel() + " to " + MetadataVersion.latestTesting().featureLevel() + ".");
         }
 
+        if (isSharedStorageEnabled() && !newVersion.isControllerRegistrationSupported()) {
+            return invalidMetadataVersion(newVersionLevel, SharedStorageVersion.FEATURE_NAME + "=1 requires " +
+                "controller registration support and metadata.version >= " + MetadataVersion.IBP_3_7_IV0 + ".");
+        }
+
         if (newVersion.isLessThan(currentVersion)) {
             // This is a downgrade
             boolean metadataChanged = MetadataVersion.checkIfMetadataChanged(currentVersion, newVersion);

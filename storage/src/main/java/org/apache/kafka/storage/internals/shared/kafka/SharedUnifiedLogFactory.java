@@ -422,23 +422,26 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
      * Removes only a crash-interrupted directory that never crossed the durable topic-ID boundary.
      *
      * <p>{@link #resolveAndPersistTopicId} runs before any shared segment or WAL access. Therefore an empty directory,
-     * or one containing only the temporary partition-metadata file, can only represent a crash between mkdir and the
-     * atomic partition.metadata publication. Any other entry is treated as durable-state evidence and must fail closed
-     * rather than guessing a topic ID.</p>
+     * or one containing only temporary mode/partition-metadata files, can only represent a crash before durable
+     * Topic-ID publication. Any other entry is treated as durable-state evidence and must fail closed rather than
+     * guessing a topic ID.</p>
      */
     private static boolean removeIncompleteInitializationDirectory(File dir) throws IOException {
         Path directory = dir.toPath().toAbsolutePath().normalize();
         Path metadataPath = PartitionMetadataFile.newFile(dir).toPath().toAbsolutePath().normalize();
         Path temporaryMetadataPath = Path.of(metadataPath + ".tmp");
+        Path temporaryModePath = directory.resolve(SharedStorageModeMarker.FILE_NAME + ".tmp");
 
         try (Stream<Path> entries = Files.list(directory)) {
             if (entries.anyMatch(entry ->
-                !entry.toAbsolutePath().normalize().equals(temporaryMetadataPath))) {
+                !entry.toAbsolutePath().normalize().equals(temporaryMetadataPath)
+                    && !entry.toAbsolutePath().normalize().equals(temporaryModePath))) {
                 return false;
             }
         }
 
         Files.deleteIfExists(temporaryMetadataPath);
+        Files.deleteIfExists(temporaryModePath);
         try {
             Files.delete(directory);
             return true;
