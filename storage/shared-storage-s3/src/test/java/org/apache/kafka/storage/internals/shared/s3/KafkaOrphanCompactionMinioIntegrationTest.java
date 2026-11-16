@@ -28,6 +28,7 @@ import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.Endpoint;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.config.TopicConfig;
+import org.apache.kafka.common.errors.InvalidProducerEpochException;
 import org.apache.kafka.common.errors.ProducerFencedException;
 import org.apache.kafka.common.security.auth.SecurityProtocol;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
@@ -167,15 +168,12 @@ class KafkaOrphanCompactionMinioIntegrationTest {
 
                     assertAtMostOneClaimResponse(first, second, orphanId, createdTimeMs);
 
-                    ExecutionException fenced = assertThrows(ExecutionException.class,
-                        () -> owner.commit(orphan).get(30, TimeUnit.SECONDS));
-                    assertTrue(hasProducerFencedCause(fenced),
-                        "The older uploader must be fenced, not merely fail for an unrelated reason");
-                    owner.releaseUpload(orphanId);
                     first.captureReadCommittedReplayHorizon().get(30, TimeUnit.SECONDS);
                     assertTrue(first.cleanupClaimedObjects().stream()
                         .anyMatch(object -> object.objectId() == orphanId),
                         "At least one CLAIM must be durably visible, including after an uncertain response");
+                    assertStaleUploaderCannotCommitAgain(owner, first, orphan);
+                    owner.releaseUpload(orphanId);
                     List<ConsumerRecord<byte[], byte[]>> claimedRecords =
                         readTargetRecords(bootstrap, topic, orphanKey, orphanKey);
                     List<ConsumerRecord<byte[], byte[]>> claims = claimedRecords.stream()
@@ -254,8 +252,8 @@ class KafkaOrphanCompactionMinioIntegrationTest {
                 ready, start));
             assertTrue(ready.await(10, TimeUnit.SECONDS));
             start.countDown();
-            int winners = (claimWonOrWasFenced(firstClaim) ? 1 : 0)
-                + (claimWonOrWasFenced(secondClaim) ? 1 : 0);
+            int winners = (claimWonOrHadUncertainEpoch(firstClaim) ? 1 : 0)
+                + (claimWonOrHadUncertainEpoch(secondClaim) ? 1 : 0);
             assertTrue(winners <= 1, "Concurrent claimants must not both report a winning CLAIM");
         } finally {
             start.countDown();
@@ -306,20 +304,40 @@ class KafkaOrphanCompactionMinioIntegrationTest {
         ));
     }
 
-    private static boolean claimWonOrWasFenced(Future<Boolean> result) throws Exception {
+    private static boolean claimWonOrHadUncertainEpoch(Future<Boolean> result) throws Exception {
         try {
             return result.get(75, TimeUnit.SECONDS);
         } catch (ExecutionException e) {
-            if (hasProducerFencedCause(e)) {
+            // A stale epoch is an uncertain failed attempt, not proof of a
+            // permanent fence. The caller must independently replay CLAIM.
+            if (hasFencingOrStaleEpochCause(e)) {
                 return false;
             }
             throw e;
         }
     }
 
-    private static boolean hasProducerFencedCause(Throwable failure) {
+    private static void assertStaleUploaderCannotCommitAgain(
+        KafkaObjectMetadataStore owner, KafkaObjectMetadataStore witness, SharedObjectMetadata descriptor
+    ) throws Exception {
+        for (int attempt = 0; attempt < 3; attempt++) {
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                () -> owner.commit(descriptor).get(30, TimeUnit.SECONDS));
+            assertTrue(hasFencingOrStaleEpochCause(failure),
+                "Old uploader must fail because its transaction epoch is rejected");
+            // InvalidProducerEpochException can be abortable in Kafka; a
+            // failed first attempt alone does not prove the next is fenced.
+            witness.captureReadCommittedReplayHorizon().get(30, TimeUnit.SECONDS);
+            assertTrue(witness.cleanupClaimedObjects().stream()
+                .anyMatch(object -> object.objectId() == descriptor.objectId()),
+                "Every old-uploader retry must preserve the durable CLAIM");
+            assertTrue(witness.committedObject(descriptor.objectId()).isEmpty());
+        }
+    }
+
+    private static boolean hasFencingOrStaleEpochCause(Throwable failure) {
         for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
-            if (cause instanceof ProducerFencedException) {
+            if (cause instanceof ProducerFencedException || cause instanceof InvalidProducerEpochException) {
                 return true;
             }
         }
