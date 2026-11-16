@@ -137,7 +137,7 @@ jobs:
           grep -q 'failures="0"' "$result"
           grep -q 'errors="0"' "$result"
           grep -q 'skipped="0"' "$result"
-          grep -q 'name="productionCleanerRecoversClaimAndRetriesLatePutAcrossStoreRestart"' "$result"
+          grep -Fq 'name="productionCleanerRecoversClaimAndRetriesLatePutAcrossStoreRestart()"' "$result"
           grep -q 'BROKER_RESTART_AND_CLAIM_RECOVERY_VERIFIED' "$result"
 
       - name: Capture Kafka logs on failure
