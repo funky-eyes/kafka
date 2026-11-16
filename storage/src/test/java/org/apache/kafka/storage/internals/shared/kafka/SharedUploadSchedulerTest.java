@@ -97,18 +97,30 @@ class SharedUploadSchedulerTest {
             )) {
                 assertTrue(scheduler.tryUploadOnce().get(10, TimeUnit.SECONDS).isPresent());
                 scheduler.checkpointRemoteCommitsOnce();
+                // Rapid upload evaluations must not issue fresh lifecycle
+                // control-plane requests: only actual WAL reclaim checks do.
+                scheduler.runScheduledUpload();
+                scheduler.runScheduledUpload();
+                assertEquals(0, policyChecks.get());
                 // Simulate a Bucket policy edited after COMMIT but before
                 // the rotating WAL has had its last local copy reclaimed.
                 bucketExpiryDetected.set(true);
                 assertEquals(0L, scheduler.reclaimCheckpointedWalOnce());
                 assertTrue(scheduler.lastFailure().isPresent());
                 assertTrue(scheduler.lastFailure().orElseThrow().getMessage().contains("Bucket expiration"));
-                assertEquals(1, policyChecks.get());
+                // A successful remote-COMMIT checkpoint is unrelated to the
+                // failed S3 policy check: it must not hide the reclaim error.
+                scheduler.checkpointRemoteCommitsOnce();
+                scheduler.runScheduledUpload();
+                assertTrue(scheduler.lastFailure().orElseThrow().getMessage().contains("Bucket expiration"));
+                assertTrue(scheduler.maintenanceFailurePresent(), "Upload polls must not clear the failed reclaim signal");
+                assertEquals(1, policyChecks.get(), "Upload polls must not recheck Bucket lifecycle");
 
                 bucketExpiryDetected.set(false);
                 scheduler.checkpointRemoteCommitsOnce();
                 scheduler.reclaimCheckpointedWalOnce();
                 assertEquals(2, policyChecks.get());
+                assertFalse(scheduler.maintenanceFailurePresent());
                 assertTrue(scheduler.lastFailure().isEmpty());
             }
         }

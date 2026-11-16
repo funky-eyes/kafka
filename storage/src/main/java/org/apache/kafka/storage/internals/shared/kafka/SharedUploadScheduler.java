@@ -67,6 +67,9 @@ import java.util.function.LongSupplier;
 public final class SharedUploadScheduler implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(SharedUploadScheduler.class);
     private static final long CLOSE_WAIT_LOG_INTERVAL_SECONDS = 30L;
+    // Upload evaluation can run every 50ms; a fresh remote Bucket policy
+    // check is required per WAL reclaim, not per upload poll.
+    private static final long MIN_WAL_RECLAIM_INTERVAL_MS = 1_000L;
     static final long DEFAULT_MAX_LINGER_MS = 1_000L;
     static final int DEFAULT_WAL_PRESSURE_PERCENT = 70;
     static final int DEFAULT_MAX_INFLIGHT = 1;
@@ -85,7 +88,8 @@ public final class SharedUploadScheduler implements AutoCloseable {
     private final Object uploadFailureLock = new Object();
     private final Map<CandidateKey, FailedCandidate> failedCandidates = new HashMap<>();
     private final AtomicBoolean closed = new AtomicBoolean();
-    private final AtomicReference<Throwable> lastMaintenanceFailure = new AtomicReference<>();
+    private final AtomicReference<Throwable> lastCheckpointFailure = new AtomicReference<>();
+    private final AtomicReference<Throwable> lastWalReclaimFailure = new AtomicReference<>();
     private Throwable lastSchedulingFailure;
     private final AtomicReference<SelectionSummary> lastSelectionSummary = new AtomicReference<>();
     private final AtomicReference<PendingHead> pendingHead = new AtomicReference<>();
@@ -196,6 +200,10 @@ public final class SharedUploadScheduler implements AutoCloseable {
             maxInflight
         );
         executor.scheduleWithFixedDelay(this::runScheduledUpload, intervalMs, intervalMs, TimeUnit.MILLISECONDS);
+        long reclaimIntervalMs = Math.max(intervalMs, MIN_WAL_RECLAIM_INTERVAL_MS);
+        executor.scheduleWithFixedDelay(
+            () -> reclaimCheckpointedWalOnce(), reclaimIntervalMs, reclaimIntervalMs, TimeUnit.MILLISECONDS
+        );
     }
 
     /**
@@ -620,9 +628,13 @@ public final class SharedUploadScheduler implements AutoCloseable {
     }
 
     public Optional<Throwable> lastFailure() {
-        Throwable maintenance = lastMaintenanceFailure.get();
-        if (maintenance != null) {
-            return Optional.of(maintenance);
+        Throwable checkpointFailure = lastCheckpointFailure.get();
+        if (checkpointFailure != null) {
+            return Optional.of(checkpointFailure);
+        }
+        Throwable reclaimFailure = lastWalReclaimFailure.get();
+        if (reclaimFailure != null) {
+            return Optional.of(reclaimFailure);
         }
         synchronized (uploadFailureLock) {
             if (lastSchedulingFailure != null) {
@@ -670,7 +682,7 @@ public final class SharedUploadScheduler implements AutoCloseable {
     }
 
     boolean maintenanceFailurePresent() {
-        return lastMaintenanceFailure.get() != null;
+        return lastCheckpointFailure.get() != null || lastWalReclaimFailure.get() != null;
     }
 
     /**
@@ -681,20 +693,20 @@ public final class SharedUploadScheduler implements AutoCloseable {
     int checkpointRemoteCommitsOnce() {
         try {
             int checkpointed = engine.checkpointCommittedRemoteObjects();
-            lastMaintenanceFailure.set(null);
+            lastCheckpointFailure.set(null);
             if (checkpointed > 0) {
                 LOG.debug("Checkpointed {} committed shared objects for local WAL recovery", checkpointed);
             }
             return checkpointed;
         } catch (IOException e) {
-            lastMaintenanceFailure.set(e);
+            lastCheckpointFailure.set(e);
             LOG.warn("Unable to persist committed shared-object ranges for local WAL recovery", e);
             return 0;
         }
     }
 
     long reclaimCheckpointedWalOnce() {
-        if (lastMaintenanceFailure.get() != null) {
+        if (lastCheckpointFailure.get() != null) {
             return 0L;
         }
         try {
@@ -704,13 +716,13 @@ public final class SharedUploadScheduler implements AutoCloseable {
             // retention controls cannot be verified.
             uploader.requireSafeForWalReclaim();
             long reclaimedBytes = engine.reclaimCheckpointedWal();
-            lastMaintenanceFailure.set(null);
+            lastWalReclaimFailure.set(null);
             if (reclaimedBytes > 0) {
                 LOG.debug("Reclaimed {} bytes from checkpointed rotating shared WAL", reclaimedBytes);
             }
             return reclaimedBytes;
         } catch (IOException | RuntimeException e) {
-            lastMaintenanceFailure.set(e);
+            lastWalReclaimFailure.set(e);
             LOG.warn("Unable to reclaim checkpointed rotating shared WAL", e);
             return 0L;
         }
@@ -826,9 +838,11 @@ public final class SharedUploadScheduler implements AutoCloseable {
         }
     }
 
-    private void runScheduledUpload() {
+    // Keep checkpoint durability on the upload cadence while running
+    // expensive remote-policy checks and WAL reclamation on a separate
+    // bounded cadence using the same single-thread maintenance executor.
+    void runScheduledUpload() {
         checkpointRemoteCommitsOnce();
-        reclaimCheckpointedWalOnce();
         for (int index = 0; index < maxInflight; index++) {
             tryScheduledUploadOnce();
         }
