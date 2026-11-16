@@ -25,6 +25,7 @@ import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.config.ConfigResource;
 import org.apache.kafka.common.config.TopicConfig;
 import org.apache.kafka.common.errors.InvalidReplicationFactorException;
@@ -55,6 +56,7 @@ import java.util.OptionalLong;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
@@ -112,6 +114,8 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
     // rather than retaining unlimited transactional producers / request state.
     private final ExecutorService lifecycleExecutor = newLifecycleExecutor();
     private volatile Thread consumerThread;
+    // Topic ID observed during startup validation; never accepted from a seal caller.
+    private Uuid initialCatalogTopicId = Uuid.ZERO_UUID;
 
     static ThreadPoolExecutor newLifecycleExecutor() {
         return new ThreadPoolExecutor(
@@ -283,6 +287,7 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
                 SharedMetadataClientConfiguration.TOPIC_NAME + " max.message.bytes " + maxMessageBytes +
                     " is below required " + SharedMetadataClientConfiguration.MIN_METADATA_MESSAGE_BYTES);
         }
+        initialCatalogTopicId = description.topicId();
     }
 
     private static String requiredConfig(Config config, String name) {
@@ -704,6 +709,9 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
         if (!configuration.fencedLifecycleEnabled() || closed.get() || !image.isReady()) {
             return CompletableFuture.failedFuture(new IllegalStateException("Fenced catalog is not ready"));
         }
+        if (initialCatalogTopicId == null || Uuid.ZERO_UUID.equals(initialCatalogTopicId)) {
+            return CompletableFuture.failedFuture(new IllegalStateException("Catalog Topic ID is unavailable"));
+        }
         long objectId = descriptor.objectId();
         if (!sealingFencedObjects.add(objectId)) {
             return CompletableFuture.failedFuture(new IllegalStateException("Catalog seal already in progress"));
@@ -734,8 +742,9 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
             return FencedObjectLifecycleArbiter.sealCommittedAfterFencing(
                 configuration.producerProperties(), SharedMetadataClientConfiguration.TOPIC_NAME,
                 configuration.clusterId(), descriptor, expectedCommitOffset, retirementEpoch,
-                () -> awaitCatalogCandidateAfterFence(image, descriptor, expectedCommitOffset,
-                    this::captureReadCommittedReplayHorizon, 15L, TimeUnit.SECONDS),
+                () -> checkCatalogIdentityAroundReplay(initialCatalogTopicId, this::lookupCatalogTopicId,
+                    () -> awaitCatalogCandidateAfterFence(image, descriptor, expectedCommitOffset,
+                        this::captureReadCommittedReplayHorizon, 15L, TimeUnit.SECONDS)),
                 () -> !closed.get() && image.isReady()
             );
         } catch (InterruptedException failure) {
@@ -753,7 +762,54 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
             return CompletableFuture.completedFuture(offset);
         }
         return confirmExperimentalCatalogSeal(image, objectId, expectedCommitOffset, retirementEpoch,
-            offset.getAsLong(), captureReadCommittedReplayHorizon(), 15L, TimeUnit.SECONDS);
+            offset.getAsLong(), captureReadCommittedReplayHorizon(), 15L, TimeUnit.SECONDS)
+            .thenCompose(result -> CompletableFuture.supplyAsync(() -> {
+                try {
+                    requireMatchingCatalogTopicId(initialCatalogTopicId, lookupCatalogTopicId());
+                    return result;
+                } catch (InterruptedException failure) {
+                    Thread.currentThread().interrupt();
+                    throw new CompletionException(failure);
+                } catch (Exception failure) {
+                    throw new CompletionException(failure);
+                }
+            }, lifecycleExecutor));
+    }
+
+    /**
+     * Best-effort identity observations around replay. These do not make a
+     * name-based Kafka produce atomic with topic deletion/recreation and are
+     * not producer authentication or Controller retirement authorization.
+     */
+    static boolean checkCatalogIdentityAroundReplay(
+        Uuid expected, Callable<Uuid> currentTopicId, Callable<Boolean> replayedCandidate
+    ) throws Exception {
+        Objects.requireNonNull(currentTopicId, "currentTopicId");
+        Objects.requireNonNull(replayedCandidate, "replayedCandidate");
+        requireMatchingCatalogTopicId(expected, currentTopicId.call());
+        boolean matched = Boolean.TRUE.equals(replayedCandidate.call());
+        requireMatchingCatalogTopicId(expected, currentTopicId.call());
+        return matched;
+    }
+
+    static void requireMatchingCatalogTopicId(Uuid expected, Uuid actual) {
+        if (expected == null || Uuid.ZERO_UUID.equals(expected) || actual == null
+            || Uuid.ZERO_UUID.equals(actual) || !expected.equals(actual)) {
+            throw new IllegalStateException("Catalog Topic ID is missing or changed");
+        }
+    }
+
+    private Uuid lookupCatalogTopicId() throws Exception {
+        var topics = admin.describeTopics(List.of(SharedMetadataClientConfiguration.TOPIC_NAME)).allTopicNames();
+        try {
+            TopicDescription current = topics.get(5L, TimeUnit.SECONDS)
+                .get(SharedMetadataClientConfiguration.TOPIC_NAME);
+            return current == null ? null : current.topicId();
+        } finally {
+            if (!topics.isDone()) {
+                topics.cancel(false);
+            }
+        }
     }
 
     static CompletableFuture<OptionalLong> confirmExperimentalCatalogSeal(

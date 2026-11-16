@@ -19,6 +19,7 @@ package org.apache.kafka.storage.internals.shared.s3;
 import org.apache.kafka.clients.producer.MockProducer;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.clients.producer.RecordMetadata;
+import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.storage.internals.shared.metadata.OffsetRange;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataImage;
@@ -56,6 +57,63 @@ class FencedObjectLifecycleArbiterTest {
 
     private static MockProducer<byte[], byte[]> producer() {
         return new MockProducer<>(true, null, new ByteArraySerializer(), new ByteArraySerializer());
+    }
+
+    @Test
+    void catalogRecreationDuringPostFenceReplayCannotWriteSeal() throws Exception {
+        Uuid original = Uuid.randomUuid();
+        Uuid replacement = Uuid.randomUuid();
+        var observations = new java.util.concurrent.atomic.AtomicInteger();
+        MockProducer<byte[], byte[]> producer = producer();
+        assertThrows(IllegalStateException.class, () -> FencedObjectLifecycleArbiter.sealCommittedAfterFencing(
+            producer, "metadata", descriptor(101L), 7L, 3L, () ->
+                KafkaObjectMetadataStore.checkCatalogIdentityAroundReplay(original,
+                    () -> observations.getAndIncrement() == 0 ? original : replacement,
+                    () -> {
+                        assertTrue(producer.transactionInitialized(), "Topic observations follow producer fencing");
+                        return true;
+                    })
+        ));
+        assertEquals(2, observations.get());
+        assertTrue(producer.history().isEmpty());
+        assertFalse(producer.transactionInFlight());
+    }
+
+    @Test
+    void unknownTopicIdentityOrFailedLookupCannotWriteSeal() {
+        Uuid original = Uuid.randomUuid();
+        for (Uuid invalid : List.of(Uuid.ZERO_UUID, Uuid.randomUuid())) {
+            MockProducer<byte[], byte[]> producer = producer();
+            assertThrows(IllegalStateException.class, () -> FencedObjectLifecycleArbiter.sealCommittedAfterFencing(
+                producer, "metadata", descriptor(102L), 7L, 3L, () ->
+                    KafkaObjectMetadataStore.checkCatalogIdentityAroundReplay(original, () -> invalid, () -> true)
+            ));
+            assertTrue(producer.history().isEmpty());
+        }
+        MockProducer<byte[], byte[]> producer = producer();
+        assertThrows(IllegalStateException.class, () -> FencedObjectLifecycleArbiter.sealCommittedAfterFencing(
+            producer, "metadata", descriptor(103L), 7L, 3L, () ->
+                KafkaObjectMetadataStore.checkCatalogIdentityAroundReplay(original,
+                    () -> {
+                        throw new IllegalStateException("metadata unavailable");
+                    }, () -> true)
+        ));
+        assertTrue(producer.history().isEmpty());
+        assertThrows(IllegalStateException.class, () -> KafkaObjectMetadataStore.requireMatchingCatalogTopicId(
+            Uuid.ZERO_UUID, original));
+        assertThrows(IllegalStateException.class, () -> KafkaObjectMetadataStore.requireMatchingCatalogTopicId(
+            original, null));
+    }
+
+    @Test
+    void matchingObservedTopicIdentityAllowsExistingNonAuthorizingSealPath() throws Exception {
+        Uuid id = Uuid.randomUuid();
+        MockProducer<byte[], byte[]> producer = producer();
+        assertTrue(FencedObjectLifecycleArbiter.sealCommittedAfterFencing(
+            producer, "metadata", descriptor(104L), 7L, 3L, () ->
+                KafkaObjectMetadataStore.checkCatalogIdentityAroundReplay(id, () -> id, () -> true)
+        ).isPresent());
+        assertEquals(1, producer.history().size());
     }
 
     @Test
