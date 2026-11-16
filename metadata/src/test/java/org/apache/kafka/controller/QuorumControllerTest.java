@@ -320,8 +320,31 @@ public class QuorumControllerTest {
                 long before = committedRetirementRecordCount(clientEnv);
                 CommittedObjectRetirementRecord candidate =
                     terminalFixtureRecord(702L, 0L, -1L, 1, Uuid.randomUuid());
-                assertEquals(true, controller.recordUnverifiedCommittedObjectRetirementIntent(candidate)
-                    .get(10, TimeUnit.SECONDS));
+                CountDownLatch entered = new CountDownLatch(1);
+                CountDownLatch release = new CountDownLatch(1);
+                controller.appendControlEvent("holdBeforeIntentCas", () -> {
+                    entered.countDown();
+                    try {
+                        if (!release.await(10, TimeUnit.SECONDS)) {
+                            throw new AssertionError("Intent event queue gate timed out");
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new RuntimeException(e);
+                    }
+                });
+                CompletableFuture<Boolean> pending;
+                try {
+                    assertTrue(entered.await(10, TimeUnit.SECONDS));
+                    pending = controller.recordUnverifiedCommittedObjectRetirementIntent(candidate);
+                    assertFalse(pending.isDone());
+                    // The caller may modify its mutable record after the
+                    // method returns; queued Controller state must be frozen.
+                    candidate.setDescriptorSha256("f".repeat(64));
+                } finally {
+                    release.countDown();
+                }
+                assertEquals(true, pending.get(10, TimeUnit.SECONDS));
                 assertEquals(before + 1L, committedRetirementRecordCount(clientEnv));
                 // KRaft log position, not the caller's claimed offset, is
                 // the accepted generation. No DELETE_READY is ever emitted.
@@ -333,6 +356,7 @@ public class QuorumControllerTest {
                         intents++;
                         assertEquals(702L, saved.objectId());
                         assertEquals((byte) 1, saved.stage());
+                        assertEquals("0123456789abcdef".repeat(4), saved.descriptorSha256());
                         assertEquals(-1L, saved.safeEpoch());
                         assertEquals(offsets.get(index), saved.acceptedKRaftOffset());
                     }
