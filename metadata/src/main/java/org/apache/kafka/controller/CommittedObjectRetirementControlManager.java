@@ -130,6 +130,42 @@ final class CommittedObjectRetirementControlManager {
     }
 
     /**
+     * Prepare a single atomic, bounded batch of first-stage intentions.
+     *
+     * <p>Each proposed identity remains UNVERIFIED and cannot grant physical
+     * deletion. Reuse the same single-intent validation, reject duplicates
+     * and existing KRaft entries, and generate consecutive real log offsets.
+     * Nothing is applied until KRaft replay commits every record.</p>
+     */
+    ControllerResult<Integer> recordRetirementIntentBatch(
+        List<CommittedObjectRetirementRecord> proposed, long nextWriteOffset
+    ) {
+        Objects.requireNonNull(proposed, "proposed");
+        if (proposed.size() > 64 || nextWriteOffset < 0L) {
+            throw new IllegalArgumentException("Invalid or unbounded KRaft intent batch");
+        }
+        if (proposed.isEmpty()) {
+            return ControllerResult.of(List.of(), 0);
+        }
+        Set<Long> unique = new HashSet<>();
+        List<ApiMessageAndVersion> records = new ArrayList<>(proposed.size());
+        for (CommittedObjectRetirementRecord candidate : proposed) {
+            Objects.requireNonNull(candidate, "candidate");
+            if (!unique.add(candidate.objectId())) {
+                throw new IllegalArgumentException("Duplicate object in KRaft intent batch");
+            }
+            long accepted = Math.addExact(nextWriteOffset, records.size());
+            ControllerResult<Boolean> single = recordRetirementIntent(candidate, accepted);
+            if (!single.response()) {
+                // A competing KRaft generation vetoes the entire batch.
+                return ControllerResult.of(List.of(), 0);
+            }
+            records.addAll(single.records());
+        }
+        return ControllerResult.atomicOf(List.copyOf(records), records.size());
+    }
+
+    /**
      * Terminalize an already durably DELETE_RECORDED object in the same KRaft
      * event queue that serializes its lifecycle CAS.
      *
