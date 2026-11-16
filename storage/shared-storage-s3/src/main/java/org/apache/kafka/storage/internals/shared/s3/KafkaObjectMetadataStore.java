@@ -509,31 +509,29 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
 
     @Override
     public CompletableFuture<Boolean> claimCleanup(long objectId, long expectedCreatedTimeMs) {
-        if (expectedCreatedTimeMs < 0) {
-            return CompletableFuture.failedFuture(new IllegalArgumentException("expectedCreatedTimeMs must be non-negative"));
-        }
-        return writeRecord(
-            SharedMetadataRecordCodec.objectCleanupKey(objectId),
-            SharedMetadataRecordCodec.cleanupClaimedValue(expectedCreatedTimeMs)
-        ).thenApply(ignored -> image.cleanupFenced(objectId, expectedCreatedTimeMs));
+        // COMMIT and CLAIM currently use independent compacted keys. A Kafka
+        // append order is not an atomic cross-broker CAS, and compaction can
+        // erase evidence needed to replay the winning transition. A positive
+        // reply here would authorize irreversible S3 DELETE: fail closed.
+        return CompletableFuture.failedFuture(unsafeOrphanClaim());
     }
 
     @Override
     public CompletableFuture<Void> completeCleanup(long objectId) {
-        final OptionalLong claimedTimestamp;
-        try {
-            claimedTimestamp = completionTarget(image, objectId);
-        } catch (RuntimeException failure) {
-            return CompletableFuture.failedFuture(failure);
-        }
-        if (claimedTimestamp.isEmpty()) {
-            // A durable DELETED fence is the only valid idempotent no-op.
-            return CompletableFuture.completedFuture(null);
-        }
-        return writeRecord(
-            SharedMetadataRecordCodec.objectCleanupKey(objectId),
-            SharedMetadataRecordCodec.cleanupDeletedValue(claimedTimestamp.getAsLong())
-        );
+        // Do not advance legacy CLAIMED fences while they lack an
+        // authenticated, compaction-stable arbitration decision.
+        return CompletableFuture.failedFuture(unsafeOrphanClaim());
+    }
+
+    /**
+     * This guard must remain unconditional until both COMMIT and CLAIM use
+     * one durable, replayable, fenced arbiter. Grace periods, local image
+     * checks and successful producer acknowledgments do not establish CAS.
+     */
+    static UnsupportedOperationException unsafeOrphanClaim() {
+        return new UnsupportedOperationException(
+            "PREPARED orphan cleanup is disabled: COMMIT and CLAIM lack durable cross-broker " +
+                "arbitration that survives compacted metadata replay");
     }
 
     /**
@@ -571,7 +569,9 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
 
     @Override
     public List<ObjectMetadataStore.PreparedObject> cleanupClaimedObjects() {
-        return image.cleanupClaimedObjects();
+        // Historical CLAIMED records are equally unsafe to re-delete when
+        // their earlier COMMIT may have been removed by compaction.
+        throw unsafeOrphanClaim();
     }
 
     public SharedMetadataImage.State state() {

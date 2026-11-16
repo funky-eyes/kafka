@@ -354,6 +354,7 @@ class SharedMetadataImageTest {
     @Test
     void commitBeforeCleanupClaimWinsAndObjectRemainsCommitted() {
         SharedMetadataImage image = new SharedMetadataImage();
+        image.markReady();
         long objectId = BrokerObjectId.compose(4, 31L);
         long createdTimeMs = 1_001L;
         SharedObjectMetadata committed = metadata(objectId, 304L);
@@ -370,6 +371,7 @@ class SharedMetadataImageTest {
     @Test
     void cleanupClaimBeforeDelayedCommitWinsEvenWhenPrepareWasCompactedAway() {
         SharedMetadataImage image = new SharedMetadataImage();
+        image.markReady();
         long objectId = BrokerObjectId.compose(4, 32L);
         long createdTimeMs = 1_002L;
         image.apply(SharedMetadataRecordCodec.objectCleanupKey(objectId), SharedMetadataRecordCodec.cleanupClaimedValue(createdTimeMs));
@@ -390,6 +392,7 @@ class SharedMetadataImageTest {
     @Test
     void deletedCleanupFenceIsTerminalAndSuppressesDelayedCommit() {
         SharedMetadataImage image = new SharedMetadataImage();
+        image.markReady();
         long objectId = BrokerObjectId.compose(4, 33L);
         long createdTimeMs = 1_003L;
         image.apply(SharedMetadataRecordCodec.objectCleanupKey(objectId), SharedMetadataRecordCodec.cleanupDeletedValue(createdTimeMs));
@@ -402,6 +405,31 @@ class SharedMetadataImageTest {
         assertTrue(image.committedObjects().isEmpty());
         assertTrue(image.cleanupClaimedObjects().isEmpty());
         assertTrue(image.cleanupFenced(objectId, createdTimeMs));
+    }
+
+    @Test
+    void compactedCommitAndCleanupAreAmbiguousInEitherOrder() {
+        long objectId = BrokerObjectId.compose(4, 34L);
+        byte[] objectKey = SharedMetadataRecordCodec.objectKey(objectId);
+        byte[] commit = SharedMetadataRecordCodec.committedObjectValue(metadata(objectId, 307L));
+        byte[] cleanupKey = SharedMetadataRecordCodec.objectCleanupKey(objectId);
+        byte[] claim = SharedMetadataRecordCodec.cleanupClaimedValue(1_004L);
+
+        for (boolean commitFirst : List.of(true, false)) {
+            List<SharedObjectMetadata> published = new ArrayList<>();
+            SharedMetadataImage image = new SharedMetadataImage(published::add);
+            byte[] firstKey = commitFirst ? objectKey : cleanupKey;
+            byte[] firstValue = commitFirst ? commit : claim;
+            byte[] secondKey = commitFirst ? cleanupKey : objectKey;
+            byte[] secondValue = commitFirst ? claim : commit;
+            image.applyFromMetadataLog(firstKey, firstValue, 10L);
+            IllegalStateException error = assertThrows(IllegalStateException.class, () ->
+                image.applyFromMetadataLog(secondKey, secondValue, 11L));
+            assertTrue(error.getMessage().contains("Ambiguous compacted COMMIT and cleanup fence"));
+            assertEquals(SharedMetadataImage.State.FAILED, image.state());
+            assertThrows(IllegalStateException.class, image::markReady);
+            assertTrue(published.isEmpty(), "Ambiguous replay must not publish a remote reference");
+        }
     }
 
     @Test

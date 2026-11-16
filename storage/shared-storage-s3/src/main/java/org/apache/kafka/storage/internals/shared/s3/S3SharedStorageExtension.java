@@ -35,8 +35,6 @@ import org.apache.kafka.storage.internals.shared.kafka.SharedUploadScheduler;
 import org.apache.kafka.storage.internals.shared.metadata.BrokerObjectId;
 import org.apache.kafka.storage.internals.shared.metadata.LocalRemoteObjectCheckpoint;
 import org.apache.kafka.storage.internals.shared.object.ActiveObjectUploads;
-import org.apache.kafka.storage.internals.shared.object.OrphanCleanupScheduler;
-import org.apache.kafka.storage.internals.shared.object.OrphanObjectCleaner;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectPacker;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectReader;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectUploadHook;
@@ -72,7 +70,8 @@ import java.util.function.LongSupplier;
  * producer durability continues through the replicated local WAL and therefore naturally backpressures at WAL
  * capacity instead of acknowledging data that cannot be retained safely. Once metadata replay succeeds, logs that were
  * loaded before the authoritative image became available are reconciled from S3, then the broker fences its object-ID
- * allocator and starts asynchronous S3 upload and orphan cleanup.</p>
+ * allocator and starts asynchronous S3 upload. PREPARED orphan deletion is disabled until durable
+ * cross-broker COMMIT/CLAIM arbitration survives compacted metadata replay.</p>
  */
 public final class S3SharedStorageExtension implements KafkaStorageExtension {
     private static final Logger LOG = LoggerFactory.getLogger(S3SharedStorageExtension.class);
@@ -95,7 +94,6 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
     private KafkaObjectMetadataStore metadataStore;
     private S3ObjectStore objectStore;
     private SharedUploadScheduler uploadScheduler;
-    private OrphanCleanupScheduler orphanCleanupScheduler;
     private boolean closed;
 
     @Override
@@ -294,7 +292,6 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
     ) throws IOException {
         KafkaObjectMetadataStore newMetadataStore = null;
         SharedUploadScheduler newUploadScheduler = null;
-        OrphanCleanupScheduler newOrphanCleanupScheduler = null;
         boolean installed = false;
         try {
             SharedMetadataClientConfiguration metadataConfiguration =
@@ -338,11 +335,9 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
                 configuration.uploadWalPressurePercent(),
                 configuration.uploadMaxInflight()
             );
-            newOrphanCleanupScheduler = new OrphanCleanupScheduler(
-                new OrphanObjectCleaner(sharedObjectStore, newMetadataStore, activeUploads, engine.remoteIndex()),
-                context.time()::milliseconds,
-                configuration.orphanGraceMs()
-            );
+            // A compacted COMMIT can be lost from independently keyed CLAIM history.
+            // Never schedule physical orphan DELETE without durable cross-broker arbitration.
+            LOG.warn("PREPARED object orphan cleanup disabled: durable cross-broker CLAIM arbitration is absent");
 
             synchronized (this) {
                 if (closed || storage != engine || objectStore != sharedObjectStore) {
@@ -350,15 +345,12 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
                 }
                 metadataStore = newMetadataStore;
                 uploadScheduler = newUploadScheduler;
-                orphanCleanupScheduler = newOrphanCleanupScheduler;
                 newUploadScheduler.start(configuration.uploadIntervalMs());
-                newOrphanCleanupScheduler.start(configuration.orphanCleanupIntervalMs());
                 sharedMetrics.attachUploadScheduler(newUploadScheduler);
                 installed = true;
             }
         } finally {
             if (!installed) {
-                closeIgnoringFailure(newOrphanCleanupScheduler);
                 closeIgnoringFailure(newUploadScheduler);
                 closeIgnoringFailure(newMetadataStore);
             }
@@ -479,7 +471,6 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         ExecutorService executor;
         SharedUploadScheduler scheduler;
         SharedStorageMetrics sharedMetrics;
-        OrphanCleanupScheduler cleanupScheduler;
         KafkaObjectMetadataStore metadata;
         S3ObjectStore objects;
         SharedStorageEngine engine;
@@ -492,7 +483,6 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             executor = bootstrapExecutor;
             scheduler = uploadScheduler;
             sharedMetrics = metrics;
-            cleanupScheduler = orphanCleanupScheduler;
             metadata = metadataStore;
             objects = objectStore;
             engine = storage;
@@ -500,7 +490,6 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             bootstrapExecutor = null;
             uploadScheduler = null;
             metrics = null;
-            orphanCleanupScheduler = null;
             metadataStore = null;
             objectStore = null;
             storageConfiguration = null;
@@ -520,11 +509,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             interrupted = awaitExecutorStop(executor);
         }
 
-        // Phase 1: stop every scheduler from admitting new asynchronous work. Do not drain yet because an upload or
-        // cleanup may be waiting indefinitely for the metadata consumer to apply its record.
-        if (cleanupScheduler != null) {
-            interrupted |= cleanupScheduler.stop();
-        }
+        // Phase 1: stop upload admission; metadata apply may still be in progress.
         if (scheduler != null) {
             interrupted |= scheduler.stop();
         }
@@ -532,12 +517,10 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         IOException failure = null;
         failure = close(failure, sharedMetrics);
 
-        // Phase 2: fail metadata waiters and stop the metadata consumer/producers. This breaks the only unbounded
-        // dependency of an in-flight upload/cleanup before the schedulers are drained.
+        // Phase 2: stop metadata clients to unblock in-flight uploads before draining the scheduler.
         failure = close(failure, metadata);
 
         // Phase 3: all remaining async work is bounded by the S3 request policy. Drain it before closing S3 or WAL.
-        failure = close(failure, cleanupScheduler);
         failure = close(failure, scheduler);
         failure = close(failure, objects);
         failure = close(failure, engine);

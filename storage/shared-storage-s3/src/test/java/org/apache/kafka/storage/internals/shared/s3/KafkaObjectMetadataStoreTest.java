@@ -42,6 +42,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class KafkaObjectMetadataStoreTest {
     @Test
+    void orphanDeleteRequiresDurableArbitration() {
+        UnsupportedOperationException refusal = KafkaObjectMetadataStore.unsafeOrphanClaim();
+        assertTrue(refusal.getMessage().contains("durable cross-broker"));
+        assertTrue(refusal.getMessage().contains("compacted metadata replay"));
+    }
+
+    @Test
     void ordinaryMetadataProducerCannotEmitUnfencedRetirementWatermark() {
         org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId partition =
             new org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId(1L, 2L, 0);
