@@ -86,8 +86,11 @@ cache_probe="${TMP}/cache-probe"
 cp /bin/sleep "${cache_probe}"
 chmod 0755 "${cache_probe}"
 cache_probe_sha="$(sha256sum "${cache_probe}" | awk '{print $1}')"
-
-binary_valid "${cache_probe}" "sleep (GNU coreutils)" "${cache_probe_sha}"
+# Use the runner's actual GNU/BusyBox/coreutils release string; the
+# self-test is about SHA/version mismatch rejection, not pinning /bin/sleep.
+cache_probe_version="$("${cache_probe}" --version 2>&1)"
+[ -n "${cache_probe_version}" ] || { echo "Missing cache probe version" >&2; exit 1; }
+binary_valid "${cache_probe}" "${cache_probe_version}" "${cache_probe_sha}"
 
 # Regression: a correctly checksummed, pinned binary may print additional
 # text after the expected version. grep -q under pipefail used to close early
