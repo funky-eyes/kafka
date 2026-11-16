@@ -55,6 +55,7 @@ import software.amazon.awssdk.services.s3.model.CreateBucketRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
 import software.amazon.awssdk.services.s3.model.S3Exception;
 
+import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -71,15 +72,174 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /** Exercises replay of actually compacted Kafka records after an actual S3 object delete. */
 class KafkaOrphanCompactionMinioIntegrationTest {
+    /**
+     * Start a real uploader transaction on the metadata partition, fence it
+     * after the broker has acknowledged a marker, then send its old COMMIT.
+     */
+    @Test
+    @Timeout(value = 6, unit = TimeUnit.MINUTES)
+    void staleUploaderEpochErrorCannotReviveClaimAfterAbort() throws Exception {
+        String bootstrap = System.getenv("SHARED_STORAGE_KAFKA_BOOTSTRAP_SERVERS");
+        String endpoint = System.getenv("SHARED_STORAGE_S3_ENDPOINT");
+        assumeTrue(bootstrap != null && !bootstrap.isBlank(), "Kafka integration brokers are not configured");
+        assumeTrue(endpoint != null && !endpoint.isBlank(), "MinIO integration endpoint is not configured");
+        String topic = "uploader-epoch-" + UUID.randomUUID();
+        String namespace = UUID.randomUUID().toString();
+        long objectId = 9_320L;
+        long createdTimeMs = 4_000L;
+        byte[] objectKey = SharedMetadataRecordCodec.objectKey(objectId);
+        byte[] bytes = new byte[] {3, 1, 4, 1};
+        SharedObjectMetadata descriptor = new SharedObjectMetadata(objectId, bytes.length, 51L, List.of(
+            new SharedObjectRange(new SharedPartitionId(1L, 2L, 0),
+                new OffsetRange(0L, 1L), 0, 0L, bytes.length, 51L)
+        ));
+        Map<String, Object> options = new HashMap<>();
+        options.put(S3ObjectStoreConfig.BUCKET_CONFIG, "kafka-orphan-compaction-test");
+        options.put(S3ObjectStoreConfig.REGION_CONFIG, "us-east-1");
+        options.put(S3ObjectStoreConfig.ENDPOINT_CONFIG, endpoint);
+        options.put(S3ObjectStoreConfig.PATH_STYLE_ACCESS_CONFIG, true);
+        options.put(S3ObjectStoreConfig.KEY_PREFIX_CONFIG, "uploader-epoch/" + UUID.randomUUID());
+        S3ObjectStoreConfig objectConfig = S3ObjectStoreConfig.from(options);
+        Properties plainProperties = producerProperties(bootstrap);
+        Properties uploaderProperties = producerProperties(bootstrap);
+        uploaderProperties.put(ProducerConfig.INTERCEPTOR_CLASSES_CONFIG,
+            List.of(UploaderCommitRaceInterceptor.class.getName()));
+        try (Admin admin = Admin.create(plainProperties);
+             S3ObjectStore objects = new S3ObjectStore(objectConfig);
+             S3Client inspector = S3Client.builder().region(Region.US_EAST_1)
+                 .endpointOverride(objectConfig.endpoint().orElseThrow())
+                 .credentialsProvider(DefaultCredentialsProvider.builder().build())
+                 .httpClientBuilder(UrlConnectionHttpClient.builder())
+                 .serviceConfiguration(S3Configuration.builder().pathStyleAccessEnabled(true).build())
+                 .build()) {
+            awaitThreeRegisteredBrokers(admin);
+            try {
+                inspector.createBucket(CreateBucketRequest.builder().bucket(objectConfig.bucket()).build());
+            } catch (S3Exception e) {
+                if (e.statusCode() != 409) {
+                    throw e;
+                }
+            }
+            admin.createTopics(List.of(new NewTopic(topic, 1, (short) 3).configs(Map.of(
+                TopicConfig.CLEANUP_POLICY_CONFIG, TopicConfig.CLEANUP_POLICY_COMPACT,
+                TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2"
+            )))).all().get(30, TimeUnit.SECONDS);
+            try {
+                try (FencedObjectLifecycleArbiter.Uploader uploader =
+                         new FencedObjectLifecycleArbiter.Uploader(
+                             uploaderProperties, topic, namespace, objectId)) {
+                    uploader.prepare(createdTimeMs);
+                    objects.put(objectId, ByteBuffer.wrap(bytes)).get(30, TimeUnit.SECONDS);
+                    exerciseEpochRace(bootstrap, plainProperties, topic, namespace, objectKey,
+                        createdTimeMs, descriptor, uploader, objects, inspector, objectConfig);
+                }
+            } finally {
+                UploaderCommitRaceInterceptor.HOOK.set(null);
+                objects.delete(objectId).get(30, TimeUnit.SECONDS);
+                admin.deleteTopics(List.of(topic)).all().get(30, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    private static void exerciseEpochRace(
+        String bootstrap, Properties plainProperties, String topic, String namespace, byte[] objectKey,
+        long createdTimeMs, SharedObjectMetadata descriptor, FencedObjectLifecycleArbiter.Uploader uploader,
+        S3ObjectStore objects, S3Client inspector, S3ObjectStoreConfig objectConfig
+    ) throws Exception {
+        CountDownLatch markerAcknowledged = new CountDownLatch(1);
+        CountDownLatch allowOldCommit = new CountDownLatch(1);
+        AtomicReference<Throwable> hookFailure = new AtomicReference<>();
+        KafkaProducer<byte[], byte[]> producer = uploaderProducer(uploader);
+        UploaderCommitRaceInterceptor.HOOK.set(() -> {
+            try {
+                producer.send(new ProducerRecord<>(topic, 0, SharedMetadataRecordCodec.brokerSequenceKey(777),
+                    SharedMetadataRecordCodec.brokerSequenceValue(1L))).get(30, TimeUnit.SECONDS);
+                markerAcknowledged.countDown();
+                if (!allowOldCommit.await(60, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("Timed out awaiting competing CLAIM");
+                }
+            } catch (Throwable failure) {
+                hookFailure.set(failure);
+                markerAcknowledged.countDown();
+            }
+        });
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<Long> oldCommit = executor.submit(() -> uploader.commit(descriptor));
+            assertTrue(markerAcknowledged.await(30, TimeUnit.SECONDS), "Uploader marker was not acknowledged");
+            assertNull(hookFailure.get(), "Uploader marker send must succeed before fencing");
+            OptionalLong claim = FencedObjectLifecycleArbiter.claimIfPrepared(
+                plainProperties, topic, namespace, descriptor.objectId(), createdTimeMs);
+            assertTrue(claim.isPresent(), "A competing producer must persist CLAIM after fencing the uploader");
+            assertClaimRetained(bootstrap, topic, objectKey);
+            objects.delete(descriptor.objectId()).get(30, TimeUnit.SECONDS);
+            assertObjectMissing(inspector, objectConfig, descriptor.objectId());
+            allowOldCommit.countDown();
+            ExecutionException oldEpoch = assertThrows(ExecutionException.class,
+                () -> oldCommit.get(60, TimeUnit.SECONDS));
+            assertTrue(hasInvalidEpochCause(oldEpoch), "The uploader itself must receive INVALID_PRODUCER_EPOCH");
+            assertNoSuppressedAbortFailure(oldEpoch);
+            assertClaimRetained(bootstrap, topic, objectKey);
+            for (int attempt = 0; attempt < 3; attempt++) {
+                Exception failure = assertThrows(Exception.class, () -> uploader.commit(descriptor));
+                assertTrue(hasFencingOrStaleEpochCause(failure), "Old COMMIT retry must fail on its epoch");
+                assertClaimRetained(bootstrap, topic, objectKey);
+                assertObjectMissing(inspector, objectConfig, descriptor.objectId());
+            }
+        } finally {
+            UploaderCommitRaceInterceptor.HOOK.set(null);
+            allowOldCommit.countDown();
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(70, TimeUnit.SECONDS));
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static KafkaProducer<byte[], byte[]> uploaderProducer(FencedObjectLifecycleArbiter.Uploader uploader)
+        throws Exception {
+        Field field = FencedObjectLifecycleArbiter.Uploader.class.getDeclaredField("producer");
+        field.setAccessible(true);
+        return (KafkaProducer<byte[], byte[]>) field.get(uploader);
+    }
+
+    private static boolean hasInvalidEpochCause(Throwable failure) {
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            if (cause instanceof InvalidProducerEpochException) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static void assertNoSuppressedAbortFailure(Throwable failure) {
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            assertEquals(0, cause.getSuppressed().length, "Uploader abort must return normally");
+        }
+    }
+
+    private static void assertClaimRetained(String bootstrap, String topic, byte[] objectKey) {
+        List<ConsumerRecord<byte[], byte[]>> records = readTargetRecords(bootstrap, topic, objectKey, objectKey);
+        assertFalse(records.isEmpty());
+        assertTrue(SharedMetadataRecordCodec.decodeValue(
+            SharedMetadataRecordCodec.decodeKey(objectKey), records.get(records.size() - 1).value()
+        ) instanceof SharedMetadataRecordCodec.FencedClaimedObjectValue, "Latest object value must remain CLAIM");
+    }
+
+    private static void assertObjectMissing(S3Client inspector, S3ObjectStoreConfig config, long objectId) {
+        assertEquals(404, assertThrows(S3Exception.class, () -> inspector.headObject(
+            HeadObjectRequest.builder().bucket(config.bucket()).key(config.objectKey(objectId)).build())).statusCode());
+    }
     /**
      * Use the production metadata store and cleaner with independent broker identities.
      * This test owns the fixed metadata topic and therefore requires a dedicated cluster.
