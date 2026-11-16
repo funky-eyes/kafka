@@ -15,6 +15,9 @@
 # limitations under the License.
 
 set -euo pipefail
+# Failures in the process-owner test used to exit silently under set -e.
+# Include the failing command and line without weakening the assertion.
+trap 'printf "MinIO fixture self-test failed at line %s: %s\\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FIXTURE="${ROOT}/tools/shared_storage_minio_fixture.sh"
