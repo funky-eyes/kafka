@@ -246,6 +246,7 @@ jobs:
 
           grep 'REMOTE_CHECKPOINT_LOSS_' "$result_xml" \
             | tee shared-storage-remote-checkpoint-loss-proof.txt
+          grep -q 'REMOTE_CHECKPOINT_LOSS_DATA_PLANE_READY partitions=3' shared-storage-remote-checkpoint-loss-proof.txt
           grep -q 'REMOTE_CHECKPOINT_LOSS_WAL_TAIL_ACKED' shared-storage-remote-checkpoint-loss-proof.txt
           grep -q 'REMOTE_CHECKPOINT_LOSS_WAL_PRESERVED' shared-storage-remote-checkpoint-loss-proof.txt
           grep -q 'REMOTE_CHECKPOINT_LOSS_ALL_BROKERS_SERVED' shared-storage-remote-checkpoint-loss-proof.txt
