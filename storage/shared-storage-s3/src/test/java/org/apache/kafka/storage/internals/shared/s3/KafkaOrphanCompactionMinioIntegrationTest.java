@@ -391,6 +391,23 @@ class KafkaOrphanCompactionMinioIntegrationTest {
                     ).isPresent(), "Legacy COMMIT must never be promoted to fenced catalog seal");
                 }
 
+                // A compacted snapshot may retain only the independent
+                // catalog-seal key after losing the original COMMIT key. A
+                // new transactional producer must not reuse that identity.
+                long sealOnlyObjectId = objectId + 3L;
+                SharedObjectMetadata sealOnly = new SharedObjectMetadata(
+                    sealOnlyObjectId, 128L, 71L, descriptor.ranges());
+                try (KafkaProducer<byte[], byte[]> fixtureWriter = new KafkaProducer<>(properties)) {
+                    fixtureWriter.send(new ProducerRecord<>(
+                        topic, 0, SharedMetadataRecordCodec.objectCatalogSealKey(sealOnlyObjectId),
+                        SharedMetadataRecordCodec.objectCatalogSealValue(1L, epoch, sealOnly)
+                    )).get(30, TimeUnit.SECONDS);
+                }
+                assertThrows(IllegalStateException.class, () ->
+                    new FencedObjectLifecycleArbiter.Uploader(
+                        properties, topic, namespace, sealOnlyObjectId),
+                    "An independent surviving catalog seal must forbid object ID reuse");
+
                 // A PREPARED-only uploader must not turn a sampled catalog
                 // into a fake COMMITTED seal. Initializing the sealer still
                 // fences that uploader's producer before its late COMMIT.
