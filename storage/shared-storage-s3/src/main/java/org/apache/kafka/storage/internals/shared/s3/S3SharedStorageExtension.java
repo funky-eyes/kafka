@@ -37,7 +37,7 @@ import org.apache.kafka.storage.internals.shared.object.ActiveObjectUploads;
 import org.apache.kafka.storage.internals.shared.object.OrphanCleanupScheduler;
 import org.apache.kafka.storage.internals.shared.object.OrphanObjectCleaner;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectPacker;
-import org.apache.kafka.storage.internals.shared.object.SharedObjectReader;
+import org.apache.kafka.storage.internals.shared.object.SharedObjectIoFences;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectUploadHook;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectUploader;
 import org.apache.kafka.storage.internals.shared.wal.SharedWal;
@@ -96,6 +96,9 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
     private S3ObjectStore objectStore;
     private SharedUploadScheduler uploadScheduler;
     private OrphanCleanupScheduler orphanCleanupScheduler;
+    // Created with the cold reader during start(), BEFORE metadata bootstrap.
+    // Every upload initialization must use this exact same local drain pair.
+    private SharedObjectIoFences ioFences;
     private boolean closed;
 
     @Override
@@ -115,7 +118,8 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             SharedStorageEngine newStorage = new SharedStorageEngine(wal, remoteCheckpoint);
             newMetrics = new SharedStorageMetrics(newStorage, context.brokerId());
             newObjectStore = new S3ObjectStore(objectStoreConfiguration(context));
-            newStorage.installRemoteReader(new SharedObjectReader(
+            SharedObjectIoFences newIoFences = new SharedObjectIoFences();
+            newStorage.installRemoteReader(newIoFences.newReader(
                 newObjectStore,
                 newStorage.remoteIndex(),
                 configuration.readIndexCacheEntries(),
@@ -147,6 +151,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             partitionRoleListener = newPartitionRoleListener;
             bootstrapExecutor = newBootstrapExecutor;
             objectStore = newObjectStore;
+            ioFences = newIoFences;
             newObjectStore = null;
         } catch (Throwable t) {
             closeIgnoringFailure(newMetrics);
@@ -186,7 +191,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         boolean localStateMissing =
             storage == null || metrics == null || bootstrapExecutor == null || storageConfiguration == null;
         boolean remoteStateMissing =
-            commitProgress == null || sharedUnifiedLogFactory == null || objectStore == null;
+            commitProgress == null || sharedUnifiedLogFactory == null || objectStore == null || ioFences == null;
         if (localStateMissing || remoteStateMissing) {
             return CompletableFuture.failedFuture(
                 new IllegalStateException("S3 shared storage extension has not been started"));
@@ -200,6 +205,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             SharedStorageMetrics sharedMetrics = metrics;
             SharedCommitProgress progress = commitProgress;
             S3ObjectStore objects = objectStore;
+            SharedObjectIoFences localFences = ioFences;
             ExecutorService executor = bootstrapExecutor;
             brokerReadyFuture = CompletableFuture.runAsync(() ->
                 initializeRemotePlaneUntilAvailable(
@@ -208,7 +214,8 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
                     engine,
                     sharedMetrics,
                     progress,
-                    objects
+                    objects,
+                    localFences
                 ),
                 executor
             ).whenComplete((ignored, error) -> {
@@ -233,11 +240,13 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         SharedStorageEngine engine,
         SharedStorageMetrics sharedMetrics,
         SharedCommitProgress progress,
-        S3ObjectStore sharedObjectStore
+        S3ObjectStore sharedObjectStore,
+        SharedObjectIoFences localFences
     ) {
         while (true) {
             try {
-                initializeRemotePlane(context, configuration, engine, sharedMetrics, progress, sharedObjectStore);
+                initializeRemotePlane(context, configuration, engine, sharedMetrics, progress, sharedObjectStore,
+                    localFences);
                 sharedMetrics.markRemoteControlPlaneReady();
                 LOG.info("Shared storage metadata control plane is ready on broker {}", context.brokerId());
                 return;
@@ -283,7 +292,8 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         SharedStorageEngine engine,
         SharedStorageMetrics sharedMetrics,
         SharedCommitProgress progress,
-        S3ObjectStore sharedObjectStore
+        S3ObjectStore sharedObjectStore,
+        SharedObjectIoFences localFences
     ) throws IOException {
         KafkaObjectMetadataStore newMetadataStore = null;
         SharedUploadScheduler newUploadScheduler = null;
@@ -309,7 +319,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
                 DEFAULT_OBJECT_ID_BLOCK_SIZE,
                 initialBlock
             );
-            ActiveObjectUploads activeUploads = new ActiveObjectUploads();
+            ActiveObjectUploads activeUploads = localFences.uploads();
             SharedObjectUploadHook uploadHook =
                 FileSharedObjectUploadBarrier.from(context.originals(), context.brokerId());
             SharedObjectUploader uploader = new SharedObjectUploader(
@@ -506,6 +516,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             metrics = null;
             metadataStore = null;
             objectStore = null;
+            ioFences = null;
             storageConfiguration = null;
             storage = null;
             commitProgress = null;
