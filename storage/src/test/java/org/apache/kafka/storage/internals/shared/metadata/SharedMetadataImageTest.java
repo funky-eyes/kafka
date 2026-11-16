@@ -819,6 +819,24 @@ class SharedMetadataImageTest {
     }
 
     @Test
+    void sealedFencedObjectCannotBeReplacedByLegacyCommitWithMatchingDescriptor() {
+        long id = BrokerObjectId.compose(8, 97L);
+        SharedObjectMetadata object = metadata(id, 124L);
+        byte[] key = SharedMetadataRecordCodec.objectKey(id);
+        SharedMetadataImage image = new SharedMetadataImage();
+        image.applyFromMetadataLog(key,
+            SharedMetadataRecordCodec.fencedCommittedObjectValue(object), 8L);
+        image.applyFromMetadataLog(SharedMetadataRecordCodec.objectCatalogSealKey(id),
+            SharedMetadataRecordCodec.objectCatalogSealValue(8L, 17L, object), 9L);
+        image.markReady();
+        IllegalStateException failure = assertThrows(IllegalStateException.class, () ->
+            image.applyFromMetadataLog(key,
+                SharedMetadataRecordCodec.committedObjectValue(object), 10L));
+        assertTrue(failure.getMessage().contains("conflicting descriptor"));
+        assertEquals(SharedMetadataImage.State.FAILED, image.state());
+    }
+
+    @Test
     void catalogSealRejectsLegacyCommitEvenWithMatchingOffsetAndDigest() {
         long id = BrokerObjectId.compose(8, 96L);
         SharedObjectMetadata object = metadata(id, 123L);
