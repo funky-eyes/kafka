@@ -91,7 +91,7 @@ jobs:
           import sys
           from common import build_docker_image_runner
           build_docker_image_runner(
-              'docker build -f $DOCKER_FILE -t kafka-orphan-local:ci --progress=plain $DOCKER_DIR',
+              'docker build -f $DOCKER_FILE -t kafka-orphan-local:ci --build-arg kafka_url= --progress=plain $DOCKER_DIR',
               'jvm', sys.argv[1])
           PY
           docker image inspect kafka-orphan-local:ci --format '{{.Id}}'
