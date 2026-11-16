@@ -87,12 +87,31 @@ jobs:
           echo "Broker checkout: $(git rev-parse HEAD)"
           # Use the repository's Docker build context and the locally built
           # archive. The runtime image uses JRE 21; release classes target 17.
+          # The Alpine build stage's process listing may truncate Kafka's
+          # command line, making kafka-server-stop.sh miss the build-only
+          # broker. Stop the exact child PID instead, in a temporary context.
           PYTHONPATH="$PWD/docker" python3 - "$archive" <<'PY'
+          import pathlib
+          import shutil
+          import subprocess
           import sys
-          from common import build_docker_image_runner
-          build_docker_image_runner(
-              'docker build -f $DOCKER_FILE -t kafka-orphan-local:ci --build-arg kafka_url= --progress=plain $DOCKER_DIR',
-              'jvm', sys.argv[1])
+          import tempfile
+          with tempfile.TemporaryDirectory() as temporary:
+              context = pathlib.Path(temporary)
+              shutil.copytree('docker/jvm', context, dirs_exist_ok=True)
+              shutil.copytree('docker/resources', context / 'resources')
+              shutil.copy('docker/server.properties', context)
+              shutil.copy(sys.argv[1], context / 'kafka.tgz')
+              launcher = context / 'jsa_launch'
+              text = launcher.read_text()
+              start = 'opt/kafka/bin/kafka-server-start.sh opt/kafka/config/server.properties &'
+              stop = 'opt/kafka/bin/kafka-server-stop.sh'
+              assert text.count(start) == 1 and text.count(stop) == 1
+              launcher.write_text(text.replace(start, start + '\nKAFKA_BROKER_PID=$!')
+                                  .replace(stop, 'kill -TERM "$KAFKA_BROKER_PID"'))
+              subprocess.run(['docker', 'build', '-f', str(context / 'Dockerfile'),
+                              '-t', 'kafka-orphan-local:ci', '--build-arg', 'kafka_url=',
+                              '--progress=plain', str(context)], check=True)
           PY
           docker image inspect kafka-orphan-local:ci --format '{{.Id}}'
 
