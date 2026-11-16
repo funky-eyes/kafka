@@ -310,6 +310,77 @@ class KafkaOrphanCompactionMinioIntegrationTest {
         }
     }
 
+    /**
+     * A real Kafka transaction fences the previous v2 uploader before the
+     * independent compacted seal key is written. This is intentionally
+     * limited to catalog facts: no Controller approval or S3 DELETE occurs.
+     */
+    @Test
+    @Timeout(value = 6, unit = TimeUnit.MINUTES)
+    void fencedCommittedCatalogSealPreservesOriginalObjectAndRejectsStaleWriter() throws Exception {
+        String bootstrap = System.getenv("SHARED_STORAGE_KAFKA_BOOTSTRAP_SERVERS");
+        assumeTrue(bootstrap != null && !bootstrap.isBlank(), "Kafka integration brokers are not configured");
+
+        String topic = "committed-seal-" + UUID.randomUUID();
+        String namespace = UUID.randomUUID().toString();
+        long objectId = 9_204L;
+        long epoch = 8L;
+        Properties properties = producerProperties(bootstrap);
+        SharedObjectMetadata descriptor = new SharedObjectMetadata(objectId, 128L, 71L, List.of(
+            new SharedObjectRange(new SharedPartitionId(1L, 2L, 0),
+                new OffsetRange(0L, 32L), 3, 0L, 32, 51L),
+            new SharedObjectRange(new SharedPartitionId(1L, 2L, 1),
+                new OffsetRange(0L, 32L), 4, 64L, 32, 52L)
+        ));
+        try (Admin admin = Admin.create(properties)) {
+            admin.createTopics(List.of(new NewTopic(topic, 1, (short) 3).configs(Map.of(
+                TopicConfig.CLEANUP_POLICY_CONFIG, TopicConfig.CLEANUP_POLICY_COMPACT,
+                TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2"
+            )))).all().get(30, TimeUnit.SECONDS);
+            try (FencedObjectLifecycleArbiter.Uploader uploader =
+                     new FencedObjectLifecycleArbiter.Uploader(properties, topic, namespace, objectId)) {
+                uploader.prepare(1_000L);
+                long commitOffset = uploader.commit(descriptor);
+                SharedObjectMetadata altered = new SharedObjectMetadata(objectId, 128L, 72L, descriptor.ranges());
+                assertFalse(FencedObjectLifecycleArbiter.sealCommittedAfterFencing(
+                    properties, topic, namespace, altered, commitOffset, epoch
+                ).isPresent(), "Conflicting full object descriptor cannot borrow the COMMIT");
+                // The failed attempt already fenced the original producer.
+                assertThrows(Exception.class, () -> uploader.commit(descriptor));
+
+                long sealOffset = FencedObjectLifecycleArbiter.sealCommittedAfterFencing(
+                    properties, topic, namespace, descriptor, commitOffset, epoch
+                ).orElseThrow();
+                assertTrue(sealOffset > commitOffset);
+                assertFalse(FencedObjectLifecycleArbiter.sealCommittedAfterFencing(
+                    properties, topic, namespace, descriptor, commitOffset, epoch
+                ).isPresent(), "A previously sealed physical identity cannot be sealed twice");
+                assertFalse(FencedObjectLifecycleArbiter.sealCommittedAfterFencing(
+                    properties, topic, namespace, descriptor, commitOffset + 1, epoch
+                ).isPresent(), "A forged COMMIT offset cannot be accepted");
+
+                List<ConsumerRecord<byte[], byte[]>> persisted = readTargetRecords(
+                    bootstrap, topic, SharedMetadataRecordCodec.objectKey(objectId),
+                    SharedMetadataRecordCodec.objectCatalogSealKey(objectId)
+                );
+                SharedMetadataImage image = new SharedMetadataImage();
+                for (ConsumerRecord<byte[], byte[]> record : persisted) {
+                    image.applyFromMetadataLog(record.key(), record.value(), record.offset());
+                }
+                image.markReady();
+                assertEquals(descriptor, image.committedObject(objectId).orElseThrow());
+                SharedMetadataImage.CatalogSealEvidence evidence = image.catalogSeal(objectId).orElseThrow();
+                assertEquals(sealOffset, evidence.sealRecordOffset());
+                assertEquals(commitOffset, evidence.seal().originalCommitOffset());
+                assertEquals(epoch, evidence.seal().retirementEpoch());
+                assertEquals(SharedMetadataRecordCodec.committedDescriptorSha256(descriptor),
+                    evidence.seal().descriptorSha256());
+            } finally {
+                admin.deleteTopics(List.of(topic)).all().get(30, TimeUnit.SECONDS);
+            }
+        }
+    }
+
     private static List<ConsumerRecord<byte[], byte[]>> awaitSingleKeyCompaction(
         String bootstrap, String topic, byte[] key, long preparedOffset, long claimedOffset
     ) throws Exception {
