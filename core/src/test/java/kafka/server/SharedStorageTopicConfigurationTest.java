@@ -45,6 +45,7 @@ import org.apache.kafka.common.utils.LogCaptureAppender;
 import org.apache.kafka.raft.KRaftConfigs;
 import org.apache.kafka.server.BrokerLifecycleManager;
 import org.apache.kafka.server.common.SharedStorageVersion;
+import org.apache.kafka.server.logger.LoggingController;
 import org.apache.kafka.storage.internals.log.KafkaStorageExtension;
 import org.apache.kafka.storage.internals.log.StorageExtensionContext;
 import org.apache.kafka.storage.internals.log.UnifiedLog;
@@ -53,7 +54,6 @@ import org.apache.kafka.storage.internals.shared.kafka.SharedStorageExtension;
 import org.apache.kafka.storage.internals.shared.kafka.SharedUnifiedLog;
 import org.apache.kafka.test.TestUtils;
 
-import org.apache.logging.log4j.Level;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -75,6 +75,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -170,8 +171,11 @@ public class SharedStorageTopicConfigurationTest {
                 roundTrip(bootstrapServers, topic, "shared");
                 assertInstanceOf(SharedUnifiedLog.class, ready.logManager().getLog(partition, false).get());
 
+                String loggerName = BrokerLifecycleManager.class.getName();
+                String previousLevel = LoggingController.loggers().get(loggerName);
+                assertNotNull(previousLevel, "The running broker must have initialized its lifecycle logger");
                 try (LogCaptureAppender appender = LogCaptureAppender.createAndRegister(BrokerLifecycleManager.class)) {
-                    appender.setClassLogger(BrokerLifecycleManager.class, Level.INFO);
+                    assertTrue(LoggingController.logLevel(loggerName, "INFO"));
                     RuntimeException failure = assertThrows(RuntimeException.class, joining::startup);
                     assertInstanceOf(CancellationException.class, failure.getCause());
                     assertTrue(appender.getMessages().stream().anyMatch(message -> message.contains(
@@ -180,6 +184,8 @@ public class SharedStorageTopicConfigurationTest {
                     assertTrue(appender.getMessages().stream().anyMatch(message -> message.contains(
                         "Shutting down because we were unable to register with the controller quorum.")),
                         "The broker must reach its initial registration deadline and terminate startup");
+                } finally {
+                    assertTrue(LoggingController.logLevel(loggerName, previousLevel));
                 }
 
                 // Check final failure, not a broker that is merely still waiting to register.
