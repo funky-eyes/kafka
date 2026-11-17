@@ -23,7 +23,13 @@ on:
     paths:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/metadata/SharedMetadataImage.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/metadata/SharedMetadataImageTest.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/object/ObjectStore.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/object/OrphanObjectCleaner.java'
+      - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/object/OrphanObjectCleanerTest.java'
       - 'storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3/KafkaObjectMetadataStore.java'
+      - 'storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3/FencedObjectLifecycleArbiter.java'
+      - 'storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3/S3ObjectStore.java'
+      - 'storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3/S3ObjectStoreConfig.java'
       - 'storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3/S3SharedStorageExtension.java'
       - 'storage/shared-storage-s3/src/test/java/org/apache/kafka/storage/internals/shared/s3/KafkaObjectMetadataStoreTest.java'
       - 'storage/shared-storage-s3/src/test/java/org/apache/kafka/storage/internals/shared/s3/KafkaOrphanCompactionMinioIntegrationTest.java'
@@ -31,10 +37,16 @@ on:
   pull_request:
     paths:
       - 'storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3/KafkaObjectMetadataStore.java'
+      - 'storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3/FencedObjectLifecycleArbiter.java'
+      - 'storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3/S3ObjectStore.java'
+      - 'storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3/S3ObjectStoreConfig.java'
       - 'storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3/S3SharedStorageExtension.java'
       - 'storage/shared-storage-s3/src/test/java/org/apache/kafka/storage/internals/shared/s3/KafkaObjectMetadataStoreTest.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/metadata/SharedMetadataImage.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/metadata/SharedMetadataImageTest.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/object/ObjectStore.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/object/OrphanObjectCleaner.java'
+      - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/object/OrphanObjectCleanerTest.java'
       - 'storage/shared-storage-s3/src/test/java/org/apache/kafka/storage/internals/shared/s3/KafkaOrphanCompactionMinioIntegrationTest.java'
       - '.github/workflows/shared-storage-orphan-compaction.yml'
   workflow_dispatch:
@@ -105,6 +117,7 @@ jobs:
           AWS_REGION: us-east-1
           SHARED_STORAGE_S3_ENDPOINT: http://127.0.0.1:9000
           SHARED_STORAGE_KAFKA_BOOTSTRAP_SERVERS: 127.0.0.1:19091,127.0.0.1:19092,127.0.0.1:19093
+          SHARED_STORAGE_ISOLATED_TEST_CLUSTER: 'true'
         run: |
           set -euo pipefail
           ./gradlew :storage:test \
