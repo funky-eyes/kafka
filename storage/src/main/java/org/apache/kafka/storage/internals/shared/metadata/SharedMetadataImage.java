@@ -20,6 +20,8 @@ import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCo
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.CleanupClaimedValue;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.CleanupDeletedValue;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.CommittedObjectValue;
+import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.FencedClaimedObjectValue;
+import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.FencedPreparedObjectValue;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.MetadataKey;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.ObjectCatalogSealValue;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.MetadataValue;
@@ -128,7 +130,15 @@ public final class SharedMetadataImage {
             return;
         }
         if (value instanceof PreparedObjectValue prepared) {
-            applyPreparedObject(objectId, prepared);
+            applyPreparedObject(objectId, prepared.createdTimeMs(), false);
+            return;
+        }
+        if (value instanceof FencedPreparedObjectValue prepared) {
+            applyPreparedObject(objectId, prepared.createdTimeMs(), true);
+            return;
+        }
+        if (value instanceof FencedClaimedObjectValue claimed) {
+            applyFencedClaim(objectId, claimed);
             return;
         }
         if (value instanceof CommittedObjectValue committed) {
@@ -156,25 +166,45 @@ public final class SharedMetadataImage {
         committedObjectPositions.remove(objectId);
     }
 
-    private void applyPreparedObject(long objectId, PreparedObjectValue prepared) {
+    private void applyPreparedObject(long objectId, long createdTimeMs, boolean fenced) {
         if (catalogSeals.containsKey(objectId)) {
-            // A prior seal in this authoritative metadata partition fences
-            // duplicate PREPAREs from an old owner, but cannot delete live data.
+            if (fenced) {
+                throw corruption("Fenced PREPARE attempted to reuse sealed object " + objectId);
+            }
             return;
         }
         CleanupObject cleanup = cleanupObjects.get(objectId);
         if (cleanup != null) {
-            validateCleanupTimestamp(objectId, cleanup.createdTimeMs, prepared.createdTimeMs());
+            if (fenced || cleanup.fenced) {
+                throw corruption("Fenced object " + objectId + " was prepared after its cleanup claim");
+            }
+            validateCleanupTimestamp(objectId, cleanup.createdTimeMs, createdTimeMs);
             return;
         }
         if (committedObjects.containsKey(objectId)) {
             throw corruption("object " + objectId + " regressed from COMMITTED to PREPARED");
         }
-        PreparedObject candidate = new PreparedObject(objectId, prepared.createdTimeMs());
+        PreparedObject candidate = new PreparedObject(objectId, createdTimeMs, fenced);
         PreparedObject existing = preparedObjects.putIfAbsent(objectId, candidate);
         if (existing != null && !existing.equals(candidate)) {
-            throw corruption("object " + objectId + " was prepared with conflicting timestamps");
+            throw corruption("object " + objectId + " was prepared with conflicting timestamps or protocol");
         }
+    }
+
+    private void applyFencedClaim(long objectId, FencedClaimedObjectValue claimed) {
+        if (committedObjects.containsKey(objectId) || catalogSeals.containsKey(objectId)) {
+            throw corruption("Fenced CLAIM after COMMIT for object " + objectId);
+        }
+        PreparedObject prepared = preparedObjects.get(objectId);
+        if (prepared != null && !prepared.fenced) {
+            throw corruption("Fenced CLAIM cannot retire a legacy PREPARED object " + objectId);
+        }
+        CleanupObject cleanup = cleanupObjects.get(objectId);
+        if (cleanup != null && !cleanup.fenced) {
+            throw corruption("Fenced CLAIM conflicts with legacy cleanup for object " + objectId);
+        }
+        validatePreparedCleanupTimestamp(objectId, claimed.createdTimeMs());
+        applyCleanupState(objectId, new CleanupRecord(claimed.createdTimeMs(), CleanupState.CLAIMED, true));
     }
 
     private void applyCommittedObject(long objectId, CommittedObjectValue committed, long recordOffset) {
@@ -194,12 +224,7 @@ public final class SharedMetadataImage {
             }
             return;
         }
-        if (cleanupObjects.containsKey(objectId)) {
-            if (state == State.RECOVERING) {
-                throw corruption("Ambiguous compacted COMMIT and cleanup fence for object " + objectId);
-            }
-            // The cleanup record has an earlier offset in the authoritative partition, so this is a losing delayed
-            // COMMIT. Keep the fence and ignore the object value; both keys remain available after compaction.
+        if (suppressCommitAfterCleanup(objectId)) {
             return;
         }
         SharedObjectMetadata existing = committedObjects.putIfAbsent(objectId, metadata);
@@ -215,6 +240,22 @@ public final class SharedMetadataImage {
             // COMMITTED winners into the broker's remote read index.
             committedObjectListener.accept(metadata);
         }
+    }
+
+    private boolean suppressCommitAfterCleanup(long objectId) {
+        CleanupObject cleanup = cleanupObjects.get(objectId);
+        if (cleanup == null) {
+            return false;
+        }
+        if (cleanup.fenced) {
+            throw corruption("COMMIT after fenced CLAIM for object " + objectId);
+        }
+        if (state == State.RECOVERING) {
+            throw corruption("Ambiguous compacted COMMIT and cleanup fence for object " + objectId);
+        }
+        // Legacy different-key cleanup won the live append order. Keep its
+        // fence, but never let a late COMMIT publish new remote read references.
+        return true;
     }
 
     private void applyObjectCatalogSeal(long objectId, MetadataValue value, long recordOffset) {
@@ -272,6 +313,10 @@ public final class SharedMetadataImage {
             // COMMIT has the lower authoritative offset, therefore the cleanup attempt lost and must be a no-op.
             return;
         }
+        PreparedObject prepared = preparedObjects.get(objectId);
+        if (prepared != null && prepared.fenced) {
+            throw corruption("Legacy cleanup cannot claim fenced PREPARED object " + objectId);
+        }
         validatePreparedCleanupTimestamp(objectId, cleanup.createdTimeMs());
         applyCleanupState(objectId, cleanup);
     }
@@ -300,12 +345,15 @@ public final class SharedMetadataImage {
         CleanupObject existing = cleanupObjects.get(objectId);
         if (existing != null) {
             validateCleanupTimestamp(objectId, existing.createdTimeMs, candidate.createdTimeMs());
+            if (existing.fenced != candidate.fenced()) {
+                throw corruption("Object " + objectId + " mixes fenced and legacy cleanup generations");
+            }
             if (existing.state == CleanupState.DELETED && candidate.state() == CleanupState.CLAIMED) {
                 // Duplicate/late claim cannot move a terminal fence backwards.
                 return;
             }
         }
-        cleanupObjects.put(objectId, new CleanupObject(candidate.createdTimeMs(), candidate.state()));
+        cleanupObjects.put(objectId, new CleanupObject(candidate.createdTimeMs(), candidate.state(), candidate.fenced()));
         preparedObjects.remove(objectId);
     }
 
@@ -407,6 +455,16 @@ public final class SharedMetadataImage {
             .sorted(Comparator.comparingLong(ObjectMetadataStore.PreparedObject::objectId))
             .toList();
         return List.copyOf(result);
+    }
+
+    /** Only generation-fenced PREPARED objects can be considered for v2 arbitration. */
+    public synchronized List<ObjectMetadataStore.PreparedObject> fencedPreparedObjects() {
+        requireReady();
+        return preparedObjects.values().stream()
+            .filter(prepared -> prepared.fenced)
+            .map(prepared -> new ObjectMetadataStore.PreparedObject(prepared.objectId, prepared.createdTimeMs))
+            .sorted(Comparator.comparingLong(ObjectMetadataStore.PreparedObject::objectId))
+            .toList();
     }
 
     public synchronized List<ObjectMetadataStore.PreparedObject> cleanupClaimedObjects() {
@@ -630,12 +688,15 @@ public final class SharedMetadataImage {
         DELETED
     }
 
-    private record PreparedObject(long objectId, long createdTimeMs) {
+    private record PreparedObject(long objectId, long createdTimeMs, boolean fenced) {
     }
 
-    private record CleanupObject(long createdTimeMs, CleanupState state) {
+    private record CleanupObject(long createdTimeMs, CleanupState state, boolean fenced) {
     }
 
-    private record CleanupRecord(long createdTimeMs, CleanupState state) {
+    private record CleanupRecord(long createdTimeMs, CleanupState state, boolean fenced) {
+        private CleanupRecord(long createdTimeMs, CleanupState state) {
+            this(createdTimeMs, state, false);
+        }
     }
 }

@@ -29,6 +29,99 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SharedMetadataImageTest {
+
+    @Test
+    void fencedPreparedCandidatesAreDistinctFromLegacyPreparedObjects() {
+        long legacy = BrokerObjectId.compose(9, 40L);
+        long fenced = BrokerObjectId.compose(9, 41L);
+        SharedMetadataImage image = new SharedMetadataImage();
+        image.apply(SharedMetadataRecordCodec.objectKey(legacy),
+            SharedMetadataRecordCodec.preparedObjectValue(10L));
+        image.apply(SharedMetadataRecordCodec.objectKey(fenced),
+            SharedMetadataRecordCodec.fencedPreparedObjectValue(20L));
+        image.markReady();
+        assertEquals(2, image.preparedObjects().size());
+        assertEquals(
+            List.of(new ObjectMetadataStore.PreparedObject(fenced, 20L)),
+            image.fencedPreparedObjects()
+        );
+    }
+
+    @Test
+    void fencedClaimSurvivesSameKeyCompactionAndRejectsLateCommit() {
+        long objectId = BrokerObjectId.compose(9, 42L);
+        byte[] objectKey = SharedMetadataRecordCodec.objectKey(objectId);
+        byte[] claim = SharedMetadataRecordCodec.fencedClaimedObjectValue(25L);
+        SharedMetadataImage live = new SharedMetadataImage();
+        live.markReady();
+        live.applyFromMetadataLog(objectKey, SharedMetadataRecordCodec.fencedPreparedObjectValue(25L), 10L);
+        live.applyFromMetadataLog(objectKey, claim, 11L);
+        assertTrue(live.cleanupClaimed(objectId, 25L));
+        assertTrue(live.committedObjects().isEmpty());
+
+        // Kafka compaction retains only the last value for a single object key.
+        List<SharedObjectMetadata> published = new ArrayList<>();
+        SharedMetadataImage recovered = new SharedMetadataImage(published::add);
+        recovered.applyFromMetadataLog(objectKey, claim, 11L);
+        recovered.markReady();
+        assertEquals(List.of(new ObjectMetadataStore.PreparedObject(objectId, 25L)),
+            recovered.cleanupClaimedObjects());
+        assertTrue(published.isEmpty());
+        IllegalStateException late = assertThrows(IllegalStateException.class, () ->
+            recovered.applyFromMetadataLog(objectKey,
+                SharedMetadataRecordCodec.committedObjectValue(metadata(objectId, 125L)), 12L));
+        assertTrue(late.getMessage().contains("COMMIT after fenced CLAIM"));
+        assertEquals(SharedMetadataImage.State.FAILED, recovered.state());
+    }
+
+    @Test
+    void fencedClaimMustNotOverwriteAnEarlierCommit() {
+        long objectId = BrokerObjectId.compose(9, 43L);
+        byte[] key = SharedMetadataRecordCodec.objectKey(objectId);
+        SharedMetadataImage image = new SharedMetadataImage();
+        image.markReady();
+        image.applyFromMetadataLog(key, SharedMetadataRecordCodec.fencedPreparedObjectValue(30L), 10L);
+        image.applyFromMetadataLog(key,
+            SharedMetadataRecordCodec.committedObjectValue(metadata(objectId, 130L)), 11L);
+        IllegalStateException failure = assertThrows(IllegalStateException.class, () ->
+            image.applyFromMetadataLog(key, SharedMetadataRecordCodec.fencedClaimedObjectValue(30L), 12L));
+        assertTrue(failure.getMessage().contains("Fenced CLAIM after COMMIT"));
+        assertEquals(SharedMetadataImage.State.FAILED, image.state());
+    }
+
+    @Test
+    void fencedClaimRejectsLegacyPreparedAndCleanupKeys() {
+        long objectId = BrokerObjectId.compose(9, 44L);
+        byte[] key = SharedMetadataRecordCodec.objectKey(objectId);
+        SharedMetadataImage image = new SharedMetadataImage();
+        image.markReady();
+        image.apply(key, SharedMetadataRecordCodec.preparedObjectValue(35L));
+        assertTrue(assertThrows(IllegalStateException.class, () ->
+            image.apply(key, SharedMetadataRecordCodec.fencedClaimedObjectValue(35L)))
+            .getMessage().contains("legacy PREPARED"));
+
+        SharedMetadataImage second = new SharedMetadataImage();
+        second.markReady();
+        second.apply(key, SharedMetadataRecordCodec.fencedPreparedObjectValue(36L));
+        assertTrue(assertThrows(IllegalStateException.class, () ->
+            second.apply(SharedMetadataRecordCodec.objectCleanupKey(objectId),
+                SharedMetadataRecordCodec.cleanupClaimedValue(36L)))
+            .getMessage().contains("Legacy cleanup"));
+    }
+
+    @Test
+    void fencedAndLegacyCleanupValueTypesUseDifferentKeys() {
+        long objectId = BrokerObjectId.compose(9, 45L);
+        assertThrows(IllegalArgumentException.class, () ->
+            SharedMetadataRecordCodec.decodeValue(
+                SharedMetadataRecordCodec.decodeKey(SharedMetadataRecordCodec.objectCleanupKey(objectId)),
+                SharedMetadataRecordCodec.fencedClaimedObjectValue(50L)));
+        assertThrows(IllegalArgumentException.class, () ->
+            SharedMetadataRecordCodec.decodeValue(
+                SharedMetadataRecordCodec.decodeKey(SharedMetadataRecordCodec.objectKey(objectId)),
+                SharedMetadataRecordCodec.cleanupClaimedValue(50L)));
+    }
+
     @Test
     void targetedCommittedObjectLookupRequiresReadyAndRejectsHistoricalTombstones() {
         SharedMetadataImage image = new SharedMetadataImage();
