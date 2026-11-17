@@ -18,6 +18,7 @@ package org.apache.kafka.storage.internals.shared.s3;
 
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.clients.admin.TopicDescription;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
@@ -57,6 +58,7 @@ import software.amazon.awssdk.services.s3.model.S3Exception;
 
 import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -259,7 +261,7 @@ class KafkaOrphanCompactionMinioIntegrationTest {
      * This test owns the fixed metadata topic and therefore requires a dedicated cluster.
      */
     @Test
-    @Timeout(value = 6, unit = TimeUnit.MINUTES)
+    @Timeout(value = 8, unit = TimeUnit.MINUTES)
     void productionCleanerRecoversClaimAndRetriesLatePutAcrossStoreRestart() throws Exception {
         String bootstrap = System.getenv("SHARED_STORAGE_KAFKA_BOOTSTRAP_SERVERS");
         String endpoint = System.getenv("SHARED_STORAGE_S3_ENDPOINT");
@@ -375,6 +377,11 @@ class KafkaOrphanCompactionMinioIntegrationTest {
                 writeCompactionFiller(properties, topic);
                 awaitSingleKeyCompaction(bootstrap, topic, orphanKey, preparedOffset, claimOffset);
 
+                boolean restartBroker = "true".equals(System.getenv("SHARED_STORAGE_BROKER_RESTART_TEST"));
+                if (restartBroker) {
+                    restartMetadataLeader(admin, bootstrap, topic);
+                }
+
                 List<SharedObjectMetadata> replayed = new ArrayList<>();
                 try (KafkaObjectMetadataStore restarted = KafkaObjectMetadataStore.open(
                     productionStoreConfiguration(bootstrap, namespace, 102), replayed::add)) {
@@ -390,6 +397,9 @@ class KafkaOrphanCompactionMinioIntegrationTest {
                             .key(objectConfig.objectKey(orphanId)).build())).statusCode());
                     inspector.headObject(HeadObjectRequest.builder().bucket(objectConfig.bucket())
                         .key(objectConfig.objectKey(liveId)).build());
+                    if (restartBroker) {
+                        System.out.println("BROKER_RESTART_AND_CLAIM_RECOVERY_VERIFIED");
+                    }
                 }
             } finally {
                 objects.delete(orphanId).get(30, TimeUnit.SECONDS);
@@ -399,6 +409,85 @@ class KafkaOrphanCompactionMinioIntegrationTest {
                 }
             }
         }
+    }
+
+    /** Restart only the metadata leader in the explicitly provisioned CI cluster. */
+    private static void restartMetadataLeader(Admin admin, String bootstrap, String topic) throws Exception {
+        assertEquals("true", System.getenv("SHARED_STORAGE_ISOLATED_TEST_CLUSTER"));
+        assertEquals("127.0.0.1:19091,127.0.0.1:19092,127.0.0.1:19093", bootstrap);
+        assertEquals("4L6g3nShT-eMCtK--X86sw", admin.describeCluster().clusterId().get(10, TimeUnit.SECONDS));
+        TopicDescription before = admin.describeTopics(List.of(topic)).allTopicNames().get(10, TimeUnit.SECONDS).get(topic);
+        assertEquals(1, before.partitions().size());
+        assertEquals(3, before.partitions().get(0).isr().size());
+        int leaderId = before.partitions().get(0).leader().id();
+        assertTrue(leaderId >= 1 && leaderId <= 3);
+        String container = "orphan-kafka-" + leaderId;
+        assertEquals("true", docker("inspect", "--format", "{{index .Config.Labels \"kafka.orphan.restart-test\"}}", container));
+        String startedAt = docker("inspect", "--format", "{{.State.StartedAt}}", container);
+        assertEquals("true", docker("inspect", "--format", "{{.State.Running}}", container));
+        boolean stopped = false;
+        try {
+            docker("stop", "--time", "30", container);
+            stopped = true;
+            assertEquals("false", docker("inspect", "--format", "{{.State.Running}}", container),
+                "The metadata leader must actually stop before it is restarted");
+            long stoppedDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(90);
+            boolean clusterObservedStop = false;
+            while (System.nanoTime() < stoppedDeadline) {
+                try {
+                    TopicDescription during = admin.describeTopics(List.of(topic)).allTopicNames()
+                        .get(10, TimeUnit.SECONDS).get(topic);
+                    clusterObservedStop = admin.describeCluster().nodes().get(10, TimeUnit.SECONDS).stream()
+                        .noneMatch(node -> node.id() == leaderId)
+                        && during.partitions().get(0).isr().stream().noneMatch(node -> node.id() == leaderId);
+                    if (clusterObservedStop) break;
+                } catch (ExecutionException | java.util.concurrent.TimeoutException e) {
+                    // The old leader can be unavailable while the remaining quorum elects a new one.
+                }
+                Thread.sleep(500L);
+            }
+            assertTrue(clusterObservedStop, "The cluster must observe the metadata broker leaving before restart");
+        } finally {
+            // Also try recovery if docker stop timed out after stopping the process.
+            if (stopped || "false".equals(docker("inspect", "--format", "{{.State.Running}}", container))) {
+                docker("start", container);
+            }
+        }
+        assertEquals("true", docker("inspect", "--format", "{{.State.Running}}", container));
+        assertFalse(startedAt.equals(docker("inspect", "--format", "{{.State.StartedAt}}", container)),
+            "The Kafka container must have a new process start time");
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(120);
+        boolean recovered = false;
+        while (System.nanoTime() < deadline) {
+            try {
+                TopicDescription after = admin.describeTopics(List.of(topic)).allTopicNames()
+                    .get(10, TimeUnit.SECONDS).get(topic);
+                recovered = admin.describeCluster().nodes().get(10, TimeUnit.SECONDS).stream()
+                    .anyMatch(node -> node.id() == leaderId)
+                    && after.partitions().get(0).isr().size() == 3
+                    && after.partitions().get(0).isr().stream().anyMatch(node -> node.id() == leaderId);
+                if (recovered) break;
+            } catch (ExecutionException | java.util.concurrent.TimeoutException e) {
+                // Leader election and replica recovery can temporarily make metadata unavailable.
+            }
+            Thread.sleep(500L);
+        }
+        assertTrue(recovered, "The restarted broker must rejoin the metadata partition's in-sync replicas");
+        System.out.println("Restarted metadata leader broker " + leaderId + " and restored the three-replica ISR");
+    }
+
+    private static String docker(String... arguments) throws Exception {
+        List<String> command = new ArrayList<>();
+        command.add("docker");
+        command.addAll(List.of(arguments));
+        Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
+        if (!process.waitFor(60, TimeUnit.SECONDS)) {
+            process.destroyForcibly();
+            throw new IllegalStateException("Timed out running " + command);
+        }
+        String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
+        assertEquals(0, process.exitValue(), "Docker command failed: " + command + ": " + output);
+        return output;
     }
 
     private static void awaitThreeRegisteredBrokers(Admin admin) throws Exception {
