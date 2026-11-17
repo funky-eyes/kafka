@@ -799,6 +799,85 @@ class SharedMetadataImageTest {
     }
 
     @Test
+    void unsealedFencedCommitProbeChecksReplayedPositionAndCompleteDescriptor() {
+        long id = BrokerObjectId.compose(8, 98L);
+        SharedObjectMetadata object = metadata(id, 125L);
+        SharedMetadataImage image = new SharedMetadataImage();
+        byte[] key = SharedMetadataRecordCodec.objectKey(id);
+        image.applyFromMetadataLog(key, SharedMetadataRecordCodec.fencedCommittedObjectValue(object), 8L);
+
+        assertThrows(IllegalStateException.class, () -> image.matchesUnsealedFencedCommit(object, 8L));
+        image.markReady();
+        assertTrue(image.matchesUnsealedFencedCommit(object, 8L));
+        assertFalse(image.matchesUnsealedFencedCommit(object, -1L));
+        assertFalse(image.matchesUnsealedFencedCommit(object, 7L));
+        assertFalse(image.matchesUnsealedFencedCommit(metadata(id, 126L), 8L));
+        SharedObjectMetadata differentRange = new SharedObjectMetadata(id, object.objectSize(), object.objectChecksum(),
+            List.of(new SharedObjectRange(new SharedPartitionId(11L, 12L, 1),
+                new OffsetRange(0L, 10L), 3, 0L, 100, 126L)));
+        assertFalse(image.matchesUnsealedFencedCommit(differentRange, 8L));
+        assertFalse(image.matchesUnsealedFencedCommit(metadata(BrokerObjectId.compose(8, 99L), 125L), 8L));
+
+        image.applyFromMetadataLog(SharedMetadataRecordCodec.objectCatalogSealKey(id),
+            SharedMetadataRecordCodec.objectCatalogSealValue(8L, 17L, object), 9L);
+        assertFalse(image.matchesUnsealedFencedCommit(object, 8L));
+        image.markFailed(new IllegalStateException("replay failed"));
+        assertThrows(IllegalStateException.class, () -> image.matchesUnsealedFencedCommit(object, 8L));
+    }
+
+    @Test
+    void unsealedFencedCommitProbeRejectsLegacyUnpositionedAndRepeatedRecords() {
+        long id = BrokerObjectId.compose(8, 100L);
+        SharedObjectMetadata object = metadata(id, 127L);
+        byte[] key = SharedMetadataRecordCodec.objectKey(id);
+        byte[] commit = SharedMetadataRecordCodec.fencedCommittedObjectValue(object);
+        SharedMetadataImage legacy = new SharedMetadataImage();
+        legacy.applyFromMetadataLog(key, SharedMetadataRecordCodec.committedObjectValue(object), 8L);
+        legacy.markReady();
+        assertFalse(legacy.matchesUnsealedFencedCommit(object, 8L));
+
+        SharedMetadataImage unpositioned = new SharedMetadataImage();
+        unpositioned.apply(key, commit);
+        unpositioned.markReady();
+        assertFalse(unpositioned.matchesUnsealedFencedCommit(object, 8L));
+
+        SharedMetadataImage repeated = new SharedMetadataImage();
+        repeated.applyFromMetadataLog(key, commit, 8L);
+        repeated.markReady();
+        repeated.applyFromMetadataLog(key, commit, 10L);
+        assertFalse(repeated.matchesUnsealedFencedCommit(object, 8L));
+        assertFalse(repeated.matchesUnsealedFencedCommit(object, 10L));
+
+        SharedMetadataImage unpositionedRetry = new SharedMetadataImage();
+        unpositionedRetry.applyFromMetadataLog(key, commit, 8L);
+        unpositionedRetry.markReady();
+        unpositionedRetry.apply(key, commit);
+        assertFalse(unpositionedRetry.matchesUnsealedFencedCommit(object, 8L));
+
+        // After compaction, the image cannot infer whether offset 10 was a
+        // duplicate; the expected original offset is supplied externally.
+        SharedMetadataImage compacted = new SharedMetadataImage();
+        compacted.applyFromMetadataLog(key, commit, 10L);
+        compacted.markReady();
+        assertFalse(compacted.matchesUnsealedFencedCommit(object, 8L));
+    }
+
+    @Test
+    void unsealedFencedCommitProbeClearsProvenanceOnRecoveryTombstone() {
+        long id = BrokerObjectId.compose(8, 101L);
+        SharedObjectMetadata object = metadata(id, 128L);
+        byte[] key = SharedMetadataRecordCodec.objectKey(id);
+        byte[] commit = SharedMetadataRecordCodec.fencedCommittedObjectValue(object);
+        SharedMetadataImage image = new SharedMetadataImage();
+        image.applyFromMetadataLog(key, commit, 8L);
+        image.applyFromMetadataLog(key, null, 9L);
+        image.applyFromMetadataLog(key, commit, 10L);
+        image.markReady();
+        assertFalse(image.matchesUnsealedFencedCommit(object, 8L));
+        assertTrue(image.matchesUnsealedFencedCommit(object, 10L));
+    }
+
+    @Test
     void catalogSealRequiresActualEarlierCommitRecordAndPreservesReads() {
         long id = BrokerObjectId.compose(8, 91L);
         SharedObjectMetadata object = metadata(id, 99L);
