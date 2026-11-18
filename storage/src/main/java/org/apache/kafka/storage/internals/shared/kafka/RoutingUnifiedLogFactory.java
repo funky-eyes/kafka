@@ -51,9 +51,10 @@ public final class RoutingUnifiedLogFactory implements UnifiedLogFactory {
     public UnifiedLog create(UnifiedLogCreationContext context) throws IOException {
         Objects.requireNonNull(context, "context");
         TopicPartition topicPartition = UnifiedLog.parseTopicPartitionName(context.dir());
-        UnifiedLogFactory selectedFactory = configuration.useSharedStorage(topicPartition.topic())
-            ? sharedFactory
-            : classicFactory;
-        return selectedFactory.create(context);
+        if (configuration.useSharedStorage(topicPartition.topic(), context.config())) {
+            return sharedFactory.create(context);
+        }
+        SharedStorageModeMarker.prepareClassic(context, configuration.useSharedStorage(topicPartition.topic()));
+        return classicFactory.create(context);
     }
 }

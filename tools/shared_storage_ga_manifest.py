@@ -137,6 +137,15 @@ PRODUCTION_PREFIXES = (
 )
 
 PRODUCTION_PATHS = {
+    "core/src/main/scala/kafka/server/metadata/BrokerMetadataPublisher.scala",
+    "clients/src/main/java/org/apache/kafka/common/config/TopicConfig.java",
+    "metadata/src/main/java/org/apache/kafka/controller/ConfigurationControlManager.java",
+    "metadata/src/main/java/org/apache/kafka/controller/FeatureControlManager.java",
+    "metadata/src/main/java/org/apache/kafka/controller/ReplicationControlManager.java",
+    "server-common/src/main/java/org/apache/kafka/server/common/Feature.java",
+    "server-common/src/main/java/org/apache/kafka/server/common/SharedStorageVersion.java",
+    "server/src/main/java/org/apache/kafka/server/BrokerFeatures.java",
+    "storage/src/main/java/org/apache/kafka/storage/internals/log/LogConfig.java",
     "metadata/src/main/java/org/apache/kafka/controller/QuorumController.java",
     "metadata/src/main/java/org/apache/kafka/controller/ControllerRequestContext.java",
     "core/src/main/scala/kafka/server/ControllerApis.scala",

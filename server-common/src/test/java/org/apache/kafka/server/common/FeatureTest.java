@@ -139,6 +139,11 @@ public class FeatureTest {
         for (FeatureVersion featureImpl : feature.featureVersions()) {
             // If features have the same bootstrapMetadataVersion, the highest level feature should be chosen.
             short defaultLevel = feature.defaultLevel(featureImpl.bootstrapMetadataVersion());
+            if (feature == Feature.SHARED_STORAGE_VERSION) {
+                // Storage selection is an explicit opt-in at every metadata version.
+                assertEquals(0, defaultLevel);
+                continue;
+            }
             if (defaultLevel != featureImpl.featureLevel()) {
                 FeatureVersion otherFeature = feature.fromFeatureLevel(defaultLevel, true);
                 assertEquals(featureImpl.bootstrapMetadataVersion(), otherFeature.bootstrapMetadataVersion());

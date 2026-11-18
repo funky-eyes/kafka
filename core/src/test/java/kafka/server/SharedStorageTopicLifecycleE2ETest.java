@@ -223,6 +223,7 @@ public class SharedStorageTopicLifecycleE2ETest {
         KafkaClusterTestKit cluster = new KafkaClusterTestKit.Builder(nodes)
             .setConfigProp("storage.extension.class",
                 "org.apache.kafka.storage.internals.shared.s3.S3SharedStorageExtension")
+            .setConfigProp("shared.storage.legacy.selectors.enabled", true)
             .setConfigProp("shared.storage.topic.pattern", "shared-topic-lifecycle-.*")
             .setConfigProp("shared.storage.wal.engine", "ring")
             .setConfigProp("shared.storage.wal.capacity.bytes", 64L * 1024 * 1024)

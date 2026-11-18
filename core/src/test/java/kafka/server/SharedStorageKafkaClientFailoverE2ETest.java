@@ -541,6 +541,7 @@ public class SharedStorageKafkaClientFailoverE2ETest {
             .setNumDisksPerBroker(1)
             .build();
         KafkaClusterTestKit cluster = new KafkaClusterTestKit.Builder(nodes)
+            .setConfigProp("shared.storage.legacy.selectors.enabled", true)
             .setConfigProp("storage.extension.class",
                 "org.apache.kafka.storage.internals.shared.s3.S3SharedStorageExtension")
             .setConfigProp("shared.storage.topics", topic)

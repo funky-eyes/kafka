@@ -176,7 +176,7 @@ class BrokerServer(
 
   var brokerRegistrationTracker: BrokerRegistrationTracker = _
 
-  val brokerFeatures: BrokerFeatures = BrokerFeatures.createDefault(config.unstableFeatureVersionsEnabled)
+  var brokerFeatures: BrokerFeatures = BrokerFeatures.createDefault(config.unstableFeatureVersionsEnabled, false)
 
   def kafkaYammerMetrics: KafkaYammerMetrics = KafkaYammerMetrics.INSTANCE
 
@@ -253,6 +253,8 @@ class BrokerServer(
         logManager.setCommittedObjectRetirementFence(
           (objectId: Long) => storageExtension.get().fenceCommittedObject(objectId))
       }
+      brokerFeatures = BrokerFeatures.createDefault(config.unstableFeatureVersionsEnabled,
+        storageExtensionOpt.exists(_.supportsTopicStorageConfiguration()))
 
       lifecycleManager = new BrokerLifecycleManager(
         config,

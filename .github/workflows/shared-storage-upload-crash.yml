@@ -20,6 +20,13 @@ on:
     branches:
       - shared-wal-s3-4.3.1
     paths:
+      - 'clients/src/main/java/org/apache/kafka/common/config/TopicConfig.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/ConfigurationControlManager.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/FeatureControlManager.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/ReplicationControlManager.java'
+      - 'server-common/src/main/java/org/apache/kafka/server/common/Feature.java'
+      - 'server-common/src/main/java/org/apache/kafka/server/common/SharedStorageVersion.java'
+      - 'server/src/main/java/org/apache/kafka/server/BrokerFeatures.java'
       - 'server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/QuorumController.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/ControllerRequestContext.java'
@@ -62,6 +69,15 @@ on:
       - '.github/workflows/shared-storage-upload-crash.yml'
   pull_request:
     paths:
+      - 'core/src/main/scala/kafka/server/metadata/BrokerMetadataPublisher.scala'
+      - 'clients/src/main/java/org/apache/kafka/common/config/TopicConfig.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/ConfigurationControlManager.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/FeatureControlManager.java'
+      - 'metadata/src/main/java/org/apache/kafka/controller/ReplicationControlManager.java'
+      - 'server-common/src/main/java/org/apache/kafka/server/common/Feature.java'
+      - 'server-common/src/main/java/org/apache/kafka/server/common/SharedStorageVersion.java'
+      - 'server/src/main/java/org/apache/kafka/server/BrokerFeatures.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/log/LogConfig.java'
       - 'server/src/main/java/org/apache/kafka/server/BrokerLifecycleManager.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/QuorumController.java'
       - 'metadata/src/main/java/org/apache/kafka/controller/ControllerRequestContext.java'
@@ -177,7 +193,14 @@ jobs:
           if [ '${{ matrix.phase }}' = 'AFTER_COMMIT' ]; then
             grep -q 'UPLOAD_CRASH_COMMITTED_OBJECT_RETAINED phase=AFTER_COMMIT objectId=' "$result_xml"
           else
-            grep -q 'UPLOAD_CRASH_ORPHAN_CLEANED phase=${{ matrix.phase }} objectId=' "$result_xml"
+            # PREPARE/PUT crash remnants must stay unretired while no durable
+            # cross-broker deletion authority exists; the tests also verify
+            # complete acknowledged data recovery and metadata state.
+            if [ '${{ matrix.phase }}' = 'AFTER_PREPARE' ]; then
+              grep -Eq 'UPLOAD_CRASH_ORPHAN_UNRETIRED phase=AFTER_PREPARE objectId=[0-9]+ initiallyPhysical=false' "$result_xml"
+            else
+              grep -Eq 'UPLOAD_CRASH_ORPHAN_UNRETIRED phase=AFTER_PUT objectId=[0-9]+ initiallyPhysical=true' "$result_xml"
+            fi
           fi
 
           {
@@ -187,7 +210,7 @@ jobs:
             if [ '${{ matrix.phase }}' = 'AFTER_COMMIT' ]; then
               grep 'UPLOAD_CRASH_COMMITTED_OBJECT_RETAINED phase=AFTER_COMMIT objectId=' "$result_xml"
             else
-              grep 'UPLOAD_CRASH_ORPHAN_CLEANED phase=${{ matrix.phase }} objectId=' "$result_xml"
+              grep 'UPLOAD_CRASH_ORPHAN_UNRETIRED phase=${{ matrix.phase }} objectId=' "$result_xml"
             fi
             printf 'UPLOAD_CRASH_SUCCESS phase=%s commit=%s\n' '${{ matrix.phase }}' "$GITHUB_SHA"
           } > shared-storage-upload-crash-proof.txt

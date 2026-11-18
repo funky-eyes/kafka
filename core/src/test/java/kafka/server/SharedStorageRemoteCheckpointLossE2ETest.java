@@ -18,6 +18,7 @@ package kafka.server;
 
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.clients.admin.OffsetSpec;
 import org.apache.kafka.clients.admin.TopicDescription;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
@@ -135,6 +136,7 @@ public class SharedStorageRemoteCheckpointLossE2ETest {
 
         boolean minioStopped = false;
         try (KafkaClusterTestKit cluster = new KafkaClusterTestKit.Builder(nodes)
+            .setConfigProp("shared.storage.legacy.selectors.enabled", true)
             .setConfigProp("storage.extension.class",
                 "org.apache.kafka.storage.internals.shared.s3.S3SharedStorageExtension")
             .setConfigProp("shared.storage.topics", TOPIC)
@@ -169,6 +171,10 @@ public class SharedStorageRemoteCheckpointLossE2ETest {
                         .configs(Map.of(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2"))))
                         .all().get(30, TimeUnit.SECONDS);
                     description = waitForTopicState(admin, BROKERS);
+                    // Controller ISR metadata may precede actual ReplicaManager readiness.
+                    // Idempotent batches sent during that interval can hit NOT_LEADER_OR_FOLLOWER;
+                    // require all three real leaders to answer ListOffsets before first append.
+                    waitForDataPlaneReadiness(admin);
 
                     for (int chunk = 0; chunk < PREFIX_CHUNKS; chunk++) {
                         produce(producer, nextSequence, RECORDS_PER_PREFIX_CHUNK);
@@ -406,6 +412,33 @@ public class SharedStorageRemoteCheckpointLossE2ETest {
         }, 90_000L, () -> "Checkpoint-loss topic did not converge to ISR=" + expectedIsrSize +
             "; last observed state: " + topicStateSummary(lastObserved[0]));
         return ready[0];
+    }
+
+    private static void waitForDataPlaneReadiness(Admin admin) throws Exception {
+        Map<TopicPartition, OffsetSpec> requested = new LinkedHashMap<>();
+        for (int partition = 0; partition < PARTITIONS; partition++) {
+            requested.put(new TopicPartition(TOPIC, partition), OffsetSpec.latest());
+        }
+        TestUtils.waitForCondition(() -> {
+            try {
+                TopicDescription topic = admin.describeTopics(List.of(TOPIC)).allTopicNames()
+                    .get(5, TimeUnit.SECONDS).get(TOPIC);
+                if (topic == null || topic.partitions().size() != PARTITIONS ||
+                    topic.partitions().stream().anyMatch(partition ->
+                        partition.leader() == null || partition.leader().id() < 0 ||
+                            partition.isr().size() != BROKERS)) {
+                    return false;
+                }
+                var offsets = admin.listOffsets(requested).all().get(5, TimeUnit.SECONDS);
+                return offsets.size() == PARTITIONS &&
+                    offsets.values().stream().allMatch(result -> result.offset() >= 0L);
+            } catch (Exception ignored) {
+                // A transient NOT_LEADER_OR_FOLLOWER is precisely what this gate must outwait.
+                return false;
+            }
+        }, 60_000L, () -> "Controller ISR3 was published but Kafka data-plane leaders never " +
+            "served ListOffsets for every checkpoint-loss partition");
+        System.out.println("REMOTE_CHECKPOINT_LOSS_DATA_PLANE_READY partitions=" + PARTITIONS);
     }
 
     private static String topicStateSummary(TopicDescription description) {

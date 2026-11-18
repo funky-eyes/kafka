@@ -19,28 +19,24 @@ package org.apache.kafka.storage.internals.shared.kafka;
 import org.apache.kafka.common.TopicIdPartition;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
-import org.apache.kafka.common.utils.MockTime;
-import org.apache.kafka.storage.internals.log.StorageExtensionContext;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
 
-import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SharedPartitionRoleListenerTest {
-    @TempDir
-    Path tempDir;
-
     @Test
     void routesOnlySelectedUserTopicsAndTracksLeaderDemotion() {
-        SharedStorageConfiguration configuration = configuration(Map.of(
+        Predicate<TopicIdPartition> configuration = configuration(Map.of(
             SharedStorageConfiguration.TOPICS_CONFIG,
             "shared-topic"
         ));
@@ -71,7 +67,7 @@ class SharedPartitionRoleListenerTest {
 
     @Test
     void removedReplicaClearsCommitWindowAndUploadOwnership() {
-        SharedStorageConfiguration configuration = configuration(Map.of());
+        Predicate<TopicIdPartition> configuration = configuration(Map.of());
         SharedCommitProgress progress = new SharedCommitProgress();
         SharedPartitionRoleListener listener = new SharedPartitionRoleListener(configuration, progress);
 
@@ -89,7 +85,7 @@ class SharedPartitionRoleListenerTest {
 
     @Test
     void removedClassicOrInternalReplicaDoesNotTouchSharedTracking() {
-        SharedStorageConfiguration configuration = configuration(Map.of(
+        Predicate<TopicIdPartition> configuration = configuration(Map.of(
             SharedStorageConfiguration.TOPICS_CONFIG,
             "shared-topic"
         ));
@@ -115,7 +111,8 @@ class SharedPartitionRoleListenerTest {
 
     @Test
     void defaultAllUserTopicRoutingStillNeverTracksInternalTopics() {
-        SharedStorageConfiguration configuration = configuration(Map.of());
+        // Explicitly model the legacy default-all predicate; production defaults are tested separately.
+        Predicate<TopicIdPartition> configuration = configuration(Map.of());
         SharedCommitProgress progress = new SharedCommitProgress();
         SharedPartitionRoleListener listener = new SharedPartitionRoleListener(configuration, progress);
 
@@ -137,7 +134,7 @@ class SharedPartitionRoleListenerTest {
 
     @Test
     void roleCallbackInvalidatesRetirementTicketBeforeReelection() {
-        SharedStorageConfiguration configuration = configuration(Map.of());
+        Predicate<TopicIdPartition> configuration = configuration(Map.of());
         SharedPartitionRoleListener listener = new SharedPartitionRoleListener(
             configuration, new SharedCommitProgress()
         );
@@ -160,7 +157,7 @@ class SharedPartitionRoleListenerTest {
 
     @Test
     void partitionRemovalAndUnselectedTopicsCannotRetainRetirementTickets() {
-        SharedStorageConfiguration configuration = configuration(Map.of(
+        Predicate<TopicIdPartition> configuration = configuration(Map.of(
             SharedStorageConfiguration.TOPICS_CONFIG, "shared-topic"
         ));
         SharedPartitionRoleListener listener = new SharedPartitionRoleListener(
@@ -457,13 +454,46 @@ class SharedPartitionRoleListenerTest {
         assertTrue(listener.captureEpochRetirementLeader(firstPartition).isEmpty());
     }
 
-    private SharedStorageConfiguration configuration(Map<String, ?> originals) {
-        return SharedStorageConfiguration.from(new StorageExtensionContext(
-            originals,
-            List.of(tempDir.toFile()),
-            1,
-            new MockTime()
-        ));
+    @Test
+    void removedLoadedIdentityCannotBeResurrectedByHigherEpochOrRecreatedTopicName() {
+        TopicIdPartition oldPartition = topicPartition(Uuid.randomUuid(), "shared-topic", 0);
+        TopicIdPartition replacement = topicPartition(Uuid.randomUuid(), "shared-topic", 0);
+        Set<TopicIdPartition> loaded = ConcurrentHashMap.newKeySet();
+        loaded.add(oldPartition);
+        SharedCommitProgress progress = new SharedCommitProgress();
+        SharedPartitionRoleListener listener = new SharedPartitionRoleListener(loaded::contains, progress, loaded::remove);
+        listener.onLeadershipChangeWithEpochs(Map.of(oldPartition, 8), Map.of());
+        listener.onPartitionsRemoved(List.of(oldPartition));
+
+        listener.onLeadershipChangeWithEpochs(Map.of(oldPartition, 9, replacement, 10), Map.of());
+        assertTrue(progress.snapshot().isEmpty());
+        assertTrue(listener.captureEpochRetirementLeader(sharedPartitionId(oldPartition.topicId(), 0)).isEmpty());
+
+        loaded.add(replacement);
+        listener.onLeadershipChangeWithEpochs(Map.of(replacement, 11), Map.of());
+        assertEquals(1, progress.snapshot().size());
+        assertTrue(progress.partitionProgress(sharedPartitionId(replacement.topicId(), 0)).orElseThrow().isLeader());
+    }
+
+    @Test
+    void removalRevokesExistingProgressEvenAfterLoadedIdentityDisappears() {
+        TopicIdPartition partition = topicPartition(Uuid.randomUuid(), "shared-topic", 0);
+        Set<TopicIdPartition> loaded = ConcurrentHashMap.newKeySet();
+        loaded.add(partition);
+        SharedCommitProgress progress = new SharedCommitProgress();
+        SharedPartitionRoleListener listener = new SharedPartitionRoleListener(loaded::contains, progress);
+        listener.onLeadershipChangeWithEpochs(Map.of(partition, 8), Map.of());
+        var ticket = listener.captureEpochRetirementLeader(sharedPartitionId(partition.topicId(), 0)).orElseThrow();
+        loaded.clear();
+        listener.onPartitionsRemoved(List.of(partition));
+        assertTrue(progress.snapshot().isEmpty());
+        assertFalse(listener.stillRetirementLeader(ticket));
+    }
+
+    private static Predicate<TopicIdPartition> configuration(Map<String, ?> originals) {
+        Object selected = originals.get(SharedStorageConfiguration.TOPICS_CONFIG);
+        return partition -> !partition.topic().startsWith("__")
+            && (selected == null || selected.equals(partition.topic()));
     }
 
     private static TopicIdPartition topicPartition(Uuid topicId, String topic, int partition) {

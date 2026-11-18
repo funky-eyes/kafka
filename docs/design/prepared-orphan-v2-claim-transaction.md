@@ -1,9 +1,10 @@
 # Experimental PREPARED v2 COMMIT / CLAIM / physical orphan cleanup
 
-Status: **default OFF; GitHub CI validation required; NOT GA**.
+Status: **broker activation is rejected; experimental direct-store tests only; NOT GA**.
 
-When every Broker in a fresh test cluster explicitly enables
-`shared.storage.orphan.fenced.lifecycle.enabled=true`:
+The isolated direct-store integration tests exercise the following experimental protocol.
+Production broker startup rejects `shared.storage.orphan.fenced.lifecycle.enabled=true`
+until cluster-wide mixed-version compatibility is guaranteed:
 
 1. A unique per-object transactional producer is initialized BEFORE
    PREPARE and reused for COMMIT, never reacquired by a fenced uploader.
@@ -18,8 +19,9 @@ When every Broker in a fresh test cluster explicitly enables
 4. Only the CLAIM winner may issue physical S3 DELETE. The CLAIM
    remains discoverable so future passes re-delete an arbitrarily
    late physical PUT. Historical v1 CLAIMED records are NOT retried.
-5. The CI upload crash test (AFTER_PREPARE, AFTER_PUT, AFTER_COMMIT) uses
-   three Brokers and real MinIO with v2 explicitly enabled.
+5. The upload crash test runs production brokers with v2 disabled and verifies
+   that an uncommitted orphan is retained. The isolated metadata-store test
+   separately exercises the experimental protocol with Kafka and MinIO.
 
 Caveats: per-object producer creation can be expensive; throughput and
 latency need benchmarking. Mixed-version rolling upgrade is NOT safe

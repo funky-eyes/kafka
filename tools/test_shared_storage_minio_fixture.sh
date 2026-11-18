@@ -14,10 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-set -euo pipefail
-# Failures in the process-owner test used to exit silently under set -e.
-# Include the failing command and line without weakening the assertion.
-trap 'printf "MinIO fixture self-test failed at line %s: %s\\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
+set -Eeuo pipefail
+trap 'printf "MinIO fixture test failed at %s:%s (exit %s): %s\n" "${BASH_SOURCE[0]}" "${LINENO}" "$?" "${BASH_COMMAND}" >&2' ERR
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FIXTURE="${ROOT}/tools/shared_storage_minio_fixture.sh"
@@ -82,17 +80,30 @@ minio_bin="${CACHE_DIR}/${platform}/minio.${platform}.RELEASE.2025-07-23T15-54-0
 pid_file="${STATE_DIR}/minio.pid"
 mkdir -p "$(dirname "${minio_bin}")" "${STATE_DIR}"
 
-# Version and checksum tests use a deterministic executable independent
-# of the runner's /bin/sleep implementation (some runners reject --version).
-# The real ELF ownership test below still copies /bin/sleep into MINIO_BIN.
 cache_probe="${TMP}/cache-probe"
-cat > "${cache_probe}" <<'EOF'
-#!/usr/bin/env bash
-printf '%s\n' 'fixture-test-release-v1'
-EOF
+# Ubuntu can supply sleep through a multicall binary that stops working when
+# renamed. Prefer its separately installed GNU companion where available; every
+# copied process below must remain the same executable with any basename.
+sleep_binary="$(type -P gnusleep || type -P sleep)"
+cp "${sleep_binary}" "${cache_probe}"
 chmod 0755 "${cache_probe}"
 cache_probe_sha="$(sha256sum "${cache_probe}" | awk '{print $1}')"
-binary_valid "${cache_probe}" "fixture-test-release-v1" "${cache_probe_sha}"
+if ! cache_probe_version="$("${cache_probe}" --version 2>&1)"; then
+  echo "Copied sleep executable cannot report its version after renaming: ${sleep_binary}" >&2
+  echo "${cache_probe_version}" >&2
+  exit 1
+fi
+cache_probe_release="${cache_probe_version%%$'\n'*}"
+if [ -z "${cache_probe_release}" ]; then
+  echo "Copied sleep executable reported an empty version: ${sleep_binary}" >&2
+  exit 1
+fi
+if ! "${cache_probe}" 0; then
+  echo "Sleep executable must still implement sleep after renaming: ${sleep_binary}" >&2
+  exit 1
+fi
+
+binary_valid "${cache_probe}" "${cache_probe_release}" "${cache_probe_sha}"
 
 # Regression: a correctly checksummed, pinned binary may print additional
 # text after the expected version. grep -q under pipefail used to close early
@@ -144,7 +155,7 @@ if compgen -G "${download_target}.download.*" >/dev/null; then
   exit 1
 fi
 
-if binary_valid "${cache_probe}" "fixture-test-release-v1"     "0000000000000000000000000000000000000000000000000000000000000000"; then
+if binary_valid "${cache_probe}" "${cache_probe_release}"     "0000000000000000000000000000000000000000000000000000000000000000"; then
   echo "Cache validation accepted an incorrect SHA-256" >&2
   exit 1
 fi
@@ -153,13 +164,12 @@ if binary_valid "${cache_probe}" "not-a-real-release" "${cache_probe_sha}"; then
   exit 1
 fi
 
-# Use a copied bash ELF executable so /proc/<pid>/exe resolves to the
-# pinned fixture path without depending on coreutils multicall applet names.
-# The server process stays alive and uses only a bounded sleep loop.
-cp "$(command -v bash)" "${minio_bin}"
+# Use a copied ELF executable so /proc/<pid>/exe resolves to the exact
+# path the fixture considers its MinIO binary without requiring network access.
+cp "${cache_probe}" "${minio_bin}"
 chmod 0755 "${minio_bin}"
 
-bash -c 'sleep 0.2; exec "$1" -c "while :; do sleep 1; done"' _ "${minio_bin}" &
+bash -c 'sleep 0.2; exec "$1" 60' _ "${minio_bin}" &
 transition_pid="$!"
 wait_for_fixture_exec "${transition_pid}"
 if [ "$(process_executable "${transition_pid}")" != "$(fixture_executable)" ]; then
@@ -177,7 +187,7 @@ fixture() {
     "${FIXTURE}" "$@"
 }
 
-"${minio_bin}" -c 'while :; do sleep 1; done' &
+"${minio_bin}" 60 &
 owned_pid="$!"
 owned_start="$(process_start_time "${owned_pid}")"
 write_pid_identity "${owned_pid}"

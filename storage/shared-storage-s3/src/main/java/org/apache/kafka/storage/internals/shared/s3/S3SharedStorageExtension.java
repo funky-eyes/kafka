@@ -28,14 +28,13 @@ import org.apache.kafka.storage.internals.shared.kafka.SharedCommitProgress;
 import org.apache.kafka.storage.internals.shared.kafka.SharedPartitionRoleListener;
 import org.apache.kafka.storage.internals.shared.kafka.SharedStorageConfiguration;
 import org.apache.kafka.storage.internals.shared.kafka.SharedStorageMetrics;
+import org.apache.kafka.storage.internals.shared.kafka.SharedStorageModeMarker;
 import org.apache.kafka.storage.internals.shared.kafka.SharedStorageWalFactory;
 import org.apache.kafka.storage.internals.shared.kafka.SharedUnifiedLogFactory;
 import org.apache.kafka.storage.internals.shared.kafka.SharedUploadScheduler;
 import org.apache.kafka.storage.internals.shared.metadata.BrokerObjectId;
 import org.apache.kafka.storage.internals.shared.metadata.LocalRemoteObjectCheckpoint;
 import org.apache.kafka.storage.internals.shared.object.ActiveObjectUploads;
-import org.apache.kafka.storage.internals.shared.object.OrphanCleanupScheduler;
-import org.apache.kafka.storage.internals.shared.object.OrphanObjectCleaner;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectPacker;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectIoFences;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectUploadHook;
@@ -95,11 +94,15 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
     private KafkaObjectMetadataStore metadataStore;
     private S3ObjectStore objectStore;
     private SharedUploadScheduler uploadScheduler;
-    private OrphanCleanupScheduler orphanCleanupScheduler;
     // Created with the cold reader during start(), BEFORE metadata bootstrap.
     // Every upload initialization must use this exact same local drain pair.
     private SharedObjectIoFences ioFences;
     private boolean closed;
+
+    @Override
+    public synchronized boolean supportsTopicStorageConfiguration() {
+        return storage != null && storageConfiguration != null && !storageConfiguration.legacySelectorsEnabled();
+    }
 
     @Override
     public synchronized void start(StorageExtensionContext context) throws IOException {
@@ -108,7 +111,9 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             throw new IllegalStateException("S3 shared storage extension cannot be started in its current state");
         }
 
+        rejectUnsupportedFencedLifecycle(context.originals());
         SharedStorageConfiguration configuration = SharedStorageConfiguration.from(context);
+        SharedStorageModeMarker.initializeWalDirectory(configuration);
         SharedWal wal = createWal(configuration);
         S3ObjectStore newObjectStore = null;
         SharedStorageMetrics newMetrics = null;
@@ -128,13 +133,14 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
 
             SharedCommitProgress newCommitProgress = new SharedCommitProgress();
             SharedUnifiedLogFactory newSharedUnifiedLogFactory =
-                new SharedUnifiedLogFactory(newStorage, newCommitProgress);
+                new SharedUnifiedLogFactory(newStorage, newCommitProgress, configuration.legacySelectorsEnabled());
             UnifiedLogFactory newFactory = new RoutingUnifiedLogFactory(
                 configuration,
                 newSharedUnifiedLogFactory
             );
             StoragePartitionRoleListener newPartitionRoleListener =
-                new SharedPartitionRoleListener(configuration, newCommitProgress);
+                new SharedPartitionRoleListener(newSharedUnifiedLogFactory::isSharedPartition,
+                    newCommitProgress, newSharedUnifiedLogFactory::forgetPartition);
             ExecutorService newBootstrapExecutor = Executors.newSingleThreadExecutor(runnable -> {
                 Thread thread = new Thread(runnable, "kafka-shared-storage-bootstrap");
                 thread.setDaemon(true);
@@ -163,6 +169,18 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             }
             throw asIOException("Unable to initialize local shared WAL storage", t);
         }
+    }
+
+    private static void rejectUnsupportedFencedLifecycle(Map<String, ?> originals) {
+        String key = SharedMetadataClientConfiguration.FENCED_LIFECYCLE_CONFIG;
+        Object configured = originals.get(key);
+        if (configured == null || "false".equalsIgnoreCase(configured.toString().trim())) {
+            return;
+        }
+        if (!"true".equalsIgnoreCase(configured.toString().trim())) {
+            throw new IllegalArgumentException(key + " must be true or false");
+        }
+        throw new IllegalStateException(key + " cannot be enabled until mixed-version metadata compatibility is guaranteed");
     }
 
     static SharedWal createWal(SharedStorageConfiguration configuration) throws IOException {
@@ -202,6 +220,11 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
     @Override
     public synchronized CompletableFuture<Void> onBrokerReady(StorageExtensionBrokerContext context) {
         Objects.requireNonNull(context, "context");
+        try {
+            rejectUnsupportedFencedLifecycle(context.originals());
+        } catch (IllegalArgumentException | IllegalStateException failure) {
+            return CompletableFuture.failedFuture(failure);
+        }
         boolean localStateMissing =
             storage == null || metrics == null || bootstrapExecutor == null || storageConfiguration == null;
         boolean remoteStateMissing =
@@ -311,7 +334,6 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
     ) throws IOException {
         KafkaObjectMetadataStore newMetadataStore = null;
         SharedUploadScheduler newUploadScheduler = null;
-        OrphanCleanupScheduler newOrphanCleanupScheduler = null;
         boolean installed = false;
         try {
             SharedMetadataClientConfiguration metadataConfiguration =
@@ -355,19 +377,9 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
                 configuration.uploadWalPressurePercent(),
                 configuration.uploadMaxInflight()
             );
-            if (metadataConfiguration.fencedLifecycleEnabled()) {
-                // Only generation-fenced v2 PREPARED objects are eligible.
-                // The metadata store first fences the upload producer and
-                // captures a post-fence read-committed horizon before CLAIM.
-                newOrphanCleanupScheduler = new OrphanCleanupScheduler(
-                    new OrphanObjectCleaner(sharedObjectStore, newMetadataStore, activeUploads, engine.remoteIndex()),
-                    context.time()::milliseconds,
-                    configuration.orphanGraceMs()
-                );
-                LOG.warn("Experimental v2 fenced orphan cleanup enabled on this Broker");
-            } else {
-                LOG.warn("Legacy PREPARED orphan cleanup remains disabled pending safe arbitration");
-            }
+            // Preserve the mainline fail-closed boundary until cross-broker
+            // arbitration and recovery are proven for this integrated tree.
+            LOG.warn("PREPARED object orphan cleanup disabled: durable cross-broker CLAIM arbitration is absent");
 
             synchronized (this) {
                 if (closed || storage != engine || objectStore != sharedObjectStore) {
@@ -375,17 +387,12 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
                 }
                 metadataStore = newMetadataStore;
                 uploadScheduler = newUploadScheduler;
-                orphanCleanupScheduler = newOrphanCleanupScheduler;
                 newUploadScheduler.start(configuration.uploadIntervalMs());
-                if (newOrphanCleanupScheduler != null) {
-                    newOrphanCleanupScheduler.start(configuration.orphanCleanupIntervalMs());
-                }
                 sharedMetrics.attachUploadScheduler(newUploadScheduler);
                 installed = true;
             }
         } finally {
             if (!installed) {
-                closeIgnoringFailure(newOrphanCleanupScheduler);
                 closeIgnoringFailure(newUploadScheduler);
                 closeIgnoringFailure(newMetadataStore);
             }
@@ -505,7 +512,6 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         CompletableFuture<Void> readyFuture;
         ExecutorService executor;
         SharedUploadScheduler scheduler;
-        OrphanCleanupScheduler cleanupScheduler;
         SharedStorageMetrics sharedMetrics;
         KafkaObjectMetadataStore metadata;
         S3ObjectStore objects;
@@ -518,7 +524,6 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             readyFuture = brokerReadyFuture;
             executor = bootstrapExecutor;
             scheduler = uploadScheduler;
-            cleanupScheduler = orphanCleanupScheduler;
             sharedMetrics = metrics;
             metadata = metadataStore;
             objects = objectStore;
@@ -526,7 +531,6 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             brokerReadyFuture = null;
             bootstrapExecutor = null;
             uploadScheduler = null;
-            orphanCleanupScheduler = null;
             metrics = null;
             metadataStore = null;
             objectStore = null;
@@ -548,10 +552,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             interrupted = awaitExecutorStop(executor);
         }
 
-        // Phase 1: stop all new upload and cleanup admission.
-        if (cleanupScheduler != null) {
-            interrupted |= cleanupScheduler.stop();
-        }
+        // Phase 1: stop upload admission; metadata apply may still be in progress.
         if (scheduler != null) {
             interrupted |= scheduler.stop();
         }
@@ -563,7 +564,6 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         failure = close(failure, metadata);
 
         // Phase 3: drain in-flight remote operations before closing S3 or WAL.
-        failure = close(failure, cleanupScheduler);
         failure = close(failure, scheduler);
         failure = close(failure, objects);
         failure = close(failure, engine);

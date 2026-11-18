@@ -23,6 +23,7 @@ import org.apache.kafka.common.DirectoryId;
 import org.apache.kafka.common.ElectionType;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.config.ConfigResource;
+import org.apache.kafka.common.config.TopicConfig;
 import org.apache.kafka.common.errors.ApiException;
 import org.apache.kafka.common.errors.BrokerIdNotRegisteredException;
 import org.apache.kafka.common.errors.InvalidPartitionsException;
@@ -655,6 +656,13 @@ public class ReplicationControlManager {
             // Figure out what ConfigRecords should be created, if any.
             ConfigResource configResource = new ConfigResource(TOPIC, topic.name());
             Map<String, Entry<OpType, String>> keyToOps = configChanges.get(configResource);
+            if (featureControl.isSharedStorageEnabled()) {
+                keyToOps = new HashMap<>(keyToOps == null ? Map.of() : keyToOps);
+                // An explicit false distinguishes new ordinary topics from untagged
+                // historical topics during a legacy-selector rolling upgrade.
+                keyToOps.putIfAbsent(TopicConfig.SHARED_STORAGE_ENABLE_CONFIG,
+                    new SimpleImmutableEntry<>(SET, "false"));
+            }
             List<ApiMessageAndVersion> configRecords;
             if (keyToOps != null) {
                 ControllerResult<ApiError> configResult =
@@ -716,7 +724,10 @@ public class ReplicationControlManager {
                                  Map<String, CreatableTopicResult> successes,
                                  List<ApiMessageAndVersion> configRecords,
                                  boolean authorizedToReturnConfigs) {
-        Map<String, String> creationConfigs = translateCreationConfigs(topic.configs());
+        Map<String, String> creationConfigs = new HashMap<>(translateCreationConfigs(topic.configs()));
+        if (featureControl.isSharedStorageEnabled()) {
+            creationConfigs.putIfAbsent(TopicConfig.SHARED_STORAGE_ENABLE_CONFIG, "false");
+        }
         Map<Integer, PartitionRegistration> newParts = new HashMap<>();
         if (!topic.assignments().isEmpty()) {
             if (topic.replicationFactor() != -1) {

@@ -21,6 +21,7 @@ import org.apache.kafka.common.feature.SupportedVersionRange;
 import org.apache.kafka.metadata.VersionRange;
 import org.apache.kafka.server.common.KRaftVersion;
 import org.apache.kafka.server.common.MetadataVersion;
+import org.apache.kafka.server.common.SharedStorageVersion;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -48,6 +49,17 @@ public class BrokerFeatures {
 
     public static BrokerFeatures createDefault(boolean unstableFeatureVersionsEnabled) {
         return new BrokerFeatures(defaultSupportedFeatures(unstableFeatureVersionsEnabled));
+    }
+
+    /** Advertise shared Topic routing only after a capable storage extension has started. */
+    public static BrokerFeatures createDefault(boolean unstableFeatureVersionsEnabled,
+                                               boolean supportsTopicStorageConfiguration) {
+        Map<String, SupportedVersionRange> features = new HashMap<>(
+            defaultSupportedFeatures(unstableFeatureVersionsEnabled).features());
+        if (!supportsTopicStorageConfiguration) {
+            features.remove(SharedStorageVersion.FEATURE_NAME);
+        }
+        return new BrokerFeatures(Features.supportedFeatures(features));
     }
     
     // only for testing
@@ -106,7 +118,8 @@ public class BrokerFeatures {
         return supportedFeatures.features().entrySet()
                 .stream()
                 .collect(Collectors.toMap(Map.Entry::getKey,
-                        e -> e.getKey().equals(KRaftVersion.FEATURE_NAME) ? 0 : e.getValue().max()));
+                        e -> e.getKey().equals(KRaftVersion.FEATURE_NAME)
+                            || e.getKey().equals(SharedStorageVersion.FEATURE_NAME) ? 0 : e.getValue().max()));
     }
 
     /**

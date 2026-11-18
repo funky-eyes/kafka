@@ -16,9 +16,21 @@
  */
 package org.apache.kafka.storage.internals.shared.s3;
 
-import org.junit.jupiter.api.Test;
+import org.apache.kafka.common.Endpoint;
+import org.apache.kafka.common.security.auth.SecurityProtocol;
+import org.apache.kafka.common.utils.Time;
+import org.apache.kafka.storage.internals.log.StorageExtensionBrokerContext;
+import org.apache.kafka.storage.internals.log.StorageExtensionContext;
 
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -26,10 +38,52 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class S3SharedStorageExtensionTest {
+    @TempDir
+    Path tempDir;
+
+    @Test
+    void rejectsFencedLifecycleBeforeWalInitialization() throws Exception {
+        String key = SharedMetadataClientConfiguration.FENCED_LIFECYCLE_CONFIG;
+        for (Object enabled : List.of(true, " TrUe ")) {
+            StorageExtensionContext context = new StorageExtensionContext(
+                Map.of(key, enabled), List.of(tempDir.toFile()), 1, Time.SYSTEM);
+            IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> new S3SharedStorageExtension().start(context));
+            assertTrue(failure.getMessage().contains(key));
+        }
+        try (var files = Files.list(tempDir)) {
+            assertEquals(0L, files.count(), "Rejection must precede WAL or marker creation");
+        }
+        StorageExtensionContext invalid = new StorageExtensionContext(
+            Map.of(key, "invalid"), List.of(tempDir.toFile()), 1, Time.SYSTEM);
+        assertThrows(IllegalArgumentException.class, () -> new S3SharedStorageExtension().start(invalid));
+    }
+
+    @Test
+    void rejectsFencedLifecycleIntroducedAtBrokerReady() {
+        String key = SharedMetadataClientConfiguration.FENCED_LIFECYCLE_CONFIG;
+        List<Endpoint> listeners = List.of(new Endpoint("PLAINTEXT", SecurityProtocol.PLAINTEXT, "localhost", 9092));
+        StorageExtensionBrokerContext enabled = new StorageExtensionBrokerContext(
+            "cluster", 1, listeners, Map.of(key, true), Time.SYSTEM);
+        CompletionException rejection = assertThrows(CompletionException.class,
+            () -> new S3SharedStorageExtension().onBrokerReady(enabled).join());
+        assertInstanceOf(IllegalStateException.class, rejection.getCause());
+        assertTrue(rejection.getCause().getMessage().contains(key));
+
+        StorageExtensionBrokerContext disabled = new StorageExtensionBrokerContext(
+            "cluster", 1, listeners, Map.of(key, false), Time.SYSTEM);
+        CompletionException normal = assertThrows(CompletionException.class,
+            () -> new S3SharedStorageExtension().onBrokerReady(disabled).join());
+        assertInstanceOf(IllegalStateException.class, normal.getCause());
+        assertEquals("S3 shared storage extension has not been started", normal.getCause().getMessage());
+    }
+
     @Test
     void waitsForBootstrapExecutorToTerminateBeforeReturning() throws Exception {
         ExecutorService executor = Executors.newSingleThreadExecutor();

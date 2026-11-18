@@ -32,6 +32,7 @@ import org.apache.kafka.server.common.Feature;
 import org.apache.kafka.server.common.KRaftVersion;
 import org.apache.kafka.server.common.MetadataVersion;
 import org.apache.kafka.server.common.PartitionRetirementAuthorityVersion;
+import org.apache.kafka.server.common.SharedStorageVersion;
 import org.apache.kafka.server.common.WalReplicaDurabilityVersion;
 import org.apache.kafka.server.mutable.BoundedList;
 import org.apache.kafka.timeline.SnapshotRegistry;
@@ -255,12 +256,24 @@ public class FeatureControlManager {
                 "A feature version cannot be less than 0.");
         }
 
+        if (featureName.equals(SharedStorageVersion.FEATURE_NAME) && newVersion > 0 &&
+                !metadataVersionOrThrow().isControllerRegistrationSupported()) {
+            // A combined metadata.version + shared-storage update must not skip
+            // controller registration checks using the old metadata version.
+            return invalidUpdateVersion(featureName, newVersion,
+                "Upgrade metadata.version and register every controller before activating shared storage.");
+        }
+
         Optional<String> reasonNotSupported = reasonNotSupported(featureName, newVersion);
         if (reasonNotSupported.isPresent()) {
             return invalidUpdateVersion(featureName, newVersion, reasonNotSupported.get());
         }
 
         if (newVersion < currentVersion) {
+            if (featureName.equals(SharedStorageVersion.FEATURE_NAME)) {
+                return invalidUpdateVersion(featureName, newVersion,
+                    "Shared storage format activation cannot be downgraded; existing topic modes must remain protected.");
+            }
             if (upgradeType.equals(FeatureUpdate.UpgradeType.UPGRADE)) {
                 return invalidUpdateVersion(featureName, newVersion,
                     "Can't downgrade the version of this feature without setting the " +
@@ -398,6 +411,11 @@ public class FeatureControlManager {
                 + MetadataVersion.MINIMUM_VERSION.featureLevel() + " to " + MetadataVersion.latestTesting().featureLevel() + ".");
         }
 
+        if (isSharedStorageEnabled() && !newVersion.isControllerRegistrationSupported()) {
+            return invalidMetadataVersion(newVersionLevel, SharedStorageVersion.FEATURE_NAME + "=1 requires " +
+                "controller registration support and metadata.version >= " + MetadataVersion.IBP_3_7_IV0 + ".");
+        }
+
         if (newVersion.isLessThan(currentVersion)) {
             // This is a downgrade
             boolean metadataChanged = MetadataVersion.checkIfMetadataChanged(currentVersion, newVersion);
@@ -492,6 +510,11 @@ public class FeatureControlManager {
             && finalizedVersions.getOrDefault(
                 WalReplicaDurabilityVersion.FEATURE_NAME, (short) 0
             ) >= WalReplicaDurabilityVersion.WRDV_1.featureLevel();
+    }
+
+    boolean isSharedStorageEnabled() {
+        return finalizedVersions.getOrDefault(SharedStorageVersion.FEATURE_NAME, (short) 0) >=
+            SharedStorageVersion.SSV_1.featureLevel();
     }
 
     boolean isElrFeatureEnabled() {

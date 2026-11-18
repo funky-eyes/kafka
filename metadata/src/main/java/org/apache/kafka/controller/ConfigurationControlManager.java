@@ -20,6 +20,7 @@ package org.apache.kafka.controller;
 import org.apache.kafka.clients.admin.AlterConfigOp.OpType;
 import org.apache.kafka.clients.admin.ConfigEntry;
 import org.apache.kafka.clients.admin.FeatureUpdate;
+import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.common.config.ConfigResource;
 import org.apache.kafka.common.config.ConfigResource.Type;
@@ -35,6 +36,7 @@ import org.apache.kafka.metadata.SupportedConfigChecker;
 import org.apache.kafka.server.common.ApiMessageAndVersion;
 import org.apache.kafka.server.common.EligibleLeaderReplicasVersion;
 import org.apache.kafka.server.common.MetadataVersion;
+import org.apache.kafka.server.common.SharedStorageVersion;
 import org.apache.kafka.server.mutable.BoundedList;
 import org.apache.kafka.server.policy.AlterConfigPolicy;
 import org.apache.kafka.server.policy.AlterConfigPolicy.RequestMetadata;
@@ -391,6 +393,7 @@ public class ConfigurationControlManager {
         }
         try {
             validator.validate(configResource, allConfigs, existingConfigsMap);
+            validateSharedStorageMode(configResource, allConfigs, existingConfigsMap, newlyCreatedResource);
             if (!newlyCreatedResource) {
                 existenceChecker.accept(configResource);
             }
@@ -406,6 +409,42 @@ public class ConfigurationControlManager {
             return apiError;
         }
         return ApiError.NONE;
+    }
+
+    private void validateSharedStorageMode(
+        ConfigResource resource,
+        Map<String, String> newConfigs,
+        Map<String, String> existingConfigs,
+        boolean newlyCreatedResource
+    ) {
+        if (resource.type() != Type.TOPIC) return;
+        String key = TopicConfig.SHARED_STORAGE_ENABLE_CONFIG;
+        String previous = existingConfigs.get(key);
+        String requested = newConfigs.get(key);
+        boolean enabled = sharedStorageEnabled(requested);
+        if (!newlyCreatedResource &&
+                (sharedStorageEnabled(previous) != enabled ||
+                    ((previous == null) != (requested == null) && !featureControl.isSharedStorageEnabled()))) {
+            // Before activation absence can still mean a legacy selector. After
+            // activation every broker uses Topic routing, so false and absence are
+            // equivalent and ordinary AlterConfigs resets retain Kafka compatibility.
+            throw new ConfigException(key + " can only be selected when creating a topic; " +
+                "changing an existing storage mode requires a supported migration.");
+        }
+        if (enabled && resource.name().startsWith("__")) {
+            throw new ConfigException(key + " cannot be enabled for internal topics.");
+        }
+        if (requested != null && !featureControl.isSharedStorageEnabled()) {
+            // Older legacy-selector brokers ignore this key even when it is false.
+            // Do not let mixed-version replicas select different log implementations.
+            throw new ConfigException(key + " requires explicit activation of " +
+                SharedStorageVersion.FEATURE_NAME + "=1 after all brokers and controllers support it.");
+        }
+    }
+
+    private static boolean sharedStorageEnabled(String value) {
+        return value != null && (Boolean) ConfigDef.parseType(
+            TopicConfig.SHARED_STORAGE_ENABLE_CONFIG, value, ConfigDef.Type.BOOLEAN);
     }
 
     private static final ApiError DISALLOWED_BROKER_MIN_ISR_TRANSITION_ERROR =

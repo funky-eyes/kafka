@@ -218,15 +218,27 @@ default credential provider rather than static long-lived secrets.
 
 ## Topic selection
 
-Shared Storage routing is controlled by:
+New Topics select storage through `shared.storage.enable`, default `false`, when
+they are created. Explicit selection requires the cluster feature
+`shared.storage.version=1`; installation of the broker extension does not change
+ordinary Topics. Internal Topics remain classic, and the storage mode of an
+existing Topic cannot be changed through a config alteration. An enabled true
+value cannot be removed; normalizing false to its absent default remains allowed
+after feature activation.
 
-- `shared.storage.topics`
-- `shared.storage.topic.pattern`
+Existing selector deployments must explicitly enable
+`shared.storage.legacy.selectors.enabled=true` on upgraded brokers and preserve
+their old `shared.storage.topics` / `shared.storage.topic.pattern` settings during
+the binary rollout. This compatibility mode is not enabled by default. It preserves
+legacy routing only for Topics without an explicit mode, including the old
+default-all behavior. Existing data is not converted automatically.
+Legacy compatibility brokers cannot activate the Topic-mode feature. The initial
+migration path uses a separately initialized Topic-configured cluster and a verified
+data-copy/cutover, preserving the legacy deployment until that cutover is complete.
 
-Internal topics always remain classic.
-
-Before GA deployment, explicitly document the intended topic selection. Avoid accidental cluster-wide enablement by
-configuration omission; validate the effective selector during change review.
+Follow [Topic configuration and migration](shared-storage-topic-configuration.md)
+for the feature activation boundary, mixed-version restrictions and data-copy
+cutover requirements before retiring legacy selectors.
 
 ## Upgrade and rollback
 
@@ -239,6 +251,12 @@ Before production rollout:
 3. verify each upgraded broker can become preferred leader and continue acks=all/idempotent traffic;
 4. verify final full-NEW remote coverage;
 5. retain the workflow artifact containing old/new refs and broker diagnostics.
+
+For the transition to Topic-level selection, that rollback probe applies only to
+the binary upgrade phase with legacy compatibility enabled and the new feature
+still at zero. Activating `shared.storage.version=1` rejects feature downgrade and
+old-broker registration. Do not infer post-activation rollback compatibility from
+the legacy rolling test.
 
 If the rolling-upgrade gate is not green, do not perform a mixed-version production rollout.
 

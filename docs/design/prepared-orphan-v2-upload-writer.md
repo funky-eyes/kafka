@@ -4,9 +4,9 @@ This opt-in slice adds a Kafka transactional uploader session for each new
 shared-storage object. It is **disabled by default** and DOES NOT re-enable
 orphan deletion.
 
-- Set `shared.storage.orphan.fenced.lifecycle.enabled=true` only in
-  isolated all-upgraded test clusters. Old binaries cannot decode the v2
-  PREPARED value and a mixed rollout is not yet supported.
+- Production broker startup rejects `shared.storage.orphan.fenced.lifecycle.enabled=true`.
+  Only isolated direct metadata-store tests may exercise this experimental mode.
+  Old binaries cannot decode v2 values and mixed rollout is not supported.
 - Before PREPARE, the session initializes a transactional.id derived from
   immutable cluster ID and object ID. PREPARE and COMMIT use this same
   producer, never a re-initialized session for a fenced ID.

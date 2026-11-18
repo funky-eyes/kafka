@@ -97,6 +97,7 @@ import org.apache.kafka.metadata.placement.UsableBroker;
 import org.apache.kafka.server.common.ApiMessageAndVersion;
 import org.apache.kafka.server.common.EligibleLeaderReplicasVersion;
 import org.apache.kafka.server.common.MetadataVersion;
+import org.apache.kafka.server.common.SharedStorageVersion;
 import org.apache.kafka.server.common.TopicIdPartition;
 import org.apache.kafka.server.policy.CreateTopicPolicy;
 import org.apache.kafka.server.util.MockRandom;
@@ -127,6 +128,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
+import static org.apache.kafka.common.config.ConfigResource.Type.TOPIC;
 import static org.apache.kafka.common.config.TopicConfig.SEGMENT_BYTES_CONFIG;
 import static org.apache.kafka.common.metadata.MetadataRecordType.CLEAR_ELR_RECORD;
 import static org.apache.kafka.common.protocol.Errors.ELECTION_NOT_NEEDED;
@@ -619,6 +621,63 @@ public class ReplicationControlManagerTest {
                 () -> ReplicationControlManager.validateTotalNumberOfPartitions(request, 9999)
         );
         assertEquals(error.getMessage(), "Excessively large number of partitions per request.");
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testSharedStorageDefaultIsStampedOnlyAfterActivation(boolean enabled) {
+        ReplicationControlTestContext ctx = new ReplicationControlTestContext.Builder().build();
+        ctx.registerBrokers(0, 1, 2);
+        ctx.unfenceBrokers(0, 1, 2);
+        if (enabled) {
+            ctx.featureControl.replay(new FeatureLevelRecord()
+                .setName(SharedStorageVersion.FEATURE_NAME).setFeatureLevel((short) 1));
+        }
+        CreateTopicsRequestData request = new CreateTopicsRequestData();
+        request.topics().add(new CreatableTopic().setName("ordinary")
+            .setNumPartitions(1).setReplicationFactor((short) 3));
+        ControllerResult<CreateTopicsResponseData> result = ctx.replicationControl.createTopics(
+            anonymousContextFor(ApiKeys.CREATE_TOPICS), request, Set.of("ordinary"), false);
+        assertEquals(NONE.code(), result.response().topics().find("ordinary").errorCode());
+        List<ConfigRecord> configs = result.records().stream().map(ApiMessageAndVersion::message)
+            .filter(ConfigRecord.class::isInstance).map(ConfigRecord.class::cast).toList();
+        if (enabled) {
+            assertEquals(List.of(new ConfigRecord().setResourceType(TOPIC.id()).setResourceName("ordinary")
+                .setName(TopicConfig.SHARED_STORAGE_ENABLE_CONFIG).setValue("false")), configs);
+        } else {
+            assertTrue(configs.isEmpty());
+        }
+        ctx.replay(result.records());
+        assertEquals(enabled ? "false" : null, ctx.configurationControl.getConfigs(new ConfigResource(TOPIC, "ordinary"))
+            .get(TopicConfig.SHARED_STORAGE_ENABLE_CONFIG));
+        assertTrue(request.topics().find("ordinary").configs().isEmpty());
+    }
+
+    @Test
+    public void testSharedStorageExplicitSelectionIsNotOverwritten() {
+        ReplicationControlTestContext ctx = new ReplicationControlTestContext.Builder().build();
+        ctx.registerBrokers(0);
+        ctx.unfenceBrokers(0);
+        ctx.featureControl.replay(new FeatureLevelRecord()
+            .setName(SharedStorageVersion.FEATURE_NAME).setFeatureLevel((short) 1));
+        ctx.createTestTopic("shared", new int[][] {{0}}, Map.of(TopicConfig.SHARED_STORAGE_ENABLE_CONFIG, "true"), NONE.code());
+        assertEquals("true", ctx.configurationControl.getConfigs(new ConfigResource(TOPIC, "shared"))
+            .get(TopicConfig.SHARED_STORAGE_ENABLE_CONFIG));
+    }
+
+    @Test
+    public void testSharedStorageDefaultDoesNotEscapeFailedCreation() {
+        ReplicationControlTestContext ctx = new ReplicationControlTestContext.Builder().build();
+        ctx.featureControl.replay(new FeatureLevelRecord()
+            .setName(SharedStorageVersion.FEATURE_NAME).setFeatureLevel((short) 1));
+        CreateTopicsRequestData request = new CreateTopicsRequestData();
+        request.topics().add(new CreatableTopic().setName("unassigned")
+            .setNumPartitions(1).setReplicationFactor((short) 3));
+        ControllerResult<CreateTopicsResponseData> result = ctx.replicationControl.createTopics(
+            anonymousContextFor(ApiKeys.CREATE_TOPICS), request, Set.of("unassigned"), false);
+        assertEquals(INVALID_REPLICATION_FACTOR.code(), result.response().topics().find("unassigned").errorCode());
+        assertTrue(result.records().isEmpty());
+        assertTrue(ctx.configurationControl.getConfigs(new ConfigResource(TOPIC, "unassigned")).isEmpty());
     }
 
     @Test

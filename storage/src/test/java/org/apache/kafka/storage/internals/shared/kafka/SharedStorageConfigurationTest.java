@@ -16,7 +16,9 @@
  */
 package org.apache.kafka.storage.internals.shared.kafka;
 
+import org.apache.kafka.common.config.TopicConfig;
 import org.apache.kafka.common.utils.Time;
+import org.apache.kafka.storage.internals.log.LogConfig;
 import org.apache.kafka.storage.internals.log.StorageExtensionContext;
 import org.apache.kafka.test.TestUtils;
 
@@ -35,7 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SharedStorageConfigurationTest {
     @Test
-    void defaultsToRingWalForAllNonInternalTopics() {
+    void defaultsToRingWalWithSharedStorageDisabledForEveryTopic() {
         File logDir = TestUtils.tempDirectory();
         SharedStorageConfiguration config = SharedStorageConfiguration.from(context(Map.of(), logDir));
         Path kafkaLogDir = logDir.toPath().toAbsolutePath().normalize();
@@ -61,7 +63,8 @@ class SharedStorageConfigurationTest {
         assertEquals(expectedWalDir, config.walDir());
         assertFalse(config.walDir().startsWith(kafkaLogDir));
         assertEquals(kafkaLogDir.getParent(), config.walDir().getParent().getParent().getParent());
-        assertTrue(config.useSharedStorage("events"));
+        assertFalse(config.useSharedStorage("events"));
+        assertFalse(config.useSharedStorage("events", new LogConfig(Map.of())));
         assertFalse(config.useSharedStorage("__consumer_offsets"));
         assertFalse(config.useSharedStorage("__transaction_state"));
         assertFalse(config.useSharedStorage("__shared_storage_metadata"));
@@ -168,6 +171,7 @@ class SharedStorageConfigurationTest {
     @Test
     void combinesExactAndPatternSelectors() {
         Map<String, Object> originals = new HashMap<>();
+        originals.put(SharedStorageConfiguration.LEGACY_SELECTORS_ENABLED_CONFIG, true);
         originals.put(SharedStorageConfiguration.TOPICS_CONFIG, "orders, payments");
         originals.put(SharedStorageConfiguration.TOPIC_PATTERN_CONFIG, "cdc-.*");
         SharedStorageConfiguration config = SharedStorageConfiguration.from(
@@ -179,6 +183,30 @@ class SharedStorageConfigurationTest {
         assertTrue(config.useSharedStorage("cdc-users"));
         assertFalse(config.useSharedStorage("audit"));
         assertFalse(config.useSharedStorage("__internal"));
+    }
+
+    @Test
+    void topicConfigOverridesOnlyExplicitLegacySelection() {
+        SharedStorageConfiguration config = SharedStorageConfiguration.from(context(
+            Map.of(SharedStorageConfiguration.LEGACY_SELECTORS_ENABLED_CONFIG, true), TestUtils.tempDirectory()));
+        assertTrue(config.useSharedStorage("events", new LogConfig(Map.of())));
+        assertFalse(config.useSharedStorage("events", new LogConfig(
+            Map.of(TopicConfig.SHARED_STORAGE_ENABLE_CONFIG, false))));
+        assertTrue(config.useSharedStorage("events", new LogConfig(
+            Map.of(TopicConfig.SHARED_STORAGE_ENABLE_CONFIG, true))));
+        assertThrows(IllegalArgumentException.class, () -> config.useSharedStorage("__consumer_offsets",
+            new LogConfig(Map.of(TopicConfig.SHARED_STORAGE_ENABLE_CONFIG, true))));
+    }
+
+    @Test
+    void brokerSelectorsCannotEnableSharedStorageWithoutExplicitLegacyMode() {
+        for (String selector : List.of(SharedStorageConfiguration.TOPICS_CONFIG,
+            SharedStorageConfiguration.TOPIC_PATTERN_CONFIG)) {
+            assertThrows(IllegalArgumentException.class, () -> SharedStorageConfiguration.from(context(
+                Map.of(selector, "events"), TestUtils.tempDirectory())));
+        }
+        assertThrows(IllegalArgumentException.class, () -> SharedStorageConfiguration.from(context(
+            Map.of(SharedStorageConfiguration.LEGACY_SELECTORS_ENABLED_CONFIG, "treu"), TestUtils.tempDirectory())));
     }
 
     @Test

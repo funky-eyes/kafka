@@ -19,6 +19,7 @@ package kafka.server;
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.AdminClientConfig;
 import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.clients.admin.ListOffsetsOptions;
 import org.apache.kafka.clients.admin.OffsetSpec;
 import org.apache.kafka.clients.admin.TopicDescription;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
@@ -28,6 +29,7 @@ import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.clients.producer.RecordMetadata;
+import org.apache.kafka.common.IsolationLevel;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.config.TopicConfig;
@@ -57,6 +59,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
@@ -289,17 +292,7 @@ public class SharedStorageAcksOneIndependentProcessTest {
 
         RecordMetadata acknowledged = produceOne(bootstrapServers, 1);
         assertEquals(1L, acknowledged.offset());
-        waitForReplicasAtHighWatermark(admin, replicas);
-        // A zero DescribeLogDirs.offsetLag is relative to the current HW:
-        // it cannot prove that the just-acked acks=1 offset has entered HW.
-        // Fetch both values before SIGKILL. Kafka Fetch only exposes
-        // high-watermark-committed records, so this also proves the new
-        // record has been fetched by the required ISR replicas.
-        assertExpectedValues(
-            consumeAll(bootstrapServers, 2),
-            2,
-            "The second acks=1 record must become high-watermark visible before leader SIGKILL"
-        );
+        waitForReplicasAtHighWatermark(admin, replicas, acknowledged.offset() + 1L);
         assertFalse(
             hasCommittedCoverage(bootstrapServers, partition, new OffsetRange(1, 2)),
             "Replicated acks=1 test record must still be WAL-only before the leader crash"
@@ -386,6 +379,7 @@ public class SharedStorageAcksOneIndependentProcessTest {
             "group.initial.rebalance.delay.ms=0",
             "auto.create.topics.enable=false",
             "unclean.leader.election.enable=false",
+            "shared.storage.legacy.selectors.enabled=true",
             "storage.extension.class=org.apache.kafka.storage.internals.shared.s3.S3SharedStorageExtension",
             "shared.storage.topics=" + TOPIC,
             "shared.storage.wal.dir=" + walDir.toAbsolutePath(),
@@ -651,10 +645,29 @@ public class SharedStorageAcksOneIndependentProcessTest {
             .toList();
     }
 
-    private static void waitForReplicasAtHighWatermark(Admin admin, List<Integer> replicas) throws Exception {
+    private static void waitForReplicasAtHighWatermark(
+        Admin admin, List<Integer> replicas, long expectedCommittedEndOffset
+    ) throws Exception {
         TopicPartition partition = new TopicPartition(TOPIC, 0);
+        Set<Integer> requiredIsr = Set.copyOf(replicas);
         TestUtils.waitForCondition(() -> {
             try {
+                TopicDescription current = describeTopic(admin);
+                if (current == null || current.partitions().size() != 1 ||
+                    !requiredIsr.equals(Set.copyOf(current.partitions().get(0).isr().stream()
+                        .map(node -> node.id()).toList()))) {
+                    return false;
+                }
+                // A zero DescribeLogDirs lag can refer to the *old* high watermark.
+                // Require the newly acknowledged record to cross Kafka's replicated
+                // read-committed boundary before killing the leader.
+                long committedEnd = admin.listOffsets(
+                    Map.of(partition, OffsetSpec.latest()),
+                    new ListOffsetsOptions(IsolationLevel.READ_COMMITTED)
+                ).all().get(10, TimeUnit.SECONDS).get(partition).offset();
+                if (committedEnd < expectedCommittedEndOffset) {
+                    return false;
+                }
                 var descriptions = admin.describeLogDirs(replicas).allDescriptions().get(10, TimeUnit.SECONDS);
                 for (int replicaId : replicas) {
                     var logDirs = descriptions.get(replicaId);
@@ -683,7 +696,9 @@ public class SharedStorageAcksOneIndependentProcessTest {
             } catch (Exception ignored) {
                 return false;
             }
-        }, 30_000L, () -> "Assigned replicas did not advance to the partition high watermark: " + replicas);
+        }, 30_000L, () -> "Assigned replicas " + replicas +
+            " did not retain full ISR and advance the read-committed high watermark to " +
+            expectedCommittedEndOffset);
     }
 
     private static RecordMetadata produceOne(String bootstrapServers, int sequence) throws Exception {
