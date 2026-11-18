@@ -36,7 +36,7 @@ import org.apache.kafka.storage.internals.shared.metadata.BrokerObjectId;
 import org.apache.kafka.storage.internals.shared.metadata.LocalRemoteObjectCheckpoint;
 import org.apache.kafka.storage.internals.shared.object.ActiveObjectUploads;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectPacker;
-import org.apache.kafka.storage.internals.shared.object.SharedObjectReader;
+import org.apache.kafka.storage.internals.shared.object.SharedObjectIoFences;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectUploadHook;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectUploader;
 import org.apache.kafka.storage.internals.shared.wal.SharedWal;
@@ -94,6 +94,9 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
     private KafkaObjectMetadataStore metadataStore;
     private S3ObjectStore objectStore;
     private SharedUploadScheduler uploadScheduler;
+    // Created with the cold reader during start(), BEFORE metadata bootstrap.
+    // Every upload initialization must use this exact same local drain pair.
+    private SharedObjectIoFences ioFences;
     private boolean closed;
 
     @Override
@@ -108,6 +111,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             throw new IllegalStateException("S3 shared storage extension cannot be started in its current state");
         }
 
+        rejectUnsupportedFencedLifecycle(context.originals());
         SharedStorageConfiguration configuration = SharedStorageConfiguration.from(context);
         SharedStorageModeMarker.initializeWalDirectory(configuration);
         SharedWal wal = createWal(configuration);
@@ -119,7 +123,8 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             SharedStorageEngine newStorage = new SharedStorageEngine(wal, remoteCheckpoint);
             newMetrics = new SharedStorageMetrics(newStorage, context.brokerId());
             newObjectStore = new S3ObjectStore(objectStoreConfiguration(context));
-            newStorage.installRemoteReader(new SharedObjectReader(
+            SharedObjectIoFences newIoFences = new SharedObjectIoFences();
+            newStorage.installRemoteReader(newIoFences.newReader(
                 newObjectStore,
                 newStorage.remoteIndex(),
                 configuration.readIndexCacheEntries(),
@@ -152,6 +157,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             partitionRoleListener = newPartitionRoleListener;
             bootstrapExecutor = newBootstrapExecutor;
             objectStore = newObjectStore;
+            ioFences = newIoFences;
             newObjectStore = null;
         } catch (Throwable t) {
             closeIgnoringFailure(newMetrics);
@@ -163,6 +169,18 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             }
             throw asIOException("Unable to initialize local shared WAL storage", t);
         }
+    }
+
+    private static void rejectUnsupportedFencedLifecycle(Map<String, ?> originals) {
+        String key = SharedMetadataClientConfiguration.FENCED_LIFECYCLE_CONFIG;
+        Object configured = originals.get(key);
+        if (configured == null || "false".equalsIgnoreCase(configured.toString().trim())) {
+            return;
+        }
+        if (!"true".equalsIgnoreCase(configured.toString().trim())) {
+            throw new IllegalArgumentException(key + " must be true or false");
+        }
+        throw new IllegalStateException(key + " cannot be enabled until mixed-version metadata compatibility is guaranteed");
     }
 
     static SharedWal createWal(SharedStorageConfiguration configuration) throws IOException {
@@ -185,13 +203,32 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         return partitionRoleListener;
     }
 
+    /**
+     * Reapply a durable KRaft DELETE_READY-or-later object fence before
+     * restart recovery can load a stale local physical read checkpoint.
+     * This rejects new in-process reads and uploads, but never grants a
+     * Controller delete or asserts that any other Broker has drained.
+     */
+    @Override
+    public synchronized void fenceCommittedObject(long objectId) {
+        if (closed || ioFences == null) {
+            throw new IllegalStateException("Cannot restore COMMITTED KRaft fence before storage startup");
+        }
+        ioFences.fence(objectId);
+    }
+
     @Override
     public synchronized CompletableFuture<Void> onBrokerReady(StorageExtensionBrokerContext context) {
         Objects.requireNonNull(context, "context");
+        try {
+            rejectUnsupportedFencedLifecycle(context.originals());
+        } catch (IllegalArgumentException | IllegalStateException failure) {
+            return CompletableFuture.failedFuture(failure);
+        }
         boolean localStateMissing =
             storage == null || metrics == null || bootstrapExecutor == null || storageConfiguration == null;
         boolean remoteStateMissing =
-            commitProgress == null || sharedUnifiedLogFactory == null || objectStore == null;
+            commitProgress == null || sharedUnifiedLogFactory == null || objectStore == null || ioFences == null;
         if (localStateMissing || remoteStateMissing) {
             return CompletableFuture.failedFuture(
                 new IllegalStateException("S3 shared storage extension has not been started"));
@@ -205,6 +242,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             SharedStorageMetrics sharedMetrics = metrics;
             SharedCommitProgress progress = commitProgress;
             S3ObjectStore objects = objectStore;
+            SharedObjectIoFences localFences = ioFences;
             ExecutorService executor = bootstrapExecutor;
             brokerReadyFuture = CompletableFuture.runAsync(() ->
                 initializeRemotePlaneUntilAvailable(
@@ -213,7 +251,8 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
                     engine,
                     sharedMetrics,
                     progress,
-                    objects
+                    objects,
+                    localFences
                 ),
                 executor
             ).whenComplete((ignored, error) -> {
@@ -238,11 +277,13 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         SharedStorageEngine engine,
         SharedStorageMetrics sharedMetrics,
         SharedCommitProgress progress,
-        S3ObjectStore sharedObjectStore
+        S3ObjectStore sharedObjectStore,
+        SharedObjectIoFences localFences
     ) {
         while (true) {
             try {
-                initializeRemotePlane(context, configuration, engine, sharedMetrics, progress, sharedObjectStore);
+                initializeRemotePlane(context, configuration, engine, sharedMetrics, progress, sharedObjectStore,
+                    localFences);
                 sharedMetrics.markRemoteControlPlaneReady();
                 LOG.info("Shared storage metadata control plane is ready on broker {}", context.brokerId());
                 return;
@@ -288,7 +329,8 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         SharedStorageEngine engine,
         SharedStorageMetrics sharedMetrics,
         SharedCommitProgress progress,
-        S3ObjectStore sharedObjectStore
+        S3ObjectStore sharedObjectStore,
+        SharedObjectIoFences localFences
     ) throws IOException {
         KafkaObjectMetadataStore newMetadataStore = null;
         SharedUploadScheduler newUploadScheduler = null;
@@ -313,7 +355,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
                 DEFAULT_OBJECT_ID_BLOCK_SIZE,
                 initialBlock
             );
-            ActiveObjectUploads activeUploads = new ActiveObjectUploads();
+            ActiveObjectUploads activeUploads = localFences.uploads();
             SharedObjectUploadHook uploadHook =
                 FileSharedObjectUploadBarrier.from(context.originals(), context.brokerId());
             SharedObjectUploader uploader = new SharedObjectUploader(
@@ -335,8 +377,8 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
                 configuration.uploadWalPressurePercent(),
                 configuration.uploadMaxInflight()
             );
-            // A compacted COMMIT can be lost from independently keyed CLAIM history.
-            // Never schedule physical orphan DELETE without durable cross-broker arbitration.
+            // Preserve the mainline fail-closed boundary until cross-broker
+            // arbitration and recovery are proven for this integrated tree.
             LOG.warn("PREPARED object orphan cleanup disabled: durable cross-broker CLAIM arbitration is absent");
 
             synchronized (this) {
@@ -492,6 +534,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
             metrics = null;
             metadataStore = null;
             objectStore = null;
+            ioFences = null;
             storageConfiguration = null;
             storage = null;
             commitProgress = null;
@@ -520,7 +563,7 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
         // Phase 2: stop metadata clients to unblock in-flight uploads before draining the scheduler.
         failure = close(failure, metadata);
 
-        // Phase 3: all remaining async work is bounded by the S3 request policy. Drain it before closing S3 or WAL.
+        // Phase 3: drain in-flight remote operations before closing S3 or WAL.
         failure = close(failure, scheduler);
         failure = close(failure, objects);
         failure = close(failure, engine);

@@ -46,6 +46,8 @@ public final class SharedMetadataClientConfiguration {
     public static final String LISTENER_NAME_CONFIG = "shared.storage.metadata.listener.name";
     public static final String REPLICATION_FACTOR_CONFIG = "shared.storage.metadata.replication.factor";
     public static final String MIN_ISR_CONFIG = "shared.storage.metadata.min.insync.replicas";
+    /** Experimental opt-in; never activate during mixed-version rolling upgrade. */
+    public static final String FENCED_LIFECYCLE_CONFIG = "shared.storage.orphan.fenced.lifecycle.enabled";
 
     public static final short DEFAULT_REPLICATION_FACTOR = 3;
     public static final int DEFAULT_MIN_ISR = 2;
@@ -56,19 +58,22 @@ public final class SharedMetadataClientConfiguration {
     private final int minInSyncReplicas;
     private final int brokerId;
     private final String clusterId;
+    private final boolean fencedLifecycleEnabled;
 
     private SharedMetadataClientConfiguration(
         Map<String, Object> commonClientProperties,
         short replicationFactor,
         int minInSyncReplicas,
         int brokerId,
-        String clusterId
+        String clusterId,
+        boolean fencedLifecycleEnabled
     ) {
         this.commonClientProperties = Map.copyOf(commonClientProperties);
         this.replicationFactor = replicationFactor;
         this.minInSyncReplicas = minInSyncReplicas;
         this.brokerId = brokerId;
         this.clusterId = clusterId;
+        this.fencedLifecycleEnabled = fencedLifecycleEnabled;
     }
 
     public static SharedMetadataClientConfiguration from(StorageExtensionBrokerContext context) {
@@ -106,12 +111,18 @@ public final class SharedMetadataClientConfiguration {
             CommonClientConfigs.SECURITY_PROTOCOL_CONFIG,
             endpoint.securityProtocol().name
         );
+        Object configuredMode = context.originals().get(FENCED_LIFECYCLE_CONFIG);
+        String requestedMode = configuredMode == null ? "false" : configuredMode.toString().trim();
+        if (!"true".equalsIgnoreCase(requestedMode) && !"false".equalsIgnoreCase(requestedMode)) {
+            throw new IllegalArgumentException(FENCED_LIFECYCLE_CONFIG + " must be true or false");
+        }
         return new SharedMetadataClientConfiguration(
             clientProperties,
             replicationFactor,
             minIsr,
             context.brokerId(),
-            context.clusterId()
+            context.clusterId(),
+            Boolean.parseBoolean(requestedMode)
         );
     }
 
@@ -243,6 +254,10 @@ public final class SharedMetadataClientConfiguration {
 
     public String clusterId() {
         return clusterId;
+    }
+
+    public boolean fencedLifecycleEnabled() {
+        return fencedLifecycleEnabled;
     }
 
     private Properties commonProperties() {

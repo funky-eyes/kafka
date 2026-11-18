@@ -46,6 +46,158 @@ class CommittedObjectGcWorkerTest {
     private static final long OBJECT_ID = 501L;
 
     @Test
+    void concurrentKRaftGrantChecksMustAllFinishBeforeAnyPhysicalDelete() {
+        TestContext ctx = new TestContext();
+        for (long id : List.of(501L, 502L)) {
+            ctx.put(id);
+            ctx.authority.add(id);
+            ctx.fence.fence(id);
+        }
+        CompletableFuture<Boolean> first = new CompletableFuture<>();
+        ctx.authority.validationGates.put(501L, first);
+        CompletableFuture<CommittedObjectGcWorker.SweepStats> sweep = ctx.worker.sweep();
+        assertEquals(List.of(501L, 502L), ctx.authority.checked,
+            "Independent KRaft grants must not queue behind a slow first check");
+        assertEquals(0, ctx.store.deletes.get());
+        assertFalse(sweep.isDone());
+
+        first.complete(false);
+        assertEquals(new CommittedObjectGcWorker.SweepStats(2, 1, 1), sweep.join());
+        assertEquals(List.of(List.of(502L)), ctx.store.batches);
+        assertTrue(ctx.store.backing.contains(501L));
+        assertFalse(ctx.store.backing.contains(502L));
+        assertTrue(ctx.authority.ready.containsKey(501L));
+    }
+
+    @Test
+    void failedKRaftGrantVerificationAbortsAllPhysicalBatchDeletes() {
+        TestContext ctx = new TestContext();
+        for (long id : List.of(501L, 502L)) {
+            ctx.put(id);
+            ctx.authority.add(id);
+            ctx.fence.fence(id);
+        }
+        CompletableFuture<Boolean> failing = new CompletableFuture<>();
+        ctx.authority.validationGates.put(501L, failing);
+        CompletableFuture<CommittedObjectGcWorker.SweepStats> sweep = ctx.worker.sweep();
+        assertEquals(2, ctx.authority.checked.size());
+        failing.completeExceptionally(new IllegalStateException("stale KRaft read"));
+        assertThrows(CompletionException.class, sweep::join);
+        assertEquals(0, ctx.store.deletes.get());
+        assertTrue(ctx.store.batches.isEmpty());
+        assertEquals(0, ctx.authority.completions.get());
+        assertEquals(2, ctx.authority.ready.size());
+        ctx.authority.validationGates.clear();
+        assertEquals(new CommittedObjectGcWorker.SweepStats(2, 0, 2), ctx.worker.sweep().join());
+    }
+
+    @Test
+    void atomicKRaftBatchAcknowledgementWaitsForSuccessfulPhysicalDelete() {
+        TestContext ctx = new TestContext();
+        for (long id : List.of(501L, 502L)) {
+            ctx.put(id);
+            ctx.authority.add(id);
+            ctx.fence.fence(id);
+        }
+        ctx.authority.atomicCompletion.set(true);
+        CompletableFuture<Void> remote = new CompletableFuture<>();
+        ctx.store.blockedDelete = remote;
+
+        CompletableFuture<CommittedObjectGcWorker.SweepStats> pending = ctx.worker.sweep();
+        assertFalse(pending.isDone());
+        assertEquals(0, ctx.authority.completionBatches.get());
+        assertEquals(0, ctx.authority.completions.get());
+
+        remote.complete(null);
+        assertEquals(new CommittedObjectGcWorker.SweepStats(2, 0, 2), pending.join());
+        assertEquals(1, ctx.authority.completionBatches.get());
+        assertEquals(2, ctx.authority.completions.get());
+        assertEquals(List.of(List.of(501L, 502L)), ctx.store.batches);
+    }
+
+    @Test
+    void uncertainAtomicKRaftBatchCommitRetainsAllDeleteReadyRetries() {
+        TestContext ctx = new TestContext();
+        for (long id : List.of(501L, 502L)) {
+            ctx.put(id);
+            ctx.authority.add(id);
+            ctx.fence.fence(id);
+        }
+        ctx.authority.atomicCompletion.set(true);
+        ctx.authority.failCompletion.set(true);
+
+        assertThrows(CompletionException.class, () -> ctx.worker.sweep().join());
+        assertEquals(1, ctx.authority.completionBatches.get());
+        assertEquals(0, ctx.authority.completions.get());
+        assertEquals(2, ctx.authority.ready.size());
+        assertFalse(ctx.store.backing.contains(501L));
+        assertFalse(ctx.store.backing.contains(502L));
+
+        // The remote DELETE succeeded, but the KRaft outcome was uncertain:
+        // retry the same idempotent delete batch and revalidate both grants.
+        assertEquals(new CommittedObjectGcWorker.SweepStats(2, 0, 2), ctx.worker.sweep().join());
+        assertEquals(2, ctx.authority.completionBatches.get());
+        assertEquals(2, ctx.authority.completions.get());
+        assertEquals(List.of(List.of(501L, 502L), List.of(501L, 502L)), ctx.store.batches);
+    }
+
+    @Test
+    void controllerBatchMustNotInventObjectOrSwitchRetirementGeneration() {
+        CommittedObjectGcWorker.DeleteReady original = ready(501L);
+        assertThrows(IllegalStateException.class, () ->
+            CommittedObjectGcWorker.verifyApprovedSubset(List.of(original), List.of(ready(502L))));
+        assertThrows(IllegalStateException.class, () ->
+            CommittedObjectGcWorker.verifyApprovedSubset(List.of(original), List.of(original, original)));
+        assertThrows(IllegalStateException.class, () ->
+            CommittedObjectGcWorker.verifyApprovedSubset(List.of(original), List.of(
+                new CommittedObjectGcWorker.DeleteReady(
+                    original.descriptor(), original.retirementGeneration() + 1, original.readyRecordOffset()
+                ))));
+    }
+
+    @Test
+    void distinctKRaftGrantsAndDrainedReadersShareOnePhysicalDeleteBatch() {
+        TestContext ctx = new TestContext();
+        for (long id : List.of(501L, 502L, 503L)) {
+            ctx.put(id);
+            ctx.authority.add(id);
+        }
+        ctx.fence.fence(501L);
+        ctx.fence.fence(502L);
+        assertEquals(new CommittedObjectGcWorker.SweepStats(3, 1, 2), ctx.worker.sweep().join());
+        assertEquals(List.of(List.of(501L, 502L)), ctx.store.batches);
+        assertFalse(ctx.store.backing.contains(501L));
+        assertFalse(ctx.store.backing.contains(502L));
+        assertTrue(ctx.store.backing.contains(503L));
+        assertEquals(2, ctx.authority.completions.get());
+        assertTrue(ctx.authority.ready.containsKey(503L));
+    }
+
+    @Test
+    void partialPhysicalBatchFailureKeepsEveryKRaftGrantRetryable() {
+        TestContext ctx = new TestContext();
+        for (long id : List.of(501L, 502L)) {
+            ctx.put(id);
+            ctx.authority.add(id);
+            ctx.fence.fence(id);
+        }
+        // Model S3 partially deleting the second key while the first fails.
+        ctx.store.failNext.set(true);
+        assertThrows(CompletionException.class, () -> ctx.worker.sweep().join());
+        assertEquals(0, ctx.authority.completions.get());
+        assertTrue(ctx.authority.ready.containsKey(501L));
+        assertTrue(ctx.authority.ready.containsKey(502L));
+
+        // Both are retried, including whichever physical DELETE succeeded
+        // before the first HTTP/batch failure. DELETE is idempotent.
+        assertEquals(new CommittedObjectGcWorker.SweepStats(2, 0, 2), ctx.worker.sweep().join());
+        assertEquals(List.of(List.of(501L, 502L), List.of(501L, 502L)), ctx.store.batches);
+        assertFalse(ctx.store.backing.contains(501L));
+        assertFalse(ctx.store.backing.contains(502L));
+        assertEquals(2, ctx.authority.completions.get());
+    }
+
+    @Test
     void noDurableDeleteReadyGrantNeverIssuesRemoteDelete() {
         TestContext ctx = new TestContext();
         ctx.put(OBJECT_ID);
@@ -161,6 +313,41 @@ class CommittedObjectGcWorkerTest {
     }
 
     @Test
+    void synchronousDeleteFailureWaitsForPreviouslyStartedDeleteBeforeRetry() {
+        TestContext ctx = new TestContext();
+        for (long id : List.of(501L, 502L)) {
+            ctx.put(id);
+            ctx.authority.add(id);
+            ctx.fence.fence(id);
+        }
+        CompletableFuture<Void> firstDelete = new CompletableFuture<>();
+        ctx.store.blockedDelete = firstDelete;
+        ctx.store.throwOnDeleteId = 502L;
+
+        CompletableFuture<CommittedObjectGcWorker.SweepStats> pending = ctx.worker.sweep();
+        assertFalse(pending.isDone(), "A synchronous failure must not abandon the first physical DELETE");
+        assertThrows(CompletionException.class, () -> ctx.worker.sweep().join());
+        assertEquals(0, ctx.authority.completions.get());
+        ctx.store.blockedDelete = null;
+        ctx.store.throwOnDeleteId = -1L;
+        firstDelete.complete(null);
+        assertThrows(CompletionException.class, pending::join);
+        assertEquals(0, ctx.authority.completions.get());
+        assertEquals(2, ctx.authority.ready.size());
+        assertEquals(new CommittedObjectGcWorker.SweepStats(2, 0, 2), ctx.worker.sweep().join());
+    }
+
+    @Test
+    void defaultBatchValidatesEveryIdBeforeStartingDeletes() {
+        TestStore store = new TestStore();
+        List<Long> ids = new ArrayList<>();
+        ids.add(501L);
+        ids.add(null);
+        assertThrows(NullPointerException.class, () -> store.defaultBatch(ids));
+        assertEquals(0, store.deletes.get());
+    }
+
+    @Test
     void duplicateAndOversizedAuthorityBatchesAreRejectedBeforeAnyDelete() {
         TestContext ctx = new TestContext();
         ctx.put(OBJECT_ID);
@@ -210,7 +397,11 @@ class CommittedObjectGcWorkerTest {
     private static final class TestAuthority implements CommittedObjectGcWorker.DeleteAuthority {
         private final Map<Long, CommittedObjectGcWorker.DeleteReady> ready = new LinkedHashMap<>();
         private final AtomicBoolean failCompletion = new AtomicBoolean();
+        private final AtomicBoolean atomicCompletion = new AtomicBoolean();
         private final AtomicInteger completions = new AtomicInteger();
+        private final AtomicInteger completionBatches = new AtomicInteger();
+        private final Map<Long, CompletableFuture<Boolean>> validationGates = new LinkedHashMap<>();
+        private final List<Long> checked = new ArrayList<>();
         private List<CommittedObjectGcWorker.DeleteReady> override;
         private boolean permit = true;
 
@@ -227,9 +418,37 @@ class CommittedObjectGcWorkerTest {
 
         @Override
         public CompletableFuture<Boolean> stillDeleteReady(CommittedObjectGcWorker.DeleteReady candidate) {
+            checked.add(candidate.objectId());
+            CompletableFuture<Boolean> gate = validationGates.get(candidate.objectId());
+            if (gate != null) {
+                return gate.thenApply(allowed -> allowed && permit && candidate.equals(ready.get(candidate.objectId())));
+            }
             return CompletableFuture.completedFuture(
                 permit && candidate.equals(ready.get(candidate.objectId()))
             );
+        }
+
+        @Override
+        public CompletableFuture<Void> recordDeletedBatch(
+            List<CommittedObjectGcWorker.DeleteReady> candidates
+        ) {
+            if (!atomicCompletion.get()) {
+                return CommittedObjectGcWorker.DeleteAuthority.super.recordDeletedBatch(candidates);
+            }
+            completionBatches.incrementAndGet();
+            if (failCompletion.compareAndSet(true, false)) {
+                return CompletableFuture.failedFuture(new IllegalStateException("injected atomic KRaft timeout"));
+            }
+            for (CommittedObjectGcWorker.DeleteReady candidate : candidates) {
+                if (!candidate.equals(ready.get(candidate.objectId()))) {
+                    return CompletableFuture.failedFuture(new IllegalStateException("stale batch KRaft grant"));
+                }
+            }
+            for (CommittedObjectGcWorker.DeleteReady candidate : candidates) {
+                ready.remove(candidate.objectId());
+                completions.incrementAndGet();
+            }
+            return CompletableFuture.completedFuture(null);
         }
 
         @Override
@@ -248,8 +467,10 @@ class CommittedObjectGcWorkerTest {
     private static final class TestStore implements ObjectStore {
         private final InMemoryObjectStore backing = new InMemoryObjectStore();
         private final AtomicInteger deletes = new AtomicInteger();
+        private final List<List<Long>> batches = new ArrayList<>();
         private final AtomicBoolean failNext = new AtomicBoolean();
         private volatile CompletableFuture<Void> blockedDelete;
+        private volatile long throwOnDeleteId = -1L;
 
         @Override
         public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
@@ -262,8 +483,21 @@ class CommittedObjectGcWorkerTest {
         }
 
         @Override
+        public CompletableFuture<Void> deleteBatch(List<Long> ids) {
+            batches.add(List.copyOf(ids));
+            return ObjectStore.super.deleteBatch(ids);
+        }
+
+        private CompletableFuture<Void> defaultBatch(List<Long> ids) {
+            return ObjectStore.super.deleteBatch(ids);
+        }
+
+        @Override
         public CompletableFuture<Void> delete(long id) {
             deletes.incrementAndGet();
+            if (id == throwOnDeleteId) {
+                throw new IllegalStateException("injected synchronous DELETE failure");
+            }
             if (failNext.compareAndSet(true, false)) {
                 return CompletableFuture.failedFuture(new IllegalStateException("injected MinIO DELETE failure"));
             }

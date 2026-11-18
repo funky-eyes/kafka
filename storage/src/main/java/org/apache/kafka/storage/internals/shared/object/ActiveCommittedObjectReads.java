@@ -17,9 +17,8 @@
 package org.apache.kafka.storage.internals.shared.object;
 
 import java.nio.ByteBuffer;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -40,53 +39,60 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * durable retirement record, or permission to issue S3 DELETE.</p>
  */
 final class ActiveCommittedObjectReads {
-    private final Map<Long, State> objects = new HashMap<>();
+    // One immutable state per object. Reads of the drain condition are
+    // lock-free; updates use short per-key ConcurrentHashMap.compute calls.
+    private final ConcurrentHashMap<Long, State> objects = new ConcurrentHashMap<>();
 
-    synchronized Optional<ReadLease> tryAcquire(long objectId) {
-        requireObjectId(objectId);
-        State state = objects.computeIfAbsent(objectId, ignored -> new State());
-        if (state.fenced) {
-            return Optional.empty();
-        }
-        state.inFlight = Math.addExact(state.inFlight, 1L);
-        return Optional.of(new ReadLease(this, objectId, false));
+    Optional<ReadLease> tryAcquire(long objectId) {
+        return admit(objectId, false);
     }
 
-    /**
-     * Admit a logical batch read before consulting either index or DataBlock
-     * cache. Otherwise a warm cache can bypass a physical Range GET fence.
-     */
-    synchronized Optional<ReadLease> tryAcquireLogicalRead(long objectId) {
-        requireObjectId(objectId);
-        State state = objects.computeIfAbsent(objectId, ignored -> new State());
-        if (state.fenced) {
-            return Optional.empty();
-        }
-        state.logicalReads = Math.addExact(state.logicalReads, 1L);
-        return Optional.of(new ReadLease(this, objectId, true));
+    /** Admit logical cache reads before consulting the index or cache. */
+    Optional<ReadLease> tryAcquireLogicalRead(long objectId) {
+        return admit(objectId, true);
     }
 
-    synchronized void fence(long objectId) {
+    private Optional<ReadLease> admit(long objectId, boolean logical) {
         requireObjectId(objectId);
-        objects.computeIfAbsent(objectId, ignored -> new State()).fenced = true;
+        State admitted = objects.compute(objectId, (id, existing) -> {
+            if (existing != null && existing.fenced()) {
+                return existing;
+            }
+            long rangeGets = existing == null ? 0L : existing.inFlight();
+            long logicalReads = existing == null ? 0L : existing.logicalReads();
+            return logical
+                ? new State(rangeGets, Math.addExact(logicalReads, 1L), false)
+                : new State(Math.addExact(rangeGets, 1L), logicalReads, false);
+        });
+        // A later fence must drain an admission that won this per-key race.
+        return admitted.fenced() ? Optional.empty() : Optional.of(new ReadLease(this, objectId, logical));
     }
 
-    synchronized boolean locallyDrainedAfterFence(long objectId) {
+    void fence(long objectId) {
+        requireObjectId(objectId);
+        objects.compute(objectId, (id, existing) -> new State(
+            existing == null ? 0L : existing.inFlight(),
+            existing == null ? 0L : existing.logicalReads(),
+            true
+        ));
+    }
+
+    boolean locallyDrainedAfterFence(long objectId) {
         requireObjectId(objectId);
         State state = objects.get(objectId);
-        return state != null && state.fenced && state.inFlight == 0L && state.logicalReads == 0L;
+        return state != null && state.fenced() && state.inFlight() == 0L && state.logicalReads() == 0L;
     }
 
-    synchronized long inFlightRangeGets(long objectId) {
+    long inFlightRangeGets(long objectId) {
         requireObjectId(objectId);
         State state = objects.get(objectId);
-        return state == null ? 0L : state.inFlight;
+        return state == null ? 0L : state.inFlight();
     }
 
-    synchronized long inFlightLogicalReads(long objectId) {
+    long inFlightLogicalReads(long objectId) {
         requireObjectId(objectId);
         State state = objects.get(objectId);
-        return state == null ? 0L : state.logicalReads;
+        return state == null ? 0L : state.logicalReads();
     }
 
     /**
@@ -168,25 +174,25 @@ final class ActiveCommittedObjectReads {
         );
     }
 
-    private synchronized void release(long objectId, boolean logical) {
-        State state = objects.get(objectId);
-        if (state == null) {
-            throw new IllegalStateException("Read lease released without admission: " + objectId);
-        }
-        if (logical) {
-            if (state.logicalReads <= 0L) {
+    private void release(long objectId, boolean logical) {
+        objects.compute(objectId, (id, current) -> {
+            if (current == null) {
+                throw new IllegalStateException("Read lease released without admission: " + objectId);
+            }
+            if (logical && current.logicalReads() <= 0L) {
                 throw new IllegalStateException("Logical read lease released without admission: " + objectId);
             }
-            state.logicalReads--;
-        } else {
-            if (state.inFlight <= 0L) {
+            if (!logical && current.inFlight() <= 0L) {
                 throw new IllegalStateException("Physical read lease released without admission: " + objectId);
             }
-            state.inFlight--;
-        }
-        if (!state.fenced && state.inFlight == 0L && state.logicalReads == 0L) {
-            objects.remove(objectId);
-        }
+            long rangeGets = current.inFlight() - (logical ? 0L : 1L);
+            long logicalReads = current.logicalReads() - (logical ? 1L : 0L);
+            if (!current.fenced() && rangeGets == 0L && logicalReads == 0L) {
+                // Key-local removal prevents stale remove/reinsert ABA.
+                return null;
+            }
+            return new State(rangeGets, logicalReads, current.fenced());
+        });
     }
 
     private static void requireObjectId(long objectId) {
@@ -195,10 +201,7 @@ final class ActiveCommittedObjectReads {
         }
     }
 
-    private static final class State {
-        private long inFlight;
-        private long logicalReads;
-        private boolean fenced;
+    private record State(long inFlight, long logicalReads, boolean fenced) {
     }
 
     static final class ReadLease implements AutoCloseable {

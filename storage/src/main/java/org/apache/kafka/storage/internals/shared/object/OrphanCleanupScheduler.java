@@ -110,7 +110,10 @@ public final class OrphanCleanupScheduler implements AutoCloseable {
             LOG.warn("Shared orphan cleanup failed before asynchronous delete", e);
             return CompletableFuture.failedFuture(e);
         }
-        return result.whenComplete((deleted, error) -> {
+        // The completion that owns the in-flight slot must remain private.
+        // Cancelling a caller's dependent Future must never skip this callback
+        // while an S3 DeleteObjects request is still executing.
+        CompletableFuture<Integer> ownedCompletion = result.whenComplete((deleted, error) -> {
             try {
                 if (error == null) {
                     lastFailure.set(null);
@@ -125,6 +128,9 @@ public final class OrphanCleanupScheduler implements AutoCloseable {
                 releaseCleanupSlot();
             }
         });
+        // Caller cancellation only abandons its observation, not the
+        // internal cleanup or shutdown-drain ownership.
+        return ownedCompletion.thenApply(deleted -> deleted);
     }
 
     /**

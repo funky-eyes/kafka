@@ -21,6 +21,11 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -29,6 +34,193 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SharedMetadataImageTest {
+
+    @Test
+    void identityAndFencedPreparedProbesDoNotWaitForMetadataPublicationCallback() throws Exception {
+        long preparedId = BrokerObjectId.compose(11, 61L);
+        long committedId = BrokerObjectId.compose(11, 62L);
+        CountDownLatch publishing = new CountDownLatch(1);
+        CountDownLatch allowPublication = new CountDownLatch(1);
+        SharedMetadataImage image = new SharedMetadataImage(ignored -> {
+            publishing.countDown();
+            try {
+                if (!allowPublication.await(10, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("Metadata publication callback timed out");
+                }
+            } catch (InterruptedException failure) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(failure);
+            }
+        });
+        image.apply(SharedMetadataRecordCodec.objectKey(preparedId),
+            SharedMetadataRecordCodec.fencedPreparedObjectValue(60L));
+        image.markReady();
+
+        ExecutorService workers = Executors.newFixedThreadPool(4);
+        CompletableFuture<Void> writer = CompletableFuture.runAsync(() ->
+            image.apply(SharedMetadataRecordCodec.objectKey(committedId),
+                SharedMetadataRecordCodec.committedObjectValue(metadata(committedId, 100L))), workers);
+        try {
+            assertTrue(publishing.await(5, TimeUnit.SECONDS));
+            // The callback holds the single metadata writer monitor.
+            // O(1) identity probes must neither acquire it nor read a HashMap
+            // concurrently with a writer.
+            CompletableFuture<Boolean> knownPrepared = CompletableFuture.supplyAsync(() ->
+                image.objectIdentityKnown(preparedId), workers);
+            CompletableFuture<Boolean> knownCommitted = CompletableFuture.supplyAsync(() ->
+                image.objectIdentityKnown(committedId), workers);
+            CompletableFuture<Boolean> fenced = CompletableFuture.supplyAsync(() ->
+                image.fencedPrepared(preparedId, 60L), workers);
+            assertTrue(knownPrepared.get(3, TimeUnit.SECONDS));
+            assertTrue(knownCommitted.get(3, TimeUnit.SECONDS));
+            assertTrue(fenced.get(3, TimeUnit.SECONDS));
+        } finally {
+            allowPublication.countDown();
+            workers.shutdown();
+            writer.get(10, TimeUnit.SECONDS);
+            assertTrue(workers.awaitTermination(10, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    void identityProbeDoesNotObserveAbsentObjectDuringTerminalTransitions() {
+        long objectId = BrokerObjectId.compose(11, 63L);
+        SharedMetadataImage image = new SharedMetadataImage();
+        image.apply(SharedMetadataRecordCodec.objectKey(objectId),
+            SharedMetadataRecordCodec.fencedPreparedObjectValue(63L));
+        image.markReady();
+        assertTrue(image.objectIdentityKnown(objectId));
+        image.apply(SharedMetadataRecordCodec.objectKey(objectId),
+            SharedMetadataRecordCodec.fencedClaimedObjectValue(63L));
+        assertTrue(image.objectIdentityKnown(objectId));
+        assertFalse(image.fencedPrepared(objectId, 63L));
+        image.markFailed(new IllegalStateException("metadata replay failed"));
+        assertThrows(IllegalStateException.class, () -> image.objectIdentityKnown(objectId));
+        assertThrows(IllegalStateException.class, () -> image.fencedPrepared(objectId, 63L));
+    }
+
+    @Test
+    void uploadObjectIdentityCannotBeReusedAfterClaimOrCommit() {
+        long preparedId = BrokerObjectId.compose(10, 50L);
+        long claimedId = BrokerObjectId.compose(10, 51L);
+        long committedId = BrokerObjectId.compose(10, 52L);
+        SharedMetadataImage image = new SharedMetadataImage();
+        image.apply(SharedMetadataRecordCodec.objectKey(preparedId),
+            SharedMetadataRecordCodec.fencedPreparedObjectValue(50L));
+        image.apply(SharedMetadataRecordCodec.objectKey(claimedId),
+            SharedMetadataRecordCodec.fencedClaimedObjectValue(51L));
+        image.apply(SharedMetadataRecordCodec.objectKey(committedId),
+            SharedMetadataRecordCodec.committedObjectValue(metadata(committedId, 52L)));
+        image.markReady();
+        assertTrue(image.objectIdentityKnown(preparedId));
+        assertTrue(image.objectIdentityKnown(claimedId));
+        assertTrue(image.objectIdentityKnown(committedId));
+        assertFalse(image.objectIdentityKnown(BrokerObjectId.compose(10, 53L)));
+        assertThrows(IllegalArgumentException.class, () -> image.objectIdentityKnown(0L));
+        image.markFailed(new IllegalStateException("lost metadata horizon"));
+        assertThrows(IllegalStateException.class, () -> image.objectIdentityKnown(preparedId));
+    }
+
+    @Test
+    void fencedPreparedCandidatesAreDistinctFromLegacyPreparedObjects() {
+        long legacy = BrokerObjectId.compose(9, 40L);
+        long fenced = BrokerObjectId.compose(9, 41L);
+        SharedMetadataImage image = new SharedMetadataImage();
+        image.apply(SharedMetadataRecordCodec.objectKey(legacy),
+            SharedMetadataRecordCodec.preparedObjectValue(10L));
+        image.apply(SharedMetadataRecordCodec.objectKey(fenced),
+            SharedMetadataRecordCodec.fencedPreparedObjectValue(20L));
+        image.markReady();
+        assertEquals(2, image.preparedObjects().size());
+        assertEquals(
+            List.of(new ObjectMetadataStore.PreparedObject(fenced, 20L)),
+            image.fencedPreparedObjects()
+        );
+        assertTrue(image.fencedPrepared(fenced, 20L));
+        assertFalse(image.fencedPrepared(fenced, 21L));
+        assertFalse(image.fencedPrepared(legacy, 10L));
+    }
+
+    @Test
+    void fencedClaimSurvivesSameKeyCompactionAndRejectsLateCommit() {
+        long objectId = BrokerObjectId.compose(9, 42L);
+        byte[] objectKey = SharedMetadataRecordCodec.objectKey(objectId);
+        byte[] claim = SharedMetadataRecordCodec.fencedClaimedObjectValue(25L);
+        SharedMetadataImage live = new SharedMetadataImage();
+        live.markReady();
+        live.applyFromMetadataLog(objectKey, SharedMetadataRecordCodec.fencedPreparedObjectValue(25L), 10L);
+        live.applyFromMetadataLog(objectKey, claim, 11L);
+        assertTrue(live.cleanupClaimed(objectId, 25L));
+        assertEquals(List.of(new ObjectMetadataStore.PreparedObject(objectId, 25L)),
+            live.fencedCleanupClaimedObjects());
+        assertTrue(live.fencedPreparedObjects().isEmpty());
+        assertTrue(live.committedObjects().isEmpty());
+
+        // Kafka compaction retains only the last value for a single object key.
+        List<SharedObjectMetadata> published = new ArrayList<>();
+        SharedMetadataImage recovered = new SharedMetadataImage(published::add);
+        recovered.applyFromMetadataLog(objectKey, claim, 11L);
+        recovered.markReady();
+        assertEquals(List.of(new ObjectMetadataStore.PreparedObject(objectId, 25L)),
+            recovered.cleanupClaimedObjects());
+        assertEquals(recovered.cleanupClaimedObjects(), recovered.fencedCleanupClaimedObjects());
+        assertFalse(recovered.fencedPrepared(objectId, 25L));
+        assertTrue(published.isEmpty());
+        IllegalStateException late = assertThrows(IllegalStateException.class, () ->
+            recovered.applyFromMetadataLog(objectKey,
+                SharedMetadataRecordCodec.committedObjectValue(metadata(objectId, 125L)), 12L));
+        assertTrue(late.getMessage().contains("COMMIT after fenced CLAIM"));
+        assertEquals(SharedMetadataImage.State.FAILED, recovered.state());
+    }
+
+    @Test
+    void fencedClaimMustNotOverwriteAnEarlierCommit() {
+        long objectId = BrokerObjectId.compose(9, 43L);
+        byte[] key = SharedMetadataRecordCodec.objectKey(objectId);
+        SharedMetadataImage image = new SharedMetadataImage();
+        image.markReady();
+        image.applyFromMetadataLog(key, SharedMetadataRecordCodec.fencedPreparedObjectValue(30L), 10L);
+        image.applyFromMetadataLog(key,
+            SharedMetadataRecordCodec.committedObjectValue(metadata(objectId, 130L)), 11L);
+        IllegalStateException failure = assertThrows(IllegalStateException.class, () ->
+            image.applyFromMetadataLog(key, SharedMetadataRecordCodec.fencedClaimedObjectValue(30L), 12L));
+        assertTrue(failure.getMessage().contains("Fenced CLAIM after COMMIT"));
+        assertEquals(SharedMetadataImage.State.FAILED, image.state());
+    }
+
+    @Test
+    void fencedClaimRejectsLegacyPreparedAndCleanupKeys() {
+        long objectId = BrokerObjectId.compose(9, 44L);
+        byte[] key = SharedMetadataRecordCodec.objectKey(objectId);
+        SharedMetadataImage image = new SharedMetadataImage();
+        image.markReady();
+        image.apply(key, SharedMetadataRecordCodec.preparedObjectValue(35L));
+        assertTrue(assertThrows(IllegalStateException.class, () ->
+            image.apply(key, SharedMetadataRecordCodec.fencedClaimedObjectValue(35L)))
+            .getMessage().contains("legacy PREPARED"));
+
+        SharedMetadataImage second = new SharedMetadataImage();
+        second.markReady();
+        second.apply(key, SharedMetadataRecordCodec.fencedPreparedObjectValue(36L));
+        assertTrue(assertThrows(IllegalStateException.class, () ->
+            second.apply(SharedMetadataRecordCodec.objectCleanupKey(objectId),
+                SharedMetadataRecordCodec.cleanupClaimedValue(36L)))
+            .getMessage().contains("Legacy cleanup"));
+    }
+
+    @Test
+    void fencedAndLegacyCleanupValueTypesUseDifferentKeys() {
+        long objectId = BrokerObjectId.compose(9, 45L);
+        assertThrows(IllegalArgumentException.class, () ->
+            SharedMetadataRecordCodec.decodeValue(
+                SharedMetadataRecordCodec.decodeKey(SharedMetadataRecordCodec.objectCleanupKey(objectId)),
+                SharedMetadataRecordCodec.fencedClaimedObjectValue(50L)));
+        assertThrows(IllegalArgumentException.class, () ->
+            SharedMetadataRecordCodec.decodeValue(
+                SharedMetadataRecordCodec.decodeKey(SharedMetadataRecordCodec.objectKey(objectId)),
+                SharedMetadataRecordCodec.cleanupClaimedValue(50L)));
+    }
+
     @Test
     void targetedCommittedObjectLookupRequiresReadyAndRejectsHistoricalTombstones() {
         SharedMetadataImage image = new SharedMetadataImage();
@@ -607,13 +799,92 @@ class SharedMetadataImageTest {
     }
 
     @Test
+    void unsealedFencedCommitProbeChecksReplayedPositionAndCompleteDescriptor() {
+        long id = BrokerObjectId.compose(8, 98L);
+        SharedObjectMetadata object = metadata(id, 125L);
+        SharedMetadataImage image = new SharedMetadataImage();
+        byte[] key = SharedMetadataRecordCodec.objectKey(id);
+        image.applyFromMetadataLog(key, SharedMetadataRecordCodec.fencedCommittedObjectValue(object), 8L);
+
+        assertThrows(IllegalStateException.class, () -> image.matchesUnsealedFencedCommit(object, 8L));
+        image.markReady();
+        assertTrue(image.matchesUnsealedFencedCommit(object, 8L));
+        assertFalse(image.matchesUnsealedFencedCommit(object, -1L));
+        assertFalse(image.matchesUnsealedFencedCommit(object, 7L));
+        assertFalse(image.matchesUnsealedFencedCommit(metadata(id, 126L), 8L));
+        SharedObjectMetadata differentRange = new SharedObjectMetadata(id, object.objectSize(), object.objectChecksum(),
+            List.of(new SharedObjectRange(new SharedPartitionId(11L, 12L, 1),
+                new OffsetRange(0L, 10L), 3, 0L, 100, 126L)));
+        assertFalse(image.matchesUnsealedFencedCommit(differentRange, 8L));
+        assertFalse(image.matchesUnsealedFencedCommit(metadata(BrokerObjectId.compose(8, 99L), 125L), 8L));
+
+        image.applyFromMetadataLog(SharedMetadataRecordCodec.objectCatalogSealKey(id),
+            SharedMetadataRecordCodec.objectCatalogSealValue(8L, 17L, object), 9L);
+        assertFalse(image.matchesUnsealedFencedCommit(object, 8L));
+        image.markFailed(new IllegalStateException("replay failed"));
+        assertThrows(IllegalStateException.class, () -> image.matchesUnsealedFencedCommit(object, 8L));
+    }
+
+    @Test
+    void unsealedFencedCommitProbeRejectsLegacyUnpositionedAndRepeatedRecords() {
+        long id = BrokerObjectId.compose(8, 100L);
+        SharedObjectMetadata object = metadata(id, 127L);
+        byte[] key = SharedMetadataRecordCodec.objectKey(id);
+        byte[] commit = SharedMetadataRecordCodec.fencedCommittedObjectValue(object);
+        SharedMetadataImage legacy = new SharedMetadataImage();
+        legacy.applyFromMetadataLog(key, SharedMetadataRecordCodec.committedObjectValue(object), 8L);
+        legacy.markReady();
+        assertFalse(legacy.matchesUnsealedFencedCommit(object, 8L));
+
+        SharedMetadataImage unpositioned = new SharedMetadataImage();
+        unpositioned.apply(key, commit);
+        unpositioned.markReady();
+        assertFalse(unpositioned.matchesUnsealedFencedCommit(object, 8L));
+
+        SharedMetadataImage repeated = new SharedMetadataImage();
+        repeated.applyFromMetadataLog(key, commit, 8L);
+        repeated.markReady();
+        repeated.applyFromMetadataLog(key, commit, 10L);
+        assertFalse(repeated.matchesUnsealedFencedCommit(object, 8L));
+        assertFalse(repeated.matchesUnsealedFencedCommit(object, 10L));
+
+        SharedMetadataImage unpositionedRetry = new SharedMetadataImage();
+        unpositionedRetry.applyFromMetadataLog(key, commit, 8L);
+        unpositionedRetry.markReady();
+        unpositionedRetry.apply(key, commit);
+        assertFalse(unpositionedRetry.matchesUnsealedFencedCommit(object, 8L));
+
+        // After compaction, the image cannot infer whether offset 10 was a
+        // duplicate; the expected original offset is supplied externally.
+        SharedMetadataImage compacted = new SharedMetadataImage();
+        compacted.applyFromMetadataLog(key, commit, 10L);
+        compacted.markReady();
+        assertFalse(compacted.matchesUnsealedFencedCommit(object, 8L));
+    }
+
+    @Test
+    void unsealedFencedCommitProbeClearsProvenanceOnRecoveryTombstone() {
+        long id = BrokerObjectId.compose(8, 101L);
+        SharedObjectMetadata object = metadata(id, 128L);
+        byte[] key = SharedMetadataRecordCodec.objectKey(id);
+        byte[] commit = SharedMetadataRecordCodec.fencedCommittedObjectValue(object);
+        SharedMetadataImage image = new SharedMetadataImage();
+        image.applyFromMetadataLog(key, commit, 8L);
+        image.applyFromMetadataLog(key, null, 9L);
+        image.applyFromMetadataLog(key, commit, 10L);
+        image.markReady();
+        assertFalse(image.matchesUnsealedFencedCommit(object, 8L));
+        assertTrue(image.matchesUnsealedFencedCommit(object, 10L));
+    }
+
+    @Test
     void catalogSealRequiresActualEarlierCommitRecordAndPreservesReads() {
         long id = BrokerObjectId.compose(8, 91L);
         SharedObjectMetadata object = metadata(id, 99L);
         List<SharedObjectMetadata> announced = new ArrayList<>();
         SharedMetadataImage image = new SharedMetadataImage(announced::add);
         byte[] key = SharedMetadataRecordCodec.objectKey(id);
-        byte[] commit = SharedMetadataRecordCodec.committedObjectValue(object);
+        byte[] commit = SharedMetadataRecordCodec.fencedCommittedObjectValue(object);
         byte[] sealKey = SharedMetadataRecordCodec.objectCatalogSealKey(id);
         byte[] sealValue = SharedMetadataRecordCodec.objectCatalogSealValue(8L, 17L, object);
         image.applyFromMetadataLog(key, commit, 8L);
@@ -624,6 +895,38 @@ class SharedMetadataImageTest {
         image.applyFromMetadataLog(key, commit, 10L);
         assertEquals(List.of(object), image.committedObjects());
         assertEquals(List.of(object), announced);
+    }
+
+    @Test
+    void sealedFencedObjectCannotBeReplacedByLegacyCommitWithMatchingDescriptor() {
+        long id = BrokerObjectId.compose(8, 97L);
+        SharedObjectMetadata object = metadata(id, 124L);
+        byte[] key = SharedMetadataRecordCodec.objectKey(id);
+        SharedMetadataImage image = new SharedMetadataImage();
+        image.applyFromMetadataLog(key,
+            SharedMetadataRecordCodec.fencedCommittedObjectValue(object), 8L);
+        image.applyFromMetadataLog(SharedMetadataRecordCodec.objectCatalogSealKey(id),
+            SharedMetadataRecordCodec.objectCatalogSealValue(8L, 17L, object), 9L);
+        image.markReady();
+        IllegalStateException failure = assertThrows(IllegalStateException.class, () ->
+            image.applyFromMetadataLog(key,
+                SharedMetadataRecordCodec.committedObjectValue(object), 10L));
+        assertTrue(failure.getMessage().contains("conflicting descriptor"));
+        assertEquals(SharedMetadataImage.State.FAILED, image.state());
+    }
+
+    @Test
+    void catalogSealRejectsLegacyCommitEvenWithMatchingOffsetAndDigest() {
+        long id = BrokerObjectId.compose(8, 96L);
+        SharedObjectMetadata object = metadata(id, 123L);
+        SharedMetadataImage image = new SharedMetadataImage();
+        image.applyFromMetadataLog(SharedMetadataRecordCodec.objectKey(id),
+            SharedMetadataRecordCodec.committedObjectValue(object), 8L);
+        IllegalStateException failure = assertThrows(IllegalStateException.class, () ->
+            image.applyFromMetadataLog(SharedMetadataRecordCodec.objectCatalogSealKey(id),
+                SharedMetadataRecordCodec.objectCatalogSealValue(8L, 17L, object), 9L));
+        assertTrue(failure.getMessage().contains("v2 fenced COMMIT"));
+        assertEquals(SharedMetadataImage.State.FAILED, image.state());
     }
 
     @Test
@@ -643,7 +946,7 @@ class SharedMetadataImageTest {
         SharedObjectMetadata object = metadata(id, 103L);
         SharedMetadataImage image = new SharedMetadataImage();
         image.applyFromMetadataLog(SharedMetadataRecordCodec.objectKey(id),
-            SharedMetadataRecordCodec.committedObjectValue(object), 8L);
+            SharedMetadataRecordCodec.fencedCommittedObjectValue(object), 8L);
         byte[] sealKey = SharedMetadataRecordCodec.objectCatalogSealKey(id);
         assertThrows(IllegalStateException.class, () ->
             image.applyFromMetadataLog(sealKey,
@@ -652,14 +955,14 @@ class SharedMetadataImageTest {
 
         SharedMetadataImage forged = new SharedMetadataImage();
         forged.applyFromMetadataLog(SharedMetadataRecordCodec.objectKey(id),
-            SharedMetadataRecordCodec.committedObjectValue(object), 8L);
+            SharedMetadataRecordCodec.fencedCommittedObjectValue(object), 8L);
         assertThrows(IllegalStateException.class, () ->
             forged.applyFromMetadataLog(sealKey,
                 SharedMetadataRecordCodec.objectCatalogSealValue(8L, 17L, metadata(id, 104L)), 9L));
 
         SharedMetadataImage notFromLog = new SharedMetadataImage();
         notFromLog.apply(SharedMetadataRecordCodec.objectKey(id),
-            SharedMetadataRecordCodec.committedObjectValue(object));
+            SharedMetadataRecordCodec.fencedCommittedObjectValue(object));
         assertThrows(IllegalStateException.class, () ->
             notFromLog.apply(sealKey,
                 SharedMetadataRecordCodec.objectCatalogSealValue(8L, 17L, object)));
@@ -683,7 +986,7 @@ class SharedMetadataImageTest {
 
         SharedMetadataImage duplicateOnly = new SharedMetadataImage();
         duplicateOnly.applyFromMetadataLog(key,
-            SharedMetadataRecordCodec.committedObjectValue(object), 10L);
+            SharedMetadataRecordCodec.fencedCommittedObjectValue(object), 10L);
         assertThrows(IllegalStateException.class, () ->
             duplicateOnly.applyFromMetadataLog(sealKey, seal, 11L));
         assertEquals(SharedMetadataImage.State.FAILED, duplicateOnly.state());
@@ -697,13 +1000,13 @@ class SharedMetadataImageTest {
         byte[] key = SharedMetadataRecordCodec.objectKey(id);
         byte[] sealKey = SharedMetadataRecordCodec.objectCatalogSealKey(id);
         byte[] seal = SharedMetadataRecordCodec.objectCatalogSealValue(8L, 17L, original);
-        conflicting.applyFromMetadataLog(key, SharedMetadataRecordCodec.committedObjectValue(original), 8L);
+        conflicting.applyFromMetadataLog(key, SharedMetadataRecordCodec.fencedCommittedObjectValue(original), 8L);
         conflicting.applyFromMetadataLog(sealKey, seal, 9L);
         assertThrows(IllegalStateException.class, () -> conflicting.applyFromMetadataLog(
-            key, SharedMetadataRecordCodec.committedObjectValue(metadata(id, 121L)), 10L));
+            key, SharedMetadataRecordCodec.fencedCommittedObjectValue(metadata(id, 121L)), 10L));
 
         SharedMetadataImage tombstone = new SharedMetadataImage();
-        tombstone.applyFromMetadataLog(key, SharedMetadataRecordCodec.committedObjectValue(original), 8L);
+        tombstone.applyFromMetadataLog(key, SharedMetadataRecordCodec.fencedCommittedObjectValue(original), 8L);
         tombstone.applyFromMetadataLog(sealKey, seal, 9L);
         assertThrows(IllegalStateException.class, () -> tombstone.applyFromMetadataLog(key, null, 10L));
         assertEquals(SharedMetadataImage.State.FAILED, tombstone.state());

@@ -5,9 +5,9 @@ written around observable states and fail-safe actions. Do not bypass WAL, metad
 barriers to recover capacity.
 
 
-### Redundant committed object cleanup
+### Committed object cleanup is not enabled
 
-Leader races may commit more than one physical S3 object for the same logical Kafka ranges. The remote index keeps the first physical read reference. Periodic object cleanup also removes a later COMMITTED object when none of its ranges are referenced. Cleanup deletes the physical object before tombstoning its metadata; a failed physical delete leaves the COMMIT intact so the next pass or broker restart can retry safely. Multi-range objects are retained whenever at least one logical range still references them.
+Leader races may commit more than one physical S3 object for the same logical Kafka ranges. The remote index keeps the first physical read reference. Production scheduling of physical COMMITTED-object cleanup is not enabled: redundant objects and objects belonging to deleted Topics may remain in the bucket. Monitor object-storage consumption and do not delete objects based only on an index miss or Topic deletion. Automated reclamation requires a trusted retirement authorization and durable cross-broker fencing and recovery proof.
 
 ## Production invariants
 

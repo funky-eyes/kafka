@@ -455,6 +455,7 @@ jobs:
           set -o pipefail
           ./gradlew :core:test \
             --tests 'kafka.log.LogManagerTest.testLoadLogsSkipsIncompleteInitializationWithoutOffliningParentDir' \
+            --tests 'kafka.server.metadata.BrokerMetadataPublisherTest.testKRaftObjectRetirementFenceOnInitialAndIncrementalImages' \
             --tests 'kafka.server.BrokerLifecycleManagerTest.testIncarnationChangesAcrossBrokerProcessRestart' \
             --tests 'kafka.server.BrokerLifecycleManagerTest.testKraftJBODMetadataVersionUpdateEvent' \
             --tests 'kafka.server.ControllerApisTest.testStableHeartbeatNeverIncludesSourceWalChallenge' \
