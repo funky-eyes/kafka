@@ -197,11 +197,12 @@ jobs:
           SHARED_STORAGE_S3_ENDPOINT: http://127.0.0.1:9000
           SHARED_STORAGE_S3_REGION: us-east-1
           SHARED_STORAGE_S3_BUCKET: kafka-shared-storage-local-state-loss
+          SHARED_STORAGE_S3_CONTROL: ${{ github.workspace }}/tools/shared_storage_minio_fixture.sh
         run: |
           set +e
           set -o pipefail
           if [ -z "${SHARED_STORAGE_S3_CONTROL:-}" ] || [ ! -x "${SHARED_STORAGE_S3_CONTROL}" ]; then
-            echo "setup-minio did not export an executable SHARED_STORAGE_S3_CONTROL" >&2
+            echo "SHARED_STORAGE_S3_CONTROL must point to the executable MinIO fixture" >&2
             exit 1
           fi
           ./gradlew :core:test \
