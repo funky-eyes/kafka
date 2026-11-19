@@ -12,3 +12,16 @@ Set the value to `100` to disable the guard. This is a per-broker write-admissio
 The refresh interval creates a window in which writes can continue after a disk passes its threshold. Tune the threshold for the maximum expected write rate during this window and for concurrent writes. This protection is not a guarantee that a filesystem can never fill. Partition log-directory moves are evaluated on the destination log directory at request time. For shared storage, the WAL directory is fixed by the storage-extension startup configuration.
 
 The optional `DiskPressureGuardIntegrationTest.sharedWalFilesystemPressureRejectsAndRecovers` test requires `KAFKA_TEST_WAL_PRESSURE_ROOT` to point to a dedicated, disposable memory-backed filesystem of at least 96 MiB. It fills up to 70 MiB there to bring only the WAL filesystem above the threshold, and removes its filler afterward. Never point this variable at a production filesystem. The test is skipped when this variable is unset.
+
+## Broker monitoring
+
+The broker exposes gauges under `kafka.server:type=DiskWriteProtection,brokerId=<id>`:
+
+- `Enabled`: 1 when the threshold is below 100, otherwise 0.
+- `ThresholdPercent`: the currently active threshold.
+- `ObservedPaths`: number of local paths already checked during client writes; this is not an inventory of all broker filesystems.
+- `BlockedPaths`: observed paths at or above the threshold, including paths whose filesystem statistics could not be read. It is 0 when the protection is disabled.
+- `ReadFailures`: cumulative filesystem-stat read failures since broker startup.
+- `RejectedAppends`: cumulative client partition appends rejected by this guard since broker startup.
+
+These metrics reflect observed local paths, not remote replicas or unused log directories. Alert on rejected appends and read failures, and monitor filesystem free space separately for every broker and volume. A count of zero does not establish that an unobserved filesystem is healthy.

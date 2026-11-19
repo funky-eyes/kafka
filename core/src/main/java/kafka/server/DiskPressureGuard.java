@@ -20,6 +20,7 @@ import org.apache.kafka.common.Reconfigurable;
 import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.common.errors.KafkaStorageException;
 import org.apache.kafka.server.config.ServerLogConfigs;
+import org.apache.kafka.server.metrics.KafkaMetricsGroup;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -28,17 +29,25 @@ import java.io.IOException;
 import java.nio.file.FileStore;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 /** Broker-scoped, dynamically configurable admission control for local disk pressure. */
 public final class DiskPressureGuard implements Reconfigurable, AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(DiskPressureGuard.class);
     private static final long CHECK_INTERVAL_SECONDS = 5;
+    private static final List<String> METRIC_NAMES = List.of(
+        "Enabled", "ThresholdPercent", "ObservedPaths", "BlockedPaths", "ReadFailures", "RejectedAppends");
+    private final KafkaMetricsGroup metricsGroup = new KafkaMetricsGroup("kafka.server", "DiskWriteProtection");
+    private final Map<String, String> metricTags;
+    private final AtomicLong readFailures = new AtomicLong();
+    private final AtomicLong rejectedAppends = new AtomicLong();
     private final ConcurrentHashMap<Path, Double> status = new ConcurrentHashMap<>();
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
         Thread thread = new Thread(runnable, "disk-pressure-check");
@@ -53,14 +62,27 @@ public final class DiskPressureGuard implements Reconfigurable, AutoCloseable {
     private final UsageReader usageReader;
     private volatile double maxUsagePercent;
 
-    public DiskPressureGuard(double maxUsagePercent) {
-        this(maxUsagePercent, DiskPressureGuard::usagePercent);
+    public DiskPressureGuard(double maxUsagePercent, int brokerId) {
+        this(maxUsagePercent, DiskPressureGuard::usagePercent, brokerId);
     }
 
     DiskPressureGuard(double maxUsagePercent, UsageReader usageReader) {
+        this(maxUsagePercent, usageReader, -1);
+    }
+
+    DiskPressureGuard(double maxUsagePercent, UsageReader usageReader, int brokerId) {
         validate(maxUsagePercent);
         this.usageReader = usageReader;
         this.maxUsagePercent = maxUsagePercent;
+        this.metricTags = brokerId < 0 ? null : Map.of("brokerId", Integer.toString(brokerId));
+        if (metricTags != null) {
+            metricsGroup.newGauge("Enabled", () -> enabled() ? 1 : 0, metricTags);
+            metricsGroup.newGauge("ThresholdPercent", () -> this.maxUsagePercent, metricTags);
+            metricsGroup.newGauge("ObservedPaths", status::size, metricTags);
+            metricsGroup.newGauge("BlockedPaths", this::blockedPaths, metricTags);
+            metricsGroup.newGauge("ReadFailures", readFailures::get, metricTags);
+            metricsGroup.newGauge("RejectedAppends", rejectedAppends::get, metricTags);
+        }
         scheduler.scheduleWithFixedDelay(this::refresh, CHECK_INTERVAL_SECONDS, CHECK_INTERVAL_SECONDS, TimeUnit.SECONDS);
     }
 
@@ -71,17 +93,25 @@ public final class DiskPressureGuard implements Reconfigurable, AutoCloseable {
     public void check(Path directory) {
         if (maxUsagePercent >= 100) return;
         Path path = directory.toAbsolutePath().normalize();
-        if (status.computeIfAbsent(path, this::readUsage) >= maxUsagePercent)
+        if (status.computeIfAbsent(path, this::readUsage) >= maxUsagePercent) {
+            rejectedAppends.incrementAndGet();
             throw new KafkaStorageException("Disk write protection is active for " + path);
+        }
     }
 
     double readUsage(Path path) {
         try {
             return usageReader.read(path);
         } catch (IOException | SecurityException e) {
+            readFailures.incrementAndGet();
             LOG.warn("Cannot determine disk usage for {}; rejecting client writes until the next successful check", path, e);
             return Double.POSITIVE_INFINITY;
         }
+    }
+
+    private long blockedPaths() {
+        double threshold = maxUsagePercent;
+        return threshold >= 100 ? 0 : status.values().stream().filter(usage -> usage >= threshold).count();
     }
 
     private static double usagePercent(Path path) throws IOException {
@@ -129,5 +159,8 @@ public final class DiskPressureGuard implements Reconfigurable, AutoCloseable {
     @Override
     public void close() {
         scheduler.shutdownNow();
+        if (metricTags != null) {
+            METRIC_NAMES.forEach(name -> metricsGroup.removeMetric(name, metricTags));
+        }
     }
 }

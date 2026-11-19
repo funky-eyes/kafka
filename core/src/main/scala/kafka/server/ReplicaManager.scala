@@ -176,7 +176,7 @@ class ReplicaManager(val config: KafkaConfig,
                      ) extends Logging {
   // Changing the package or class name may cause incompatibility with existing code and metrics configuration
   private[server] val diskPressureGuard = new DiskPressureGuard(
-    config.getDouble(org.apache.kafka.server.config.ServerLogConfigs.LOG_DISK_PROTECTION_MAX_USAGE_PERCENT_CONFIG))
+    config.getDouble(org.apache.kafka.server.config.ServerLogConfigs.LOG_DISK_PROTECTION_MAX_USAGE_PERCENT_CONFIG), config.brokerId)
   private var storageExtensionContext: Option[StorageExtensionContext] = None
   private[server] def setStorageExtensionContext(context: StorageExtensionContext): Unit = {
     storageExtensionContext = Some(context)
