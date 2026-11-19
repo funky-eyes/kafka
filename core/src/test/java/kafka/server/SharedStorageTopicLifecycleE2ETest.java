@@ -17,6 +17,8 @@
 package kafka.server;
 
 import org.apache.kafka.clients.admin.Admin;
+import org.apache.kafka.clients.admin.AlterConfigOp;
+import org.apache.kafka.clients.admin.ConfigEntry;
 import org.apache.kafka.clients.admin.FeatureUpdate;
 import org.apache.kafka.clients.admin.NewPartitions;
 import org.apache.kafka.clients.admin.NewTopic;
@@ -32,6 +34,7 @@ import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.config.TopicConfig;
+import org.apache.kafka.common.config.ConfigResource;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
@@ -53,12 +56,14 @@ import org.junit.jupiter.api.parallel.ExecutionMode;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -208,6 +213,149 @@ public class SharedStorageTopicLifecycleE2ETest {
                 totalRecords,
                 "retained"
             );
+        }
+    }
+
+    private static final int UNIQUE_KEYS = 24;
+    private static final int INITIAL_RECORDS = 97;
+    private static final String PADDING = "x".repeat(32768);
+    private static final String CLASSIC = "ga-probe-classic-compacted";
+    private static final String SHARED = "ga-probe-shared-compacted";
+
+    private static Properties properties(String bootstrap) {
+        var config = new Properties();
+        config.setProperty("bootstrap.servers", bootstrap);
+        config.setProperty("request.timeout.ms", "10000");
+        config.setProperty("default.api.timeout.ms", "20000");
+        return config;
+    }
+
+    private static NewTopic topic(String name, boolean shared) {
+        return new NewTopic(name, 1, (short) 3).configs(Map.of(
+            "cleanup.policy", "compact",
+            "shared.storage.enable", Boolean.toString(shared),
+            "min.insync.replicas", "2",
+            "compression.type", "uncompressed",
+            "segment.bytes", "1048576",
+            "min.compaction.lag.ms", "300000",
+            "min.cleanable.dirty.ratio", "0.01"));
+    }
+
+    private static void produce(String bootstrap, String topic) throws Exception {
+        var config = properties(bootstrap);
+        config.setProperty("acks", "all");
+        config.setProperty("enable.idempotence", "true");
+        try (var producer = new KafkaProducer<>(config, new StringSerializer(), new StringSerializer())) {
+            for (int i = 0; i < INITIAL_RECORDS; i++) {
+                String key = i < UNIQUE_KEYS ? "unique-" + i : "changing-key";
+                long actual = producer.send(new ProducerRecord<>(topic, key, i + ":" + PADDING))
+                    .get(20, TimeUnit.SECONDS).offset();
+                if (actual != i) {
+                    throw new AssertionError(topic + " expected offset " + i + " but got " + actual);
+                }
+            }
+        }
+    }
+
+    private record Observed(Map<String, String> values, int total, long latestChangingOffset) {
+        boolean retainsAllKeys() {
+            return IntStream.range(0, UNIQUE_KEYS).allMatch(i ->
+                (i + ":" + PADDING).equals(values.get("unique-" + i)));
+        }
+    }
+
+    private static Observed observe(String bootstrap, String topic) {
+        var partition = new TopicPartition(topic, 0);
+        var config = properties(bootstrap);
+        config.setProperty("enable.auto.commit", "false");
+        Map<String, String> values = new HashMap<>();
+        int total = 0;
+        long latest = -1;
+        try (var consumer = new KafkaConsumer<>(config, new StringDeserializer(), new StringDeserializer())) {
+            consumer.assign(List.of(partition));
+            consumer.seekToBeginning(List.of(partition));
+            long deadline = System.nanoTime() + Duration.ofSeconds(25).toNanos();
+            while (latest < INITIAL_RECORDS - 1 && System.nanoTime() < deadline) {
+                for (var record : consumer.poll(Duration.ofMillis(500))) {
+                    values.put(record.key(), record.value());
+                    if (record.key().equals("changing-key")) {
+                        latest = record.offset();
+                    }
+                    total++;
+                }
+            }
+        }
+        var result = new Observed(values, total, latest);
+        System.out.printf("%s total=%d immutableKeysPreserved=%s latestChangingOffset=%d%n",
+            topic, total, result.retainsAllKeys(), latest);
+        return result;
+    }
+
+    private static void requireLatest(String topic, Observed result) {
+        if (!result.retainsAllKeys() || result.latestChangingOffset() != INITIAL_RECORDS - 1 ||
+            !(INITIAL_RECORDS - 1 + ":" + PADDING).equals(result.values().get("changing-key"))) {
+            throw new AssertionError(topic + " lost an immutable key or its latest update");
+        }
+    }
+
+    @Test
+    @Timeout(value = 8, unit = TimeUnit.MINUTES)
+    public void compactedSharedTopicPreservesLatestValuesLikeClassicTopic() throws Exception {
+        try (KafkaClusterTestKit cluster = startSharedCluster(); Admin admin = cluster.admin()) {
+            String bootstrap = cluster.bootstrapServers();
+            admin.createTopics(List.of(topic(CLASSIC, false), topic(SHARED, true))).all().get(25, TimeUnit.SECONDS);
+            for (String topic : List.of(CLASSIC, SHARED)) {
+                waitForTopicReady(admin, topic, 1);
+                produce(bootstrap, topic);
+                Observed initial = observe(bootstrap, topic);
+                requireLatest(topic, initial);
+                if (initial.total() != INITIAL_RECORDS) {
+                    throw new AssertionError(topic + " baseline count " + initial.total());
+                }
+            }
+
+            var lag = new AlterConfigOp(new ConfigEntry("min.compaction.lag.ms", "0"), AlterConfigOp.OpType.SET);
+            var maxLag = new AlterConfigOp(new ConfigEntry("max.compaction.lag.ms", "5000"), AlterConfigOp.OpType.SET);
+            admin.incrementalAlterConfigs(Map.of(
+                new ConfigResource(ConfigResource.Type.TOPIC, CLASSIC), List.of(lag, maxLag),
+                new ConfigResource(ConfigResource.Type.TOPIC, SHARED), List.of(lag, maxLag)))
+                .all().get(25, TimeUnit.SECONDS);
+            long deadline = System.nanoTime() + Duration.ofSeconds(120).toNanos();
+            boolean classicCompacted = false;
+            boolean sharedCompacted = false;
+            while (System.nanoTime() < deadline) {
+                Observed classic = observe(bootstrap, CLASSIC);
+                requireLatest(CLASSIC, classic);
+                classicCompacted |= classic.total() < INITIAL_RECORDS;
+                Observed shared = observe(bootstrap, SHARED);
+                requireLatest(SHARED, shared);
+                sharedCompacted |= shared.total() < INITIAL_RECORDS;
+                if (classicCompacted && sharedCompacted) {
+                    break;
+                }
+                Thread.sleep(4000);
+            }
+            assertTrue(classicCompacted, "Classic positive-control topic did not compact");
+            assertTrue(sharedCompacted, "Shared topic did not compact within the positive-control window");
+
+            for (BrokerServer broker : cluster.brokers().values()) {
+                broker.shutdown();
+            }
+            for (BrokerServer broker : cluster.brokers().values()) {
+                broker.awaitShutdown();
+            }
+            for (BrokerServer broker : cluster.brokers().values()) {
+                broker.startup();
+            }
+            cluster.waitForReadyBrokers();
+            try (Admin restartedAdmin = cluster.admin()) {
+                waitForTopicReady(restartedAdmin, CLASSIC, 1);
+                waitForTopicReady(restartedAdmin, SHARED, 1);
+            }
+            for (String topic : List.of(CLASSIC, SHARED)) {
+                Observed recovered = observe(bootstrap, topic);
+                requireLatest(topic, recovered);
+            }
         }
     }
 
