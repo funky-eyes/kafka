@@ -322,24 +322,40 @@ public class SharedStorageTopicLifecycleE2ETest {
                 .all().get(25, TimeUnit.SECONDS);
             long deadline = System.nanoTime() + Duration.ofSeconds(120).toNanos();
             boolean classicCompacted = false;
+            boolean sharedCompacted = false;
             while (System.nanoTime() < deadline) {
                 Observed classic = observe(bootstrap, CLASSIC);
                 requireLatest(CLASSIC, classic);
                 classicCompacted |= classic.total() < INITIAL_RECORDS;
                 Observed shared = observe(bootstrap, SHARED);
                 requireLatest(SHARED, shared);
-                if (classicCompacted) {
-                    if (shared.total() < INITIAL_RECORDS) {
-                        System.out.println("COMPACTION_PARITY_PASS");
-                        return;
-                    }
+                sharedCompacted |= shared.total() < INITIAL_RECORDS;
+                if (classicCompacted && sharedCompacted) {
+                    break;
                 }
                 Thread.sleep(4000);
             }
-            if (!classicCompacted) {
-                throw new IllegalStateException("CLASSIC_POSITIVE_CONTROL_DID_NOT_COMPACT");
+            assertTrue(classicCompacted, "Classic positive-control topic did not compact");
+            assertTrue(sharedCompacted, "Shared topic did not compact within the positive-control window");
+
+            for (BrokerServer broker : cluster.brokers().values()) {
+                broker.shutdown();
             }
-            throw new AssertionError("Shared topic did not compact within the positive-control window");
+            for (BrokerServer broker : cluster.brokers().values()) {
+                broker.awaitShutdown();
+            }
+            for (BrokerServer broker : cluster.brokers().values()) {
+                broker.startup();
+            }
+            cluster.waitForReadyBrokers();
+            try (Admin restartedAdmin = cluster.admin()) {
+                waitForTopicReady(restartedAdmin, CLASSIC, 1);
+                waitForTopicReady(restartedAdmin, SHARED, 1);
+            }
+            for (String topic : List.of(CLASSIC, SHARED)) {
+                Observed recovered = observe(bootstrap, topic);
+                requireLatest(topic, recovered);
+            }
         }
     }
 
