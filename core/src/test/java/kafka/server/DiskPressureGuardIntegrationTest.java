@@ -28,6 +28,8 @@ import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.config.ConfigResource;
+import org.apache.kafka.common.errors.InvalidConfigurationException;
+import org.apache.kafka.common.errors.InvalidRequestException;
 import org.apache.kafka.common.errors.KafkaStorageException;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
@@ -158,6 +160,84 @@ public class DiskPressureGuardIntegrationTest {
                         30_000, "Disabling disk protection was not applied");
                     assertEquals(1, producer.send(new ProducerRecord<>(topic, "after")).get(30, TimeUnit.SECONDS).offset());
                 }
+            }
+        }
+    }
+
+    @Test
+    public void rejectsNonFiniteBrokerThresholdBeforePersisting() throws Exception {
+        TestKitNodes nodes = new TestKitNodes.Builder().setNumBrokerNodes(1).setNumControllerNodes(1).build();
+        try (KafkaClusterTestKit cluster = new KafkaClusterTestKit.Builder(nodes).build()) {
+            cluster.format();
+            cluster.startup();
+            cluster.waitForReadyBrokers();
+            try (Admin admin = cluster.admin(); Admin controllerAdmin = cluster.admin(Map.of(), true)) {
+                int brokerId = cluster.brokers().keySet().iterator().next();
+                setThreshold(controllerAdmin, brokerId, "87");
+                TestUtils.waitForCondition(() -> cluster.brokers().get(brokerId).config()
+                    .getDouble(ServerLogConfigs.LOG_DISK_PROTECTION_MAX_USAGE_PERCENT_CONFIG) == 87.0,
+                    30_000, "Valid controller update was not applied");
+                for (Admin client : List.of(admin, controllerAdmin)) {
+                    for (String invalid : List.of("NaN", "Infinity", "-Infinity", "${file:/tmp/not-configured:key}")) {
+                        ExecutionException failure = assertThrows(ExecutionException.class,
+                            () -> setThreshold(client, brokerId, invalid));
+                        assertTrue(failure.getCause() instanceof InvalidConfigurationException
+                            || failure.getCause() instanceof InvalidRequestException);
+                    }
+                }
+                ConfigResource resource = new ConfigResource(ConfigResource.Type.BROKER, Integer.toString(brokerId));
+                ConfigEntry entry = admin.describeConfigs(List.of(resource)).all().get(30, TimeUnit.SECONDS)
+                    .get(resource).get(ServerLogConfigs.LOG_DISK_PROTECTION_MAX_USAGE_PERCENT_CONFIG);
+                assertEquals("87.0", entry.value());
+                ConfigEntry toDelete = new ConfigEntry(ServerLogConfigs.LOG_DISK_PROTECTION_MAX_USAGE_PERCENT_CONFIG, null);
+                controllerAdmin.incrementalAlterConfigs(Map.of(resource,
+                    List.of(new AlterConfigOp(toDelete, AlterConfigOp.OpType.DELETE)))).all().get(30, TimeUnit.SECONDS);
+                TestUtils.waitForCondition(() -> cluster.brokers().get(brokerId).config()
+                    .getDouble(ServerLogConfigs.LOG_DISK_PROTECTION_MAX_USAGE_PERCENT_CONFIG) == 100.0,
+                    30_000, "Deleted broker override did not restore the default");
+                cluster.brokers().get(brokerId).shutdown();
+                cluster.brokers().get(brokerId).startup();
+                cluster.waitForReadyBrokers();
+                assertEquals(100.0, cluster.brokers().get(brokerId).config()
+                    .getDouble(ServerLogConfigs.LOG_DISK_PROTECTION_MAX_USAGE_PERCENT_CONFIG));
+            }
+        }
+    }
+
+    @Test
+    public void controllerValidatesClusterDefaultAndBrokerOverrideFallback() throws Exception {
+        TestKitNodes nodes = new TestKitNodes.Builder().setNumBrokerNodes(1).setNumControllerNodes(1).build();
+        try (KafkaClusterTestKit cluster = new KafkaClusterTestKit.Builder(nodes).build()) {
+            cluster.format();
+            cluster.startup();
+            cluster.waitForReadyBrokers();
+            try (Admin admin = cluster.admin(Map.of(), true)) {
+                int brokerId = cluster.brokers().keySet().iterator().next();
+                String key = ServerLogConfigs.LOG_DISK_PROTECTION_MAX_USAGE_PERCENT_CONFIG;
+                ConfigResource defaults = new ConfigResource(ConfigResource.Type.BROKER, "");
+                ConfigResource broker = new ConfigResource(ConfigResource.Type.BROKER, Integer.toString(brokerId));
+                ExecutionException invalid = assertThrows(ExecutionException.class, () -> admin.incrementalAlterConfigs(
+                    Map.of(defaults, List.of(new AlterConfigOp(new ConfigEntry(key, "NaN"), AlterConfigOp.OpType.SET))))
+                    .all().get(30, TimeUnit.SECONDS));
+                assertInstanceOf(InvalidConfigurationException.class, invalid.getCause());
+                admin.incrementalAlterConfigs(Map.of(defaults,
+                    List.of(new AlterConfigOp(new ConfigEntry(key, "75"), AlterConfigOp.OpType.SET))))
+                    .all().get(30, TimeUnit.SECONDS);
+                TestUtils.waitForCondition(() -> cluster.brokers().get(brokerId).config().getDouble(key) == 75.0,
+                    30_000, "Cluster default was not applied");
+                setThreshold(admin, brokerId, "80");
+                TestUtils.waitForCondition(() -> cluster.brokers().get(brokerId).config().getDouble(key) == 80.0,
+                    30_000, "Broker override was not applied");
+                admin.incrementalAlterConfigs(Map.of(broker,
+                    List.of(new AlterConfigOp(new ConfigEntry(key, null), AlterConfigOp.OpType.DELETE))))
+                    .all().get(30, TimeUnit.SECONDS);
+                TestUtils.waitForCondition(() -> cluster.brokers().get(brokerId).config().getDouble(key) == 75.0,
+                    30_000, "Broker override did not fall back to cluster default");
+                admin.incrementalAlterConfigs(Map.of(defaults,
+                    List.of(new AlterConfigOp(new ConfigEntry(key, null), AlterConfigOp.OpType.DELETE))))
+                    .all().get(30, TimeUnit.SECONDS);
+                TestUtils.waitForCondition(() -> cluster.brokers().get(brokerId).config().getDouble(key) == 100.0,
+                    30_000, "Deleting the cluster default did not restore the builtin default");
             }
         }
     }
