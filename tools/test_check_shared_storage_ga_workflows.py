@@ -434,6 +434,18 @@ class WorkflowTriggerOwnershipTest(unittest.TestCase):
 
 
 class LocalStateLossCompileSourceOwnershipTest(unittest.TestCase):
+    def test_recovery_step_configures_the_minio_control_script(self):
+        root = Path(__file__).resolve().parents[1]
+        path = root / ".github/workflows/shared-storage-local-state-loss.yml"
+        workflow = path.read_text(encoding="utf-8")
+        recovery_step = workflow.split(
+            "- name: Recover from complete local loss and checkpoint-only loss", 1
+        )[1].split("\n      - name:", 1)[0]
+        self.assertIn(
+            "SHARED_STORAGE_S3_CONTROL: ${{ github.workspace }}/tools/shared_storage_minio_fixture.sh",
+            recovery_step,
+        )
+
     def test_quarantine_test_compilation_is_in_the_ga_recovery_push_contract(self):
         root = Path(__file__).resolve().parents[1]
         path = root / ".github/workflows/shared-storage-local-state-loss.yml"
