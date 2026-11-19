@@ -241,11 +241,12 @@ class BrokerServer(
         brokerTopicStats,
         logDirFailureChannel)
 
-      val storageExtension = StorageExtensionLoader.load(new StorageExtensionContext(
+      val storageExtensionContext = new StorageExtensionContext(
         config.originals(),
         logManager.liveLogDirs.asJava,
         config.brokerId,
-        time))
+        time)
+      val storageExtension = StorageExtensionLoader.load(storageExtensionContext)
       if (storageExtension.isPresent) {
         storageExtensionOpt = Some(storageExtension.get())
         logManager.setUnifiedLogFactory(storageExtension.get().unifiedLogFactory())
@@ -400,6 +401,7 @@ class BrokerServer(
         directoryEventHandler = directoryEventHandler,
         defaultActionQueue = defaultActionQueue
       )
+      replicaManager.setStorageExtensionContext(storageExtensionContext)
 
       /* start token manager */
       tokenManager = new DelegationTokenManager(new DelegationTokenManagerConfigs(config), tokenCache)

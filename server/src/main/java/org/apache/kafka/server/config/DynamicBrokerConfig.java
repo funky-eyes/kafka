@@ -69,6 +69,7 @@ public class DynamicBrokerConfig {
 
     public static final Set<String> ALL_DYNAMIC_CONFIGS = Stream.of(
             DYNAMIC_SECURITY_CONFIGS,
+            Set.of(ServerLogConfigs.LOG_DISK_PROTECTION_MAX_USAGE_PERCENT_CONFIG),
             LogCleaner.RECONFIGURABLE_CONFIGS,
             DynamicLogConfig.RECONFIGURABLE_CONFIGS,
             DynamicThreadPool.RECONFIGURABLE_CONFIGS,

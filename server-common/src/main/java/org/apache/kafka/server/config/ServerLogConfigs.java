@@ -45,6 +45,10 @@ public class ServerLogConfigs {
         + "If it is not explicitly configured on the broker, the value from the controller configuration is used.<br/>"
         + "For (2) and (3), the value from the controller configuration is always used.</p>";
 
+    public static final String LOG_DISK_PROTECTION_MAX_USAGE_PERCENT_CONFIG = "log.disk.protection.max.usage.percent";
+    public static final double LOG_DISK_PROTECTION_MAX_USAGE_PERCENT_DEFAULT = 100.0;
+    public static final String LOG_DISK_PROTECTION_MAX_USAGE_PERCENT_DOC = "Reject client writes when the destination filesystem usage reaches this percentage. 100 disables protection.";
+
     public static final String LOG_DIRS_CONFIG = LOG_PREFIX + "dirs";
     public static final String LOG_DIR_CONFIG = LOG_PREFIX + "dir";
     public static final String LOG_DIR_DEFAULT = "/tmp/kafka-logs";
