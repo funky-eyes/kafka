@@ -3,6 +3,26 @@
 A Shared Storage build is eligible for GA only when the machine-generated GA manifest passes for the release
 production tree.
 
+## First release of Topic opt-in
+
+For the first release, select `fresh_install=true`. The candidate is a fresh KRaft deployment
+of one release version. The storage mode is chosen when creating a Topic, and ordinary Topics
+retain Kafka's native storage and client behavior. In-place conversion of previously existing
+Topics and old/new Broker interoperability belong to a separate upgrade qualification.
+
+The fresh-install manifest requires the 18 remaining correctness and hardening gates for the
+exact release commit. Verify client protocol and behavior against native Kafka, including produce
+and fetch, offsets, idempotence and transactions, consumer groups, Admin operations, and supported
+security and ecosystem clients. Test native and opted-in Topics together. Use the same candidate
+for durability, broker and controller failover, object-store recovery, performance and soak/chaos.
+Exercise the published binary or image with a clean install before promotion. A selected workflow
+must finish successfully with its required runtime cases executed.
+
+Kafka-visible Topic deletion, retention and DeleteRecords remain part of the behavior contract.
+Physical reclamation of COMMITTED objects requires its own safety evidence and release claim.
+
+The default upgrade-qualified profile additionally requires the rolling-upgrade gate.
+
 The release gate deliberately separates two concerns:
 
 * correctness gates prove durability, crash recovery, failover, Kafka semantics, object-format compatibility, and
@@ -31,11 +51,11 @@ The GA gate currently requires these hardening workflows in addition to the corr
 * `Shared Storage Soak and Chaos`
 * `Shared Storage Rolling Upgrade`
 
-Until those workflows exist and pass for the candidate production tree, the GA manifest must remain **BLOCKED**.
+Each workflow required by the selected profile must pass before the GA manifest can report **PASS**.
 
 The release workflow defaults to **`require_real_s3=false`**. This GA scope is
 **pinned MinIO and MinIO-backed S3-compatible storage**, proven by the required 19-gate
-correctness/hardening manifest. The MinIO E2E explicitly exercises PUT, Range GET, DELETE,
+correctness/hardening manifest for the default upgrade-qualified profile. The MinIO E2E explicitly exercises PUT, Range GET, DELETE,
 multipart completion, multipart abort and absence of partial objects. The
 MinIO integration suite also verifies orphan-claim cleanup, reclamation
 after a late PUT, committed-object preservation, and active-upload fences

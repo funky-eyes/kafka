@@ -17,15 +17,20 @@
 package kafka.server;
 
 import org.apache.kafka.clients.admin.Admin;
+import org.apache.kafka.clients.admin.ConsumerGroupDescription;
+import org.apache.kafka.clients.admin.FeatureUpdate;
+import org.apache.kafka.clients.admin.UpdateFeaturesOptions;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.admin.TopicDescription;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.clients.producer.RecordMetadata;
+import org.apache.kafka.common.GroupState;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.config.TopicConfig;
@@ -36,6 +41,9 @@ import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.apache.kafka.common.test.KafkaClusterTestKit;
 import org.apache.kafka.common.test.TestKitNodes;
+import org.apache.kafka.server.common.SharedStorageVersion;
+import org.apache.kafka.storage.internals.log.UnifiedLog;
+import org.apache.kafka.storage.internals.shared.kafka.SharedUnifiedLog;
 import org.apache.kafka.storage.internals.shared.metadata.OffsetRange;
 import org.apache.kafka.storage.internals.shared.metadata.PartitionRemoteCoverage;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec;
@@ -51,15 +59,18 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.Properties;
 import java.util.UUID;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
@@ -86,13 +97,22 @@ public class SharedStorageKafkaSemanticsParityIntegrationTest {
 
     @Test
     public void sharedStorageMatchesClassicKafkaProducerConsumerAndTransactionSemantics() throws Exception {
+        runParity(false);
+    }
+
+    @Test
+    public void topicOptInMatchesClassicKafkaProducerConsumerAndTransactionSemantics() throws Exception {
+        runParity(true);
+    }
+
+    private static void runParity(boolean topicMode) throws Exception {
         String s3Endpoint = System.getenv("SHARED_STORAGE_S3_ENDPOINT");
         assumeTrue(s3Endpoint != null && !s3Endpoint.isBlank(), "S3/MinIO integration endpoint is not configured");
         String bucket = environment("SHARED_STORAGE_S3_BUCKET", "kafka-shared-storage-parity");
         String region = environment("SHARED_STORAGE_S3_REGION", "us-east-1");
 
-        ClusterSnapshot classic = runWorkload(false, s3Endpoint, region, bucket);
-        ClusterSnapshot shared = runWorkload(true, s3Endpoint, region, bucket);
+        ClusterSnapshot classic = runWorkload(false, topicMode, s3Endpoint, region, bucket);
+        ClusterSnapshot shared = runWorkload(true, topicMode, s3Endpoint, region, bucket);
 
         assertEquals(classic.regularRecords(), shared.regularRecords(),
             "Shared storage must preserve classic Kafka record offsets, timestamps, keys, values and headers");
@@ -110,6 +130,7 @@ public class SharedStorageKafkaSemanticsParityIntegrationTest {
 
     private static ClusterSnapshot runWorkload(
         boolean sharedStorage,
+        boolean topicMode,
         String s3Endpoint,
         String region,
         String bucket
@@ -123,10 +144,8 @@ public class SharedStorageKafkaSemanticsParityIntegrationTest {
         KafkaClusterTestKit.Builder builder = new KafkaClusterTestKit.Builder(nodes);
         if (sharedStorage) {
             builder
-                .setConfigProp("shared.storage.legacy.selectors.enabled", true)
                 .setConfigProp("storage.extension.class",
                     "org.apache.kafka.storage.internals.shared.s3.S3SharedStorageExtension")
-                .setConfigProp("shared.storage.topic.pattern", "shared-parity-.*")
                 .setConfigProp("shared.storage.wal.engine", "ring")
                 .setConfigProp("shared.storage.wal.capacity.bytes", 8L * 1024 * 1024)
                 .setConfigProp("shared.storage.object.target.bytes", 128L * 1024)
@@ -140,6 +159,10 @@ public class SharedStorageKafkaSemanticsParityIntegrationTest {
                 .setConfigProp("shared.storage.s3.key.prefix", "parity/" + UUID.randomUUID() + "/objects")
                 .setConfigProp("shared.storage.s3.path.style", true)
                 .setConfigProp("shared.storage.s3.io.threads", 2);
+            if (!topicMode) {
+                builder.setConfigProp("shared.storage.legacy.selectors.enabled", true)
+                    .setConfigProp("shared.storage.topic.pattern", "shared-parity-.*");
+            }
         }
 
         try (KafkaClusterTestKit cluster = builder.build()) {
@@ -149,9 +172,31 @@ public class SharedStorageKafkaSemanticsParityIntegrationTest {
             String bootstrapServers = cluster.bootstrapServers();
 
             try (Admin admin = cluster.admin()) {
-                createTopics(admin);
+                if (sharedStorage && topicMode) {
+                    admin.updateFeatures(Map.of(SharedStorageVersion.FEATURE_NAME,
+                        new FeatureUpdate((short) 1, FeatureUpdate.UpgradeType.UPGRADE)),
+                        new UpdateFeaturesOptions()).all().get(30, TimeUnit.SECONDS);
+                }
+                createTopics(admin, sharedStorage && topicMode);
                 TopicDescription recordDescription = waitForTopicReady(admin, RECORD_TOPIC);
                 waitForTopicReady(admin, TRANSACTION_TOPIC);
+                if (sharedStorage && topicMode) {
+                    assertLogMode(cluster, RECORD_TOPIC, true);
+                    assertLogMode(cluster, TRANSACTION_TOPIC, true);
+                    String ordinaryTopic = "ordinary-parity";
+                    admin.createTopics(List.of(new NewTopic(ordinaryTopic, PARTITIONS, (short) 3)))
+                        .all().get(30, TimeUnit.SECONDS);
+                    waitForTopicReady(admin, ordinaryTopic);
+                    assertLogMode(cluster, ordinaryTopic, false);
+                    try (KafkaProducer<String, String> producer = producer(bootstrapServers, "none", null)) {
+                        producer.send(new ProducerRecord<>(ordinaryTopic, 0, "ordinary", "native"))
+                            .get(30, TimeUnit.SECONDS);
+                    }
+                    assertEquals("native", consume(bootstrapServers, ordinaryTopic, 1, "read_uncommitted")
+                        .get(0).value());
+                    System.out.println("TOPIC_PARITY_MIXED_MODE_READY");
+                    assertConsumerGroupParity(cluster, admin);
+                }
 
                 produceCompressedRecords(bootstrapServers);
                 produceTransactions(bootstrapServers);
@@ -188,12 +233,213 @@ public class SharedStorageKafkaSemanticsParityIntegrationTest {
         }
     }
 
-    private static void createTopics(Admin admin) throws Exception {
-        Map<String, String> configs = Map.of(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2");
+    private static void assertConsumerGroupParity(KafkaClusterTestKit cluster, Admin admin) throws Exception {
+        String ordinary = "ordinary-parity-group";
+        String shared = "shared-parity-group";
+        List<String> topics = List.of(ordinary, shared);
+        admin.createTopics(List.of(
+            new NewTopic(ordinary, PARTITIONS, (short) 3)
+                .configs(Map.of(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2")),
+            new NewTopic(shared, PARTITIONS, (short) 3)
+                .configs(Map.of(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2",
+                    TopicConfig.SHARED_STORAGE_ENABLE_CONFIG, "true"))
+        )).all().get(30, TimeUnit.SECONDS);
+
+        waitForTopicReady(admin, ordinary);
+        TopicDescription sharedDescription = waitForTopicReady(admin, shared);
+        assertLogMode(cluster, ordinary, false);
+        assertLogMode(cluster, shared, true);
+        Set<TopicPartition> expectedPartitions = Set.of(
+            new TopicPartition(ordinary, 0), new TopicPartition(ordinary, 1), new TopicPartition(ordinary, 2),
+            new TopicPartition(shared, 0), new TopicPartition(shared, 1), new TopicPartition(shared, 2));
+
+        String bootstrapServers = cluster.bootstrapServers();
+        for (String protocol : List.of("classic", "consumer")) {
+            assertGroupRebalance(admin, bootstrapServers, protocol, topics, expectedPartitions);
+        }
+        try (KafkaProducer<String, String> producer = producer(bootstrapServers, "none", null)) {
+            for (int offset = 0; offset < 2; offset++) {
+                for (TopicPartition partition : expectedPartitions) {
+                    RecordMetadata metadata = producer.send(new ProducerRecord<>(partition.topic(), partition.partition(),
+                        "group-key-" + partition.partition(), "group-value-" + offset)).get(30, TimeUnit.SECONDS);
+                    assertEquals(offset, metadata.offset());
+                }
+            }
+        }
+        waitForRemoteCoverage(bootstrapServers, sharedDescription, 2);
+        for (String protocol : List.of("classic", "consumer")) {
+            String group = "parity-" + protocol;
+            String firstMember = consumeAndCommitGroupBatch(
+                bootstrapServers, group, protocol, topics, expectedPartitions, 0);
+            assertGroupOffsets(admin, group, expectedPartitions, 1);
+
+            String replacement = consumeAndCommitGroupBatch(
+                bootstrapServers, group, protocol, topics, expectedPartitions, 1);
+            assertNotEquals(firstMember, replacement, "Replacement consumer must join as a new member");
+            assertGroupOffsets(admin, group, expectedPartitions, 2);
+            System.out.println("TOPIC_PARITY_GROUP_PROTOCOL_PASSED=" + protocol);
+        }
+    }
+
+    private static void assertGroupRebalance(
+        Admin admin,
+        String bootstrapServers,
+        String protocol,
+        List<String> topics,
+        Set<TopicPartition> expectedPartitions
+    ) throws Exception {
+        String group = "parity-rebalance-" + protocol;
+        try (KafkaConsumer<String, String> remaining = groupConsumer(bootstrapServers, group, protocol, "earliest")) {
+            remaining.subscribe(topics);
+            waitForGroupAssignment(admin, group, expectedPartitions, List.of(remaining));
+
+            try (KafkaConsumer<String, String> joining = groupConsumer(bootstrapServers, group, protocol, "earliest")) {
+                joining.subscribe(topics);
+                waitForGroupAssignment(admin, group, expectedPartitions, List.of(remaining, joining));
+            }
+
+            waitForGroupAssignment(admin, group, expectedPartitions, List.of(remaining));
+        }
+        System.out.println("TOPIC_PARITY_GROUP_REBALANCE_PASSED=" + protocol);
+    }
+
+    private static void waitForGroupAssignment(
+        Admin admin,
+        String group,
+        Set<TopicPartition> expectedPartitions,
+        List<KafkaConsumer<String, String>> consumers
+    ) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(45);
+        while (System.nanoTime() < deadline) {
+            for (KafkaConsumer<String, String> consumer : consumers) {
+                consumer.poll(Duration.ofMillis(200));
+            }
+            if (hasExactGroupAssignment(expectedPartitions, consumers)
+                    && coordinatorAgreesWithGroupAssignment(admin, group, consumers)) {
+                return;
+            }
+        }
+        throw new AssertionError("Group did not converge to an exact " + consumers.size()
+            + "-member assignment for " + group);
+    }
+
+    private static boolean hasExactGroupAssignment(
+        Set<TopicPartition> expectedPartitions,
+        List<KafkaConsumer<String, String>> consumers
+    ) {
+        Set<TopicPartition> assigned = new HashSet<>();
+        int assignmentCount = 0;
+        for (KafkaConsumer<String, String> consumer : consumers) {
+            Set<TopicPartition> assignment = consumer.assignment();
+            if (assignment.isEmpty()) {
+                return false;
+            }
+            assignmentCount += assignment.size();
+            assigned.addAll(assignment);
+        }
+        return assigned.equals(expectedPartitions) && assignmentCount == expectedPartitions.size();
+    }
+
+    private static boolean coordinatorAgreesWithGroupAssignment(
+        Admin admin,
+        String group,
+        List<KafkaConsumer<String, String>> consumers
+    ) throws Exception {
+        ConsumerGroupDescription description = admin.describeConsumerGroups(List.of(group))
+            .describedGroups().get(group).get(10, TimeUnit.SECONDS);
+        Map<String, Set<TopicPartition>> expected = new LinkedHashMap<>();
+        for (KafkaConsumer<String, String> consumer : consumers) {
+            expected.put(consumer.groupMetadata().memberId(), consumer.assignment());
+        }
+        return description.groupState() == GroupState.STABLE
+            && description.members().size() == consumers.size()
+            && description.members().stream().allMatch(member ->
+                member.assignment().topicPartitions().equals(expected.get(member.consumerId())));
+    }
+
+    private static KafkaConsumer<String, String> groupConsumer(
+        String bootstrapServers,
+        String group,
+        String protocol,
+        String offsetReset
+    ) {
+        Properties properties = new Properties();
+        properties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+        properties.put(ConsumerConfig.GROUP_ID_CONFIG, group);
+        properties.put(ConsumerConfig.GROUP_PROTOCOL_CONFIG, protocol);
+        properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
+        properties.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, offsetReset);
+        properties.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 1);
+        properties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        properties.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        return new KafkaConsumer<>(properties);
+    }
+
+    private static String consumeAndCommitGroupBatch(
+        String bootstrapServers,
+        String group,
+        String protocol,
+        List<String> topics,
+        Set<TopicPartition> expectedPartitions,
+        long expectedOffset
+    ) {
+        Map<TopicPartition, OffsetAndMetadata> offsets = new LinkedHashMap<>();
+        try (KafkaConsumer<String, String> consumer = groupConsumer(
+            bootstrapServers, group, protocol, expectedOffset == 0 ? "earliest" : "none")) {
+            consumer.subscribe(topics);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(45);
+            while (offsets.size() < expectedPartitions.size() && System.nanoTime() < deadline) {
+                for (ConsumerRecord<String, String> record : consumer.poll(Duration.ofMillis(250))) {
+                    TopicPartition partition = new TopicPartition(record.topic(), record.partition());
+                    assertTrue(expectedPartitions.contains(partition), () -> "Unexpected group partition " + partition);
+                    assertEquals("group-key-" + partition.partition(), record.key());
+                    assertTrue(record.offset() >= expectedOffset, () -> "Group replayed " + record);
+                    assertEquals("group-value-" + record.offset(), record.value());
+                    // Kafka may fetch two records for one partition before delivering any from another.
+                    // Commit only the first record per partition so the replacement must replay the tail.
+                    offsets.putIfAbsent(partition, new OffsetAndMetadata(record.offset() + 1));
+                }
+            }
+            assertEquals(expectedPartitions, consumer.assignment());
+            assertEquals(expectedPartitions, offsets.keySet());
+            offsets.values().forEach(offset -> assertEquals(expectedOffset + 1, offset.offset()));
+            consumer.commitSync(offsets, Duration.ofSeconds(15));
+            String member = consumer.groupMetadata().memberId();
+            assertTrue(!member.isEmpty(), "Subscribed consumer must have an active group membership");
+            return member;
+        }
+    }
+
+    private static void assertGroupOffsets(
+        Admin admin,
+        String group,
+        Set<TopicPartition> expectedPartitions,
+        long expectedOffset
+    ) throws Exception {
+        Map<TopicPartition, OffsetAndMetadata> offsets = admin.listConsumerGroupOffsets(group)
+            .partitionsToOffsetAndMetadata().get(30, TimeUnit.SECONDS);
+        assertEquals(expectedPartitions, offsets.keySet());
+        offsets.values().forEach(offset -> assertEquals(expectedOffset, offset.offset()));
+    }
+
+    private static void createTopics(Admin admin, boolean topicMode) throws Exception {
+        Map<String, String> configs = new LinkedHashMap<>();
+        configs.put(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2");
+        if (topicMode) configs.put(TopicConfig.SHARED_STORAGE_ENABLE_CONFIG, "true");
         admin.createTopics(List.of(
             new NewTopic(RECORD_TOPIC, PARTITIONS, (short) 3).configs(configs),
             new NewTopic(TRANSACTION_TOPIC, PARTITIONS, (short) 3).configs(configs)
         )).all().get(30, TimeUnit.SECONDS);
+    }
+
+    private static void assertLogMode(KafkaClusterTestKit cluster, String topic, boolean shared) throws Exception {
+        TestUtils.waitForCondition(() -> cluster.brokers().values().stream().allMatch(broker -> {
+            for (int partition = 0; partition < PARTITIONS; partition++) {
+                scala.Option<UnifiedLog> log = broker.logManager().getLog(new TopicPartition(topic, partition), false);
+                if (log.isEmpty() || (log.get() instanceof SharedUnifiedLog) != shared) return false;
+            }
+            return true;
+        }), 30_000L, "Unexpected physical log mode for " + topic);
     }
 
     private static TopicDescription waitForTopicReady(Admin admin, String topic) throws Exception {
