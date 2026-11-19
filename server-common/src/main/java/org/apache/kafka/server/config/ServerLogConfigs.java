@@ -17,6 +17,8 @@
 
 package org.apache.kafka.server.config;
 
+import org.apache.kafka.common.config.ConfigDef;
+import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.common.config.TopicConfig;
 import org.apache.kafka.common.record.internal.Records;
 import org.apache.kafka.server.record.BrokerCompressionType;
@@ -44,6 +46,24 @@ public class ServerLogConfigs {
         + "<p>For (1), the value from the broker configuration is used only when it is explicitly set. "
         + "If it is not explicitly configured on the broker, the value from the controller configuration is used.<br/>"
         + "For (2) and (3), the value from the controller configuration is always used.</p>";
+
+    public static final String LOG_DISK_PROTECTION_MAX_USAGE_PERCENT_CONFIG = "log.disk.protection.max.usage.percent";
+    public static final double LOG_DISK_PROTECTION_MAX_USAGE_PERCENT_DEFAULT = 100.0;
+    public static final ConfigDef.Validator LOG_DISK_PROTECTION_MAX_USAGE_PERCENT_VALIDATOR = new ConfigDef.Validator() {
+        @Override
+        public void ensureValid(String name, Object value) {
+            if (!(value instanceof Number number) || !Double.isFinite(number.doubleValue())
+                || number.doubleValue() < 0.01 || number.doubleValue() > 100.0) {
+                throw new ConfigException(name, value, "Value must be finite and in [0.01, 100]");
+            }
+        }
+
+        @Override
+        public String toString() {
+            return "[0.01,...,100] (finite)";
+        }
+    };
+    public static final String LOG_DISK_PROTECTION_MAX_USAGE_PERCENT_DOC = "Reject client writes when the destination filesystem usage reaches this percentage. 100 disables protection.";
 
     public static final String LOG_DIRS_CONFIG = LOG_PREFIX + "dirs";
     public static final String LOG_DIR_CONFIG = LOG_PREFIX + "dir";

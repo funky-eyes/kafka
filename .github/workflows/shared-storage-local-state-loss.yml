@@ -218,6 +218,24 @@ jobs:
             exit "$status"
           fi
 
+          if ! python3 - <<'PYTEST'
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+
+          path = Path("core/build/test-results/test") / "TEST-kafka.server.SharedStorageLocalStateLossE2ETest.xml"
+          root = ET.parse(path).getroot()
+          assert all(root.get(field) == "0" for field in ("failures", "errors", "skipped")), path
+          cases = [case.get("name", "").split("(")[0] for case in root.findall("testcase")]
+          required = (
+              "topicOptInRecoversAfterAllSharedWalAndCheckpointStateIsLost",
+              "clusterRecoversAfterAllSharedWalAndCheckpointStateIsLost",
+          )
+          assert all(cases.count(name) == 1 for name in required), (path, cases)
+          PYTEST
+          then
+            exit 1
+          fi
+
           ./gradlew :core:test \
             --tests 'kafka.server.SharedStorageRemoteCheckpointLossE2ETest' \
             -x :core:checkstyleMain \

@@ -139,6 +139,19 @@ jobs:
             -x :core:spotbugsTest \
             --no-scan 2>&1 | tee shared-storage-performance.log
 
+      - name: Require measured performance results
+        run: |
+          python3 - <<'PYTEST'
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+
+          path = Path("core/build/test-results/test/TEST-kafka.server.SharedStoragePerformanceBaselineTest.xml")
+          root = ET.parse(path).getroot()
+          assert root.get("tests") == "1", root.attrib
+          assert all(root.get(field) == "0" for field in ("skipped", "failures", "errors")), root.attrib
+          assert "SHARED_STORAGE_PERF medianProduceRatio=" in (root.findtext("system-out") or "")
+          PYTEST
+
       - name: Upload performance evidence
         if: always()
         uses: actions/upload-artifact@v4

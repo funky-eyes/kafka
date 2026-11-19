@@ -17,6 +17,7 @@
 package kafka.server;
 
 import org.apache.kafka.clients.admin.Admin;
+import org.apache.kafka.clients.admin.FeatureUpdate;
 import org.apache.kafka.clients.admin.NewPartitions;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.admin.RecordsToDelete;
@@ -36,6 +37,7 @@ import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.apache.kafka.common.test.KafkaClusterTestKit;
 import org.apache.kafka.common.test.TestKitNodes;
+import org.apache.kafka.server.common.SharedStorageVersion;
 import org.apache.kafka.storage.internals.shared.metadata.OffsetRange;
 import org.apache.kafka.storage.internals.shared.metadata.PartitionRemoteCoverage;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec;
@@ -223,8 +225,6 @@ public class SharedStorageTopicLifecycleE2ETest {
         KafkaClusterTestKit cluster = new KafkaClusterTestKit.Builder(nodes)
             .setConfigProp("storage.extension.class",
                 "org.apache.kafka.storage.internals.shared.s3.S3SharedStorageExtension")
-            .setConfigProp("shared.storage.legacy.selectors.enabled", true)
-            .setConfigProp("shared.storage.topic.pattern", "shared-topic-lifecycle-.*")
             .setConfigProp("shared.storage.wal.engine", "ring")
             .setConfigProp("shared.storage.wal.capacity.bytes", 64L * 1024 * 1024)
             .setConfigProp("shared.storage.object.target.bytes", 128L * 1024)
@@ -239,15 +239,29 @@ public class SharedStorageTopicLifecycleE2ETest {
             .setConfigProp("shared.storage.s3.path.style", true)
             .setConfigProp("shared.storage.s3.io.threads", 2)
             .build();
-        cluster.format();
-        cluster.startup();
-        cluster.waitForReadyBrokers();
-        return cluster;
+        boolean ready = false;
+        try {
+            cluster.format();
+            cluster.startup();
+            cluster.waitForReadyBrokers();
+            try (Admin admin = cluster.admin()) {
+                admin.updateFeatures(Map.of(SharedStorageVersion.FEATURE_NAME,
+                    new FeatureUpdate((short) 1, FeatureUpdate.UpgradeType.UPGRADE)))
+                    .all().get(30, TimeUnit.SECONDS);
+            }
+            ready = true;
+            return cluster;
+        } finally {
+            if (!ready) {
+                cluster.close();
+            }
+        }
     }
 
     private static void createTopic(Admin admin, String topic, int partitions) throws Exception {
         admin.createTopics(List.of(new NewTopic(topic, partitions, (short) 3)
-            .configs(Map.of(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2"))))
+            .configs(Map.of(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2",
+                TopicConfig.SHARED_STORAGE_ENABLE_CONFIG, "true"))))
             .all().get(30, TimeUnit.SECONDS);
     }
 

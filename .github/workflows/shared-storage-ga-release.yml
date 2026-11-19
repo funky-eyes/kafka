@@ -28,6 +28,11 @@ on:
         required: true
         default: shared-wal-s3-4.3.1
         type: string
+      fresh_install:
+        description: First Topic opt-in release on fresh Kafka clusters
+        required: true
+        default: false
+        type: boolean
       require_real_s3:
         description: Optional strict native AWS S3 proof; not required for MinIO GA
         required: true
@@ -64,6 +69,7 @@ jobs:
         shell: bash
         env:
           REQUIRE_REAL_S3: ${{ inputs.require_real_s3 }}
+          FRESH_INSTALL: ${{ inputs.fresh_install }}
         run: |
           set -euo pipefail
           if [ "${REQUIRE_REAL_S3}" = "true" ]; then
@@ -71,8 +77,12 @@ jobs:
             echo "Requires strict exact-SHA AWS S3 proof in addition to the MinIO GA gates." >> "${GITHUB_STEP_SUMMARY}"
           else
             echo "## MinIO-backed Shared Storage GA" >> "${GITHUB_STEP_SUMMARY}"
-            echo "Release scope: 19 required correctness and hardening gates including real MinIO integration." >> "${GITHUB_STEP_SUMMARY}"
             echo "This result does not claim native AWS S3 interoperability." >> "${GITHUB_STEP_SUMMARY}"
+          fi
+          if [ "${FRESH_INSTALL}" = "true" ]; then
+            echo "Release scope: fresh installation with Topic opt-in, 18 required MinIO gates, exact release SHA." >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "Release scope: 19 required MinIO gates including rolling upgrade." >> "${GITHUB_STEP_SUMMARY}"
           fi
 
       - name: Evaluate release criteria
@@ -86,6 +96,9 @@ jobs:
             --evidence-branch "${{ inputs.evidence_branch }}"
             --output shared-storage-ga-manifest.md
           )
+          if [[ "${{ inputs.fresh_install }}" == "true" ]]; then
+            args+=(--fresh-install)
+          fi
           if [[ "${{ inputs.require_real_s3 }}" == "true" ]]; then
             args+=(--require-real-s3 --require-real-s3-exact-sha --require-real-s3-branch-push)
           fi

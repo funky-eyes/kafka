@@ -17,6 +17,7 @@
 package kafka.server;
 
 import org.apache.kafka.clients.admin.Admin;
+import org.apache.kafka.clients.admin.FeatureUpdate;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.admin.TopicDescription;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
@@ -36,6 +37,7 @@ import org.apache.kafka.common.serialization.StringSerializer;
 import org.apache.kafka.common.test.KafkaClusterTestKit;
 import org.apache.kafka.common.test.TestKitNodes;
 import org.apache.kafka.common.test.api.TestKitDefaults;
+import org.apache.kafka.server.common.SharedStorageVersion;
 import org.apache.kafka.storage.internals.shared.metadata.OffsetRange;
 import org.apache.kafka.storage.internals.shared.metadata.PartitionRemoteCoverage;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec;
@@ -92,6 +94,15 @@ public class SharedStorageLocalStateLossE2ETest {
 
     @Test
     public void clusterRecoversAfterAllSharedWalAndCheckpointStateIsLost() throws Exception {
+        recoverAfterLocalStateLoss(false);
+    }
+
+    @Test
+    public void topicOptInRecoversAfterAllSharedWalAndCheckpointStateIsLost() throws Exception {
+        recoverAfterLocalStateLoss(true);
+    }
+
+    private static void recoverAfterLocalStateLoss(boolean topicOptIn) throws Exception {
         String s3Endpoint = System.getenv("SHARED_STORAGE_S3_ENDPOINT");
         assumeTrue(s3Endpoint != null && !s3Endpoint.isBlank(), "S3/MinIO integration endpoint is not configured");
         String bucket = environment("SHARED_STORAGE_S3_BUCKET", "kafka-shared-storage-local-state-loss");
@@ -115,11 +126,9 @@ public class SharedStorageLocalStateLossE2ETest {
             .setPerServerProperties(perServerProperties)
             .build();
 
-        try (KafkaClusterTestKit cluster = new KafkaClusterTestKit.Builder(nodes)
-            .setConfigProp("shared.storage.legacy.selectors.enabled", true)
+        KafkaClusterTestKit.Builder builder = new KafkaClusterTestKit.Builder(nodes)
             .setConfigProp("storage.extension.class",
                 "org.apache.kafka.storage.internals.shared.s3.S3SharedStorageExtension")
-            .setConfigProp("shared.storage.topics", TOPIC)
             .setConfigProp("shared.storage.wal.engine", "ring")
             .setConfigProp("shared.storage.wal.capacity.bytes", WAL_CAPACITY_BYTES)
             .setConfigProp("shared.storage.object.target.bytes", OBJECT_TARGET_BYTES)
@@ -134,9 +143,13 @@ public class SharedStorageLocalStateLossE2ETest {
             .setConfigProp("shared.storage.s3.bucket", bucket)
             .setConfigProp("shared.storage.s3.key.prefix", "local-state-loss/" + UUID.randomUUID() + "/objects")
             .setConfigProp("shared.storage.s3.path.style", true)
-            .setConfigProp("shared.storage.s3.io.threads", 2)
-            .build()) {
+            .setConfigProp("shared.storage.s3.io.threads", 2);
+        if (!topicOptIn) {
+            builder.setConfigProp("shared.storage.legacy.selectors.enabled", true)
+                .setConfigProp("shared.storage.topics", TOPIC);
+        }
 
+        try (KafkaClusterTestKit cluster = builder.build()) {
             cluster.format();
             cluster.startup();
             cluster.waitForReadyBrokers();
@@ -146,9 +159,7 @@ public class SharedStorageLocalStateLossE2ETest {
 
             try (Admin admin = cluster.admin();
                  KafkaProducer<String, String> producer = producer(bootstrapServers)) {
-                admin.createTopics(List.of(new NewTopic(TOPIC, PARTITIONS, (short) BROKERS)
-                    .configs(Map.of(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2"))))
-                    .all().get(30, TimeUnit.SECONDS);
+                createTopic(admin, topicOptIn);
                 description = waitForTopicState(admin, 3);
 
                 for (int chunk = 0; chunk < BASE_CHUNKS; chunk++) {
@@ -166,6 +177,7 @@ public class SharedStorageLocalStateLossE2ETest {
                 assertFalse(Files.exists(walDir), "Shared WAL/checkpoint directory must be completely removed");
             }
 
+            System.out.println("OPTIN_ALL_WAL_REMOVED_BEFORE_RESTART_MS=" + System.currentTimeMillis());
             restartAllBrokersSequentially(cluster);
             waitForLocalCheckpoints(walDirs);
 
@@ -191,7 +203,9 @@ public class SharedStorageLocalStateLossE2ETest {
                 assertEquals(BROKERS, leaders.size(),
                     "Preferred leader election must exercise remote reads through every recovered broker");
 
+                System.out.println("OPTIN_COLD_READ_AFTER_ALL_WAL_REMOVED_MS=" + System.currentTimeMillis());
                 consumeAndAssert(bootstrapServers, nextSequence);
+                System.out.println("OPTIN_COLD_READ_COMPLETED_MS=" + System.currentTimeMillis());
 
                 try (KafkaProducer<String, String> producer = producer(bootstrapServers)) {
                     produce(producer, nextSequence, FOLLOW_UP_RECORDS_PER_PARTITION);
@@ -207,6 +221,21 @@ public class SharedStorageLocalStateLossE2ETest {
                     "Every partition must preserve old history and accept post-recovery writes");
             }
         }
+    }
+
+    private static void createTopic(Admin admin, boolean topicOptIn) throws Exception {
+        if (topicOptIn) {
+            admin.updateFeatures(Map.of(SharedStorageVersion.FEATURE_NAME,
+                new FeatureUpdate((short) 1, FeatureUpdate.UpgradeType.UPGRADE)))
+                .all().get(30, TimeUnit.SECONDS);
+        }
+        Map<String, String> topicConfigs = new LinkedHashMap<>();
+        topicConfigs.put(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2");
+        if (topicOptIn) {
+            topicConfigs.put(TopicConfig.SHARED_STORAGE_ENABLE_CONFIG, "true");
+        }
+        admin.createTopics(List.of(new NewTopic(TOPIC, PARTITIONS, (short) BROKERS)
+            .configs(topicConfigs))).all().get(30, TimeUnit.SECONDS);
     }
 
     private static void shutdownAllBrokers(KafkaClusterTestKit cluster) throws Exception {

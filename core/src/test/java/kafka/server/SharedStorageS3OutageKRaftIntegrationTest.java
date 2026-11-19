@@ -17,6 +17,7 @@
 package kafka.server;
 
 import org.apache.kafka.clients.admin.Admin;
+import org.apache.kafka.clients.admin.FeatureUpdate;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.admin.TopicDescription;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
@@ -34,6 +35,7 @@ import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.apache.kafka.common.test.KafkaClusterTestKit;
 import org.apache.kafka.common.test.TestKitNodes;
+import org.apache.kafka.server.common.SharedStorageVersion;
 import org.apache.kafka.storage.internals.shared.metadata.BrokerObjectId;
 import org.apache.kafka.storage.internals.shared.metadata.OffsetRange;
 import org.apache.kafka.storage.internals.shared.metadata.PartitionRemoteCoverage;
@@ -105,10 +107,8 @@ public class SharedStorageS3OutageKRaftIntegrationTest {
             .build();
 
         try (KafkaClusterTestKit cluster = new KafkaClusterTestKit.Builder(nodes)
-            .setConfigProp("shared.storage.legacy.selectors.enabled", true)
             .setConfigProp("storage.extension.class",
                 "org.apache.kafka.storage.internals.shared.s3.S3SharedStorageExtension")
-            .setConfigProp("shared.storage.topics", TOPIC)
             .setConfigProp("shared.storage.wal.engine", "ring")
             .setConfigProp("shared.storage.wal.capacity.bytes", 64L * 1024 * 1024)
             .setConfigProp("shared.storage.object.target.bytes", 1024L * 1024)
@@ -133,8 +133,12 @@ public class SharedStorageS3OutageKRaftIntegrationTest {
 
                 try (Admin admin = cluster.admin();
                      KafkaProducer<String, String> producer = producer(bootstrapServers)) {
+                    admin.updateFeatures(Map.of(SharedStorageVersion.FEATURE_NAME,
+                        new FeatureUpdate((short) 1, FeatureUpdate.UpgradeType.UPGRADE)))
+                        .all().get(30, TimeUnit.SECONDS);
                     admin.createTopics(List.of(new NewTopic(TOPIC, 1, (short) 3)
-                        .configs(Map.of(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2"))))
+                        .configs(Map.of(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2",
+                            TopicConfig.SHARED_STORAGE_ENABLE_CONFIG, "true"))))
                         .all().get(30, TimeUnit.SECONDS);
 
                     TopicDescription topic = waitForTopicReady(admin);
