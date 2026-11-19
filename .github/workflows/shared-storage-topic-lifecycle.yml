@@ -146,6 +146,24 @@ jobs:
             -x :core:spotbugsTest \
             --no-scan 2>&1 | tee shared-storage-topic-lifecycle.log
 
+      - name: Require executed Topic-mode cases
+        run: |
+          python3 - <<'PYTEST'
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+
+          path = Path("core/build/test-results/test") / "TEST-kafka.server.SharedStorageTopicLifecycleE2ETest.xml"
+          root = ET.parse(path).getroot()
+          assert all(root.get(field) == "0" for field in ("failures", "errors", "skipped")), path
+          cases = [case.get("name", "").split("(")[0] for case in root.findall("testcase")]
+          required = (
+              "deleteAndRecreateSameNameNeverExposesOldTopicIdData",
+              "onlinePartitionExpansionCreatesIndependentWalAndRemoteStreams",
+              "deleteRecordsLogStartOffsetSurvivesRemoteCoverageAndFullRestart",
+          )
+          assert all(cases.count(name) == 1 for name in required), (path, cases)
+          PYTEST
+
       - name: Show lifecycle S3 objects
         if: always()
         run: |

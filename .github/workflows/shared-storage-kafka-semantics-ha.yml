@@ -150,6 +150,27 @@ jobs:
             -x :core:spotbugsTest \
             --no-scan 2>&1 | tee shared-storage-kafka-parity.log
 
+      - name: Require executed Topic-mode cases
+        run: |
+          python3 - <<'PYTEST'
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+
+          path = Path("core/build/test-results/test") / "TEST-kafka.server.SharedStorageKafkaSemanticsParityIntegrationTest.xml"
+          root = ET.parse(path).getroot()
+          assert all(root.get(field) == "0" for field in ("failures", "errors", "skipped")), path
+          cases = [case.get("name", "").split("(")[0] for case in root.findall("testcase")]
+          required = (
+              "topicOptInMatchesClassicKafkaProducerConsumerAndTransactionSemantics",
+              "sharedStorageMatchesClassicKafkaProducerConsumerAndTransactionSemantics",
+          )
+          assert all(cases.count(name) == 1 for name in required), (path, cases)
+          output = root.findtext("system-out", default="")
+          for protocol in ("classic", "consumer"):
+              assert f"TOPIC_PARITY_GROUP_PROTOCOL_PASSED={protocol}" in output, (path, protocol)
+              assert f"TOPIC_PARITY_GROUP_REBALANCE_PASSED={protocol}" in output, (path, protocol)
+          PYTEST
+
       - name: Show parity S3 objects
         if: always()
         run: |
