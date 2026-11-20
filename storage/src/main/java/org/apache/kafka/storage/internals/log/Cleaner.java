@@ -137,6 +137,7 @@ public class Cleaner {
      * */
     public Map.Entry<Long, CleanerStats> doClean(LogToClean cleanable, long currentTime) throws IOException, DigestException {
         UnifiedLog log = cleanable.log();
+        rejectUnsupportedSharedCompaction(log);
 
         logger.info("Beginning cleaning of log {}", log.name());
 
@@ -188,6 +189,13 @@ public class Cleaner {
         return Map.entry(endOffset, stats);
     }
 
+    private static void rejectUnsupportedSharedCompaction(UnifiedLog log) {
+        if (log.usesSharedStorage()) {
+            throw new IllegalStateException("Compaction of shared-storage log " + log.topicPartition() +
+                " is disabled: Kafka cleaner cannot safely read or replace shared segments");
+        }
+    }
+
     /**
      * Clean a group of segments into a single replacement segment.
      *
@@ -210,6 +218,7 @@ public class Cleaner {
                                CleanedTransactionMetadata transactionMetadata,
                                long legacyDeleteHorizonMs,
                                long upperBoundOffsetOfCleaningRound) throws IOException {
+        rejectUnsupportedSharedCompaction(log);
         // create a new segment with a suffix appended to the name of the log and indexes
         LogSegment cleaned = UnifiedLog.createNewCleanedSegment(log.dir(), log.config(), segments.get(0).baseOffset());
         transactionMetadata.setCleanedIndex(Optional.of(cleaned.txnIndex()));
@@ -637,6 +646,7 @@ public class Cleaner {
                                long end,
                                OffsetMap map,
                                CleanerStats stats) throws IOException, DigestException {
+        rejectUnsupportedSharedCompaction(log);
         map.clear();
         List<LogSegment> dirty = log.logSegments(start, end);
         List<Long> nextSegmentStartOffsets = new ArrayList<>();

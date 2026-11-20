@@ -245,6 +245,9 @@ public class LogCleanerManager {
 
             List<LogToClean> dirtyLogs = logs.entrySet().stream()
                     .filter(entry -> entry.getValue().config().compact &&
+                            // Shared segment replacement is not yet safe. Keep these logs
+                            // eligible for the independent retention/deletion pass below.
+                            !entry.getValue().usesSharedStorage() &&
                             !inProgress.containsKey(entry.getKey()) &&
                             !isUncleanablePartition(entry.getValue(), entry.getKey())
                     )
