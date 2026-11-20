@@ -245,6 +245,12 @@ public final class SharedStorageEngine implements AutoCloseable {
     }
 
     public Optional<ByteBuffer> readBatchBytes(SharedPartitionId partition, long offset) throws IOException {
+        return readBatchBytes(partition, offset, null);
+    }
+
+    private Optional<ByteBuffer> readBatchBytes(
+        SharedPartitionId partition, long offset, SharedObjectReader.ReadSession session
+    ) throws IOException {
         Optional<WalRecord> local = readLocal(partition, offset);
         if (local.isPresent()) {
             return Optional.of(local.get().payload().asReadOnlyBuffer());
@@ -253,7 +259,7 @@ public final class SharedStorageEngine implements AutoCloseable {
         if (reader == null) {
             return Optional.empty();
         }
-        return awaitRemote(reader.read(partition, offset));
+        return awaitRemote(reader.read(partition, offset, session));
     }
 
     public List<StoredBatchMetadata> storedBatches(
@@ -306,36 +312,43 @@ public final class SharedStorageEngine implements AutoCloseable {
         List<ByteBuffer> selected = new ArrayList<>();
         int selectedBytes = 0;
         long firstBatchOffset = startOffset;
-        for (StoredBatchMetadata metadata : known) {
-            if (metadata.lastOffset() < startOffset) {
-                continue;
-            }
-            boolean first = selected.isEmpty();
-            if (first) {
-                firstBatchOffset = metadata.firstOffset();
-            }
-            if (!canSelectPayload(metadata.payloadLength(), selectedBytes, first, maxBytes, minOneBatch)) {
-                if (first) {
-                    return new BatchReadResult(firstBatchOffset, List.of(), 0, !minOneBatch);
+        try (SharedObjectReader.ReadSession session = openReadSession()) {
+            for (StoredBatchMetadata metadata : known) {
+                if (metadata.lastOffset() < startOffset) {
+                    continue;
                 }
-                break;
-            }
-            ByteBuffer bytes = readBatchBytes(partition, metadata.firstOffset())
-                .orElseThrow(() -> new IOException(
-                    "Shared batch payload is unavailable from both WAL and remote storage at offset " +
-                        metadata.firstOffset()));
-            if (bytes.remaining() != metadata.payloadLength()) {
-                throw new IOException(
-                    "Shared batch payload length mismatch at offset " + metadata.firstOffset() +
-                        ": expected=" + metadata.payloadLength() + ", actual=" + bytes.remaining());
-            }
-            selected.add(bytes.asReadOnlyBuffer());
-            selectedBytes = Math.addExact(selectedBytes, bytes.remaining());
-            if (selectedBytes >= maxBytes && !(selected.size() == 1 && minOneBatch)) {
-                break;
+                boolean first = selected.isEmpty();
+                if (first) {
+                    firstBatchOffset = metadata.firstOffset();
+                }
+                if (!canSelectPayload(metadata.payloadLength(), selectedBytes, first, maxBytes, minOneBatch)) {
+                    if (first) {
+                        return new BatchReadResult(firstBatchOffset, List.of(), 0, !minOneBatch);
+                    }
+                    break;
+                }
+                ByteBuffer bytes = readBatchBytes(partition, metadata.firstOffset(), session)
+                    .orElseThrow(() -> new IOException(
+                        "Shared batch payload is unavailable from both WAL and remote storage at offset " +
+                            metadata.firstOffset()));
+                if (bytes.remaining() != metadata.payloadLength()) {
+                    throw new IOException(
+                        "Shared batch payload length mismatch at offset " + metadata.firstOffset() +
+                            ": expected=" + metadata.payloadLength() + ", actual=" + bytes.remaining());
+                }
+                selected.add(bytes.asReadOnlyBuffer());
+                selectedBytes = Math.addExact(selectedBytes, bytes.remaining());
+                if (selectedBytes >= maxBytes && !(selected.size() == 1 && minOneBatch)) {
+                    break;
+                }
             }
         }
         return new BatchReadResult(firstBatchOffset, List.copyOf(selected), selectedBytes, false);
+    }
+
+    private SharedObjectReader.ReadSession openReadSession() {
+        SharedObjectReader reader = remoteReader;
+        return reader == null ? null : reader.openReadSession();
     }
 
     public List<WalLocation> localLocations(
