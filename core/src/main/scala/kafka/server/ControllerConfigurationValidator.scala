@@ -18,12 +18,13 @@
 package kafka.server
 
 import java.util
-import org.apache.kafka.common.config.ConfigResource
+import org.apache.kafka.common.config.{ConfigDef, ConfigResource}
 import org.apache.kafka.common.config.ConfigResource.Type.{BROKER, CLIENT_METRICS, GROUP, TOPIC}
 import org.apache.kafka.controller.ConfigurationValidator
 import org.apache.kafka.common.errors.{InvalidConfigurationException, InvalidRequestException}
 import org.apache.kafka.common.internals.Topic
 import org.apache.kafka.coordinator.group.GroupConfig
+import org.apache.kafka.server.config.ServerLogConfigs
 import org.apache.kafka.server.metrics.ClientMetricsConfigs
 import org.apache.kafka.storage.internals.log.LogConfig
 
@@ -128,7 +129,13 @@ class ControllerConfigurationValidator(kafkaConfig: KafkaConfig) extends Configu
         val filteredConfigs = filterAndValidateNullConfigs(newConfigs, "topic")
         LogConfig.validate(oldConfigs, filteredConfigs, kafkaConfig.extractLogConfigMap,
           kafkaConfig.remoteLogManagerConfig.isRemoteStorageSystemEnabled())
-      case BROKER => validateBrokerName(resource.name())
+      case BROKER =>
+        validateBrokerName(resource.name())
+        val key = ServerLogConfigs.LOG_DISK_PROTECTION_MAX_USAGE_PERCENT_CONFIG
+        Option(newConfigs.get(key)).foreach { value =>
+          val parsed = ConfigDef.parseType(key, value, ConfigDef.Type.DOUBLE)
+          ServerLogConfigs.LOG_DISK_PROTECTION_MAX_USAGE_PERCENT_VALIDATOR.ensureValid(key, parsed)
+        }
       case CLIENT_METRICS =>
         val filteredConfigs = filterAndValidateNullConfigs(newConfigs, "client metrics")
         ClientMetricsConfigs.validate(resource.name(), filteredConfigs)

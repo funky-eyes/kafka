@@ -69,6 +69,8 @@ import org.apache.kafka.server.util.{Scheduler, ShutdownableThread}
 import org.apache.kafka.server.{ActionQueue, DelayedActionQueue, HostedPartition, LogAppendResult, LogDeleteRecordsResult, common}
 import org.apache.kafka.storage.internals.checkpoint.{LazyOffsetCheckpoints, OffsetCheckpointFile, OffsetCheckpoints}
 import org.apache.kafka.storage.internals.log.{AppendOrigin, FetchDataInfo, FetchPartitionStatus, LeaderHwChange, LogAppendInfo, LogConfig, LogDirFailureChannel, LogOffsetMetadata, LogReadInfo, LogReadResult, OffsetResultHolder, RecordValidationException, RecordValidationStats, RemoteLogReadResult, RemoteStorageFetchInfo, UnifiedLog, VerificationGuard}
+import org.apache.kafka.storage.internals.shared.kafka.{SharedStorageConfiguration, SharedUnifiedLog}
+import org.apache.kafka.storage.internals.log.StorageExtensionContext
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats
 
 import java.io.File
@@ -173,6 +175,16 @@ class ReplicaManager(val config: KafkaConfig,
                      val defaultActionQueue: ActionQueue = new DelayedActionQueue
                      ) extends Logging {
   // Changing the package or class name may cause incompatibility with existing code and metrics configuration
+  private[server] val diskPressureGuard = new DiskPressureGuard(
+    config.getDouble(org.apache.kafka.server.config.ServerLogConfigs.LOG_DISK_PROTECTION_MAX_USAGE_PERCENT_CONFIG), config.brokerId)
+  private var storageExtensionContext: Option[StorageExtensionContext] = None
+  private[server] def setStorageExtensionContext(context: StorageExtensionContext): Unit = {
+    storageExtensionContext = Some(context)
+  }
+  private lazy val sharedWalPath = SharedStorageConfiguration.from(
+    storageExtensionContext.getOrElse(throw new IllegalStateException("Shared storage context is unavailable"))).walDir()
+
+
   private val metricsPackage = "kafka.server"
   private val metricsClassName = "ReplicaManager"
   private val metricsGroup = new KafkaMetricsGroup(metricsPackage, metricsClassName)
@@ -1411,6 +1423,11 @@ class ReplicaManager(val config: KafkaConfig,
       } else {
         try {
           val partition = getPartitionOrException(topicIdPartition)
+          if (origin == AppendOrigin.CLIENT && !Topic.isInternal(topicIdPartition.topic) && diskPressureGuard.enabled()) {
+            val log = partition.localLogOrException
+            diskPressureGuard.check(Paths.get(log.parentDir()))
+            if (log.isInstanceOf[SharedUnifiedLog]) diskPressureGuard.check(sharedWalPath)
+          }
           val info = partition.appendRecordsToLeader(records, origin, requiredAcks, requestLocal,
             verificationGuards.getOrElse(topicIdPartition.topicPartition(), VerificationGuard.SENTINEL), transactionVersion)
           val numAppendedMessages = info.numMessages
@@ -2211,6 +2228,7 @@ class ReplicaManager(val config: KafkaConfig,
   // High watermark do not need to be checkpointed only when under unit tests
   def shutdown(checkpointHW: Boolean = true): Unit = {
     info("Shutting down")
+    diskPressureGuard.close()
     removeMetrics()
     if (logDirFailureHandler != null)
       logDirFailureHandler.shutdown()
