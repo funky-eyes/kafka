@@ -103,6 +103,11 @@ final class StreamObjectDataBlockCache {
         return shared.thenApply(value -> value);
     }
 
+    synchronized void clear() {
+        entries.clear();
+        cachedBytes = 0;
+    }
+
     synchronized int size() {
         return entries.size();
     }

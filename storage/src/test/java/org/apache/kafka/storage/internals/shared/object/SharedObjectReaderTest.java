@@ -19,6 +19,7 @@ package org.apache.kafka.storage.internals.shared.object;
 import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
 import org.apache.kafka.storage.internals.shared.metadata.LocalRemoteObjectCheckpoint;
 import org.apache.kafka.storage.internals.shared.metadata.RemoteObjectIndex;
+import org.apache.kafka.storage.internals.shared.metadata.RemoteMetadataConflictException;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectRange;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
@@ -94,6 +95,374 @@ class SharedObjectReaderTest {
         assertTrue(store.reads().stream().noneMatch(
             read -> read.position() == 0 && read.length() == logicalRangesWithWrongPhysicalPosition.get(1).objectLength()
         ));
+    }
+
+    @Test
+    void fetchReusesVerifiedBlockOnlyWithinOneRequestWhenSharedCacheIsDisabled() throws Exception {
+        PackedObject packed = packObject(1980);
+        RecordingObjectStore store = new RecordingObjectStore(packed.metadata().objectId(), packed.bytes());
+        StreamObjectFormat.Footer footer = StreamObjectFormat.readFooter(packed.bytes());
+        StreamObjectFormat.DataBlockIndexEntry block = StreamObjectFormat.readIndex(packed.bytes(), footer).get(0);
+        try (SharedStorageEngine engine = new SharedStorageEngine(
+            new FileSharedWal(tempDir.resolve("request-cache-fetch"), 1024 * 1024, 4096))) {
+            engine.commitRemoteObject(packed.metadata());
+            engine.installRemoteReader(new SharedObjectReader(store, engine.remoteIndex(), 0, 0));
+            SharedStorageEngine.BatchReadResult first = engine.readBatches(PARTITION, 0, 1024, false);
+            assertEquals(2, first.batches().size());
+            assertArrayEquals(new byte[]{1, 2, 3, 4, 5}, toArray(first.batches().get(0)));
+            assertArrayEquals(new byte[]{6, 7, 8, 9}, toArray(first.batches().get(1)));
+            assertEquals(1, store.reads().stream().filter(r -> r.position() == block.blockPosition() &&
+                r.length() == block.blockLength()).count());
+            assertEquals(4, store.reads().size(), "one index and one data block GET per Fetch");
+            SharedStorageEngine.BatchReadResult second = engine.readBatches(PARTITION, 0, 1024, false);
+            assertEquals(2, second.batches().size());
+            assertEquals(2, store.reads().stream().filter(r -> r.position() == block.blockPosition() &&
+                r.length() == block.blockLength()).count(), "no request cache survives a Fetch");
+            assertEquals(8, store.reads().size(), "index reuse also ends when Fetch ends");
+        }
+    }
+
+    @Test
+    void requestReuseHasGlobalNonblockingSlotLimitAndCloseIsIdempotent() throws Exception {
+        PackedObject packed = packObject(1981);
+        RecordingObjectStore store = new RecordingObjectStore(packed.metadata().objectId(), packed.bytes());
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(packed.metadata());
+        SharedObjectReader reader = new SharedObjectReader(store, index, 4, 0);
+        List<SharedObjectReader.ReadSession> sessions = new ArrayList<>();
+        for (int i = 0; i < 9; i++) {
+            sessions.add(reader.openReadSession());
+        }
+        assertEquals(0, reader.availableRequestCacheSlots());
+        try {
+            SharedObjectReader.ReadSession overflow = sessions.get(8);
+            reader.read(PARTITION, 2, overflow).get(10, TimeUnit.SECONDS);
+            reader.read(PARTITION, 7, overflow).get(10, TimeUnit.SECONDS);
+            StreamObjectFormat.Footer footer = StreamObjectFormat.readFooter(packed.bytes());
+            StreamObjectFormat.DataBlockIndexEntry block = StreamObjectFormat.readIndex(packed.bytes(), footer).get(0);
+            assertEquals(2, store.reads().stream().filter(r -> r.position() == block.blockPosition() &&
+                r.length() == block.blockLength()).count(), "overflow requests bypass reuse without blocking");
+        } finally {
+            sessions.forEach(SharedObjectReader.ReadSession::close);
+            sessions.forEach(SharedObjectReader.ReadSession::close);
+        }
+        assertEquals(8, reader.availableRequestCacheSlots());
+    }
+
+    @Test
+    void cancelledWaitingFetchKeepsSlotUntilPhysicalReadCompletes() throws Exception {
+        PackedObject packed = packObject(1982);
+        RecordingObjectStore backing = new RecordingObjectStore(packed.metadata().objectId(), packed.bytes());
+        StreamObjectFormat.Footer footer = StreamObjectFormat.readFooter(packed.bytes());
+        StreamObjectFormat.DataBlockIndexEntry block = StreamObjectFormat.readIndex(packed.bytes(), footer).get(0);
+        CompletableFuture<ByteBuffer> pending = new CompletableFuture<>();
+        ObjectStore store = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long id, ByteBuffer data) {
+                return backing.put(id, data);
+            }
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long id, long position, int length) {
+                if (position == block.blockPosition() && length == block.blockLength()) {
+                    return pending;
+                }
+                return backing.rangeRead(id, position, length);
+            }
+            @Override
+            public CompletableFuture<Void> delete(long id) {
+                return backing.delete(id);
+            }
+        };
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(packed.metadata());
+        SharedObjectReader reader = new SharedObjectReader(store, index, 4, 0);
+        SharedObjectReader.ReadSession session = reader.openReadSession();
+        CompletableFuture<Optional<ByteBuffer>> waiting = reader.read(PARTITION, 2, session);
+        assertTrue(waiting.cancel(false));
+        session.close();
+        assertEquals(7, reader.availableRequestCacheSlots());
+        pending.complete(slice(packed.bytes(), block.blockPosition(), block.blockLength()));
+        assertEquals(8, reader.availableRequestCacheSlots());
+    }
+
+    @Test
+    void requestCacheSeparatesDifferentObjectIdentities() throws Exception {
+        PackedObject first;
+        PackedObject second;
+        try (SharedStorageEngine engine = new SharedStorageEngine(
+            new FileSharedWal(tempDir.resolve("request-cache-two-objects"), 1024 * 1024, 4096))) {
+            append(engine, 0, 4, new byte[]{1, 2, 3, 4, 5});
+            append(engine, 5, 9, new byte[]{6, 7, 8, 9});
+            engine.appendData(OTHER_PARTITION, 8, 0, 4, ByteBuffer.wrap(new byte[]{10}))
+                .get(10, TimeUnit.SECONDS);
+            engine.appendData(OTHER_PARTITION, 8, 5, 9, ByteBuffer.wrap(new byte[]{11}))
+                .get(10, TimeUnit.SECONDS);
+            SharedObjectPacker packer = new SharedObjectPacker();
+            first = packer.pack(1983, engine.uploadCandidates(PARTITION, 0, 10), engine);
+            second = packer.pack(1984, engine.uploadCandidates(OTHER_PARTITION, 0, 10), engine);
+        }
+        InMemoryObjectStore backing = new InMemoryObjectStore();
+        backing.put(1983, first.bytes()).get(10, TimeUnit.SECONDS);
+        backing.put(1984, second.bytes()).get(10, TimeUnit.SECONDS);
+        AtomicInteger gets = new AtomicInteger();
+        ObjectStore store = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long id, ByteBuffer data) {
+                return backing.put(id, data);
+            }
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long id, long position, int length) {
+                gets.incrementAndGet();
+                return backing.rangeRead(id, position, length);
+            }
+            @Override
+            public CompletableFuture<Void> delete(long id) {
+                return backing.delete(id);
+            }
+        };
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(first.metadata());
+        index.add(second.metadata());
+        SharedObjectReader reader = new SharedObjectReader(store, index, 4, 0);
+        try (SharedObjectReader.ReadSession session = reader.openReadSession()) {
+            assertArrayEquals(new byte[]{1, 2, 3, 4, 5}, toArray(reader.read(PARTITION, 2, session)
+                .get(10, TimeUnit.SECONDS).orElseThrow()));
+            assertArrayEquals(new byte[]{10}, toArray(reader.read(OTHER_PARTITION, 2, session)
+                .get(10, TimeUnit.SECONDS).orElseThrow()));
+            assertArrayEquals(new byte[]{6, 7, 8, 9}, toArray(reader.read(PARTITION, 7, session)
+                .get(10, TimeUnit.SECONDS).orElseThrow()));
+            assertArrayEquals(new byte[]{11}, toArray(reader.read(OTHER_PARTITION, 7, session)
+                .get(10, TimeUnit.SECONDS).orElseThrow()));
+            assertEquals(8, gets.get(), "two distinct indices and data blocks are each loaded once");
+        }
+    }
+
+    @Test
+    void requestCacheDoesNotReuseCorruptPrimaryAndValidatesFallback() throws Exception {
+        PackedObject primary = packObject(1985);
+        PackedObject alternate = packObject(1986);
+        ByteBuffer corrupt = writableCopy(primary.bytes());
+        StreamObjectFormat.Footer footer = StreamObjectFormat.readFooter(corrupt);
+        StreamObjectFormat.DataBlockIndexEntry block = StreamObjectFormat.readIndex(corrupt, footer).get(0);
+        int position = Math.toIntExact(block.blockPosition() + StreamObjectFormat.DATA_BLOCK_HEADER_BYTES +
+            StreamObjectFormat.BATCH_ENTRY_HEADER_BYTES);
+        corrupt.put(position, (byte) (corrupt.get(position) ^ 0x44));
+        InMemoryObjectStore backing = new InMemoryObjectStore();
+        backing.put(1985, corrupt).get(10, TimeUnit.SECONDS);
+        backing.put(1986, alternate.bytes()).get(10, TimeUnit.SECONDS);
+        AtomicInteger primaryDataGets = new AtomicInteger();
+        AtomicInteger alternateDataGets = new AtomicInteger();
+        ObjectStore store = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long id, ByteBuffer data) {
+                return backing.put(id, data);
+            }
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long id, long pos, int length) {
+                if (pos == block.blockPosition() && length == block.blockLength()) {
+                    (id == 1985 ? primaryDataGets : alternateDataGets).incrementAndGet();
+                }
+                return backing.rangeRead(id, pos, length);
+            }
+            @Override
+            public CompletableFuture<Void> delete(long id) {
+                return backing.delete(id);
+            }
+        };
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(primary.metadata());
+        index.add(alternate.metadata());
+        SharedObjectReader reader = new SharedObjectReader(store, index, 4, 0);
+        try (SharedObjectReader.ReadSession session = reader.openReadSession()) {
+            assertArrayEquals(new byte[]{1, 2, 3, 4, 5}, toArray(reader.read(PARTITION, 2, session)
+                .get(10, TimeUnit.SECONDS).orElseThrow()));
+            assertArrayEquals(new byte[]{6, 7, 8, 9}, toArray(reader.read(PARTITION, 7, session)
+                .get(10, TimeUnit.SECONDS).orElseThrow()));
+            assertEquals(2, primaryDataGets.get(), "failed primary loads must not be retained");
+            assertEquals(1, alternateDataGets.get(), "the validated fallback block is reused");
+        }
+        assertEquals(8, reader.availableRequestCacheSlots());
+    }
+
+    @Test
+    void requestCacheSeparatesBlocksOfSameObject() throws Exception {
+        PackedObject packed;
+        try (SharedStorageEngine engine = new SharedStorageEngine(
+            new FileSharedWal(tempDir.resolve("request-cache-two-blocks"), 1024 * 1024, 4096))) {
+            append(engine, 0, 4, new byte[]{1, 2, 3, 4, 5});
+            engine.appendData(OTHER_PARTITION, 8, 0, 4, ByteBuffer.wrap(new byte[]{10}))
+                .get(10, TimeUnit.SECONDS);
+            List<SharedStorageEngine.UploadCandidate> batches = new ArrayList<>();
+            batches.addAll(engine.uploadCandidates(PARTITION, 0, 5));
+            batches.addAll(engine.uploadCandidates(OTHER_PARTITION, 0, 5));
+            packed = new SharedObjectPacker().pack(1987, batches, engine);
+        }
+        RecordingObjectStore store = new RecordingObjectStore(1987, packed.bytes());
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(packed.metadata());
+        SharedObjectReader reader = new SharedObjectReader(store, index, 4, 0);
+        try (SharedObjectReader.ReadSession session = reader.openReadSession()) {
+            assertArrayEquals(new byte[]{1, 2, 3, 4, 5}, toArray(reader.read(PARTITION, 2, session)
+                .get(10, TimeUnit.SECONDS).orElseThrow()));
+            assertArrayEquals(new byte[]{10}, toArray(reader.read(OTHER_PARTITION, 2, session)
+                .get(10, TimeUnit.SECONDS).orElseThrow()));
+            assertArrayEquals(new byte[]{1, 2, 3, 4, 5}, toArray(reader.read(PARTITION, 2, session)
+                .get(10, TimeUnit.SECONDS).orElseThrow()));
+            assertEquals(5, store.reads().size(), "one index and two distinct data blocks");
+        }
+    }
+
+    @Test
+    void oversizedRequestIndexIsNotRetained() throws Exception {
+        PackedObject packed;
+        try (SharedStorageEngine engine = new SharedStorageEngine(
+            new FileSharedWal(tempDir.resolve("request-cache-large-index"), 2 * 1024 * 1024, 4096))) {
+            for (int i = 0; i < 1024; i++) {
+                engine.appendData(PARTITION, 8, i, i, ByteBuffer.wrap(new byte[]{42})).get(10, TimeUnit.SECONDS);
+            }
+            packed = new SharedObjectPacker(StreamObjectFormat.BATCH_ENTRY_HEADER_BYTES)
+                .pack(1988, engine.uploadCandidates(PARTITION, 0, 1024), engine);
+        }
+        StreamObjectFormat.Footer footer = StreamObjectFormat.readFooter(packed.bytes());
+        assertTrue(footer.indexLength() > 64 * 1024);
+        RecordingObjectStore store = new RecordingObjectStore(1988, packed.bytes());
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(packed.metadata());
+        SharedObjectReader reader = new SharedObjectReader(store, index, 0, 0);
+        try (SharedObjectReader.ReadSession session = reader.openReadSession()) {
+            assertArrayEquals(new byte[]{42}, toArray(reader.read(PARTITION, 0, session)
+                .get(10, TimeUnit.SECONDS).orElseThrow()));
+            assertArrayEquals(new byte[]{42}, toArray(reader.read(PARTITION, 0, session)
+                .get(10, TimeUnit.SECONDS).orElseThrow()));
+            assertEquals(7, store.reads().size(), "oversize index is read twice; data block is reused");
+        }
+    }
+
+    @Test
+    void corruptIndexIsNotRetainedWithinRequest() throws Exception {
+        PackedObject packed = packObject(1989);
+        ByteBuffer corrupt = writableCopy(packed.bytes());
+        StreamObjectFormat.Footer footer = StreamObjectFormat.readFooter(corrupt);
+        int position = Math.toIntExact(footer.indexPosition() + StreamObjectFormat.INDEX_HEADER_BYTES);
+        corrupt.put(position, (byte) (corrupt.get(position) ^ 0x44));
+        RecordingObjectStore store = new RecordingObjectStore(1989, corrupt);
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(packed.metadata());
+        SharedObjectReader reader = new SharedObjectReader(store, index, 0, 0);
+        try (SharedObjectReader.ReadSession session = reader.openReadSession()) {
+            for (int i = 0; i < 2; i++) {
+                ExecutionException error = assertThrows(ExecutionException.class,
+                    () -> reader.read(PARTITION, 2, session).get(10, TimeUnit.SECONDS));
+                assertTrue(hasCause(error, RemoteObjectCorruptionException.class));
+            }
+            assertEquals(6, store.reads().size(), "failed object index is fetched and verified on each attempt");
+        }
+    }
+
+    @Test
+    void conflictingObjectReplacementIsRejectedWithoutChangingRequestView() throws Exception {
+        PackedObject oldObject = packObject(1990);
+        PackedObject newObject;
+        try (SharedStorageEngine engine = new SharedStorageEngine(
+            new FileSharedWal(tempDir.resolve("request-cache-replace"), 1024 * 1024, 4096))) {
+            append(engine, 0, 4, new byte[]{9, 9, 9, 9, 9});
+            append(engine, 5, 9, new byte[]{8, 8, 8, 8});
+            newObject = new SharedObjectPacker().pack(1991, engine.uploadCandidates(PARTITION, 0, 10), engine);
+        }
+        InMemoryObjectStore store = new InMemoryObjectStore();
+        store.put(1990, oldObject.bytes()).get(10, TimeUnit.SECONDS);
+        store.put(1991, newObject.bytes()).get(10, TimeUnit.SECONDS);
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(oldObject.metadata());
+        SharedObjectReader reader = new SharedObjectReader(store, index, 0, 0);
+        try (SharedObjectReader.ReadSession session = reader.openReadSession()) {
+            assertArrayEquals(new byte[]{1, 2, 3, 4, 5}, toArray(reader.read(PARTITION, 2, session)
+                .get(10, TimeUnit.SECONDS).orElseThrow()));
+            SharedObjectMetadata object = newObject.metadata();
+            assertThrows(RemoteMetadataConflictException.class, () -> index.restore(object.ranges().stream()
+                .map(range -> new RemoteObjectIndex.RangeReference(
+                    object.objectId(), object.objectSize(), object.objectChecksum(), range)).toList()));
+            assertArrayEquals(new byte[]{1, 2, 3, 4, 5}, toArray(reader.read(PARTITION, 2, session)
+                .get(10, TimeUnit.SECONDS).orElseThrow()));
+        }
+    }
+
+    @Test
+    void tailObjectPublicationChangesRevisionWithoutReusingAnotherObjectsIndex() throws Exception {
+        PackedObject oldObject = packObject(1992);
+        PackedObject tailObject;
+        try (SharedStorageEngine engine = new SharedStorageEngine(
+            new FileSharedWal(tempDir.resolve("request-cache-tail-publication"), 1024 * 1024, 4096))) {
+            append(engine, 10, 14, new byte[]{7, 7, 7});
+            append(engine, 15, 19, new byte[]{8, 8, 8});
+            tailObject = new SharedObjectPacker().pack(1993, engine.uploadCandidates(PARTITION, 10, 20), engine);
+        }
+        InMemoryObjectStore store = new InMemoryObjectStore();
+        store.put(1992, oldObject.bytes()).get(10, TimeUnit.SECONDS);
+        store.put(1993, tailObject.bytes()).get(10, TimeUnit.SECONDS);
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(oldObject.metadata());
+        SharedObjectReader reader = new SharedObjectReader(store, index, 0, 0);
+        try (SharedObjectReader.ReadSession session = reader.openReadSession()) {
+            long before = index.revision(PARTITION);
+            assertArrayEquals(new byte[]{1, 2, 3, 4, 5}, toArray(reader.read(PARTITION, 2, session)
+                .get(10, TimeUnit.SECONDS).orElseThrow()));
+            index.add(tailObject.metadata());
+            assertTrue(index.revision(PARTITION) > before);
+            assertArrayEquals(new byte[]{7, 7, 7}, toArray(reader.read(PARTITION, 12, session)
+                .get(10, TimeUnit.SECONDS).orElseThrow()));
+            assertArrayEquals(new byte[]{1, 2, 3, 4, 5}, toArray(reader.read(PARTITION, 2, session)
+                .get(10, TimeUnit.SECONDS).orElseThrow()));
+        }
+    }
+
+    @Test
+    void requestSessionCannotCrossReadersOrHideCorruptPhysicalCopy() throws Exception {
+        PackedObject packed = packObject(1994);
+        ByteBuffer corrupt = writableCopy(packed.bytes());
+        StreamObjectFormat.Footer footer = StreamObjectFormat.readFooter(corrupt);
+        StreamObjectFormat.DataBlockIndexEntry block = StreamObjectFormat.readIndex(corrupt, footer).get(0);
+        int payload = Math.toIntExact(block.blockPosition() + StreamObjectFormat.DATA_BLOCK_HEADER_BYTES +
+            StreamObjectFormat.BATCH_ENTRY_HEADER_BYTES);
+        corrupt.put(payload, (byte) (corrupt.get(payload) ^ 0x44));
+
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(packed.metadata());
+        RecordingObjectStore healthyStore = new RecordingObjectStore(1994, packed.bytes());
+        RecordingObjectStore corruptStore = new RecordingObjectStore(1994, corrupt);
+        SharedObjectReader healthyReader = new SharedObjectReader(healthyStore, index, 0, 0);
+        SharedObjectReader corruptReader = new SharedObjectReader(corruptStore, index, 0, 0);
+        try (SharedObjectReader.ReadSession session = healthyReader.openReadSession()) {
+            assertArrayEquals(new byte[]{1, 2, 3, 4, 5}, toArray(healthyReader.read(PARTITION, 2, session)
+                .get(10, TimeUnit.SECONDS).orElseThrow()));
+            ExecutionException foreign = assertThrows(ExecutionException.class,
+                () -> corruptReader.read(PARTITION, 2, session).get(10, TimeUnit.SECONDS));
+            assertTrue(hasCause(foreign, IllegalArgumentException.class));
+            assertTrue(corruptStore.reads().isEmpty(), "foreign session is rejected before any object I/O");
+            try (SharedObjectReader.ReadSession ownSession = corruptReader.openReadSession()) {
+                ExecutionException damaged = assertThrows(ExecutionException.class,
+                    () -> corruptReader.read(PARTITION, 2, ownSession).get(10, TimeUnit.SECONDS));
+                assertTrue(hasCause(damaged, RemoteObjectCorruptionException.class));
+                assertTrue(corruptStore.reads().size() > 0, "own session must validate its physical copy");
+            }
+            assertArrayEquals(new byte[]{6, 7, 8, 9}, toArray(healthyReader.read(PARTITION, 7, session)
+                .get(10, TimeUnit.SECONDS).orElseThrow()));
+        }
+    }
+
+    @Test
+    void closedRequestSessionIsRejectedBeforeRemoteLookup() throws Exception {
+        PackedObject packed = packObject(1995);
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(packed.metadata());
+        RecordingObjectStore store = new RecordingObjectStore(1995, packed.bytes());
+        SharedObjectReader reader = new SharedObjectReader(store, index, 0, 0);
+        SharedObjectReader.ReadSession session = reader.openReadSession();
+        session.close();
+        ExecutionException closed = assertThrows(ExecutionException.class,
+            () -> reader.read(PARTITION, 2, session).get(10, TimeUnit.SECONDS));
+        assertTrue(hasCause(closed, IllegalStateException.class));
+        assertTrue(store.reads().isEmpty());
     }
 
     @Test

@@ -25,6 +25,7 @@ import java.nio.ByteBuffer;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CancellationException;
 import java.util.zip.CRC32C;
@@ -33,6 +34,13 @@ public final class SharedObjectReader {
     static final int DEFAULT_INDEX_CACHE_ENTRIES = 1_024;
     static final long DEFAULT_DATA_BLOCK_CACHE_BYTES = 64L * 1024 * 1024;
 
+    // Temporary read reuse is separate from the shared hot cache. Admission is
+    // non-blocking and limits cache holders, not physical object-store GETs.
+    private static final int REQUEST_CACHE_BYTES = 1024 * 1024;
+    private static final int REQUEST_CACHE_SLOTS = 8;
+    private static final int REQUEST_INDEX_MAX_BYTES = 64 * 1024;
+    private static final int REQUEST_INDEX_MAX_ENTRIES = 1024;
+    private final Semaphore requestCacheSlots = new Semaphore(REQUEST_CACHE_SLOTS);
     private final ObjectStore objectStore;
     private final ActiveCommittedObjectReads physicalReads;
     private final RemoteObjectIndex remoteIndex;
@@ -86,14 +94,124 @@ public final class SharedObjectReader {
      * promote a physical copy, affect Kafka ISR/HW, or permit object GC.
      */
     public CompletableFuture<Optional<ByteBuffer>> read(SharedPartitionId partition, long offset) {
+        return read(partition, offset, null);
+    }
+
+    int availableRequestCacheSlots() {
+        return requestCacheSlots.availablePermits();
+    }
+
+    public ReadSession openReadSession() {
+        return new ReadSession(this, requestCacheSlots.tryAcquire() ? requestCacheSlots : null);
+    }
+
+    /** A bounded, request-scoped block reuse cache; it never changes the configured shared cache. */
+    public static final class ReadSession implements AutoCloseable {
+        private final SharedObjectReader owner;
+        private final Semaphore slots;
+        private final StreamObjectDataBlockCache cache;
+        private CompletableFuture<?> inFlight = CompletableFuture.completedFuture(null);
+        private IndexKey indexKey;
+        private CompletableFuture<Optional<StreamObjectIndexReader.IndexSnapshot>> indexFuture;
+        private boolean closed;
+
+        private ReadSession(SharedObjectReader owner, Semaphore slots) {
+            this.owner = owner;
+            this.slots = slots;
+            this.cache = slots == null ? null : new StreamObjectDataBlockCache(REQUEST_CACHE_BYTES);
+        }
+
+        private synchronized void requireOpenOwner(SharedObjectReader reader) {
+            if (owner != reader) {
+                throw new IllegalArgumentException("read session belongs to another reader");
+            }
+            if (closed) {
+                throw new IllegalStateException("read session is closed");
+            }
+        }
+
+        private synchronized CompletableFuture<StreamObjectDataBlockReader.DataBlockSnapshot> get(
+            RemoteObjectIndex.RangeReference reference,
+            StreamObjectFormat.DataBlockIndexEntry block,
+            java.util.function.Supplier<CompletableFuture<StreamObjectDataBlockReader.DataBlockSnapshot>> loader
+        ) {
+            if (closed) {
+                return CompletableFuture.failedFuture(new IllegalStateException("read session is closed"));
+            }
+            CompletableFuture<StreamObjectDataBlockReader.DataBlockSnapshot> result = cache == null
+                ? loader.get() : cache.get(reference, block, loader);
+            // Keep the cache permit until this block-loading future completes even if its
+            // caller is interrupted. Physical GETs have separate lifetime tracking.
+            inFlight = CompletableFuture.allOf(inFlight.handle((v, e) -> null), result.handle((v, e) -> null));
+            return result;
+        }
+
+        private synchronized CompletableFuture<Optional<StreamObjectIndexReader.IndexSnapshot>> index(
+            RemoteObjectIndex.RangeReference reference,
+            java.util.function.Supplier<CompletableFuture<Optional<StreamObjectIndexReader.IndexSnapshot>>> loader
+        ) {
+            if (closed) {
+                return CompletableFuture.failedFuture(new IllegalStateException("read session is closed"));
+            }
+            if (slots == null) {
+                return loader.get();
+            }
+            IndexKey key = new IndexKey(reference.objectId(), reference.objectSize(), reference.objectChecksum());
+            if (key.equals(indexKey) && indexFuture != null) {
+                return indexFuture.thenApply(value -> value);
+            }
+            CompletableFuture<Optional<StreamObjectIndexReader.IndexSnapshot>> load = loader.get();
+            indexKey = key;
+            indexFuture = load;
+            inFlight = CompletableFuture.allOf(inFlight.handle((v, e) -> null), load.handle((v, e) -> null));
+            load.whenComplete((value, failure) -> {
+                synchronized (ReadSession.this) {
+                    if (indexFuture == load && (failure != null || value == null || value.isEmpty() ||
+                        value.orElseThrow().footer().indexLength() > REQUEST_INDEX_MAX_BYTES ||
+                        value.orElseThrow().entries().size() > REQUEST_INDEX_MAX_ENTRIES)) {
+                        indexFuture = null;
+                        indexKey = null;
+                    }
+                }
+            });
+            return load.thenApply(value -> value);
+        }
+
+        private record IndexKey(long objectId, long objectSize, long objectChecksum) {
+        }
+
+        @Override
+        public synchronized void close() {
+            if (!closed) {
+                closed = true;
+                if (cache != null) {
+                    cache.clear();
+                }
+                indexFuture = null;
+                indexKey = null;
+                if (slots != null) {
+                    inFlight.whenComplete((v, e) -> slots.release());
+                }
+            }
+        }
+    }
+
+    public CompletableFuture<Optional<ByteBuffer>> read(SharedPartitionId partition, long offset, ReadSession session) {
         Objects.requireNonNull(partition, "partition");
+        if (session != null) {
+            try {
+                session.requireOpenOwner(this);
+            } catch (IllegalArgumentException | IllegalStateException failure) {
+                return CompletableFuture.failedFuture(failure);
+            }
+        }
         Optional<RemoteObjectIndex.RangeReference> reference = remoteIndex.find(partition, offset);
         if (reference.isEmpty()) {
             return CompletableFuture.completedFuture(Optional.empty());
         }
 
         RemoteObjectIndex.RangeReference ref = reference.get();
-        return readReference(ref).exceptionallyCompose(firstFailure -> {
+        return readReference(ref, session).exceptionallyCompose(firstFailure -> {
             if (unwrapCompletion(firstFailure) instanceof CancellationException) {
                 // Cancellation is a caller/lifecycle signal, not evidence of
                 // physical object loss. Never start a second S3 read.
@@ -104,7 +222,7 @@ public final class SharedObjectReader {
                 return CompletableFuture.failedFuture(firstFailure);
             }
             RemoteObjectIndex.RangeReference alternate = fallback.get();
-            return readReference(alternate).handle((bytes, secondFailure) -> {
+            return readReference(alternate, session).handle((bytes, secondFailure) -> {
                 if (secondFailure != null) {
                     // Cancellation of alternate I/O is a lifecycle signal,
                     // not evidence that both COMMITTED copies are unreadable.
@@ -150,7 +268,8 @@ public final class SharedObjectReader {
     }
 
     private CompletableFuture<Optional<ByteBuffer>> readReference(
-        RemoteObjectIndex.RangeReference reference
+        RemoteObjectIndex.RangeReference reference,
+        ReadSession session
     ) {
         Optional<ActiveCommittedObjectReads.ReadLease> admitted =
             physicalReads.tryAcquireLogicalRead(reference.objectId());
@@ -163,7 +282,7 @@ public final class SharedObjectReader {
         final CompletableFuture<Optional<ByteBuffer>> result;
         try {
             result = Objects.requireNonNull(
-                reference.hasObjectDescriptor() ? readIndexed(reference) : readDirect(reference),
+                reference.hasObjectDescriptor() ? readIndexed(reference, session) : readDirect(reference),
                 "remote read returned null future"
             );
         } catch (Throwable failure) {
@@ -175,8 +294,12 @@ public final class SharedObjectReader {
         return result.whenComplete((ignored, failure) -> lease.close());
     }
 
-    private CompletableFuture<Optional<ByteBuffer>> readIndexed(RemoteObjectIndex.RangeReference reference) {
-        return indexCache.get(reference, indexReader).thenCompose(snapshot -> {
+    private CompletableFuture<Optional<ByteBuffer>> readIndexed(RemoteObjectIndex.RangeReference reference, ReadSession session) {
+        java.util.function.Supplier<CompletableFuture<Optional<StreamObjectIndexReader.IndexSnapshot>>> load =
+            () -> indexCache.get(reference, indexReader);
+        CompletableFuture<Optional<StreamObjectIndexReader.IndexSnapshot>> index = session == null
+            ? load.get() : session.index(reference, load);
+        return index.thenCompose(snapshot -> {
             if (snapshot.isEmpty()) {
                 return readDirect(reference);
             }
@@ -186,19 +309,20 @@ public final class SharedObjectReader {
             } catch (IOException e) {
                 return CompletableFuture.failedFuture(corruption(reference, e));
             }
-            return readDataBlock(reference, block);
+            return readDataBlock(reference, block, session);
         });
     }
 
     private CompletableFuture<Optional<ByteBuffer>> readDataBlock(
         RemoteObjectIndex.RangeReference reference,
-        StreamObjectFormat.DataBlockIndexEntry block
+        StreamObjectFormat.DataBlockIndexEntry block,
+        ReadSession session
     ) {
-        return dataBlockCache.get(
-            reference,
-            block,
-            () -> loadDataBlock(reference, block)
-        ).thenApply(snapshot -> {
+        java.util.function.Supplier<CompletableFuture<StreamObjectDataBlockReader.DataBlockSnapshot>> load =
+            () -> dataBlockCache.get(reference, block, () -> loadDataBlock(reference, block));
+        CompletableFuture<StreamObjectDataBlockReader.DataBlockSnapshot> result = session == null
+            ? load.get() : session.get(reference, block, load);
+        return result.thenApply(snapshot -> {
             try {
                 return Optional.of(snapshot.batch(reference.range()));
             } catch (IOException e) {
