@@ -97,9 +97,55 @@ jobs:
           gradle-cache-read-only: true
 
       - name: Run repeated HA and failure cycles
+        env:
+          SOAK_ITERATIONS: ${{ inputs.iterations || '3' }}
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin123
+          AWS_REGION: us-east-1
+          SHARED_STORAGE_S3_ENDPOINT: http://127.0.0.1:9000
+          SHARED_STORAGE_S3_REGION: us-east-1
+          SHARED_STORAGE_S3_BUCKET: kafka-shared-storage-soak
+          SHARED_STORAGE_S3_CONTROL: ${{ github.workspace }}/tools/shared_storage_minio_fixture.sh
         run: |
-          "${GITHUB_WORKSPACE}/tools/shared_storage_minio_fixture.sh" start
-          "${GITHUB_WORKSPACE}/tools/shared_storage_minio_fixture.sh" wait-ready 30 || true
+          set -euo pipefail
+          mkdir -p shared-storage-soak-results
+          if [[ ! "$SOAK_ITERATIONS" =~ ^[1-9][0-9]?$ ]]; then
+            echo "Expected a positive iteration count below 100" >&2
+            exit 1
+          fi
+          for ((cycle = 1; cycle <= SOAK_ITERATIONS; cycle++)); do
+            cycle_dir="shared-storage-soak-results/cycle-$cycle"
+            mkdir "$cycle_dir"
+            ./gradlew :core:test --rerun \
+              --tests 'kafka.server.SharedStorageHighAvailabilityE2ETest' \
+              --tests 'kafka.server.SharedStorageKafkaClientFailoverE2ETest' \
+              --tests 'kafka.server.SharedStorageS3OutageKRaftIntegrationTest' \
+              --tests 'kafka.server.SharedStorageLocalStateLossE2ETest.topicOptInRecoversAfterAllSharedWalAndCheckpointStateIsLost' \
+              -x :core:checkstyleMain -x :core:checkstyleTest \
+              -x :core:spotbugsMain -x :core:spotbugsTest \
+              -PmaxParallelForks=1 --no-scan 2>&1 | tee "$cycle_dir/test.log"
+            python3 - "$cycle_dir" <<'PYTEST'
+          from pathlib import Path
+          import shutil
+          import sys
+          from xml.etree import ElementTree as ET
+
+          output = Path(sys.argv[1])
+          results = Path("core/build/test-results/test")
+          required = {
+              "SharedStorageHighAvailabilityE2ETest": 1,
+              "SharedStorageKafkaClientFailoverE2ETest": 3,
+              "SharedStorageS3OutageKRaftIntegrationTest": 1,
+              "SharedStorageLocalStateLossE2ETest": 1,
+          }
+          for suite, count in required.items():
+              path = results / f"TEST-kafka.server.{suite}.xml"
+              root = ET.parse(path).getroot()
+              assert int(root.get("tests")) == count, (path, root.attrib)
+              assert all(root.get(field) == "0" for field in ("skipped", "failures", "errors")), (path, root.attrib)
+              shutil.copyfile(path, output / path.name)
+          PYTEST
+          done
       - name: Record object-store convergence evidence
         if: always()
         run: |
@@ -120,7 +166,7 @@ jobs:
         with:
           name: shared-storage-soak-evidence
           path: |
-            shared-storage-soak.log
+            shared-storage-soak-results/
             shared-storage-soak-objects.log
             core/build/test-results/test/**
           if-no-files-found: warn

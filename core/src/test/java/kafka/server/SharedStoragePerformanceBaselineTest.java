@@ -17,6 +17,7 @@
 package kafka.server;
 
 import org.apache.kafka.clients.admin.Admin;
+import org.apache.kafka.clients.admin.FeatureUpdate;
 import org.apache.kafka.clients.admin.OffsetSpec;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.admin.TopicDescription;
@@ -32,6 +33,7 @@ import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.test.KafkaClusterTestKit;
 import org.apache.kafka.common.test.TestKitNodes;
+import org.apache.kafka.server.common.SharedStorageVersion;
 import org.apache.kafka.server.metrics.KafkaMetricsGroup;
 import org.apache.kafka.server.metrics.KafkaYammerMetrics;
 import org.apache.kafka.test.TestUtils;
@@ -110,10 +112,8 @@ public class SharedStoragePerformanceBaselineTest {
             .setNumDisksPerBroker(1)
             .build();
         KafkaClusterTestKit.Builder builder = new KafkaClusterTestKit.Builder(nodes)
-            .setConfigProp("shared.storage.legacy.selectors.enabled", true)
             .setConfigProp("storage.extension.class",
                 "org.apache.kafka.storage.internals.shared.s3.S3SharedStorageExtension")
-            .setConfigProp("shared.storage.topic.pattern", "shared-performance-shared-.*")
             .setConfigProp("shared.storage.wal.engine", "ring")
             .setConfigProp("shared.storage.wal.capacity.bytes", 128L * 1024 * 1024)
             .setConfigProp("shared.storage.object.target.bytes", 4L * 1024 * 1024)
@@ -137,6 +137,9 @@ public class SharedStoragePerformanceBaselineTest {
             String bootstrapServers = cluster.bootstrapServers();
             List<Integer> brokerIds = List.copyOf(cluster.brokers().keySet());
             try (Admin admin = cluster.admin()) {
+                admin.updateFeatures(Map.of(SharedStorageVersion.FEATURE_NAME,
+                    new FeatureUpdate((short) 1, FeatureUpdate.UpgradeType.UPGRADE)))
+                    .all().get(30, TimeUnit.SECONDS);
                 // Warm both routed data paths once before collecting samples. Classic runs first in calibration.
                 BenchmarkPair calibration = benchmarkPair(
                     admin,
@@ -350,7 +353,9 @@ public class SharedStoragePerformanceBaselineTest {
         String classicTopic = "classic-performance-classic-" + pairId;
         Map<String, String> topicConfigs = Map.of(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2");
         admin.createTopics(List.of(
-            new NewTopic(sharedTopic, PARTITIONS, (short) 3).configs(topicConfigs),
+            new NewTopic(sharedTopic, PARTITIONS, (short) 3)
+                .configs(Map.of(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2",
+                    TopicConfig.SHARED_STORAGE_ENABLE_CONFIG, "true")),
             new NewTopic(classicTopic, PARTITIONS, (short) 3).configs(topicConfigs)
         )).all().get(30, TimeUnit.SECONDS);
         waitForTopicReady(admin, List.of(sharedTopic, classicTopic));
@@ -427,7 +432,9 @@ public class SharedStoragePerformanceBaselineTest {
         String classicTopic = "classic-performance-classic-uncompressed-diagnostic";
         Map<String, String> topicConfigs = Map.of(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2");
         admin.createTopics(List.of(
-            new NewTopic(sharedTopic, PARTITIONS, (short) 3).configs(topicConfigs),
+            new NewTopic(sharedTopic, PARTITIONS, (short) 3)
+                .configs(Map.of(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2",
+                    TopicConfig.SHARED_STORAGE_ENABLE_CONFIG, "true")),
             new NewTopic(classicTopic, PARTITIONS, (short) 3).configs(topicConfigs)
         )).all().get(30, TimeUnit.SECONDS);
         waitForTopicReady(admin, List.of(sharedTopic, classicTopic));

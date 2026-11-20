@@ -29,6 +29,8 @@ from shared_storage_ga_manifest import (
     source_evidence_run_state,
     path_is_selected,
     push_path_patterns,
+    required_release_gates,
+    ROLLING_UPGRADE_GATE,
 )
 
 
@@ -43,6 +45,13 @@ class StubGitHub(GitHub):
 
 
 class EvidenceRunTest(unittest.TestCase):
+    def test_fresh_install_excludes_only_mixed_version_upgrade(self):
+        standard = required_release_gates(require_real_s3=True)
+        fresh_install = required_release_gates(fresh_install=True, require_real_s3=True)
+        self.assertIn(ROLLING_UPGRADE_GATE, standard)
+        self.assertEqual([gate for gate in standard if gate != ROLLING_UPGRADE_GATE], fresh_install)
+        self.assertIn(REAL_S3_REQUIRED, fresh_install)
+
     def test_real_s3_uses_dispatch_branch_and_dedicated_push_branch(self):
         self.assertEqual(
             (

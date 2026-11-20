@@ -53,6 +53,8 @@ CORE_REQUIRED = [
     "Shared Storage Topic Lifecycle",
 ]
 
+ROLLING_UPGRADE_GATE = "Shared Storage Rolling Upgrade"
+
 GA_HARDENING_REQUIRED = [
     "Shared Storage Performance Baseline",
     "Shared Storage Soak and Chaos",
@@ -479,6 +481,15 @@ def render_row(repo, name, state, run, detail):
     return f"| {name} | {state} | {run_cell} | {status} | {evidence} | {detail} |"
 
 
+def required_release_gates(fresh_install=False, require_real_s3=False):
+    required = CORE_REQUIRED + [
+        gate for gate in GA_HARDENING_REQUIRED if not fresh_install or gate != ROLLING_UPGRADE_GATE
+    ]
+    if require_real_s3:
+        required.append(REAL_S3_REQUIRED)
+    return required
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", required=True)
@@ -486,6 +497,8 @@ def main():
     parser.add_argument("--evidence-branch", required=True)
     parser.add_argument("--token", default=os.environ.get("GITHUB_TOKEN"))
     parser.add_argument("--output", default="shared-storage-ga-manifest.md")
+    parser.add_argument("--fresh-install", action="store_true",
+                        help="Evaluate the first Topic opt-in release without mixed-version upgrade claims")
     parser.add_argument("--require-real-s3", action="store_true")
     parser.add_argument("--require-real-s3-exact-sha", action="store_true")
     parser.add_argument("--require-real-s3-branch-push", action="store_true")
@@ -503,9 +516,7 @@ def main():
     target_sha = target["sha"]
     target_fingerprint, production_files = github.production_fingerprint(target_sha)
 
-    required = CORE_REQUIRED + GA_HARDENING_REQUIRED
-    if args.require_real_s3:
-        required.append(REAL_S3_REQUIRED)
+    required = required_release_gates(args.fresh_install, args.require_real_s3)
 
     fingerprint_cache = {target_sha: target_fingerprint}
     contract_cache = {}
@@ -513,6 +524,7 @@ def main():
     failures = []
 
     for name in required:
+        require_exact_sha = args.fresh_install or (name == REAL_S3_REQUIRED and args.require_real_s3_exact_sha)
         workflow_path = EVIDENCE_WORKFLOW_PATHS[name]
         run_specs = evidence_run_specs(
             name,
@@ -545,11 +557,6 @@ def main():
             latest_for_spec = None
             for candidate_runs in run_pages:
                 for run in candidate_runs:
-                    required_head_sha = (
-                        target_sha
-                        if name == REAL_S3_REQUIRED and args.require_real_s3_exact_sha
-                        else None
-                    )
                     if not is_branch_evidence_run(
                         run,
                         args.repo,
@@ -557,7 +564,7 @@ def main():
                         name,
                         workflow_path,
                         event,
-                        required_head_sha,
+                        target_sha if require_exact_sha else None,
                     ):
                         continue
                     sha = run.get("head_sha")
@@ -591,7 +598,7 @@ def main():
         run = max(equivalent, key=lambda item: item.get("created_at", "")) if equivalent else None
         if run is None:
             state = "MISSING"
-            if name == REAL_S3_REQUIRED and args.require_real_s3_exact_sha:
+            if require_exact_sha:
                 detail = "no run covers this exact release SHA and gate contract"
             else:
                 detail = "no run covers this production tree and gate contract"
@@ -615,6 +622,7 @@ def main():
         f"- Repository: `{args.repo}`",
         f"- Release ref: `{args.ref}`",
         f"- Release commit: `{target_sha}`",
+        f"- Release scope: **{'Fresh install (Topic opt-in, exact SHA)' if args.fresh_install else 'Upgrade compatible'}**",
         f"- Evidence branch: `{args.evidence_branch}`",
         f"- Real S3 evidence branch: `{args.evidence_branch + REAL_S3_EVIDENCE_BRANCH_SUFFIX}`",
         f"- Production fingerprint: `{target_fingerprint}`",

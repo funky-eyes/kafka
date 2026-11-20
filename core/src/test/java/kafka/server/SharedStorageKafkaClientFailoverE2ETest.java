@@ -17,6 +17,7 @@
 package kafka.server;
 
 import org.apache.kafka.clients.admin.Admin;
+import org.apache.kafka.clients.admin.FeatureUpdate;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.admin.TopicDescription;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
@@ -35,6 +36,7 @@ import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.apache.kafka.common.test.KafkaClusterTestKit;
 import org.apache.kafka.common.test.TestKitNodes;
+import org.apache.kafka.server.common.SharedStorageVersion;
 import org.apache.kafka.storage.internals.shared.metadata.OffsetRange;
 import org.apache.kafka.storage.internals.shared.metadata.PartitionRemoteCoverage;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec;
@@ -80,7 +82,7 @@ public class SharedStorageKafkaClientFailoverE2ETest {
     @Timeout(value = 7, unit = TimeUnit.MINUTES)
     public void concurrentIdempotentProducersRemainUniqueAcrossLeaderEpochChange() throws Exception {
         String topic = "shared-idempotent-producer-failover";
-        try (KafkaClusterTestKit cluster = startSharedCluster(topic, 8L * 1024 * 1024)) {
+        try (KafkaClusterTestKit cluster = startSharedCluster(8L * 1024 * 1024)) {
             String bootstrapServers = cluster.bootstrapServers();
             try (Admin admin = cluster.admin()) {
                 createTopic(admin, topic, 1);
@@ -138,7 +140,7 @@ public class SharedStorageKafkaClientFailoverE2ETest {
     @Timeout(value = 7, unit = TimeUnit.MINUTES)
     public void transactionCommitAndAbortRemainCorrectAcrossLeaderFailover() throws Exception {
         String topic = "shared-transaction-leader-failover";
-        try (KafkaClusterTestKit cluster = startSharedCluster(topic, 4L * 1024 * 1024)) {
+        try (KafkaClusterTestKit cluster = startSharedCluster(4L * 1024 * 1024)) {
             String bootstrapServers = cluster.bootstrapServers();
             try (Admin admin = cluster.admin();
                  KafkaProducer<String, String> producer = transactionalProducer(bootstrapServers)) {
@@ -207,7 +209,7 @@ public class SharedStorageKafkaClientFailoverE2ETest {
         int recordsPerPartition = 30;
         int committedOffset = 10;
 
-        try (KafkaClusterTestKit cluster = startSharedCluster(topic, 8L * 1024 * 1024)) {
+        try (KafkaClusterTestKit cluster = startSharedCluster(8L * 1024 * 1024)) {
             String bootstrapServers = cluster.bootstrapServers();
             TopicDescription description = createReadyTopic(cluster, topic, partitions);
             producePartitioned(bootstrapServers, topic, partitions, recordsPerPartition);
@@ -529,7 +531,7 @@ public class SharedStorageKafkaClientFailoverE2ETest {
         broker.awaitShutdown();
     }
 
-    private static KafkaClusterTestKit startSharedCluster(String topic, long objectTargetBytes) throws Exception {
+    private static KafkaClusterTestKit startSharedCluster(long objectTargetBytes) throws Exception {
         String s3Endpoint = System.getenv("SHARED_STORAGE_S3_ENDPOINT");
         assumeTrue(s3Endpoint != null && !s3Endpoint.isBlank(), "S3/MinIO integration endpoint is not configured");
         String bucket = environment("SHARED_STORAGE_S3_BUCKET", "kafka-shared-storage-client-failover");
@@ -541,10 +543,8 @@ public class SharedStorageKafkaClientFailoverE2ETest {
             .setNumDisksPerBroker(1)
             .build();
         KafkaClusterTestKit cluster = new KafkaClusterTestKit.Builder(nodes)
-            .setConfigProp("shared.storage.legacy.selectors.enabled", true)
             .setConfigProp("storage.extension.class",
                 "org.apache.kafka.storage.internals.shared.s3.S3SharedStorageExtension")
-            .setConfigProp("shared.storage.topics", topic)
             .setConfigProp("shared.storage.wal.engine", "ring")
             .setConfigProp("shared.storage.wal.capacity.bytes", 64L * 1024 * 1024)
             .setConfigProp("shared.storage.object.target.bytes", objectTargetBytes)
@@ -560,15 +560,30 @@ public class SharedStorageKafkaClientFailoverE2ETest {
             .setConfigProp("shared.storage.s3.io.threads", 2)
             .setConfigProp("group.initial.rebalance.delay.ms", 0)
             .build();
-        cluster.format();
-        cluster.startup();
-        cluster.waitForReadyBrokers();
-        return cluster;
+        try {
+            cluster.format();
+            cluster.startup();
+            cluster.waitForReadyBrokers();
+            try (Admin admin = cluster.admin()) {
+                admin.updateFeatures(Map.of(SharedStorageVersion.FEATURE_NAME,
+                    new FeatureUpdate((short) 1, FeatureUpdate.UpgradeType.UPGRADE)))
+                    .all().get(30, TimeUnit.SECONDS);
+            }
+            return cluster;
+        } catch (Exception | Error failure) {
+            try {
+                cluster.close();
+            } catch (Exception | Error closeFailure) {
+                failure.addSuppressed(closeFailure);
+            }
+            throw failure;
+        }
     }
 
     private static void createTopic(Admin admin, String topic, int partitions) throws Exception {
         admin.createTopics(List.of(new NewTopic(topic, partitions, (short) 3)
-            .configs(Map.of(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2"))))
+            .configs(Map.of(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, "2",
+                TopicConfig.SHARED_STORAGE_ENABLE_CONFIG, "true"))))
             .all().get(30, TimeUnit.SECONDS);
     }
 
