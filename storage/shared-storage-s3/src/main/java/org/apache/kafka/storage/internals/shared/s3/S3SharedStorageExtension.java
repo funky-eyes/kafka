@@ -128,7 +128,9 @@ public final class S3SharedStorageExtension implements KafkaStorageExtension {
 
             SharedCommitProgress newCommitProgress = new SharedCommitProgress();
             SharedUnifiedLogFactory newSharedUnifiedLogFactory =
-                new SharedUnifiedLogFactory(newStorage, newCommitProgress, configuration.legacySelectorsEnabled());
+                new SharedUnifiedLogFactory(newStorage, newCommitProgress, configuration.legacySelectorsEnabled(),
+                    configuration.walAsyncPartitionAppend(), configuration.walAdmissionMaxGroups(),
+                    configuration.walAdmissionMaxBytes());
             UnifiedLogFactory newFactory = new RoutingUnifiedLogFactory(
                 configuration,
                 newSharedUnifiedLogFactory
