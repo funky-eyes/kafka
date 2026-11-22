@@ -102,6 +102,10 @@ class SharedStorageMetricsTest {
         MetricName interArrivalCountName = metricName("WalAppendInterArrivalCount", brokerId);
         MetricName readyName = metricName("RemoteControlPlaneReady", brokerId);
         MetricName bootstrapFailuresName = metricName("MetadataBootstrapFailureCount", brokerId);
+        MetricName cacheHitsName = metricName("WalLocalCacheHitCount", brokerId);
+        MetricName cacheMissesName = metricName("WalLocalCacheMissCount", brokerId);
+        MetricName cacheEvictionsName = metricName("WalLocalCacheEvictionCount", brokerId);
+        MetricName cacheBytesName = metricName("WalLocalCacheBytes", brokerId);
 
         try (SharedStorageEngine engine = engine("metrics");
              SharedStorageMetrics metrics = new SharedStorageMetrics(engine, brokerId)) {
@@ -140,6 +144,12 @@ class SharedStorageMetricsTest {
             engine.appendData(PARTITION, 1, 0L, 0L, ByteBuffer.wrap(new byte[] {1, 2, 3}))
                 .get(10, TimeUnit.SECONDS);
             assertTrue(((Number) usedBytes.value()).longValue() > 0L);
+            engine.readLocal(PARTITION, 0L).orElseThrow();
+            engine.readLocal(PARTITION, 0L).orElseThrow();
+            assertEquals(1L, ((Number) gauge(cacheHitsName).value()).longValue());
+            assertEquals(1L, ((Number) gauge(cacheMissesName).value()).longValue());
+            assertEquals(0L, ((Number) gauge(cacheEvictionsName).value()).longValue());
+            assertTrue(((Number) gauge(cacheBytesName).value()).longValue() >= 3L);
 
             metrics.recordMetadataBootstrapFailure();
             metrics.markRemoteControlPlaneReady();
@@ -165,6 +175,10 @@ class SharedStorageMetricsTest {
         assertFalse(KafkaYammerMetrics.defaultRegistry().allMetrics().containsKey(interArrivalCountName));
         assertFalse(KafkaYammerMetrics.defaultRegistry().allMetrics().containsKey(readyName));
         assertFalse(KafkaYammerMetrics.defaultRegistry().allMetrics().containsKey(bootstrapFailuresName));
+        assertFalse(KafkaYammerMetrics.defaultRegistry().allMetrics().containsKey(cacheHitsName));
+        assertFalse(KafkaYammerMetrics.defaultRegistry().allMetrics().containsKey(cacheMissesName));
+        assertFalse(KafkaYammerMetrics.defaultRegistry().allMetrics().containsKey(cacheEvictionsName));
+        assertFalse(KafkaYammerMetrics.defaultRegistry().allMetrics().containsKey(cacheBytesName));
     }
 
     @Test

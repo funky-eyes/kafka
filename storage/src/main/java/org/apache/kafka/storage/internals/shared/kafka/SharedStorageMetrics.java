@@ -49,6 +49,10 @@ public final class SharedStorageMetrics implements AutoCloseable {
         "WalMaxGroupsPerBlock",
         "WalTrackedAppendCount",
         "WalNonBlockingRequestCount",
+        "WalLocalCacheHitCount",
+        "WalLocalCacheMissCount",
+        "WalLocalCacheEvictionCount",
+        "WalLocalCacheBytes",
         "WalDurableAppendGroupCount",
         "WalDurableBytes",
         "WalDurabilityBarrierNanos",
@@ -98,6 +102,10 @@ public final class SharedStorageMetrics implements AutoCloseable {
         metricsGroup.newGauge("WalMaxGroupsPerBlock", () -> engine.walBlockStats().maxGroupsPerBlock(), tags);
         metricsGroup.newGauge("WalTrackedAppendCount", engine::trackedAppendCount, tags);
         metricsGroup.newGauge("WalNonBlockingRequestCount", engine::nonBlockingRequestCount, tags);
+        metricsGroup.newGauge("WalLocalCacheHitCount", engine::localCacheHitCount, tags);
+        metricsGroup.newGauge("WalLocalCacheMissCount", engine::localCacheMissCount, tags);
+        metricsGroup.newGauge("WalLocalCacheEvictionCount", engine::localCacheEvictionCount, tags);
+        metricsGroup.newGauge("WalLocalCacheBytes", engine::localCacheBytes, tags);
         metricsGroup.newGauge(
             "WalDurabilityBatchCount",
             () -> engine.walDurabilityStats().durabilityBatchCount(),

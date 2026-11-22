@@ -65,6 +65,9 @@ public final class SharedStorageEngine implements AutoCloseable {
     private final LocalWalDurabilityObservation liveWalDurability = new LocalWalDurabilityObservation();
     private final LongAdder trackedAppends = new LongAdder();
     private final LongAdder nonBlockingRequests = new LongAdder();
+    private final LongAdder localCacheHits = new LongAdder();
+    private final LongAdder localCacheMisses = new LongAdder();
+    private final LongAdder localCacheEvictions = new LongAdder();
     private final RemoteObjectIndex remoteIndex = new RemoteObjectIndex();
     private final LocalRemoteObjectCheckpoint remoteCheckpoint;
     private final ConcurrentLinkedQueue<SharedObjectMetadata> pendingRemoteCheckpoints = new ConcurrentLinkedQueue<>();
@@ -77,7 +80,7 @@ public final class SharedStorageEngine implements AutoCloseable {
     // allowance so a stream of tiny batches cannot grow the map without bound.
     private final int localCacheLimit;
     private final Map<LocalCacheKey, WalRecord> localCache = new LinkedHashMap<>(16, 0.75f, true);
-    private long localCacheBytes;
+    private volatile long localCacheBytes;
     private volatile SharedObjectReader remoteReader;
 
     public SharedStorageEngine(SharedWal wal) throws IOException {
@@ -142,6 +145,22 @@ public final class SharedStorageEngine implements AutoCloseable {
 
     public long nonBlockingRequestCount() {
         return nonBlockingRequests.sum();
+    }
+
+    public long localCacheHitCount() {
+        return localCacheHits.sum();
+    }
+
+    public long localCacheMissCount() {
+        return localCacheMisses.sum();
+    }
+
+    public long localCacheEvictionCount() {
+        return localCacheEvictions.sum();
+    }
+
+    public long localCacheBytes() {
+        return localCacheBytes;
     }
 
     public CompletableFuture<WalLocation> appendData(
@@ -476,9 +495,11 @@ public final class SharedStorageEngine implements AutoCloseable {
         for (int i = 0; i < locations.size(); i++) {
             WalRecord cached = localCache.get(new LocalCacheKey(partitions.get(i), locations.get(i)));
             if (cached == null) {
+                localCacheMisses.increment();
                 misses.add(locations.get(i));
                 missingIndexes.add(i);
             } else {
+                localCacheHits.increment();
                 records.set(i, cached);
             }
         }
@@ -519,6 +540,7 @@ public final class SharedStorageEngine implements AutoCloseable {
             Map.Entry<LocalCacheKey, WalRecord> eldest = localCache.entrySet().iterator().next();
             localCacheBytes -= (long) eldest.getKey().location().payloadLength() + CACHE_ENTRY_OVERHEAD;
             localCache.remove(eldest.getKey());
+            localCacheEvictions.increment();
         }
     }
 
