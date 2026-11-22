@@ -37,7 +37,9 @@ import org.apache.kafka.storage.internals.shared.wal.WalRecordType;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.TreeMap;
@@ -55,6 +57,8 @@ import java.util.function.LongFunction;
  * its own. WAL addresses consumed here are logical and independent from the backend's physical allocation layout.</p>
  */
 public final class SharedStorageEngine implements AutoCloseable {
+    private static final int DEFAULT_LOCAL_CACHE_BYTES = 16 * 1024 * 1024;
+    private static final int CACHE_ENTRY_OVERHEAD = 128;
     private final SharedWal wal;
     private final PartitionWalIndex walIndex = new PartitionWalIndex();
     private final StartupWalReplayEvidence startupWalReplayEvidence;
@@ -69,6 +73,11 @@ public final class SharedStorageEngine implements AutoCloseable {
     // lock. Never acquire this maintenance lock in a completion callback:
     // reclamation takes it before entering WAL I/O, creating a lock cycle.
     private final Object walMaintenanceLock = new Object();
+    // Accessed only under walMaintenanceLock; the limit includes a fixed per-entry
+    // allowance so a stream of tiny batches cannot grow the map without bound.
+    private final int localCacheLimit;
+    private final Map<LocalCacheKey, WalRecord> localCache = new LinkedHashMap<>(16, 0.75f, true);
+    private long localCacheBytes;
     private volatile SharedObjectReader remoteReader;
 
     public SharedStorageEngine(SharedWal wal) throws IOException {
@@ -76,8 +85,17 @@ public final class SharedStorageEngine implements AutoCloseable {
     }
 
     public SharedStorageEngine(SharedWal wal, LocalRemoteObjectCheckpoint remoteCheckpoint) throws IOException {
+        this(wal, remoteCheckpoint, DEFAULT_LOCAL_CACHE_BYTES);
+    }
+
+    SharedStorageEngine(SharedWal wal, LocalRemoteObjectCheckpoint remoteCheckpoint, int localCacheLimit)
+        throws IOException {
+        if (localCacheLimit < 0) {
+            throw new IllegalArgumentException("localCacheLimit must not be negative");
+        }
         this.wal = Objects.requireNonNull(wal, "wal");
         this.remoteCheckpoint = remoteCheckpoint;
+        this.localCacheLimit = localCacheLimit;
         try {
             if (remoteCheckpoint != null) {
                 remoteIndex.restore(remoteCheckpoint.references());
@@ -255,8 +273,7 @@ public final class SharedStorageEngine implements AutoCloseable {
             if (location.isEmpty()) {
                 return Optional.empty();
             }
-            WalRecord record = wal.read(location.get());
-            requireLocalDataIdentity(partition, location.get(), record);
+            WalRecord record = readCachedBatches(List.of(partition), List.of(location.get())).get(0);
             // A concurrently durable TRUNCATE or replacement may update
             // the partition index while the backend reads WAL bytes.
             requireCurrentLocalLocation(partition, location.get());
@@ -435,7 +452,8 @@ public final class SharedStorageEngine implements AutoCloseable {
             if (selection.locations().isEmpty()) {
                 return new LocalReadResult(selection.firstBatchOffset(), List.of(), 0, selection.firstBatchIncomplete());
             }
-            List<WalRecord> records = wal.readBatch(selection.locations());
+            List<WalRecord> records = readCachedBatches(
+                java.util.Collections.nCopies(selection.locations().size(), partition), selection.locations());
             requireLocalBatchIdentity(partition, selection.locations(), records);
             for (WalLocation location : selection.locations()) {
                 requireCurrentLocalLocation(partition, location);
@@ -447,6 +465,69 @@ public final class SharedStorageEngine implements AutoCloseable {
                 selection.firstBatchIncomplete()
             );
         }
+    }
+
+    /** Caller holds walMaintenanceLock. Backend reads remain batched for cache misses. */
+    private List<WalRecord> readCachedBatches(List<SharedPartitionId> partitions, List<WalLocation> locations)
+        throws IOException {
+        List<WalRecord> records = new ArrayList<>(java.util.Collections.nCopies(locations.size(), null));
+        List<WalLocation> misses = new ArrayList<>();
+        List<Integer> missingIndexes = new ArrayList<>();
+        for (int i = 0; i < locations.size(); i++) {
+            WalRecord cached = localCache.get(new LocalCacheKey(partitions.get(i), locations.get(i)));
+            if (cached == null) {
+                misses.add(locations.get(i));
+                missingIndexes.add(i);
+            } else {
+                records.set(i, cached);
+            }
+        }
+        if (!misses.isEmpty()) {
+            List<WalRecord> loaded = wal.readBatch(misses);
+            if (loaded.size() != misses.size()) {
+                throw new WalCorruptionException("Local WAL batch read count does not match selection");
+            }
+            for (int i = 0; i < loaded.size(); i++) {
+                int index = missingIndexes.get(i);
+                SharedPartitionId partition = partitions.get(index);
+                WalLocation location = locations.get(index);
+                WalRecord record = loaded.get(i);
+                requireLocalDataIdentity(partition, location, record);
+                requireCurrentLocalLocation(partition, location);
+                records.set(index, record);
+                cacheLocalBatch(partition, location, record);
+            }
+        }
+        return records;
+    }
+
+    private void cacheLocalBatch(SharedPartitionId partition, WalLocation location, WalRecord record) {
+        long weight = (long) location.payloadLength() + CACHE_ENTRY_OVERHEAD;
+        if (weight > localCacheLimit) {
+            return;
+        }
+        // Copy exactly the payload: a decoded slice may otherwise retain an
+        // entire WAL block beyond the cache's accounting limit.
+        WalRecord copy = WalRecord.data(record.topicIdHigh(), record.topicIdLow(), record.partition(),
+            record.leaderEpoch(), record.firstOffset(), record.lastOffset(), record.payload());
+        LocalCacheKey key = new LocalCacheKey(partition, location);
+        WalRecord previous = localCache.put(key, copy);
+        if (previous == null) {
+            localCacheBytes += weight;
+        }
+        while (localCacheBytes > localCacheLimit) {
+            Map.Entry<LocalCacheKey, WalRecord> eldest = localCache.entrySet().iterator().next();
+            localCacheBytes -= (long) eldest.getKey().location().payloadLength() + CACHE_ENTRY_OVERHEAD;
+            localCache.remove(eldest.getKey());
+        }
+    }
+
+    private void clearLocalCache() {
+        localCache.clear();
+        localCacheBytes = 0;
+    }
+
+    private record LocalCacheKey(SharedPartitionId partition, WalLocation location) {
     }
 
     /**
@@ -584,7 +665,8 @@ public final class SharedStorageEngine implements AutoCloseable {
             // The caller may be holding a cursor result from a WAL generation
             // that was truncated, replaced or reclaimed after selection.
             requireCurrentUploadLocations(candidates);
-            List<WalRecord> records = wal.readBatch(locations);
+            List<SharedPartitionId> partitions = candidates.stream().map(UploadCandidate::partition).toList();
+            List<WalRecord> records = readCachedBatches(partitions, locations);
             if (records.size() != candidates.size()) {
                 throw new WalCorruptionException("WAL upload candidate read count does not match selection");
             }
@@ -857,6 +939,7 @@ public final class SharedStorageEngine implements AutoCloseable {
             synchronized (walMaintenanceLock) {
                 long reclaimed = wal.reclaim(new RemoteCoverageWalReclaimPolicy(checkpointed));
                 if (reclaimed > 0) {
+                    clearLocalCache();
                     long reclaimedBeforeOffset = wal.reclaimedBeforeOffset();
                     if (reclaimedBeforeOffset >= 0) {
                         walIndex.removeBefore(reclaimedBeforeOffset);
@@ -903,6 +986,7 @@ public final class SharedStorageEngine implements AutoCloseable {
     @Override
     public void close() throws IOException {
         synchronized (walMaintenanceLock) {
+            clearLocalCache();
             wal.close();
         }
     }

@@ -111,7 +111,9 @@ final class BlockRingCheckpoint {
         var scan = BlockRingRecovery.scan(io, checkpoint.metadataBytes(), capacity, alignment,
             newest.head(), newest.tail(), newest.retiredLastGroup(), newest.lastGroup(), high, low);
         checkpoint.repair(slots, newest);
-        checkpoint.current = newest;
+        synchronized (checkpoint) {
+            checkpoint.current = newest;
+        }
         return new Opened(checkpoint, scan);
     }
 

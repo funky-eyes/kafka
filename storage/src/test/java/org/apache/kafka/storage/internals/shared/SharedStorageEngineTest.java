@@ -368,10 +368,39 @@ class SharedStorageEngineTest {
     }
 
     @Test
+    void cachedLocalBatchesAreSharedWithUploadAndEvictedWithinBound() throws Exception {
+        ReadMutationWal backend = new ReadMutationWal(
+            new FileSharedWal(tempDir.resolve("cached-local"), 1024 * 1024, 4096));
+        // One one-byte batch plus its accounting overhead fits.
+        try (SharedStorageEngine engine = new SharedStorageEngine(backend, null, 129)) {
+            append(engine, 100, 109, 1);
+            append(engine, 110, 119, 2);
+            List<SharedStorageEngine.UploadCandidate> candidates = engine.uploadCandidates(PARTITION, 100, 120);
+            assertEquals(1, engine.readLocal(PARTITION, 100).orElseThrow().payload().get());
+            assertEquals(1, backend.reads);
+            assertEquals(1, engine.readUploadCandidates(List.of(candidates.get(0))).get(0).payload().get());
+            assertEquals(1, engine.readLocalBatches(PARTITION, 100, 1, true).records().size());
+            assertEquals(1, backend.reads, "fetch and upload reuse the same validated batch");
+
+            assertEquals(2, engine.readLocal(PARTITION, 110).orElseThrow().payload().get());
+            assertEquals(1, engine.readLocal(PARTITION, 100).orElseThrow().payload().get());
+            assertEquals(3, backend.reads, "the older entry was evicted");
+
+            engine.truncate(PARTITION, 4, 100).get(10, TimeUnit.SECONDS);
+            assertThrows(WalCorruptionException.class, () -> engine.readUploadCandidates(candidates));
+            engine.appendData(PARTITION, 5, 100, 109, ByteBuffer.wrap(new byte[]{9}))
+                .get(10, TimeUnit.SECONDS);
+            assertEquals(9, engine.readLocal(PARTITION, 100).orElseThrow().payload().get());
+            assertEquals(4, backend.reads, "a new WAL location cannot reuse the truncated batch");
+        }
+    }
+
+    @Test
     void concurrentTruncateDuringLocalReadCannotReturnStaleWalBatch() throws Exception {
         ReadMutationWal backend = new ReadMutationWal(
             new FileSharedWal(tempDir.resolve("read-race"), 1024 * 1024, 4096));
-        try (SharedStorageEngine engine = new SharedStorageEngine(backend)) {
+        // Exercise backend-read races explicitly, including after an earlier read.
+        try (SharedStorageEngine engine = new SharedStorageEngine(backend, null, 0)) {
             append(engine, 100, 109, 1);
             assertEquals(100L, engine.readLocal(PARTITION, 100).orElseThrow().firstOffset());
             assertEquals(1, engine.readLocalBatches(PARTITION, 100, 1024, true).records().size());
@@ -401,6 +430,7 @@ class SharedStorageEngineTest {
     private static final class ReadMutationWal implements SharedWal {
         private final SharedWal delegate;
         private Runnable onNextRead;
+        private int reads;
 
         private ReadMutationWal(SharedWal delegate) {
             this.delegate = delegate;
@@ -417,6 +447,7 @@ class SharedStorageEngineTest {
 
         @Override
         public WalRecord read(WalLocation location) throws IOException {
+            reads++;
             WalRecord record = delegate.read(location);
             Runnable hook = onNextRead;
             onNextRead = null;
