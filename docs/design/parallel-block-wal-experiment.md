@@ -19,7 +19,9 @@ not an implementation of a Broker visibility barrier. It rejects gaps in offset
 reservations, advances confirmation over a contiguous prefix only after both WAL
 and Kafka-state signals complete, and fences outstanding reservations as soon as
 either signal fails. It waits for actual outstanding WAL operations before a
-generation reset. Tests use the real parallel block WAL on NIO and AIO, but the
+generation reset. A fence also fails success notifications still in the test
+queue; a notification already dispatched requires a separate Broker epoch fence.
+Tests use the real parallel block WAL on NIO and AIO, but the
 Kafka-state signal is synthetic. They do not connect the experiment to
 `UnifiedLog`, `Partition`, Broker ACKs, fetches or leader changes.
 

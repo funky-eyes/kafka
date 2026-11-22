@@ -118,6 +118,7 @@ final class PartitionDurableOffsetTracker {
                 return;
             }
             failure = reason;
+            failQueuedNotifications(reason);
             while (!pending.isEmpty()) {
                 Reservation entry = pending.removeFirst();
                 entry.pending = false;
@@ -166,6 +167,7 @@ final class PartitionDurableOffsetTracker {
             if (inFlightWrites != 0) {
                 throw new IllegalStateException("prior WAL writes must settle before resetting the partition");
             }
+            failQueuedNotifications(reason);
             for (Reservation reservation : pending) {
                 reservation.pending = false;
                 notifications.addLast(new Notification(reservation, reason));
@@ -207,6 +209,7 @@ final class PartitionDurableOffsetTracker {
     private void applyCompletion(Reservation reservation, Throwable completionError) {
         if (completionError != null) {
             failure = completionError;
+            failQueuedNotifications(completionError);
             while (!pending.isEmpty()) {
                 Reservation entry = pending.removeFirst();
                 entry.pending = false;
@@ -220,6 +223,15 @@ final class PartitionDurableOffsetTracker {
                 confirmedOffset = head.endOffset;
                 notifications.addLast(new Notification(head, null));
             }
+        }
+    }
+
+    // A delivery already removed from this queue needs a separate Broker epoch fence.
+    private void failQueuedNotifications(Throwable reason) {
+        int queued = notifications.size();
+        for (int i = 0; i < queued; i++) {
+            Notification notification = notifications.removeFirst();
+            notifications.addLast(notification.error() == null ? new Notification(notification.reservation(), reason) : notification);
         }
     }
 

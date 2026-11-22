@@ -141,6 +141,39 @@ class PartitionDurableOffsetTrackerTest {
     }
 
     @Test
+    void leadershipFenceRejectsSuccessStillQueuedForNotification() {
+        java.util.List<Runnable> notifications = new java.util.ArrayList<>();
+        PartitionDurableOffsetTracker tracker = new PartitionDurableOffsetTracker(1L, 0L, notifications::add, 10, 100L);
+        var reservation = tracker.reserve(1L, 0L, 1L, 1L);
+        var wal = new CompletableFuture<Void>();
+        reservation.bind(wal);
+        wal.complete(null);
+        assertEquals(1L, tracker.confirmedOffset());
+        assertFalse(reservation.confirmed().isDone());
+        tracker.fence(new IOException("leadership lost before delivery"));
+        notifications.forEach(Runnable::run);
+        assertInstanceOf(IOException.class, assertThrows(CompletionException.class, () -> reservation.confirmed().join()).getCause());
+    }
+
+    @Test
+    void walFailureRejectsUndeliveredSuccessNotifications() {
+        java.util.List<Runnable> notifications = new java.util.ArrayList<>();
+        PartitionDurableOffsetTracker tracker = new PartitionDurableOffsetTracker(1L, 0L, notifications::add, 10, 100L);
+        var first = tracker.reserve(1L, 0L, 1L, 1L);
+        var second = tracker.reserve(1L, 1L, 2L, 1L);
+        var firstWal = new CompletableFuture<Void>();
+        var secondWal = new CompletableFuture<Void>();
+        first.bind(firstWal);
+        second.bind(secondWal);
+        firstWal.complete(null);
+        secondWal.completeExceptionally(new IOException("later WAL failure"));
+        notifications.forEach(Runnable::run);
+        assertInstanceOf(IOException.class, assertThrows(CompletionException.class, () -> first.confirmed().join()).getCause());
+        assertInstanceOf(IOException.class, assertThrows(CompletionException.class, () -> second.confirmed().join()).getCause());
+        assertEquals(1L, tracker.confirmedOffset());
+    }
+
+    @Test
     void aBlockedNotificationDoesNotBlockWalAndPreservesCompletionOrder() throws Exception {
         ExecutorService executor = Executors.newSingleThreadExecutor();
         CountDownLatch firstEntered = new CountDownLatch(1);
