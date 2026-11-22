@@ -16,9 +16,20 @@ are regression checks, not a per-write check against memory corruption.
 Data write workers queue finished blocks for a shared force. A force covers
 a snapshot of the finished queue. Blocks that finish writing after the snapshot
 wait for the next force. The checkpoint thread can publish the full contiguous
-forced prefix over one pair of independently forced tail checkpoints. Entries
+forced prefix with a single checkpoint transition. Entries
 for reservations and reads are looked up by logical position so that preceding
 committed blocks do not lengthen those searches.
+
+New files created by the Broker factory use checkpoint version 2. Data and
+checkpoint have separate forces. The checkpoint alternates between banks of
+three aligned copies, leaving the complete preceding bank untouched. Recovery
+checks the newest valid generation against the complete committed window and
+repairs only missing copies in that bank before admitting writes. A crash that
+tears the entire bank being written leaves the preceding committed bank
+available. Once a bank has been forced, any two independent slot losses leave
+at least one valid copy of that generation. This fault model assumes failure
+unit isolation, effective force, and intact data blocks. Existing version 1
+files reopen in place and continue using their original checkpoint protocol.
 
 The experimental `shared.storage.wal.async.partition.append=true` switch, off
 by default and accepted only with `parallel-block`, pipelines RF1 `acks=1`

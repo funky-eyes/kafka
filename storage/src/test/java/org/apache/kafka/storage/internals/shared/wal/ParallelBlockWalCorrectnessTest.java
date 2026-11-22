@@ -76,6 +76,87 @@ class ParallelBlockWalCorrectnessTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
+    void bankedCheckpointUsesOneForceAndCanRecoverEitherBank(boolean aio) throws Exception {
+        Path path = dir.resolve("banked-" + aio);
+        long fileBytes = CAPACITY + CoordinatedRingWalAdapter.BANKED_METADATA_BYTES;
+        try (var backend = new CountingBackend(aio);
+             var wal = CoordinatedRingWalAdapter.createWithBankedCheckpoints(path, backend, CAPACITY, ALIGNMENT, 0, 8,
+                 8L * ALIGNMENT)) {
+            backend.countForces.set(true);
+            wal.append(record(0, 1)).get(10, TimeUnit.SECONDS);
+            assertEquals(2, backend.forces.get(), "a data force followed by one tail force");
+            wal.append(record(1, 1)).get(10, TimeUnit.SECONDS);
+            wal.append(record(2, 1)).get(10, TimeUnit.SECONDS);
+        }
+        assertEquals(fileBytes, Files.size(path));
+        // Generation four is in slots 0..2. A crash during its inactive-bank
+        // writes can leave all three torn while the three prior copies survive.
+        Path interrupted = dir.resolve("banked-interrupted-" + aio);
+        Files.copy(path, interrupted);
+        corruptSlots(interrupted, 0, 1, 2);
+        assertReplayByFileSize(interrupted, aio, fileBytes, List.of(0L, 1L));
+
+        // After a successful shared force, losing two independent copies must
+        // still recover the newest generation, including the acknowledged record.
+        corruptSlots(path, 0, 1);
+        assertReplayByFileSize(path, aio, fileBytes, List.of(0L, 1L, 2L));
+        corruptSlots(path, 1, 2);
+        assertReplayByFileSize(path, aio, fileBytes, List.of(0L, 1L, 2L));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void bankedHeadSurvivesReuseAndTwoLostNewestSlots(boolean aio) throws Exception {
+        Path path = dir.resolve("banked-reuse-" + aio);
+        try (var backend = new CountingBackend(aio);
+             var wal = CoordinatedRingWalAdapter.createWithBankedCheckpoints(path, backend, CAPACITY, ALIGNMENT, 0, 8,
+                 8L * ALIGNMENT)) {
+            for (int i = 0; i < 4; i++) wal.append(record(i, 1)).get(10, TimeUnit.SECONDS);
+            backend.countForces.set(true);
+            assertEquals(2L * ALIGNMENT, wal.reclaim((record, location) -> record.firstOffset() < 2, CAPACITY));
+            assertEquals(1, backend.forces.get(), "the covered head prefix shares one force");
+            wal.append(record(4, 1)).get(10, TimeUnit.SECONDS);
+        }
+        // Generation seven is in the second bank. Its newest tail includes
+        // the write that physically reused the retired block.
+        corruptSlots(path, 3, 4);
+        assertReplayByFileSize(path, aio, CAPACITY + CoordinatedRingWalAdapter.BANKED_METADATA_BYTES, List.of(2L, 3L, 4L));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void fileSizeOpeningPreservesLegacyCheckpointFormat(boolean aio) throws Exception {
+        Path path = dir.resolve("legacy-by-file-size-" + aio);
+        try (WalIoBackend backend = backend(aio);
+             var wal = CoordinatedRingWalAdapter.create(path, backend, CAPACITY, ALIGNMENT, 0)) {
+            wal.append(record(0, 1)).get(10, TimeUnit.SECONDS);
+        }
+        long fileBytes = CAPACITY + CoordinatedRingWalAdapter.METADATA_BYTES;
+        assertReplayByFileSize(path, aio, fileBytes, List.of(0L));
+        assertEquals(fileBytes, Files.size(path));
+    }
+
+    private static void assertReplayByFileSize(Path path, boolean aio, long fileBytes, List<Long> expected)
+        throws Exception {
+        try (WalIoBackend backend = backend(aio);
+             var wal = CoordinatedRingWalAdapter.reopenByFileSize(path, backend, fileBytes, 0, 8, 8L * ALIGNMENT)) {
+            List<Long> recovered = new ArrayList<>();
+            wal.replay((record, location) -> recovered.add(record.firstOffset()));
+            assertEquals(expected, recovered);
+        }
+    }
+
+    private static void corruptSlots(Path path, int... slots) throws IOException {
+        try (FileChannel file = FileChannel.open(path, StandardOpenOption.WRITE)) {
+            for (int slot : slots) {
+                file.write(ByteBuffer.wrap(new byte[] {0}), (long) slot * ALIGNMENT);
+            }
+            file.force(true);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
     void reclaimsOnlyCoveredPrefixWithOneDurableHeadCheckpoint(boolean aio) throws Exception {
         Path path = dir.resolve("batch-reclaim-" + aio);
         try (var backend = new CountingBackend(aio);

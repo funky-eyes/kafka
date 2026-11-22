@@ -58,20 +58,21 @@ public final class SharedStorageWalFactory {
             case PARALLEL_BLOCK -> {
                 ensureNoLegacyRotatingWalSegments(configuration.walDir());
                 long total = configuration.walCapacityBytes();
-                long capacity = total - CoordinatedRingWalAdapter.METADATA_BYTES;
-                if (capacity < 4096 || capacity % 4096 != 0) {
+                long capacity = total - CoordinatedRingWalAdapter.BANKED_METADATA_BYTES;
+                Path path = ringWalPath(configuration.walDir());
+                boolean exists = Files.exists(path);
+                if (total % 4096 != 0 || (!exists && capacity < 4096)) {
                     throw new IllegalArgumentException("parallel-block WAL capacity must be 4 KiB aligned and include metadata");
                 }
                 int maxBlock = (int) Math.min(capacity, CoordinatedRingWalAdapter.MAX_BLOCK_BYTES);
                 Files.createDirectories(configuration.walDir());
-                Path path = ringWalPath(configuration.walDir());
                 WalIoBackend backend = selectBackend(configuration);
                 long lingerNanos = TimeUnit.MILLISECONDS.toNanos(configuration.walBlockLingerMs());
                 try {
-                    yield Files.exists(path)
-                        ? CoordinatedRingWalAdapter.reopen(path, backend, capacity, maxBlock, lingerNanos,
+                    yield exists
+                        ? CoordinatedRingWalAdapter.reopenByFileSize(path, backend, total, lingerNanos,
                             configuration.walAdmissionMaxGroups(), configuration.walAdmissionMaxBytes())
-                        : CoordinatedRingWalAdapter.create(path, backend, capacity, maxBlock, lingerNanos,
+                        : CoordinatedRingWalAdapter.createWithBankedCheckpoints(path, backend, capacity, maxBlock, lingerNanos,
                             configuration.walAdmissionMaxGroups(), configuration.walAdmissionMaxBytes());
                 } catch (IOException | RuntimeException | Error failure) {
                     closeFailedBackend(backend, failure);

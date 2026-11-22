@@ -34,6 +34,7 @@ import java.util.concurrent.TimeUnit;
 /** Experimental SharedWal implementation. No automatic migration or legacy-writer fencing. */
 public final class CoordinatedRingWalAdapter implements SharedWal {
     public static final int METADATA_BYTES = 3 * 4096;
+    public static final int BANKED_METADATA_BYTES = 6 * 4096;
     public static final int MAX_BLOCK_BYTES = AlignedWalBlockCodec.MAX_BLOCK_BYTES;
     record BlockMetrics(long blocks, long groups, long bytes, long maxGroupsPerBlock) { }
     private static final int ALIGNMENT = 4096;
@@ -75,6 +76,20 @@ public final class CoordinatedRingWalAdapter implements SharedWal {
     public static CoordinatedRingWalAdapter create(
             Path path, WalIoBackend backend, long capacity, int maxBlock, long lingerNanos,
             int maxAdmissionGroups, long maxAdmissionBytes) throws IOException {
+        return create(path, backend, capacity, maxBlock, lingerNanos, maxAdmissionGroups, maxAdmissionBytes,
+            BlockRingCheckpoint.Layout.LEGACY);
+    }
+
+    public static CoordinatedRingWalAdapter createWithBankedCheckpoints(
+            Path path, WalIoBackend backend, long capacity, int maxBlock, long lingerNanos,
+            int maxAdmissionGroups, long maxAdmissionBytes) throws IOException {
+        return create(path, backend, capacity, maxBlock, lingerNanos, maxAdmissionGroups, maxAdmissionBytes,
+            BlockRingCheckpoint.Layout.BANKED);
+    }
+
+    private static CoordinatedRingWalAdapter create(
+            Path path, WalIoBackend backend, long capacity, int maxBlock, long lingerNanos,
+            int maxAdmissionGroups, long maxAdmissionBytes, BlockRingCheckpoint.Layout layout) throws IOException {
         validateConfiguration(capacity, maxBlock, lingerNanos);
         validateAdmission(maxAdmissionGroups, maxAdmissionBytes);
         if (!backend.supportsPreallocation()) throw new IOException("WAL backend requires preallocation");
@@ -85,7 +100,7 @@ public final class CoordinatedRingWalAdapter implements SharedWal {
         boolean published = false;
         try {
             handle = backend.create(stage);
-            long size = Math.addExact(3L * ALIGNMENT, capacity);
+            long size = Math.addExact(layout.metadataBytes(ALIGNMENT), capacity);
             handle.preallocate(size);
             handle.force();
             var checkpoint = BlockRingCheckpoint.initialize(handle, ALIGNMENT, capacity,
@@ -138,16 +153,35 @@ public final class CoordinatedRingWalAdapter implements SharedWal {
             Path path, WalIoBackend backend, long capacity, int maxBlock, long lingerNanos,
             int maxAdmissionGroups, long maxAdmissionBytes) throws IOException {
         validateConfiguration(capacity, maxBlock, lingerNanos);
+        return reopen(path, backend, maxBlock, lingerNanos, maxAdmissionGroups, maxAdmissionBytes,
+            handle -> BlockRingCheckpoint.open(handle, ALIGNMENT, capacity));
+    }
+
+    public static CoordinatedRingWalAdapter reopenByFileSize(
+            Path path, WalIoBackend backend, long fileSize, long lingerNanos,
+            int maxAdmissionGroups, long maxAdmissionBytes) throws IOException {
+        return reopen(path, backend, MAX_BLOCK_BYTES, lingerNanos, maxAdmissionGroups, maxAdmissionBytes,
+            handle -> BlockRingCheckpoint.openByFileSize(handle, ALIGNMENT, fileSize));
+    }
+
+    @FunctionalInterface
+    private interface CheckpointOpener {
+        BlockRingCheckpoint.Opened open(WalIoBackend.Handle handle) throws IOException;
+    }
+
+    private static CoordinatedRingWalAdapter reopen(
+            Path path, WalIoBackend backend, int maxBlock, long lingerNanos,
+            int maxAdmissionGroups, long maxAdmissionBytes, CheckpointOpener opener) throws IOException {
         validateAdmission(maxAdmissionGroups, maxAdmissionBytes);
         RingWalOwnership ownership = RingWalOwnership.acquire(path);
         WalIoBackend.Handle handle = null;
         try {
             flushParent(path);
             handle = backend.reopen(path);
-            if (handle.size() != 3L * ALIGNMENT + capacity) throw new IOException("Unexpected ring WAL file size");
-            var opened = BlockRingCheckpoint.open(handle, ALIGNMENT, capacity);
+            var opened = opener.open(handle);
+            long recoveredCapacity = opened.checkpoint().capacity();
             return new CoordinatedRingWalAdapter(
-                    handle, backend, ownership, capacity, maxBlock, lingerNanos,
+                    handle, backend, ownership, recoveredCapacity, (int) Math.min(recoveredCapacity, maxBlock), lingerNanos,
                     maxAdmissionGroups, maxAdmissionBytes, opened.checkpoint(), opened.scan());
         } catch (Throwable t) {
             try {
@@ -192,7 +226,7 @@ public final class CoordinatedRingWalAdapter implements SharedWal {
         var identity = checkpoint.identity();
         var writer =
                 new ParallelRingBlockWriter(
-                        handle, allocator, 3L * ALIGNMENT, capacity, ALIGNMENT,
+                        handle, allocator, checkpoint.metadataBytes(), capacity, ALIGNMENT,
                         identity.high(), identity.low(), 4, 128);
         this.coordinator =
                 new RingBlockCommitCoordinator(
@@ -200,7 +234,7 @@ public final class CoordinatedRingWalAdapter implements SharedWal {
                         checkpoint,
                         writer,
                         handle,
-                        3L * ALIGNMENT,
+                        checkpoint.metadataBytes(),
                         scan,
                         ALIGNMENT,
                         maxBlock,

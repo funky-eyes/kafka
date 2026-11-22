@@ -56,7 +56,7 @@ class ParallelBlockWalFactoryTest {
             SharedStorageConfiguration.WAL_IO_BACKEND_CONFIG, mode));
         try (SharedWal wal = SharedStorageWalFactory.create(config)) {
             assertInstanceOf(CoordinatedRingWalAdapter.class, wal);
-            assertEquals(CAPACITY - CoordinatedRingWalAdapter.METADATA_BYTES, wal.capacityBytes());
+            assertEquals(CAPACITY - CoordinatedRingWalAdapter.BANKED_METADATA_BYTES, wal.capacityBytes());
             wal.append(WalRecord.data(1, 2, 0, 3, 0, 0, new byte[128 * 1024])).join();
         }
         assertEquals(CAPACITY, Files.size(SharedStorageWalFactory.ringWalPath(walDir)));
