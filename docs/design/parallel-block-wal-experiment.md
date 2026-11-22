@@ -13,32 +13,27 @@ record and block still carries its checksum; reads and recovery validate both.
 This removes a pre-write self-check of encoder output. Format and location tests
 are regression checks, not a per-write check against memory corruption.
 
-The opt-in implementation was exercised with NIO and AIO through the actual
-Broker factory, including selected force/ACK, transaction, failure, restart and
-leader-reassignment cases. These tests do not establish power-loss safety,
-multi-host failover or production readiness. In a same-partition concurrency
-probe, six requests formed six singleton blocks with either backend. Consequently
-there is no established same-partition batching improvement or comparable RF1
-`acks=1` performance result.
+The experimental `shared.storage.wal.async.partition.append=true` switch, off
+by default and accepted only with `parallel-block`, pipelines RF1 `acks=1`
+client appends without producer IDs or transaction/control batches. Native
+Kafka validation and offset assignment remain serialized by the log monitor;
+the WAL wait happens after that monitor is released. The partition leader read
+lock remains held until durability, so a role transition cannot pass an in-flight
+append. Other appends use the ordinary synchronous path after draining tracked
+writes. The implementation caps log-end visibility, fetches, offset snapshots
+and high-watermark updates at the confirmed prefix, and drains before truncation,
+remote recovery, close and synchronous fallback. Segment rolls wait for prior
+writes before taking producer snapshots. An async failure fences the tracked
+path; recovery may require restarting the Broker.
 
-`PartitionDurableOffsetTracker` under the test tree is a standalone experiment,
-not an implementation of a Broker visibility barrier. It rejects gaps in offset
-reservations, advances confirmation over a contiguous prefix only after both WAL
-and Kafka-state signals complete, and fences outstanding reservations as soon as
-either signal fails. It waits for actual outstanding WAL operations before a
-generation reset. A fence also fails success notifications still in the test
-queue; a notification already dispatched requires a separate Broker epoch fence.
-Tests use the real parallel block WAL on NIO and AIO, but the
-Kafka-state signal is synthetic. They do not connect the experiment to
-`UnifiedLog`, `Partition`, Broker ACKs, fetches or leader changes.
-
-Before considering an asynchronous partition append path, account for the
-speculative state held by Kafka's `UnifiedLog`. In particular, `Partition`
-uses log-end metadata to advance the high watermark, includes log end and last
-stable offset in Fetch responses, exposes offsets via ListOffsets, and consults
-leader-epoch state. Restricting only Produce ACKs would not prevent early
-visibility. A full design must also isolate validation errors, order duplicate
-producer sequences and transactions, bind publication to the correct leader
-epoch, fence failures and drain in-flight I/O before truncation/recovery. Test
-those boundaries with real Broker requests before running the requested matched
-RF1 `acks=1` NIO/AIO comparison against AutoMQ.
+The tracker rejects gaps and confirms only a contiguous prefix whose WAL and
+Kafka-state signals have both completed. NIO/AIO experiments through the real
+Broker factory observed six concurrent requests in four blocks, with controlled
+force gates and test-only logging. Selected ACK/visibility, transaction,
+idempotent retry, malformed-neighbor, capacity, restart and reassignment cases
+passed. The block occupancy gauges report completed blocks and groups separately
+from checkpoint cohorts. These controlled tests are not a multi-host failover or
+power-loss guarantee, and they do not establish production readiness or a
+performance comparison. Broader failure windows and sustained-load behavior remain
+to be verified. The implementation does not yet promise concurrent batching for
+transactional, idempotent, follower or RF>1 appends.

@@ -17,12 +17,19 @@
 package org.apache.kafka.storage.internals.shared.kafka;
 
 import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.errors.KafkaStorageException;
 import org.apache.kafka.common.record.internal.MemoryRecords;
+import org.apache.kafka.common.record.internal.RecordBatch;
 import org.apache.kafka.server.common.RequestLocal;
+import org.apache.kafka.server.storage.log.FetchIsolation;
 import org.apache.kafka.storage.internals.epoch.LeaderEpochFileCache;
 import org.apache.kafka.storage.internals.log.AppendOrigin;
+import org.apache.kafka.storage.internals.log.FetchDataInfo;
 import org.apache.kafka.storage.internals.log.LogAppendInfo;
+import org.apache.kafka.storage.internals.log.LogOffsetMetadata;
+import org.apache.kafka.storage.internals.log.LogOffsetSnapshot;
 import org.apache.kafka.storage.internals.log.LogOffsetsListener;
+import org.apache.kafka.storage.internals.log.LogSegment;
 import org.apache.kafka.storage.internals.log.LogStartOffsetIncrementReason;
 import org.apache.kafka.storage.internals.log.ProducerStateManager;
 import org.apache.kafka.storage.internals.log.StorageAction;
@@ -32,8 +39,12 @@ import org.apache.kafka.storage.log.metrics.BrokerTopicStats;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
@@ -53,6 +64,99 @@ public final class SharedUnifiedLog extends UnifiedLog {
     private final ReentrantReadWriteLock remoteRecoveryFence = new ReentrantReadWriteLock();
     private volatile long remoteCommittedHighWatermarkFloor;
     private volatile SourceLogStartCallbackFence sourceLogStartTracker;
+    private record ExperimentalVisibility(PartitionDurableOffsetTracker tracker, LogOffsetMetadata confirmed) { }
+    private final AtomicReference<ExperimentalVisibility> experimentalVisibility = new AtomicReference<>();
+    private record ExperimentalAsyncSettings(SharedPartitionId partition, int maxGroups, long maxBytes) { }
+    private volatile ExperimentalAsyncSettings experimentalAsyncSettings;
+    private final Object experimentalTrackerLock = new Object();
+    private PartitionDurableOffsetTracker experimentalOwnedTracker;
+
+    void enableExperimentalAsyncAppend(SharedPartitionId partition, int maxGroups, long maxBytes) {
+        Objects.requireNonNull(partition, "partition");
+        if (maxGroups <= 0 || maxBytes <= 0) throw new IllegalArgumentException("Invalid async append limits");
+        if (experimentalAsyncSettings != null) throw new IllegalStateException("Async append is already configured");
+        experimentalAsyncSettings = new ExperimentalAsyncSettings(partition, maxGroups, maxBytes);
+    }
+
+    /** Only non-transactional records without producer state use the experimental pipeline. */
+    public boolean allowsExperimentalAsyncAppend(MemoryRecords records) {
+        if (experimentalAsyncSettings == null) return false;
+        try {
+            var batches = records.batches().iterator();
+            if (!batches.hasNext()) return false;
+            while (batches.hasNext()) {
+                RecordBatch batch = batches.next();
+                if (batch.hasProducerId() || batch.isTransactional() || batch.isControlBatch()) return false;
+            }
+            return true;
+        } catch (RuntimeException invalidRecords) {
+            return false;
+        }
+    }
+
+    /** The caller must hold the partition leader read lock until this method returns. */
+    public LogAppendInfo appendAsLeaderWithDurableWait(MemoryRecords records, int leaderEpoch, AppendOrigin origin,
+        RequestLocal requestLocal, VerificationGuard verificationGuard, short transactionVersion) {
+        ExperimentalAsyncSettings settings = Objects.requireNonNull(experimentalAsyncSettings, "async settings");
+        TrackedAppend append;
+        remoteRecoveryFence.readLock().lock();
+        try {
+            PartitionDurableOffsetTracker tracker;
+            synchronized (experimentalTrackerLock) {
+                if (experimentalOwnedTracker == null) {
+                    experimentalOwnedTracker = new PartitionDurableOffsetTracker(1L, super.logEndOffset(),
+                        Runnable::run, settings.maxGroups(), settings.maxBytes());
+                }
+                tracker = experimentalOwnedTracker;
+            }
+            append = appendAsLeaderTracked(records, leaderEpoch, origin, requestLocal, verificationGuard,
+                transactionVersion, settings.partition(), tracker, 1L);
+        } finally {
+            remoteRecoveryFence.readLock().unlock();
+        }
+        awaitExperimental(append.confirmation());
+        return append.info();
+    }
+
+    private static void awaitExperimental(CompletableFuture<?> future) {
+        try {
+            future.get();
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new KafkaStorageException("Interrupted waiting for shared WAL durability", interrupted);
+        } catch (ExecutionException failure) {
+            Throwable cause = failure.getCause();
+            if (cause instanceof RuntimeException runtime) throw runtime;
+            if (cause instanceof Error error) throw error;
+            throw new KafkaStorageException("Shared WAL durability failed", cause);
+        }
+    }
+
+    /** Caller holds the recovery write lock, preventing new tracked admissions. */
+    private void drainExperimentalAppend() {
+        ExperimentalVisibility visible = experimentalVisibility.get();
+        if (visible == null) return;
+        PartitionDurableOffsetTracker tracker = visible.tracker();
+        awaitExperimental(tracker.awaitReserved());
+        if (tracker.confirmedOffset() != super.logEndOffset()) {
+            throw new KafkaStorageException("Cannot retire an unconfirmed shared log append");
+        }
+        experimentalVisibility.updateAndGet(current -> current != null && current.tracker() == tracker ? null : current);
+        synchronized (experimentalTrackerLock) {
+            if (experimentalOwnedTracker == tracker) experimentalOwnedTracker = null;
+        }
+    }
+
+    /** Fences a role or replication-factor transition against the experimental pipeline. */
+    public void prepareForRoleChange() {
+        if (experimentalAsyncSettings == null) return;
+        remoteRecoveryFence.writeLock().lock();
+        try {
+            drainExperimentalAppend();
+        } finally {
+            remoteRecoveryFence.writeLock().unlock();
+        }
+    }
 
     @Override
     protected boolean usesSharedStorage() {
@@ -119,6 +223,15 @@ public final class SharedUnifiedLog extends UnifiedLog {
 
     @Override
     public LogAppendInfo appendAsFollower(MemoryRecords records, int leaderEpoch) {
+        if (experimentalAsyncSettings != null) {
+            remoteRecoveryFence.writeLock().lock();
+            try {
+                drainExperimentalAppend();
+                return super.appendAsFollower(records, leaderEpoch);
+            } finally {
+                remoteRecoveryFence.writeLock().unlock();
+            }
+        }
         remoteRecoveryFence.readLock().lock();
         try {
             return super.appendAsFollower(records, leaderEpoch);
@@ -136,6 +249,15 @@ public final class SharedUnifiedLog extends UnifiedLog {
         VerificationGuard verificationGuard,
         short transactionVersion
     ) {
+        if (experimentalAsyncSettings != null) {
+            remoteRecoveryFence.writeLock().lock();
+            try {
+                drainExperimentalAppend();
+                return super.appendAsLeader(records, leaderEpoch, origin, requestLocal, verificationGuard, transactionVersion);
+            } finally {
+                remoteRecoveryFence.writeLock().unlock();
+            }
+        }
         remoteRecoveryFence.readLock().lock();
         try {
             return super.appendAsLeader(
@@ -152,6 +274,122 @@ public final class SharedUnifiedLog extends UnifiedLog {
     }
 
     /**
+     * Experimental RF1 append entry point. It must not be exposed to broker
+     * requests until leadership, fetch visibility, recovery and ACK gating use
+     * the returned durable confirmation. The normal entry point stays synchronous.
+     */
+    TrackedAppend appendAsLeaderTracked(
+        MemoryRecords records,
+        int leaderEpoch,
+        AppendOrigin origin,
+        RequestLocal requestLocal,
+        VerificationGuard verificationGuard,
+        short transactionVersion,
+        SharedPartitionId partition,
+        PartitionDurableOffsetTracker tracker,
+        long generation
+    ) {
+        remoteRecoveryFence.readLock().lock();
+        try {
+            return withLogLock(() -> {
+                ExperimentalVisibility visibility = experimentalVisibility.get();
+                if (visibility == null) {
+                    LogOffsetMetadata initial = super.logEndOffsetMetadata();
+                    if (initial.messageOffset != tracker.confirmedOffset()) {
+                        throw new IllegalArgumentException("Tracker does not match the log end offset");
+                    }
+                    visibility = new ExperimentalVisibility(tracker, initial);
+                    experimentalVisibility.set(visibility);
+                }
+                if (visibility.tracker() != tracker) throw new IllegalStateException("A different tracker owns this log");
+                try (SharedAppendScope scope = SharedAppendScope.open(tracker, partition, generation)) {
+                    try {
+                        LogAppendInfo info = super.appendAsLeader(
+                            records, leaderEpoch, origin, requestLocal, verificationGuard, transactionVersion);
+                        LogOffsetMetadata appended = scope.hasReservation() ? super.logEndOffsetMetadata() : null;
+                        scope.publish();
+                        CompletableFuture<Void> confirmation = info.lastOffset() < 0L
+                            ? CompletableFuture.completedFuture(null)
+                            : tracker.awaitOffset(generation, Math.addExact(info.lastOffset(), 1L));
+                        if (appended != null) {
+                            confirmation = confirmation.thenRun(() -> experimentalVisibility.updateAndGet(current ->
+                                current == null || current.tracker() != tracker ||
+                                    current.confirmed().messageOffset >= appended.messageOffset
+                                    ? current : new ExperimentalVisibility(tracker, appended)));
+                        }
+                        return new TrackedAppend(info, confirmation);
+                    } catch (RuntimeException | Error failure) {
+                        if (scope.hasReservation()) tracker.fence(failure);
+                        scope.fail(failure);
+                        throw failure;
+                    }
+                }
+            });
+        } catch (IOException failure) {
+            throw new UncheckedIOException(failure);
+        } finally {
+            remoteRecoveryFence.readLock().unlock();
+        }
+    }
+
+    @Override
+    public long logEndOffset() {
+        ExperimentalVisibility visible = experimentalVisibility == null ? null : experimentalVisibility.get();
+        return visible == null ? super.logEndOffset() : visible.confirmed().messageOffset;
+    }
+
+    @Override
+    public LogOffsetMetadata logEndOffsetMetadata() {
+        ExperimentalVisibility visible = experimentalVisibility == null ? null : experimentalVisibility.get();
+        return visible == null ? super.logEndOffsetMetadata() : visible.confirmed();
+    }
+
+    @Override
+    public FetchDataInfo read(long startOffset, int maxLength, FetchIsolation isolation, boolean minOneMessage)
+        throws IOException {
+        FetchIsolation bounded = experimentalVisibility != null && experimentalVisibility.get() != null && isolation == FetchIsolation.LOG_END
+            ? FetchIsolation.HIGH_WATERMARK : isolation;
+        return super.read(startOffset, maxLength, bounded, minOneMessage);
+    }
+
+    @Override
+    public LogOffsetSnapshot fetchOffsetSnapshot() throws IOException {
+        if (experimentalVisibility == null || experimentalVisibility.get() == null) return super.fetchOffsetSnapshot();
+        return withLogLock(() -> {
+            LogOffsetSnapshot snapshot = super.fetchOffsetSnapshot();
+            ExperimentalVisibility visible = experimentalVisibility == null ? null : experimentalVisibility.get();
+            return visible == null ? snapshot : new LogOffsetSnapshot(snapshot.logStartOffset(),
+                visible.confirmed(), snapshot.highWatermark(), snapshot.lastStableOffset());
+        });
+    }
+
+    long experimentalReservedEndOffset() {
+        return super.logEndOffset();
+    }
+
+    @Override
+    public LogSegment roll(Optional<Long> expectedNextOffset) throws IOException {
+        return withLogLock(() -> {
+            ExperimentalVisibility visible = experimentalVisibility == null ? null : experimentalVisibility.get();
+            if (visible != null) awaitExperimental(visible.tracker().awaitReserved());
+            return super.roll(expectedNextOffset);
+        });
+    }
+
+    @Override
+    public void takeProducerSnapshot() throws IOException {
+        withLogLock(() -> {
+            ExperimentalVisibility visible = experimentalVisibility == null ? null : experimentalVisibility.get();
+            if (visible != null) awaitExperimental(visible.tracker().awaitReserved());
+            super.takeProducerSnapshot();
+            return null;
+        });
+    }
+
+    record TrackedAppend(LogAppendInfo info, CompletableFuture<Void> confirmation) {
+    }
+
+    /**
      * Replica divergence truncation rebuilds Kafka's producer and leader-epoch state from the retained shared log.
      * Serialize it with metadata replay recovery so one path cannot publish a shorter LEO while the other still exposes
      * producer state reconstructed from a longer view.
@@ -160,6 +398,7 @@ public final class SharedUnifiedLog extends UnifiedLog {
     public boolean truncateTo(long targetOffset) {
         remoteRecoveryFence.writeLock().lock();
         try {
+            if (experimentalAsyncSettings != null) drainExperimentalAppend();
             SourceLogStartCallbackFence tracker = sourceLogStartTracker;
             if (tracker != null) {
                 tracker.invalidateForRebase();
@@ -182,6 +421,7 @@ public final class SharedUnifiedLog extends UnifiedLog {
     public void truncateFullyAndStartAt(long newOffset, Optional<Long> logStartOffsetOpt) {
         remoteRecoveryFence.writeLock().lock();
         try {
+            if (experimentalAsyncSettings != null) drainExperimentalAppend();
             SourceLogStartCallbackFence tracker = sourceLogStartTracker;
             if (tracker != null) {
                 tracker.invalidateForRebase();
@@ -201,6 +441,14 @@ public final class SharedUnifiedLog extends UnifiedLog {
     @Override
     public long updateHighWatermark(long highWatermark) throws IOException {
         return super.updateHighWatermark(applyRemoteCommittedHighWatermarkFloor(highWatermark));
+    }
+
+    @Override
+    public long updateHighWatermark(LogOffsetMetadata highWatermark) throws IOException {
+        ExperimentalVisibility visible = experimentalVisibility == null ? null : experimentalVisibility.get();
+        LogOffsetMetadata bounded = visible != null && highWatermark.messageOffset > visible.confirmed().messageOffset
+            ? visible.confirmed() : highWatermark;
+        return super.updateHighWatermark(bounded);
     }
 
     /**
@@ -223,6 +471,7 @@ public final class SharedUnifiedLog extends UnifiedLog {
         }
         remoteRecoveryFence.writeLock().lock();
         try {
+            if (experimentalAsyncSettings != null) drainExperimentalAppend();
             remoteCommittedHighWatermarkFloor = Math.max(remoteCommittedHighWatermarkFloor, highWatermark);
             return super.updateHighWatermark(effectiveInstalledHighWatermark(
                 highWatermark(),
@@ -291,7 +540,43 @@ public final class SharedUnifiedLog extends UnifiedLog {
     public <T> T withRemoteRecoveryFence(StorageAction<T, IOException> action) throws IOException {
         remoteRecoveryFence.writeLock().lock();
         try {
+            if (experimentalAsyncSettings != null) drainExperimentalAppend();
             return withLogLock(action);
+        } finally {
+            remoteRecoveryFence.writeLock().unlock();
+        }
+    }
+
+    @Override
+    public void close() {
+        if (experimentalAsyncSettings == null) {
+            super.close();
+            return;
+        }
+        remoteRecoveryFence.writeLock().lock();
+        try {
+            try {
+                drainExperimentalAppend();
+            } catch (RuntimeException failure) {
+                super.closeHandlers();
+                throw failure;
+            }
+            super.close();
+        } finally {
+            remoteRecoveryFence.writeLock().unlock();
+        }
+    }
+
+    @Override
+    public void delete() {
+        if (experimentalAsyncSettings == null) {
+            super.delete();
+            return;
+        }
+        remoteRecoveryFence.writeLock().lock();
+        try {
+            drainExperimentalAppend();
+            super.delete();
         } finally {
             remoteRecoveryFence.writeLock().unlock();
         }

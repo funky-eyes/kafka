@@ -403,6 +403,12 @@ public final class CoordinatedRingWalAdapter implements SharedWal {
     }
 
     @Override
+    public WalBlockStats blockStats() {
+        var metrics = blockMetrics();
+        return new WalBlockStats(metrics.blocks(), metrics.groups(), metrics.bytes(), metrics.maxGroupsPerBlock());
+    }
+
+    @Override
     public void close() throws IOException {
         if (Thread.currentThread() == assembler || coordinator.isCallbackContext())
             throw new IOException("Cannot close from a WAL callback");

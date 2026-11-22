@@ -48,6 +48,7 @@ class SharedStorageConfigurationTest {
             .normalize();
 
         assertEquals(SharedStorageConfiguration.WalEngine.RING, config.walEngine());
+        assertFalse(config.walAsyncPartitionAppend());
         assertEquals(SharedStorageConfiguration.DEFAULT_WAL_CAPACITY_BYTES, config.walCapacityBytes());
         assertEquals(SharedStorageConfiguration.DEFAULT_WAL_SEGMENT_BYTES, config.walSegmentBytes());
         assertEquals(SharedStorageConfiguration.DEFAULT_WAL_ADMISSION_MAX_GROUPS,
@@ -68,6 +69,20 @@ class SharedStorageConfigurationTest {
         assertFalse(config.useSharedStorage("__consumer_offsets"));
         assertFalse(config.useSharedStorage("__transaction_state"));
         assertFalse(config.useSharedStorage("__shared_storage_metadata"));
+    }
+
+    @Test
+    void asyncPartitionAppendRequiresExplicitParallelBlockWal() {
+        File logDir = TestUtils.tempDirectory();
+        assertThrows(IllegalArgumentException.class, () -> SharedStorageConfiguration.from(context(Map.of(
+            SharedStorageConfiguration.WAL_ASYNC_PARTITION_APPEND_CONFIG, true), logDir)));
+        var config = SharedStorageConfiguration.from(context(Map.of(
+            SharedStorageConfiguration.WAL_ENGINE_CONFIG, "parallel-block",
+            SharedStorageConfiguration.WAL_ASYNC_PARTITION_APPEND_CONFIG, true), logDir));
+        assertTrue(config.walAsyncPartitionAppend());
+        assertThrows(IllegalArgumentException.class, () -> SharedStorageConfiguration.from(context(Map.of(
+            SharedStorageConfiguration.WAL_ENGINE_CONFIG, "parallel-block",
+            SharedStorageConfiguration.WAL_ASYNC_PARTITION_APPEND_CONFIG, "yes"), logDir)));
     }
 
     @Test

@@ -40,6 +40,7 @@ public final class SharedStorageConfiguration {
     public static final String WAL_SEGMENT_BYTES_CONFIG = "shared.storage.wal.segment.bytes";
     public static final String WAL_ADMISSION_MAX_GROUPS_CONFIG = "shared.storage.wal.admission.max.groups";
     public static final String WAL_ADMISSION_MAX_BYTES_CONFIG = "shared.storage.wal.admission.max.bytes";
+    public static final String WAL_ASYNC_PARTITION_APPEND_CONFIG = "shared.storage.wal.async.partition.append";
     public static final String OBJECT_TARGET_BYTES_CONFIG = "shared.storage.object.target.bytes";
     public static final String READ_INDEX_CACHE_ENTRIES_CONFIG = "shared.storage.read.index.cache.entries";
     public static final String READ_DATA_BLOCK_CACHE_BYTES_CONFIG = "shared.storage.read.data.block.cache.bytes";
@@ -76,6 +77,7 @@ public final class SharedStorageConfiguration {
     private final long walSegmentBytes;
     private final int walAdmissionMaxGroups;
     private final long walAdmissionMaxBytes;
+    private final boolean walAsyncPartitionAppend;
     private final long objectTargetBytes;
     private final int readIndexCacheEntries;
     private final long readDataBlockCacheBytes;
@@ -97,6 +99,7 @@ public final class SharedStorageConfiguration {
         long walSegmentBytes,
         int walAdmissionMaxGroups,
         long walAdmissionMaxBytes,
+        boolean walAsyncPartitionAppend,
         long objectTargetBytes,
         ReadCacheConfiguration readCache,
         UploadConfiguration upload,
@@ -110,6 +113,7 @@ public final class SharedStorageConfiguration {
         this.walSegmentBytes = walSegmentBytes;
         this.walAdmissionMaxGroups = walAdmissionMaxGroups;
         this.walAdmissionMaxBytes = walAdmissionMaxBytes;
+        this.walAsyncPartitionAppend = walAsyncPartitionAppend;
         this.objectTargetBytes = objectTargetBytes;
         this.readIndexCacheEntries = readCache.indexEntries();
         this.readDataBlockCacheBytes = readCache.dataBlockBytes();
@@ -154,6 +158,12 @@ public final class SharedStorageConfiguration {
             DEFAULT_WAL_ADMISSION_MAX_BYTES,
             WAL_ADMISSION_MAX_BYTES_CONFIG
         );
+        boolean walAsyncPartitionAppend = booleanValue(
+            context.originals().get(WAL_ASYNC_PARTITION_APPEND_CONFIG), WAL_ASYNC_PARTITION_APPEND_CONFIG);
+        if (walAsyncPartitionAppend && walEngine != WalEngine.PARALLEL_BLOCK) {
+            throw new IllegalArgumentException(WAL_ASYNC_PARTITION_APPEND_CONFIG + " requires " +
+                WAL_ENGINE_CONFIG + "=parallel-block");
+        }
         if (walEngine == WalEngine.ROTATING_FILE && walSegmentBytes > walCapacityBytes) {
             throw new IllegalArgumentException(
                 WAL_SEGMENT_BYTES_CONFIG + " must not exceed " + WAL_CAPACITY_BYTES_CONFIG +
@@ -227,6 +237,7 @@ public final class SharedStorageConfiguration {
             walSegmentBytes,
             walAdmissionMaxGroups,
             walAdmissionMaxBytes,
+            walAsyncPartitionAppend,
             objectTargetBytes,
             readCache,
             upload,
@@ -286,6 +297,10 @@ public final class SharedStorageConfiguration {
 
     public long walAdmissionMaxBytes() {
         return walAdmissionMaxBytes;
+    }
+
+    public boolean walAsyncPartitionAppend() {
+        return walAsyncPartitionAppend;
     }
 
     public long objectTargetBytes() {

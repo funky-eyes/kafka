@@ -48,6 +48,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.zip.CRC32C;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -56,6 +57,37 @@ class SharedLogSegmentRemoteRecoveryTest {
 
     @TempDir
     Path tempDir;
+
+    @Test
+    void trackedRemoteBatchWaitsForKafkaStateWithoutRewritingWal() throws Exception {
+        MemoryRecords records = records(0L, 9, 1000L, "remote-a", "remote-b");
+        KafkaRecordBatchAdapter.SerializedBatch batch = onlyBatch(records);
+        long objectId = 1002L;
+        var reference = remoteReference(objectId, batch, batch.leaderEpoch(), batch.bytes().remaining(), crc32c(batch.bytes()));
+        File logDir = tempDir.resolve("tracked-remote-topic-0").toFile();
+        Files.createDirectories(logDir.toPath());
+        try (SharedStorageEngine engine = engine(tempDir.resolve("tracked-remote-wal"))) {
+            engine.remoteIndex().restore(List.of(reference));
+            var tracker = new PartitionDurableOffsetTracker(1L, batch.firstOffset(), Runnable::run, 8, 8192L);
+            long walBytesBefore = engine.walUsedBytes();
+            SharedLogSegment segment = SharedLogSegment.open(logDir, batch.firstOffset(), new LogConfig(new Properties()),
+                new MockTime(), engine, PARTITION, false, "");
+            try {
+                try (SharedAppendScope scope = SharedAppendScope.open(tracker, PARTITION, 1L)) {
+                    segment.append(batch.lastOffset(), records);
+                    var confirmation = tracker.awaitOffset(1L, batch.lastOffset() + 1);
+                    assertFalse(confirmation.isDone());
+                    assertEquals(batch.firstOffset(), tracker.confirmedOffset());
+                    assertEquals(walBytesBefore, engine.walUsedBytes());
+                    scope.publish();
+                    confirmation.join();
+                }
+                assertEquals(batch.lastOffset() + 1, tracker.confirmedOffset());
+            } finally {
+                segment.close();
+            }
+        }
+    }
 
     @Test
     void shouldRebuildLogicalStateFromExactRemoteBatchWithoutConsumingWal() throws Exception {

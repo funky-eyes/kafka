@@ -82,7 +82,9 @@ public final class SharedStorageExtension implements KafkaStorageExtension {
             storage = new SharedStorageEngine(wal);
             storageConfiguration = configuration;
             commitProgress = new SharedCommitProgress();
-            SharedUnifiedLogFactory sharedFactory = new SharedUnifiedLogFactory(storage, commitProgress, configuration.legacySelectorsEnabled());
+            SharedUnifiedLogFactory sharedFactory = new SharedUnifiedLogFactory(storage, commitProgress,
+                configuration.legacySelectorsEnabled(), configuration.walAsyncPartitionAppend(),
+                configuration.walAdmissionMaxGroups(), configuration.walAdmissionMaxBytes());
             unifiedLogFactory = new RoutingUnifiedLogFactory(configuration, sharedFactory);
             partitionRoleListener = new SharedPartitionRoleListener(
                 roleSelectionOverride.orElse(sharedFactory::isSharedPartition), commitProgress, sharedFactory::forgetPartition

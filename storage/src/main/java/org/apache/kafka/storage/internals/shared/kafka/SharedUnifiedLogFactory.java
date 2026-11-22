@@ -62,6 +62,9 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
     private final SharedStorageEngine storage;
     private final SharedCommitProgress commitProgress;
     private final boolean legacyAdoption;
+    private final boolean experimentalAsyncAppend;
+    private final int asyncMaxGroups;
+    private final long asyncMaxBytes;
     private final ConcurrentMap<File, LoadedSharedLog> loadedLogs = new ConcurrentHashMap<>();
     private final ConcurrentMap<SharedPartitionId, Set<File>> loadedPartitionDirs = new ConcurrentHashMap<>();
 
@@ -75,9 +78,19 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
 
     public SharedUnifiedLogFactory(SharedStorageEngine storage, SharedCommitProgress commitProgress,
                                    boolean legacyAdoption) {
+        this(storage, commitProgress, legacyAdoption, false, 1, 1);
+    }
+
+    public SharedUnifiedLogFactory(SharedStorageEngine storage, SharedCommitProgress commitProgress,
+                                   boolean legacyAdoption, boolean experimentalAsyncAppend,
+                                   int asyncMaxGroups, long asyncMaxBytes) {
         this.storage = Objects.requireNonNull(storage, "storage");
         this.commitProgress = Objects.requireNonNull(commitProgress, "commitProgress");
         this.legacyAdoption = legacyAdoption;
+        if (asyncMaxGroups <= 0 || asyncMaxBytes <= 0) throw new IllegalArgumentException("Invalid async admission limits");
+        this.experimentalAsyncAppend = experimentalAsyncAppend;
+        this.asyncMaxGroups = asyncMaxGroups;
+        this.asyncMaxBytes = asyncMaxBytes;
     }
 
     @Override
@@ -168,6 +181,7 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
             false,
             context.logOffsetsListener()
         );
+        if (experimentalAsyncAppend) log.enableExperimentalAsyncAppend(sharedPartition, asyncMaxGroups, asyncMaxBytes);
         // UnifiedLog may normalize its start in its constructor. Observe the
         // actual native source state only after that constructor completes.
         log.trackSourceLogStart(commitProgress, sharedPartition);

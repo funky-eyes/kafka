@@ -27,8 +27,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Test-only experimental model of an ordered, exclusive Kafka offset frontier.
- * It is not connected to Broker reads, leadership transitions or acknowledgements.
+ * Experimental tracker of an ordered, exclusive Kafka offset frontier.
+ * It is not yet connected to Broker reads, leadership transitions or acknowledgements.
  * Callers reserve under the partition append lock before submitting the WAL
  * group, and bind the returned reservation even if submission fails. This class
  * is not a replay frontier: its initial offset must be established by recovery.
@@ -86,6 +86,11 @@ final class PartitionDurableOffsetTracker {
 
     synchronized long confirmedOffset() {
         return confirmedOffset;
+    }
+
+    synchronized CompletableFuture<Void> awaitReserved() {
+        if (failure != null) return CompletableFuture.failedFuture(failure);
+        return awaitOffset(generation, reservedOffset);
     }
 
     synchronized CompletableFuture<Void> awaitOffset(long expectedGeneration, long endOffset) {

@@ -26,6 +26,7 @@ import org.apache.kafka.storage.internals.shared.wal.PartitionWalIndex;
 import org.apache.kafka.storage.internals.shared.wal.RemoteCoverageWalReclaimPolicy;
 import org.apache.kafka.storage.internals.shared.wal.SharedWal;
 import org.apache.kafka.storage.internals.shared.wal.WalAppendResult;
+import org.apache.kafka.storage.internals.shared.wal.WalBlockStats;
 import org.apache.kafka.storage.internals.shared.wal.WalCorruptionException;
 import org.apache.kafka.storage.internals.shared.wal.WalDurabilityStats;
 import org.apache.kafka.storage.internals.shared.wal.WalLocation;
@@ -874,6 +875,10 @@ public final class SharedStorageEngine implements AutoCloseable {
 
     public WalDurabilityStats walDurabilityStats() {
         return wal.durabilityStats();
+    }
+
+    public WalBlockStats walBlockStats() {
+        return wal.blockStats();
     }
 
     @Override

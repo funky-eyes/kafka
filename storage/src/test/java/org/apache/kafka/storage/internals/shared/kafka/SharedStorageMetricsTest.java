@@ -20,7 +20,10 @@ import org.apache.kafka.server.metrics.KafkaMetricsGroup;
 import org.apache.kafka.server.metrics.KafkaYammerMetrics;
 import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
+import org.apache.kafka.storage.internals.shared.wal.CoordinatedRingWalAdapter;
+import org.apache.kafka.storage.internals.shared.wal.FileChannelWalIoBackend;
 import org.apache.kafka.storage.internals.shared.wal.FileSharedWal;
+import org.apache.kafka.storage.internals.shared.wal.WalRecord;
 
 import com.yammer.metrics.core.Gauge;
 import com.yammer.metrics.core.MetricName;
@@ -30,7 +33,9 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -43,6 +48,30 @@ class SharedStorageMetricsTest {
 
     @TempDir
     Path tempDir;
+
+    @Test
+    void exposesCompletedBlockOccupancySeparatelyFromCheckpointCohorts() throws Exception {
+        int brokerId = 37;
+        MetricName blockName = metricName("WalBlockCount", brokerId);
+        MetricName groupsName = metricName("WalBlockGroupCount", brokerId);
+        MetricName bytesName = metricName("WalBlockRecordBytes", brokerId);
+        MetricName maxName = metricName("WalMaxGroupsPerBlock", brokerId);
+        var wal = CoordinatedRingWalAdapter.create(tempDir.resolve("metric-block-wal"),
+            new FileChannelWalIoBackend(), 65536L, 4096, 50_000_000L, 8, 8192L);
+        try (SharedStorageEngine engine = new SharedStorageEngine(wal);
+             SharedStorageMetrics metrics = new SharedStorageMetrics(engine, brokerId)) {
+            var writes = java.util.stream.IntStream.range(0, 3).mapToObj(i ->
+                wal.appendBatch(List.of(WalRecord.data(1, 2, 0, 1, i, i, new byte[] {(byte) i})))).toList();
+            CompletableFuture.allOf(writes.toArray(CompletableFuture[]::new)).get(10, TimeUnit.SECONDS);
+            long blocks = ((Number) gauge(blockName).value()).longValue();
+            assertTrue(blocks >= 1 && blocks <= 3);
+            assertEquals(3L, ((Number) gauge(groupsName).value()).longValue());
+            assertTrue(((Number) gauge(bytesName).value()).longValue() > 0);
+            assertTrue(((Number) gauge(maxName).value()).longValue() >= 1);
+        }
+        assertFalse(KafkaYammerMetrics.defaultRegistry().allMetrics().containsKey(blockName));
+        assertFalse(KafkaYammerMetrics.defaultRegistry().allMetrics().containsKey(groupsName));
+    }
 
     @Test
     void exposesBrokerScopedWalAndControlPlaneMetrics() throws Exception {

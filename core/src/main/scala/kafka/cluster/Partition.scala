@@ -42,6 +42,7 @@ import org.apache.kafka.server.common.{RequestLocal, TransactionVersion}
 import org.apache.kafka.server.log.remote.TopicPartitionLog
 import org.apache.kafka.server.log.remote.storage.RemoteLogManager
 import org.apache.kafka.storage.internals.log.{AppendOrigin, AsyncOffsetReader, FetchDataInfo, LeaderHwChange, LogAppendInfo, LogOffsetMetadata, LogOffsetSnapshot, LogOffsetsListener, LogReadInfo, LogStartOffsetIncrementReason, OffsetResultHolder, UnifiedLog, VerificationGuard}
+import org.apache.kafka.storage.internals.shared.kafka.SharedUnifiedLog
 import org.apache.kafka.server.metrics.KafkaMetricsGroup
 import org.apache.kafka.server.partition.{AlterPartitionListener, AssignmentState, CommittedPartitionState, OngoingReassignmentState, PartitionListener, PartitionState, PendingExpandIsr, PendingPartitionChange, PendingShrinkIsr, SimpleAssignmentState}
 import org.apache.kafka.server.purgatory.{DelayedDeleteRecords, DelayedOperationPurgatory, DelayedProduce, TopicPartitionOperationKey}
@@ -610,6 +611,13 @@ class Partition(val topicPartition: TopicPartition,
       val addingReplicas = partitionRegistration.addingReplicas
       val removingReplicas = partitionRegistration.removingReplicas
 
+      if (isNewLeader || isNewLeaderEpoch || replicas.length != 1) {
+        log.foreach {
+          case shared: SharedUnifiedLog => shared.prepareForRoleChange()
+          case _ =>
+        }
+      }
+
       if (partitionRegistration.leaderRecoveryState == LeaderRecoveryState.RECOVERING) {
         stateChangeLogger.info(s"The topic partition $topicPartition was marked as RECOVERING. " +
           "Marking the topic partition as RECOVERED.")
@@ -704,6 +712,12 @@ class Partition(val topicPartition: TopicPartition,
       }
 
       val isNewLeaderEpoch = partitionRegistration.leaderEpoch > leaderEpoch
+      if (isNewLeaderEpoch || isLeader) {
+        log.foreach {
+          case shared: SharedUnifiedLog => shared.prepareForRoleChange()
+          case _ =>
+        }
+      }
       // The leader should be updated before updateAssignmentAndIsr where we clear the ISR. Or it is possible to meet
       // the under min isr condition during the makeFollower process and emits the wrong metric.
       val prevLeaderReplicaIdOpt = leaderReplicaIdOpt
@@ -1237,7 +1251,14 @@ class Partition(val topicPartition: TopicPartition,
               s"live replica(s) broker.id are : $inSyncReplicaIds")
           }
 
-          val info = leaderLog.appendAsLeader(records, this.leaderEpoch, origin, requestLocal, verificationGuard, transactionVersion)
+          val info = leaderLog match {
+            case shared: SharedUnifiedLog if assignmentState.replicationFactor == 1 && requiredAcks == 1 &&
+              origin == AppendOrigin.CLIENT && verificationGuard == VerificationGuard.SENTINEL &&
+              shared.allowsExperimentalAsyncAppend(records) =>
+              shared.appendAsLeaderWithDurableWait(records, this.leaderEpoch, origin, requestLocal, verificationGuard, transactionVersion)
+            case _ =>
+              leaderLog.appendAsLeader(records, this.leaderEpoch, origin, requestLocal, verificationGuard, transactionVersion)
+          }
 
           // we may need to increment high watermark since ISR could be down to 1
           (info, maybeIncrementLeaderHW(leaderLog))

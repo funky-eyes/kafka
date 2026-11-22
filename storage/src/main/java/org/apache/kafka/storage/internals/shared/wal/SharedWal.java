@@ -108,6 +108,11 @@ public interface SharedWal extends AutoCloseable {
         return WalDurabilityStats.EMPTY;
     }
 
+    /** Completed physical block occupancy; an empty snapshot means this backend does not expose blocks. */
+    default WalBlockStats blockStats() {
+        return WalBlockStats.EMPTY;
+    }
+
     /**
      * Cumulative queue and physical-write latency diagnostics. This does not
      * include Kafka replica acknowledgement latency.

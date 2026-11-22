@@ -42,6 +42,7 @@ import org.apache.kafka.storage.internals.log.TimestampOffset;
 import org.apache.kafka.storage.internals.log.TransactionIndex;
 import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
+import org.apache.kafka.storage.internals.shared.wal.WalLocation;
 
 import java.io.File;
 import java.io.IOException;
@@ -52,6 +53,7 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
@@ -159,6 +161,12 @@ public final class SharedLogSegment extends LogSegment {
 
     @Override
     public void append(long largestOffset, MemoryRecords records) throws IOException {
+        SharedAppendScope scope = SharedAppendScope.current();
+        if (scope != null) {
+            scope.claimPartition(partition);
+            appendTracked(largestOffset, records, scope.tracker(), scope.generation());
+            return;
+        }
         if (records.sizeInBytes() == 0) {
             return;
         }
@@ -174,6 +182,67 @@ public final class SharedLogSegment extends LogSegment {
         validateLargestOffsetBeforeWal(largestOffset, serialized);
         appendToWal(batchesRequiringWal(serialized));
         materializeLogicalMetadata(serialized);
+    }
+
+    /**
+     * Experimental entry point for a caller that separately fences the log end,
+     * high watermark, reads and acknowledgements at the returned confirmation.
+     * The ordinary append path remains synchronous until those Kafka boundaries
+     * are wired and verified. The caller serializes appends to this segment.
+     */
+    CompletableFuture<Void> appendTracked(
+        long largestOffset,
+        MemoryRecords records,
+        PartitionDurableOffsetTracker tracker,
+        long generation
+    ) throws IOException {
+        Objects.requireNonNull(records, "records");
+        Objects.requireNonNull(tracker, "tracker");
+        if (records.sizeInBytes() == 0) {
+            return CompletableFuture.completedFuture(null);
+        }
+        List<KafkaRecordBatchAdapter.SerializedBatch> serialized = KafkaRecordBatchAdapter.serializeBatches(records);
+        if (serialized.isEmpty()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        validateLargestOffsetBeforeWal(largestOffset, serialized);
+        List<SharedStorageEngine.OwnedDataBatch> group = batchesRequiringWal(serialized);
+        long firstOffset = serialized.get(0).firstOffset();
+        long endOffset = Math.addExact(largestOffset, 1L);
+        PartitionDurableOffsetTracker.Reservation reservation =
+            tracker.reserve(generation, firstOffset, endOffset, records.sizeInBytes());
+        SharedAppendScope scope = SharedAppendScope.current();
+        if (scope != null) {
+            scope.markReserved();
+        }
+        CompletableFuture<Void> materializedAndDurable = new CompletableFuture<>();
+        CompletableFuture<Void> published = scope == null ? CompletableFuture.completedFuture(null) : scope.published();
+        reservation.bind(materializedAndDurable, published);
+        CompletableFuture<List<WalLocation>> walFuture = null;
+        try {
+            walFuture = group.isEmpty() ? CompletableFuture.completedFuture(List.of())
+                : storage.appendOwnedBatchGroup(partition, group);
+            if (walFuture.isDone()) {
+                await(walFuture);
+            }
+            materializeLogicalMetadata(serialized);
+        } catch (IOException | RuntimeException | Error failure) {
+            tracker.fence(failure);
+            if (walFuture == null) {
+                materializedAndDurable.completeExceptionally(failure);
+            } else {
+                walFuture.whenComplete((ignored, error) -> materializedAndDurable.completeExceptionally(failure));
+            }
+            throw failure;
+        }
+        walFuture.whenComplete((ignored, failure) -> {
+            if (failure == null) {
+                materializedAndDurable.complete(null);
+            } else {
+                materializedAndDurable.completeExceptionally(failure);
+            }
+        });
+        return reservation.confirmed();
     }
 
     private List<SharedStorageEngine.OwnedDataBatch> batchesRequiringWal(
