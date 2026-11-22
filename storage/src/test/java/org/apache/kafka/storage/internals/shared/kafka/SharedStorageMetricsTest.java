@@ -57,6 +57,7 @@ class SharedStorageMetricsTest {
         MetricName bytesName = metricName("WalBlockRecordBytes", brokerId);
         MetricName maxName = metricName("WalMaxGroupsPerBlock", brokerId);
         MetricName trackedName = metricName("WalTrackedAppendCount", brokerId);
+        MetricName nonBlockingName = metricName("WalNonBlockingRequestCount", brokerId);
         var wal = CoordinatedRingWalAdapter.create(tempDir.resolve("metric-block-wal"),
             new FileChannelWalIoBackend(), 65536L, 4096, 50_000_000L, 8, 8192L);
         try (SharedStorageEngine engine = new SharedStorageEngine(wal);
@@ -64,6 +65,9 @@ class SharedStorageMetricsTest {
             assertEquals(0L, ((Number) gauge(trackedName).value()).longValue());
             engine.recordTrackedAppend();
             assertEquals(1L, ((Number) gauge(trackedName).value()).longValue());
+            assertEquals(0L, ((Number) gauge(nonBlockingName).value()).longValue());
+            engine.recordNonBlockingRequest();
+            assertEquals(1L, ((Number) gauge(nonBlockingName).value()).longValue());
             var writes = java.util.stream.IntStream.range(0, 3).mapToObj(i ->
                 wal.appendBatch(List.of(WalRecord.data(1, 2, 0, 1, i, i, new byte[] {(byte) i})))).toList();
             CompletableFuture.allOf(writes.toArray(CompletableFuture[]::new)).get(10, TimeUnit.SECONDS);
@@ -76,6 +80,7 @@ class SharedStorageMetricsTest {
         assertFalse(KafkaYammerMetrics.defaultRegistry().allMetrics().containsKey(blockName));
         assertFalse(KafkaYammerMetrics.defaultRegistry().allMetrics().containsKey(groupsName));
         assertFalse(KafkaYammerMetrics.defaultRegistry().allMetrics().containsKey(trackedName));
+        assertFalse(KafkaYammerMetrics.defaultRegistry().allMetrics().containsKey(nonBlockingName));
     }
 
     @Test

@@ -661,6 +661,11 @@ class ReplicaManager(val config: KafkaConfig,
       return
     }
 
+    if (tryAppendSingleSharedPartitionAsync(requiredAcks, internalTopicsAllowed, origin, entriesPerPartition,
+      responseCallback, recordValidationStatsCallback, requestLocal, verificationGuards, transactionVersion)) {
+      return
+    }
+
     val localProduceResults = appendRecordsToLeader(
       requiredAcks,
       internalTopicsAllowed,
@@ -686,6 +691,132 @@ class ReplicaManager(val config: KafkaConfig,
       produceStatus,
       responseCallback
     )
+  }
+
+  /**
+   * The restricted RF1 shared-log path submits on the request thread, then schedules completion back onto a request
+   * handler after the ordered durable prefix advances. Other requests retain the ordinary append path.
+   */
+  private def tryAppendSingleSharedPartitionAsync(
+    requiredAcks: Short,
+    internalTopicsAllowed: Boolean,
+    origin: AppendOrigin,
+    entries: Map[TopicIdPartition, MemoryRecords],
+    responseCallback: util.Map[TopicIdPartition, PartitionResponse] => Unit,
+    statsCallback: Map[TopicIdPartition, RecordValidationStats] => Unit,
+    requestLocal: RequestLocal,
+    guards: Map[TopicPartition, VerificationGuard],
+    transactionVersion: Short
+  ): Boolean = {
+    if (requiredAcks != 1 || origin != AppendOrigin.CLIENT || entries.size != 1 ||
+      !KafkaRequestHandler.isRequestThread || !storageExtensionContext.exists(context =>
+        java.lang.Boolean.parseBoolean(String.valueOf(context.originals().get(
+          SharedStorageConfiguration.WAL_ASYNC_PARTITION_APPEND_CONFIG))))) return false
+    val (topicIdPartition, records) = entries.head
+    if (Topic.isInternal(topicIdPartition.topic) && !internalTopicsAllowed) return false
+    val partition = try {
+      val current = getPartitionOrException(topicIdPartition)
+      val log = current.localLogOrException
+      if (!log.isInstanceOf[SharedUnifiedLog]) return false
+      if (!Topic.isInternal(topicIdPartition.topic) && diskPressureGuard.enabled()) {
+        diskPressureGuard.check(Paths.get(log.parentDir()))
+        diskPressureGuard.check(sharedWalPath)
+      }
+      current
+    } catch {
+      case scala.util.control.NonFatal(_) => return false
+    }
+    val attempt: Either[Throwable, Option[Partition.PendingLeaderAppend]] = try {
+      Right(partition.tryAppendRecordsToLeaderAsync(records, origin, requiredAcks, requestLocal,
+        guards.getOrElse(topicIdPartition.topicPartition(), VerificationGuard.SENTINEL), transactionVersion))
+    } catch {
+      case failure: Throwable => Left(failure)
+    }
+    if (attempt.isLeft) {
+      brokerTopicStats.topicStats(topicIdPartition.topic).totalProduceRequestRate.mark()
+      brokerTopicStats.allTopicsStats.totalProduceRequestRate.mark()
+      finishSingleAsyncAppend(topicIdPartition, appendFailureResult(topicIdPartition, attempt.swap.toOption.get),
+        statsCallback, responseCallback)
+      return true
+    }
+    val pending = attempt.toOption.get
+    if (pending.isEmpty) return false
+    val append = pending.get
+    val bytes = records.sizeInBytes
+    brokerTopicStats.topicStats(topicIdPartition.topic).totalProduceRequestRate.mark()
+    brokerTopicStats.allTopicsStats.totalProduceRequestRate.mark()
+    val wrapped = KafkaRequestHandler.wrapAsyncCallback[(LogAppendInfo, Throwable)]({ (_, completed) =>
+      val (info, error) = completed
+      val result = try {
+        if (error != null) {
+          val cause = error match {
+            case wrapped: java.util.concurrent.CompletionException if wrapped.getCause != null => wrapped.getCause
+            case _ => error
+          }
+          cause match {
+            case runtime: RuntimeException => throw runtime
+            case fatal: Error => throw fatal
+            case _ => throw new KafkaStorageException("Shared WAL append failed", cause)
+          }
+        }
+        val confirmed = append.finish(info)
+        brokerTopicStats.topicStats(topicIdPartition.topic).bytesInRate.mark(bytes)
+        brokerTopicStats.allTopicsStats.bytesInRate.mark(bytes)
+        brokerTopicStats.topicStats(topicIdPartition.topic).messagesInRate.mark(confirmed.numMessages)
+        brokerTopicStats.allTopicsStats.messagesInRate.mark(confirmed.numMessages)
+        new LogAppendResult(LogAppendSummary.fromAppendInfo(confirmed), Optional.empty(), false)
+      } catch {
+        case failure: Throwable =>
+          appendFailureResult(topicIdPartition, failure)
+      }
+      finishSingleAsyncAppend(topicIdPartition, result, statsCallback, responseCallback)
+    }, requestLocal)
+    append.completion.whenComplete((info: LogAppendInfo, error: Throwable) => wrapped((info, error)))
+    true
+  }
+
+  private def finishSingleAsyncAppend(topicIdPartition: TopicIdPartition,
+                                      result: LogAppendResult,
+                                      statsCallback: Map[TopicIdPartition, RecordValidationStats] => Unit,
+                                      responseCallback: util.Map[TopicIdPartition, PartitionResponse] => Unit): Unit = {
+    val results = Map(topicIdPartition -> result)
+    addCompletePurgatoryAction(defaultActionQueue, results)
+    statsCallback(results.map { case (key, value) => key -> value.logAppendSummary().recordValidationStats() })
+    val responses = new util.HashMap[TopicIdPartition, PartitionResponse]()
+    buildProducePartitionStatus(results).foreach { case (key, status) => responses.put(key, status.responseStatus) }
+    responseCallback(responses)
+  }
+
+  private def processFailedRecord(topicIdPartition: TopicIdPartition, t: Throwable): Long = {
+    val logStartOffset = onlinePartition(topicIdPartition.topicPartition()).map(_.logStartOffset).getOrElse(-1L)
+    brokerTopicStats.topicStats(topicIdPartition.topic).failedProduceRequestRate.mark()
+    brokerTopicStats.allTopicsStats.failedProduceRequestRate.mark()
+    t match {
+      case _: InvalidProducerEpochException =>
+        info(s"Error processing append operation on partition $topicIdPartition", t)
+      case _ =>
+        error(s"Error processing append operation on partition $topicIdPartition", t)
+    }
+    logStartOffset
+  }
+
+  private def appendFailureResult(topicIdPartition: TopicIdPartition, failure: Throwable): LogAppendResult = {
+    failure match {
+      case e@ (_: UnknownTopicOrPartitionException | _: NotLeaderOrFollowerException | _: RecordTooLargeException |
+               _: RecordBatchTooLargeException | _: CorruptRecordException | _: KafkaStorageException |
+               _: UnknownTopicIdException) =>
+        new LogAppendResult(LogAppendSummary.fromAppendInfo(LogAppendInfo.UNKNOWN_LOG_APPEND_INFO),
+          Optional.of(e), false)
+      case validation: RecordValidationException =>
+        val logStartOffset = processFailedRecord(topicIdPartition, validation.invalidException)
+        new LogAppendResult(
+          LogAppendSummary.fromAppendInfo(LogAppendInfo.unknownLogAppendInfoWithAdditionalInfo(
+            logStartOffset, validation.recordErrors)), Optional.of(validation.invalidException), true)
+      case other =>
+        val logStartOffset = processFailedRecord(topicIdPartition, other)
+        new LogAppendResult(LogAppendSummary.fromAppendInfo(
+          LogAppendInfo.unknownLogAppendInfoWithLogStartOffset(logStartOffset)), Optional.of(other), false)
+    }
   }
 
   /**
@@ -1393,19 +1524,6 @@ class ReplicaManager(val config: KafkaConfig,
                                transactionVersion: Short):
   Map[TopicIdPartition, LogAppendResult] = {
     val traceEnabled = isTraceEnabled
-    def processFailedRecord(topicIdPartition: TopicIdPartition, t: Throwable) = {
-      val logStartOffset = onlinePartition(topicIdPartition.topicPartition()).map(_.logStartOffset).getOrElse(-1L)
-      brokerTopicStats.topicStats(topicIdPartition.topic).failedProduceRequestRate.mark()
-      brokerTopicStats.allTopicsStats.failedProduceRequestRate.mark()
-      t match {
-        case _: InvalidProducerEpochException =>
-          info(s"Error processing append operation on partition $topicIdPartition", t)
-        case _ =>
-          error(s"Error processing append operation on partition $topicIdPartition", t)
-      }
-
-      logStartOffset
-    }
 
     if (traceEnabled)
       trace(s"Append [$entriesPerPartition] to local log")
@@ -1445,28 +1563,7 @@ class ReplicaManager(val config: KafkaConfig,
           (topicIdPartition,  new LogAppendResult(LogAppendSummary.fromAppendInfo(info), Optional.empty(), false))
 
         } catch {
-          // NOTE: Failed produce requests metric is not incremented for known exceptions
-          // it is supposed to indicate un-expected failures of a broker in handling a produce request
-          case e@ (_: UnknownTopicOrPartitionException |
-                   _: NotLeaderOrFollowerException |
-                   _: RecordTooLargeException |
-                   _: RecordBatchTooLargeException |
-                   _: CorruptRecordException |
-                   _: KafkaStorageException |
-                   _: UnknownTopicIdException) =>
-            (topicIdPartition, new LogAppendResult(LogAppendSummary.fromAppendInfo(LogAppendInfo.UNKNOWN_LOG_APPEND_INFO),
-              Optional.of(e), false))
-          case rve: RecordValidationException =>
-            val logStartOffset = processFailedRecord(topicIdPartition, rve.invalidException)
-            val recordErrors = rve.recordErrors
-            (topicIdPartition, new LogAppendResult(
-              LogAppendSummary.fromAppendInfo(LogAppendInfo.unknownLogAppendInfoWithAdditionalInfo(logStartOffset, recordErrors)),
-              Optional.of(rve.invalidException), true))
-          case t: Throwable =>
-            val logStartOffset = processFailedRecord(topicIdPartition, t)
-            (topicIdPartition, new LogAppendResult(
-              LogAppendSummary.fromAppendInfo(LogAppendInfo.unknownLogAppendInfoWithLogStartOffset(logStartOffset)),
-              Optional.of(t), false))
+          case t: Throwable => (topicIdPartition, appendFailureResult(topicIdPartition, t))
         }
       }
     }

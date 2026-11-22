@@ -49,6 +49,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -56,6 +57,52 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class SharedUnifiedLogTrackedAppendTest {
     @TempDir
     Path tempDir;
+
+    @Test
+    void asynchronousLeaderAppendReturnsBeforeForceButCompletesAfterDurability() throws Exception {
+        var backend = new TrackedWalTestBackend(false, 0);
+        Uuid topicId = Uuid.randomUuid();
+        var partition = new SharedPartitionId(topicId.getMostSignificantBits(), topicId.getLeastSignificantBits(), 0);
+        MockTime time = new MockTime();
+        BrokerTopicStats stats = new BrokerTopicStats(false);
+        var wal = CoordinatedRingWalAdapter.create(tempDir.resolve("callback-wal"), backend, 65536L, 4096,
+            1_000_000L, 8, 8192L);
+        try (SharedStorageEngine engine = new SharedStorageEngine(wal)) {
+            Path dir = tempDir.resolve("callback-0");
+            var context = new UnifiedLogCreationContext(dir.toFile(), new LogConfig(new Properties()), 0L, 0L,
+                time.scheduler, stats, time, 3600000, new ProducerStateManagerConfig(3600000, false),
+                600000, new LogDirFailureChannel(10), true, Optional.of(topicId), new ConcurrentHashMap<>(),
+                false, LogOffsetsListener.NO_OP_OFFSETS_LISTENER);
+            SharedUnifiedLog log = (SharedUnifiedLog) new SharedUnifiedLogFactory(engine).create(context);
+            log.enableExperimentalAsyncAppend(partition, 8, 8192L);
+            try {
+                backend.arm();
+                MemoryRecords records = MemoryRecords.withRecords(0L, Compression.NONE, 3,
+                    new SimpleRecord(1L, new byte[24]));
+                var pending = log.appendAsLeaderAsync(records, 3, AppendOrigin.CLIENT, RequestLocal.noCaching(),
+                    VerificationGuard.SENTINEL, (short) 0);
+                assertTrue(backend.forceEntered.await(10, TimeUnit.SECONDS));
+                assertFalse(pending.isDone());
+                assertEquals(0L, log.logEndOffset());
+                var requestBuffer = records.buffer().duplicate();
+                byte[] expected = new byte[requestBuffer.remaining()];
+                requestBuffer.duplicate().get(expected);
+                for (int i = requestBuffer.position(); i < requestBuffer.limit(); i++) requestBuffer.put(i, (byte) 0);
+                backend.forceRelease.countDown();
+                assertEquals(0L, pending.get(10, TimeUnit.SECONDS).firstOffset());
+                assertEquals(1L, log.logEndOffset());
+                var stored = engine.readLocal(partition, 0).orElseThrow().payload();
+                byte[] actual = new byte[stored.remaining()];
+                stored.get(actual);
+                assertArrayEquals(expected, actual, "WAL must own its data after the request buffer is released");
+            } finally {
+                backend.forceRelease.countDown();
+                log.close();
+            }
+        } finally {
+            stats.close();
+        }
+    }
 
     @Test
     void synchronousIdempotentAppendDrainsTheExperimentalPipeline() throws Exception {

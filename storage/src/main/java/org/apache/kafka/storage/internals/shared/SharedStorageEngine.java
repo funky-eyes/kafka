@@ -60,6 +60,7 @@ public final class SharedStorageEngine implements AutoCloseable {
     private final StartupWalReplayEvidence startupWalReplayEvidence;
     private final LocalWalDurabilityObservation liveWalDurability = new LocalWalDurabilityObservation();
     private final LongAdder trackedAppends = new LongAdder();
+    private final LongAdder nonBlockingRequests = new LongAdder();
     private final RemoteObjectIndex remoteIndex = new RemoteObjectIndex();
     private final LocalRemoteObjectCheckpoint remoteCheckpoint;
     private final ConcurrentLinkedQueue<SharedObjectMetadata> pendingRemoteCheckpoints = new ConcurrentLinkedQueue<>();
@@ -115,6 +116,14 @@ public final class SharedStorageEngine implements AutoCloseable {
 
     public long trackedAppendCount() {
         return trackedAppends.sum();
+    }
+
+    public void recordNonBlockingRequest() {
+        nonBlockingRequests.increment();
+    }
+
+    public long nonBlockingRequestCount() {
+        return nonBlockingRequests.sum();
     }
 
     public CompletableFuture<WalLocation> appendData(

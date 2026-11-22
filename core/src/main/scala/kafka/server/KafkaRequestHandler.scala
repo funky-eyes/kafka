@@ -41,6 +41,9 @@ object KafkaRequestHandler {
   private val threadRequestChannel = new ThreadLocal[RequestChannel]
   private val threadCurrentRequest = new ThreadLocal[RequestChannel.Request]
 
+  private[server] def isRequestThread: Boolean =
+    threadRequestChannel.get() != null && threadCurrentRequest.get() != null
+
   // For testing
   @volatile private var bypassThreadCheck = false
   def setBypassThreadCheck(bypassCheck: Boolean): Unit = {

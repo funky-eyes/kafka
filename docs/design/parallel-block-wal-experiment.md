@@ -16,11 +16,14 @@ are regression checks, not a per-write check against memory corruption.
 The experimental `shared.storage.wal.async.partition.append=true` switch, off
 by default and accepted only with `parallel-block`, pipelines RF1 `acks=1`
 client appends without producer IDs or transaction/control batches. Native
-Kafka validation and offset assignment remain serialized by the log monitor;
-the WAL wait happens after that monitor is released. The partition leader read
-lock remains held until durability, so a role transition cannot pass an in-flight
-append. Other appends use the ordinary synchronous path after draining tracked
-writes. The implementation caps log-end visibility, fetches, offset snapshots
+Kafka validation and offset assignment remain serialized by the log monitor.
+For a single-partition Produce request handled by a Kafka request thread, the
+leader lock is released after admission; ordered WAL completion schedules a
+request-handler callback that rechecks leadership and epoch before ACK. Role
+changes drain the admitted prefix before updating partition state. Multi-partition
+requests and other entry points retain the synchronous wait with the leader read
+lock held. Ineligible appends use the ordinary path after draining tracked writes.
+The implementation caps log-end visibility, fetches, offset snapshots
 and high-watermark updates at the confirmed prefix, and drains before truncation,
 remote recovery, close and synchronous fallback. Segment rolls wait for prior
 writes before taking producer snapshots. An async failure fences the tracked
@@ -37,7 +40,8 @@ Broker factory observed six concurrent requests in four blocks, with controlled
 force gates and test-only logging. Selected ACK/visibility, transaction,
 idempotent retry, malformed-neighbor, capacity, restart and reassignment cases
 passed. The block occupancy gauges report completed blocks and groups separately
-from checkpoint cohorts. These controlled tests are not a multi-host failover or
+from checkpoint cohorts; `WalNonBlockingRequestCount` counts accepted requests
+using the callback path. These controlled tests are not a multi-host failover or
 power-loss guarantee, and they do not establish production readiness or a
 performance comparison. Broader failure windows and sustained-load behavior remain
 to be verified. The implementation does not yet promise concurrent batching for

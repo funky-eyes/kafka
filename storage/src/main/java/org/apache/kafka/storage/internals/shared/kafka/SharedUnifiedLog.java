@@ -66,16 +66,28 @@ public final class SharedUnifiedLog extends UnifiedLog {
     private volatile SourceLogStartCallbackFence sourceLogStartTracker;
     private record ExperimentalVisibility(PartitionDurableOffsetTracker tracker, LogOffsetMetadata confirmed) { }
     private final AtomicReference<ExperimentalVisibility> experimentalVisibility = new AtomicReference<>();
-    private record ExperimentalAsyncSettings(SharedPartitionId partition, int maxGroups, long maxBytes) { }
+    private record ExperimentalAsyncSettings(SharedPartitionId partition, int maxGroups, long maxBytes,
+                                             Runnable recordNonBlockingRequest) { }
     private volatile ExperimentalAsyncSettings experimentalAsyncSettings;
     private final Object experimentalTrackerLock = new Object();
     private PartitionDurableOffsetTracker experimentalOwnedTracker;
 
     void enableExperimentalAsyncAppend(SharedPartitionId partition, int maxGroups, long maxBytes) {
+        enableExperimentalAsyncAppend(partition, maxGroups, maxBytes, () -> { });
+    }
+
+    void enableExperimentalAsyncAppend(SharedPartitionId partition, int maxGroups, long maxBytes,
+                                       Runnable recordNonBlockingRequest) {
         Objects.requireNonNull(partition, "partition");
+        Objects.requireNonNull(recordNonBlockingRequest, "recordNonBlockingRequest");
         if (maxGroups <= 0 || maxBytes <= 0) throw new IllegalArgumentException("Invalid async append limits");
         if (experimentalAsyncSettings != null) throw new IllegalStateException("Async append is already configured");
-        experimentalAsyncSettings = new ExperimentalAsyncSettings(partition, maxGroups, maxBytes);
+        experimentalAsyncSettings = new ExperimentalAsyncSettings(partition, maxGroups, maxBytes,
+            recordNonBlockingRequest);
+    }
+
+    public void recordNonBlockingRequest() {
+        Objects.requireNonNull(experimentalAsyncSettings, "async settings").recordNonBlockingRequest().run();
     }
 
     /** Only non-transactional records without producer state use the experimental pipeline. */
@@ -97,6 +109,18 @@ public final class SharedUnifiedLog extends UnifiedLog {
     /** The caller must hold the partition leader read lock until this method returns. */
     public LogAppendInfo appendAsLeaderWithDurableWait(MemoryRecords records, int leaderEpoch, AppendOrigin origin,
         RequestLocal requestLocal, VerificationGuard verificationGuard, short transactionVersion) {
+        CompletableFuture<LogAppendInfo> result = appendAsLeaderAsync(records, leaderEpoch, origin, requestLocal,
+            verificationGuard, transactionVersion);
+        awaitExperimental(result);
+        return result.join();
+    }
+
+    /**
+     * Reserves and publishes Kafka state synchronously, then completes only when the ordered WAL prefix is durable.
+     * The caller must hold the partition leader read lock during this call and revalidate leadership before ACK.
+     */
+    public CompletableFuture<LogAppendInfo> appendAsLeaderAsync(MemoryRecords records, int leaderEpoch,
+        AppendOrigin origin, RequestLocal requestLocal, VerificationGuard verificationGuard, short transactionVersion) {
         ExperimentalAsyncSettings settings = Objects.requireNonNull(experimentalAsyncSettings, "async settings");
         TrackedAppend append;
         remoteRecoveryFence.readLock().lock();
@@ -114,8 +138,7 @@ public final class SharedUnifiedLog extends UnifiedLog {
         } finally {
             remoteRecoveryFence.readLock().unlock();
         }
-        awaitExperimental(append.confirmation());
-        return append.info();
+        return append.confirmation().thenApply(ignored -> append.info());
     }
 
     private static void awaitExperimental(CompletableFuture<?> future) {

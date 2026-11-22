@@ -181,7 +181,8 @@ public final class SharedUnifiedLogFactory implements UnifiedLogFactory {
             false,
             context.logOffsetsListener()
         );
-        if (experimentalAsyncAppend) log.enableExperimentalAsyncAppend(sharedPartition, asyncMaxGroups, asyncMaxBytes);
+        if (experimentalAsyncAppend) log.enableExperimentalAsyncAppend(sharedPartition, asyncMaxGroups, asyncMaxBytes,
+            storage::recordNonBlockingRequest);
         // UnifiedLog may normalize its start in its constructor. Observe the
         // actual native source state only after that constructor completes.
         log.trackSourceLogStart(commitProgress, sharedPartition);

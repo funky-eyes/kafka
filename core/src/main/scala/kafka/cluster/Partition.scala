@@ -80,6 +80,8 @@ class DelayedOperations(topicId: Option[Uuid],
 }
 
 object Partition {
+  final case class PendingLeaderAppend(completion: CompletableFuture[LogAppendInfo],
+                                       finish: LogAppendInfo => LogAppendInfo)
   // Changing the package or class name may cause incompatibility with existing code and metrics configuration
   private val metricsPackage = "kafka.cluster"
   private val metricsClassName = "Partition"
@@ -1270,6 +1272,42 @@ class Partition(val topicPartition: TopicPartition,
     })
 
     info.copy(if (leaderHWIncremented) LeaderHwChange.INCREASED else LeaderHwChange.SAME)
+  }
+
+  /**
+   * Reserve an eligible shared-log append without blocking the request thread on WAL durability.
+   * The completion callback must invoke `finish` on a request handler thread, not the WAL completion thread.
+   */
+  def tryAppendRecordsToLeaderAsync(records: MemoryRecords,
+                                    origin: AppendOrigin,
+                                    requiredAcks: Int,
+                                    requestLocal: RequestLocal,
+                                    verificationGuard: VerificationGuard,
+                                    transactionVersion: Short): Option[Partition.PendingLeaderAppend] = {
+    inReadLock(leaderIsrUpdateLock, () => {
+      if (assignmentState.replicationFactor != 1 || requiredAcks != 1 || origin != AppendOrigin.CLIENT ||
+        verificationGuard != VerificationGuard.SENTINEL) {
+        None
+      } else {
+        leaderLogIfLocal match {
+          case Some(shared: SharedUnifiedLog) if shared.allowsExperimentalAsyncAppend(records) =>
+            val expectedEpoch = leaderEpoch
+            val completion = shared.appendAsLeaderAsync(records, expectedEpoch, origin, requestLocal,
+              verificationGuard, transactionVersion)
+            shared.recordNonBlockingRequest()
+            val finish = (info: LogAppendInfo) => inReadLock(leaderIsrUpdateLock, () => {
+              leaderLogIfLocal match {
+                case Some(current) if (current eq shared) && leaderEpoch == expectedEpoch =>
+                  info.copy(if (maybeIncrementLeaderHW(shared)) LeaderHwChange.INCREASED else LeaderHwChange.SAME)
+                case _ =>
+                  throw new NotLeaderOrFollowerException(s"Leadership changed before the append completed for $topicPartition")
+              }
+            })
+            Some(Partition.PendingLeaderAppend(completion, finish))
+          case _ => None
+        }
+      }
+    })
   }
 
   /**
