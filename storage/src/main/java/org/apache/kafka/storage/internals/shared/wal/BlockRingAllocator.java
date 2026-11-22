@@ -1,0 +1,292 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.kafka.storage.internals.shared.wal;
+
+import java.io.IOException;
+import java.util.ArrayDeque;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+/**
+ * Experimental ring reservation and reader-pin state machine. It performs no
+ * I/O and is not wired into SharedWal. Callers must durably force the data and
+ * head/tail checkpoints before invoking the corresponding confirmation methods.
+ */
+final class BlockRingAllocator {
+    static final class CapacityException extends IOException {
+        CapacityException(String message) {
+            super(message);
+        }
+    }
+    record Address(long reservedStart, long blockStart, long end, long physical, long generation, long padding) { }
+
+    private enum State {
+        RESERVED, FORCED, COMMITTED, RETIRING
+    }
+    private static final class Entry {
+        final Address address;
+        State state = State.RESERVED;
+        int pins;
+        CompletableFuture<Void> drained;
+        Entry(Address address) {
+            this.address = address;
+        }
+    }
+
+    final class Pin implements AutoCloseable {
+        private final Entry entry;
+        private final AtomicBoolean closed = new AtomicBoolean();
+        private Pin(Entry entry) {
+            this.entry = entry;
+        }
+        Address address() {
+            return entry.address;
+        }
+        @Override
+        public void close() {
+            if (!closed.compareAndSet(false, true)) return;
+            CompletableFuture<Void> notify = null;
+            synchronized (lock) {
+                entry.pins--;
+                if (entry.pins == 0 && entry.drained != null) notify = entry.drained;
+            }
+            if (notify != null) notify.complete(null);
+        }
+    }
+
+    static final class Retirement {
+        private final Entry entry;
+        private Retirement(Entry entry) {
+            this.entry = entry;
+        }
+        long newHead() {
+            return entry.address.end();
+        }
+        CompletableFuture<Void> readersDrained() {
+            return entry.drained.copy();
+        }
+    }
+
+    private final Object lock = new Object();
+    private final ArrayDeque<Entry> entries = new ArrayDeque<>();
+    private final long capacity;
+    private final int alignment;
+    private long head;
+    private long reservedTail;
+    private long committedTail;
+    private boolean fenced;
+
+    BlockRingAllocator(long capacity, int alignment) {
+        if (alignment <= 0 || capacity <= 0 || capacity % alignment != 0)
+            throw new IllegalArgumentException("Invalid ring layout");
+        this.capacity = capacity;
+        this.alignment = alignment;
+    }
+
+    boolean matchesLayout(long expectedCapacity, int expectedAlignment) {
+        return capacity == expectedCapacity && alignment == expectedAlignment;
+    }
+
+    long committedTail() throws IOException {
+        synchronized (lock) {
+            checkOpen();
+            return committedTail;
+        }
+    }
+
+    long usedBytes() {
+        synchronized (lock) {
+            return reservedTail - head;
+        }
+    }
+
+    /** The next physical origin is safe only when no reservation or retained block exists. */
+    long emptyRebaseTarget() throws IOException {
+        synchronized (lock) {
+            checkOpen();
+            if (!entries.isEmpty() || head != reservedTail || committedTail != reservedTail)
+                throw new IOException("Cannot rebase a nonempty ring");
+            long physical = reservedTail % capacity;
+            return physical == 0 ? reservedTail : Math.addExact(reservedTail, capacity - physical);
+        }
+    }
+
+    /** Call only after the empty head/tail checkpoint itself is durably forced. */
+    void emptyRebaseCheckpointForced(long offset) throws IOException {
+        synchronized (lock) {
+            if (offset != emptyRebaseTarget()) throw new IOException("Invalid empty ring rebase");
+            head = offset;
+            reservedTail = offset;
+            committedTail = offset;
+        }
+    }
+
+    /** Restores only a prefix already validated against the durable ring checkpoint. */
+    static BlockRingAllocator recover(long capacity, int alignment, long head, long tail,
+                                      BlockRingRecovery.Scan scan) throws IOException {
+        BlockRingAllocator result = new BlockRingAllocator(capacity, alignment);
+        if (head < 0 || tail < head || tail - head > capacity || head % alignment != 0 ||
+            tail % alignment != 0 || scan == null) throw new IOException("Invalid recovered ring bounds");
+        long cursor = head;
+        for (BlockRingRecovery.RecoveredBlock block : scan.blocks()) {
+            long start = block.blockStart();
+            long end = block.end();
+            if (!result.validRecoveredBlock(block, cursor, tail))
+                throw new IOException("Invalid recovered ring block");
+            Address address = new Address(cursor, start, end, start % capacity, start / capacity, start - cursor);
+            Entry entry = new Entry(address);
+            entry.state = State.COMMITTED;
+            result.entries.addLast(entry);
+            cursor = end;
+        }
+        if (cursor != tail) throw new IOException("Incomplete recovered ring blocks");
+        result.head = head;
+        result.reservedTail = tail;
+        result.committedTail = tail;
+        return result;
+    }
+
+    private boolean validRecoveredBlock(BlockRingRecovery.RecoveredBlock block, long cursor, long tail) {
+        long start = block.blockStart(), end = block.end(), remaining = capacity - cursor % capacity;
+        if (block.reservedStart() != cursor || start < cursor || end <= start || end > tail) return false;
+        if (start % alignment != 0 || end % alignment != 0 || end - start > capacity) return false;
+        if (start != cursor && (start - cursor != remaining || start % capacity != 0 || end - start <= remaining))
+            return false;
+        return end - start <= capacity - start % capacity;
+    }
+
+    List<Address> committedAddresses() throws IOException {
+        synchronized (lock) {
+            checkOpen();
+            return entries.stream().filter(entry -> entry.state == State.COMMITTED)
+                .map(entry -> entry.address).toList();
+        }
+    }
+
+    Address reserve(int length) throws IOException {
+        if (length <= 0 || length % alignment != 0 || length > capacity)
+            throw new IllegalArgumentException("Invalid block length");
+        synchronized (lock) {
+            checkOpen();
+            long physical = reservedTail % capacity;
+            long remaining = capacity - physical;
+            long padding = remaining < length ? remaining : 0;
+            long start = Math.addExact(reservedTail, padding);
+            long end = Math.addExact(start, length);
+            if (end - head > capacity) throw new CapacityException("Ring capacity exceeded");
+            Address address = new Address(reservedTail, start, end, start % capacity, start / capacity, padding);
+            entries.addLast(new Entry(address));
+            reservedTail = end;
+            return address;
+        }
+    }
+
+    void dataForced(Address address) throws IOException {
+        synchronized (lock) {
+            checkOpen();
+            Entry entry = find(address);
+            if (entry.state != State.RESERVED) throw new IOException("Unexpected data completion");
+            // If padding is nonzero, its authenticated marker must also have
+            // completed and been forced before this notification.
+            entry.state = State.FORCED;
+        }
+    }
+
+    long contiguousForcedTail() throws IOException {
+        synchronized (lock) {
+            checkOpen();
+            long cursor = committedTail;
+            for (Entry entry : entries) {
+                if (entry.address.end() <= committedTail) continue;
+                if (entry.address.reservedStart() != cursor || entry.state != State.FORCED) break;
+                cursor = entry.address.end();
+            }
+            return cursor;
+        }
+    }
+
+    /** Only after the target tail checkpoint has itself completed and been forced. */
+    void tailCheckpointForced(long newTail) throws IOException {
+        synchronized (lock) {
+            checkOpen();
+            if (newTail <= committedTail || newTail > contiguousForcedTail())
+                throw new IOException("Tail is not a forced contiguous prefix");
+            boolean boundary = false;
+            for (Entry entry : entries) {
+                if (entry.address.end() == newTail) boundary = true;
+            }
+            if (!boundary) throw new IOException("Tail must end on a block boundary");
+            for (Entry entry : entries) {
+                if (entry.address.end() <= committedTail) continue;
+                if (entry.address.end() > newTail) break;
+                entry.state = State.COMMITTED;
+            }
+            committedTail = newTail;
+        }
+    }
+
+    Pin pin(Address address) throws IOException {
+        synchronized (lock) {
+            checkOpen();
+            Entry entry = find(address);
+            if (entry.state != State.COMMITTED) throw new IOException("Block is not readable");
+            entry.pins++;
+            return new Pin(entry);
+        }
+    }
+
+    /** Caller must establish durable remote coverage for the complete first block. */
+    Retirement prepareRetirement(boolean remoteCovered) throws IOException {
+        synchronized (lock) {
+            checkOpen();
+            Entry first = entries.peekFirst();
+            if (!remoteCovered || first == null || first.state != State.COMMITTED)
+                throw new IOException("Oldest block is not safely reclaimable");
+            first.state = State.RETIRING;
+            first.drained = new CompletableFuture<>();
+            if (first.pins == 0) first.drained.complete(null);
+            return new Retirement(first);
+        }
+    }
+
+    /** Only after reader drainage and all required head checkpoint copies are forced. */
+    void headCheckpointsForced(Retirement retirement) throws IOException {
+        synchronized (lock) {
+            checkOpen();
+            Entry first = entries.peekFirst();
+            if (retirement == null || first != retirement.entry || first.state != State.RETIRING || first.pins != 0)
+                throw new IOException("Retirement is not ready");
+            entries.removeFirst();
+            head = first.address.end();
+        }
+    }
+
+    void fence() {
+        synchronized (lock) {
+            fenced = true;
+        }
+    }
+
+    private Entry find(Address address) throws IOException {
+        for (Entry entry : entries) if (entry.address == address) return entry;
+        throw new IOException("Unknown or retired block");
+    }
+    private void checkOpen() throws IOException {
+        if (fenced) throw new IOException("Ring allocator fenced");
+    }
+}

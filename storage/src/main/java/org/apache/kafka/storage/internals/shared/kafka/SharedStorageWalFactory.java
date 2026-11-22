@@ -17,6 +17,7 @@
 package org.apache.kafka.storage.internals.shared.kafka;
 
 import org.apache.kafka.storage.internals.shared.wal.AsynchronousFileChannelWalIoBackend;
+import org.apache.kafka.storage.internals.shared.wal.CoordinatedRingWalAdapter;
 import org.apache.kafka.storage.internals.shared.wal.FileChannelWalIoBackend;
 import org.apache.kafka.storage.internals.shared.wal.RingSharedWal;
 import org.apache.kafka.storage.internals.shared.wal.WalIoBackend;
@@ -48,6 +49,28 @@ public final class SharedStorageWalFactory {
                     yield new RingSharedWal(ringWalPath(configuration.walDir()),
                         configuration.walCapacityBytes(), backend,
                         configuration.walAdmissionMaxGroups(), configuration.walAdmissionMaxBytes());
+                } catch (IOException | RuntimeException | Error failure) {
+                    closeFailedBackend(backend, failure);
+                    throw failure;
+                }
+            }
+            case PARALLEL_BLOCK -> {
+                ensureNoLegacyRotatingWalSegments(configuration.walDir());
+                long total = configuration.walCapacityBytes();
+                long capacity = total - CoordinatedRingWalAdapter.METADATA_BYTES;
+                if (capacity < 4096 || capacity % 4096 != 0) {
+                    throw new IllegalArgumentException("parallel-block WAL capacity must be 4 KiB aligned and include metadata");
+                }
+                int maxBlock = (int) Math.min(capacity, CoordinatedRingWalAdapter.MAX_BLOCK_BYTES);
+                Files.createDirectories(configuration.walDir());
+                Path path = ringWalPath(configuration.walDir());
+                WalIoBackend backend = selectBackend(configuration);
+                try {
+                    yield Files.exists(path)
+                        ? CoordinatedRingWalAdapter.reopen(path, backend, capacity, maxBlock, 1_000_000L,
+                            configuration.walAdmissionMaxGroups(), configuration.walAdmissionMaxBytes())
+                        : CoordinatedRingWalAdapter.create(path, backend, capacity, maxBlock, 1_000_000L,
+                            configuration.walAdmissionMaxGroups(), configuration.walAdmissionMaxBytes());
                 } catch (IOException | RuntimeException | Error failure) {
                     closeFailedBackend(backend, failure);
                     throw failure;

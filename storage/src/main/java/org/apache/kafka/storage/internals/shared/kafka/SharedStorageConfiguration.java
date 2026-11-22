@@ -491,6 +491,7 @@ public final class SharedStorageConfiguration {
 
     public enum WalEngine {
         RING("ring"),
+        PARALLEL_BLOCK("parallel-block"),
         ROTATING_FILE("rotating-file");
 
         private final String configValue;
@@ -514,7 +515,7 @@ public final class SharedStorageConfiguration {
                 }
             }
             throw new IllegalArgumentException(
-                "Invalid " + WAL_ENGINE_CONFIG + ": " + value + "; expected ring or rotating-file");
+                "Invalid " + WAL_ENGINE_CONFIG + ": " + value + "; expected ring, parallel-block or rotating-file");
         }
     }
 }
