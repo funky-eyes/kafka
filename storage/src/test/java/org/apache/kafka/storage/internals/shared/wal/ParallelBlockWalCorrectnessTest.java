@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.storage.internals.shared.wal;
 
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -26,7 +27,9 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
@@ -42,6 +45,121 @@ class ParallelBlockWalCorrectnessTest {
     private static final long CAPACITY = 4L * ALIGNMENT;
     @TempDir
     Path dir;
+
+    @Test
+    void encodedBlockMatchesPreOptimizationFormat() throws Exception {
+        var groups = List.of(
+            new AlignedWalBlockCodec.Group(10, List.of(
+                WalRecord.data(1, 2, 0, 1, 0, 0, new byte[] {1, 2, 3}), WalRecord.truncate(1, 2, 0, 1, 1))),
+            new AlignedWalBlockCodec.Group(11, List.of(
+                WalRecord.data(3, 4, 1, 2, 5, 6, new byte[] {4, 5, 6, 7}))));
+        var encoded = AlignedWalBlockCodec.encodeWithLocations(4096, 7, 8, ALIGNMENT, groups);
+        var sha256 = MessageDigest.getInstance("SHA-256");
+        sha256.update(encoded.bytes());
+        // Generated from the encoder in commit effd9f6, before this optimization.
+        assertEquals("7a50bcc0d530d85efb7b9a3a76cf17b795c9b7308a0e3599291b5d4a35676e67",
+            HexFormat.of().formatHex(sha256.digest()));
+    }
+
+    @Test
+    void encodedLocationsMatchIndependentBlockDecoding() throws Exception {
+        for (int sample = 1; sample <= 64; sample++) {
+            List<AlignedWalBlockCodec.Group> groups = new ArrayList<>();
+            for (int group = 0; group < 1 + sample % 5; group++) {
+                List<WalRecord> records = new ArrayList<>();
+                for (int record = 0; record < 1 + (sample + group) % 4; record++) {
+                    records.add(record(group * 10L + record, 1 + (sample * 73 + group * 17 + record) % 1300));
+                }
+                if (group == 1) records.add(WalRecord.truncate(1, 2, 0, 1, 200));
+                groups.add(new AlignedWalBlockCodec.Group(group, records));
+            }
+            long offset = (long) sample * ALIGNMENT;
+            var encoded = AlignedWalBlockCodec.encodeWithLocations(offset, 7, 8, ALIGNMENT, groups);
+            var decoded = AlignedWalBlockCodec.decode(encoded.bytes(), offset, 7, 8, ALIGNMENT);
+            assertEquals(groups.size(), encoded.groups().size());
+            assertEquals(groups.size(), decoded.groups().size());
+            for (int group = 0; group < groups.size(); group++) {
+                assertEquals(groups.get(group).records().size(), encoded.groups().get(group).size());
+                for (int record = 0; record < groups.get(group).records().size(); record++) {
+                    var location = encoded.groups().get(group).get(record);
+                    var entry = decoded.groups().get(group).records().get(record);
+                    assertEquals(entry.walOffset(), location.offset());
+                    assertEquals(entry.length(), location.length());
+                    assertEquals(groups.get(group).records().get(record).firstOffset(), entry.record().firstOffset());
+                }
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void appendLocationsReadCorrectRecordsAfterReopen(boolean aio) throws Exception {
+        Path path = dir.resolve("locations-" + aio);
+        List<List<WalRecord>> groups = List.of(
+            List.of(record(0, 1), record(1, 3000)),
+            List.of(record(2, 2000)),
+            List.of(record(3, 200), record(4, 1000)));
+        List<List<WalAppendResult>> locations = new ArrayList<>();
+        try (WalIoBackend backend = backend(aio);
+             var wal = CoordinatedRingWalAdapter.create(path, backend, CAPACITY, 2 * ALIGNMENT, 10_000_000L)) {
+            var futures = groups.stream().map(wal::appendBatch).toList();
+            for (var future : futures) locations.add(future.get(10, TimeUnit.SECONDS));
+            verifyLocations(wal, groups, locations);
+        }
+        try (WalIoBackend backend = backend(aio);
+             var wal = CoordinatedRingWalAdapter.reopen(path, backend, CAPACITY, 2 * ALIGNMENT, 0)) {
+            verifyLocations(wal, groups, locations);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void appendLocationsRemainValidAcrossPhysicalReuse(boolean aio) throws Exception {
+        Path path = dir.resolve("locations-reuse-" + aio);
+        List<List<WalRecord>> groups = new ArrayList<>();
+        List<List<WalAppendResult>> locations = new ArrayList<>();
+        try (WalIoBackend backend = backend(aio);
+             var wal = CoordinatedRingWalAdapter.create(path, backend, CAPACITY, ALIGNMENT, 0)) {
+            for (int i = 0; i < 4; i++) {
+                var group = List.of(record(i, i + 1));
+                groups.add(group);
+                locations.add(wal.appendBatch(group).get(10, TimeUnit.SECONDS));
+            }
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            long reclaimed = 0;
+            while (reclaimed == 0 && System.nanoTime() < deadline) {
+                reclaimed = wal.reclaim((record, location) -> record.firstOffset() == 0, ALIGNMENT);
+                if (reclaimed == 0) Thread.yield();
+            }
+            assertEquals(ALIGNMENT, reclaimed);
+            groups.remove(0);
+            locations.remove(0);
+            var group = List.of(record(4, 5));
+            groups.add(group);
+            locations.add(wal.appendBatch(group).get(10, TimeUnit.SECONDS));
+            verifyLocations(wal, groups, locations);
+        }
+        try (WalIoBackend backend = backend(aio);
+             var wal = CoordinatedRingWalAdapter.reopen(path, backend, CAPACITY, ALIGNMENT, 0)) {
+            verifyLocations(wal, groups, locations);
+        }
+    }
+
+    private static void verifyLocations(CoordinatedRingWalAdapter wal, List<List<WalRecord>> groups,
+                                        List<List<WalAppendResult>> locations) throws IOException {
+        assertEquals(groups.size(), locations.size());
+        for (int group = 0; group < groups.size(); group++) {
+            assertEquals(groups.get(group).size(), locations.get(group).size());
+            for (int i = 0; i < groups.get(group).size(); i++) {
+                WalRecord expected = groups.get(group).get(i);
+                WalAppendResult result = locations.get(group).get(i);
+                WalRecord actual = wal.read(new WalLocation(result.offset(), result.length(),
+                    expected.leaderEpoch(), expected.firstOffset(), expected.lastOffset()));
+                assertEquals(expected.firstOffset(), actual.firstOffset());
+                assertEquals(expected.payload(), actual.payload());
+            }
+        }
+    }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
@@ -134,6 +252,26 @@ class ParallelBlockWalCorrectnessTest {
                     }
                 }
             }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void corruptedCommittedPayloadFailsRecovery(boolean aio) throws Exception {
+        Path path = dir.resolve("payload-" + aio);
+        try (WalIoBackend backend = backend(aio);
+             var wal = CoordinatedRingWalAdapter.create(path, backend, CAPACITY, ALIGNMENT, 0)) {
+            wal.append(record(0, 1)).get(10, TimeUnit.SECONDS);
+            wal.append(record(1, 1)).get(10, TimeUnit.SECONDS);
+        }
+        try (FileChannel file = FileChannel.open(path, StandardOpenOption.WRITE)) {
+            long secondPayload = 4L * ALIGNMENT + AlignedWalBlockCodec.HEADER_BYTES + WalRecordCodec.HEADER_BYTES;
+            file.write(ByteBuffer.wrap(new byte[] {42}), secondPayload);
+            file.force(true);
+        }
+        try (WalIoBackend backend = backend(aio)) {
+            assertThrows(IOException.class,
+                () -> CoordinatedRingWalAdapter.reopen(path, backend, CAPACITY, ALIGNMENT, 0));
         }
     }
 

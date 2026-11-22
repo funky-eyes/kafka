@@ -206,7 +206,7 @@ public final class CoordinatedRingWalAdapter implements SharedWal {
                         maxBlock,
                         identity.high(),
                         identity.low());
-        this.assembler = new Thread(this::assemble, "test-ring-wal-assembler");
+        this.assembler = new Thread(this::assemble, "parallel-block-wal-assembler");
         assembler.start();
     }
 
@@ -239,7 +239,7 @@ public final class CoordinatedRingWalAdapter implements SharedWal {
             for (WalRecord record : records) {
                 if (record.type() == WalRecordType.GROUP_COMMIT)
                     throw new IllegalArgumentException("Internal record");
-                size = Math.addExact(size, WalRecordCodec.encode(record).totalLength());
+                size = Math.addExact(size, WalRecordCodec.encodedLength(record));
             }
         } catch (Throwable error) {
             return CompletableFuture.failedFuture(error);

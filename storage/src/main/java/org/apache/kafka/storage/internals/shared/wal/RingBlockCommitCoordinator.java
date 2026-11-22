@@ -29,14 +29,14 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
-/** Experimental block-level commit coordinator; not a SharedWal or Kafka ACK path. */
+/** Experimental block-level coordinator for the opt-in SharedWal implementation. */
 final class RingBlockCommitCoordinator implements AutoCloseable {
     private static final class Pending {
         final BlockRingAllocator.Address address;
         final long lastId;
         final int groupCount;
         final long recordBytes;
-        final AtomicReference<List<AlignedWalBlockCodec.DecodedGroup>> decoded;
+        final AtomicReference<List<List<WalAppendResult>>> locations;
         final CompletableFuture<List<List<WalAppendResult>>> result = new CompletableFuture<>();
         boolean forced;
 
@@ -45,12 +45,12 @@ final class RingBlockCommitCoordinator implements AutoCloseable {
                 long lastId,
                 int groupCount,
                 long recordBytes,
-                AtomicReference<List<AlignedWalBlockCodec.DecodedGroup>> decoded) {
+                AtomicReference<List<List<WalAppendResult>>> locations) {
             this.address = address;
             this.lastId = lastId;
             this.groupCount = groupCount;
             this.recordBytes = recordBytes;
-            this.decoded = decoded;
+            this.locations = locations;
         }
     }
 
@@ -195,7 +195,7 @@ final class RingBlockCommitCoordinator implements AutoCloseable {
             for (WalRecord record : records) {
                 if (record.type() == WalRecordType.GROUP_COMMIT)
                     throw new IllegalArgumentException("Internal record");
-                bytes = Math.addExact(bytes, WalRecordCodec.encode(record).totalLength());
+                bytes = Math.addExact(bytes, WalRecordCodec.encodedLength(record));
             }
             groups.add(records);
         }
@@ -221,7 +221,7 @@ final class RingBlockCommitCoordinator implements AutoCloseable {
             List<AlignedWalBlockCodec.Group> encoded = new ArrayList<>();
             long id = nextGroup;
             for (var records : groups) encoded.add(new AlignedWalBlockCodec.Group(id++, records));
-            AtomicReference<List<AlignedWalBlockCodec.DecodedGroup>> decoded =
+            AtomicReference<List<List<WalAppendResult>>> locations =
                     new AtomicReference<>();
             final ParallelRingBlockWriter.Submission submission;
             try {
@@ -229,23 +229,16 @@ final class RingBlockCommitCoordinator implements AutoCloseable {
                         writer.submitOwned(
                                 length,
                                 offset -> {
-                                    ByteBuffer block =
-                                            AlignedWalBlockCodec.encode(
+                                    var block =
+                                            AlignedWalBlockCodec.encodeWithLocations(
                                                     offset, high, low, alignment, encoded);
-                                    try {
-                                        decoded.set(
-                                                AlignedWalBlockCodec.decode(
-                                                                block, offset, high, low, alignment)
-                                                        .groups());
-                                    } catch (IOException e) {
-                                        throw new java.io.UncheckedIOException(e);
-                                    }
-                                    return block;
+                                    locations.set(block.groups());
+                                    return block.bytes();
                                 });
             } catch (IOException e) {
                 return CompletableFuture.failedFuture(e);
             }
-            Pending item = new Pending(submission.address(), after - 1, groups.size(), prepared.recordBytes(), decoded);
+            Pending item = new Pending(submission.address(), after - 1, groups.size(), prepared.recordBytes(), locations);
             pending.put(item.address.reservedStart(), item);
             nextGroup = after;
             submission.forced().whenComplete((address, error) -> onForced(item, error));
@@ -540,14 +533,7 @@ final class RingBlockCommitCoordinator implements AutoCloseable {
     private void complete(List<Pending> cohort) {
         try {
             for (Pending item : cohort) {
-                List<List<WalAppendResult>> groups = new ArrayList<>();
-                for (var group : item.decoded.get()) {
-                    List<WalAppendResult> records = new ArrayList<>();
-                    for (var entry : group.records())
-                        records.add(new WalAppendResult(entry.walOffset(), entry.length()));
-                    groups.add(List.copyOf(records));
-                }
-                item.result.complete(List.copyOf(groups));
+                item.result.complete(item.locations.get());
                 synchronized (lock) {
                     Committed block = committed.get(item.address.blockStart());
                     if (block != null) block.published = true;

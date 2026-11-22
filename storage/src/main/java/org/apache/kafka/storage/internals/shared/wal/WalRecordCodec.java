@@ -34,6 +34,15 @@ final class WalRecordCodec {
     private WalRecordCodec() {
     }
 
+    /** Returns the encoded size without computing the payload checksum. */
+    static int encodedLength(WalRecord record) {
+        int totalLength = Math.addExact(HEADER_BYTES, record.payloadUnsafe().remaining());
+        if (totalLength > MAX_RECORD_BYTES) {
+            throw new IllegalArgumentException("WAL record exceeds maximum size: " + totalLength);
+        }
+        return totalLength;
+    }
+
     /**
      * Encodes only the WAL header and keeps the payload as a separate owned view.
      *
@@ -43,10 +52,7 @@ final class WalRecordCodec {
     static EncodedRecord encode(WalRecord record) {
         ByteBuffer payload = record.payloadUnsafe();
         int payloadLength = payload.remaining();
-        int totalLength = Math.addExact(HEADER_BYTES, payloadLength);
-        if (totalLength > MAX_RECORD_BYTES) {
-            throw new IllegalArgumentException("WAL record exceeds maximum size: " + totalLength);
-        }
+        int totalLength = encodedLength(record);
 
         ByteBuffer header = ByteBuffer.allocate(HEADER_BYTES).order(ByteOrder.BIG_ENDIAN);
         header.putInt(MAGIC);

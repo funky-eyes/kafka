@@ -24,7 +24,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.zip.CRC32C;
 
-/** Experimental block framing. Not wired into the WAL or a supported on-disk format. */
+/** Experimental block framing for the opt-in parallel block WAL. */
 final class AlignedWalBlockCodec {
     static final int MAGIC = 0x4b574233; // KWB3
     static final int HEADER_BYTES = 64;
@@ -49,9 +49,15 @@ final class AlignedWalBlockCodec {
     record Entry(WalRecord record, long walOffset, int length) { }
     record DecodedGroup(long id, List<Entry> records) { }
     record DecodedBlock(int length, List<DecodedGroup> groups) { }
+    record EncodedBlock(ByteBuffer bytes, List<List<WalAppendResult>> groups) { }
 
     static ByteBuffer encode(long offset, long incarnationHigh, long incarnationLow,
                              int alignment, List<Group> groups) {
+        return encodeWithLocations(offset, incarnationHigh, incarnationLow, alignment, groups).bytes();
+    }
+
+    static EncodedBlock encodeWithLocations(long offset, long incarnationHigh, long incarnationLow,
+                                            int alignment, List<Group> groups) {
         checkAlignment(alignment);
         if (offset < 0 || offset % alignment != 0 || groups == null || groups.isEmpty())
             throw new IllegalArgumentException("invalid block offset or groups");
@@ -80,10 +86,22 @@ final class AlignedWalBlockCodec {
         output.putInt(MAGIC).putInt(VERSION).putInt(length).putInt(Math.toIntExact(payload));
         output.putLong(offset).putLong(incarnationHigh).putLong(incarnationLow);
         output.putInt(groups.size()).putInt(0).putInt(0).putInt(0).putLong(0L);
-        for (WalRecordCodec.EncodedRecord item : encoded) output.put(item.header()).put(item.payload());
+        List<List<WalAppendResult>> locations = new ArrayList<>();
+        int encodedIndex = 0;
+        for (Group group : groups) {
+            List<WalAppendResult> groupLocations = new ArrayList<>();
+            for (int i = 0; i < group.records().size(); i++) {
+                WalRecordCodec.EncodedRecord item = encoded.get(encodedIndex++);
+                groupLocations.add(new WalAppendResult(Math.addExact(offset, output.position()), item.totalLength()));
+                output.put(item.header()).put(item.payload());
+            }
+            WalRecordCodec.EncodedRecord commit = encoded.get(encodedIndex++);
+            output.put(commit.header()).put(commit.payload());
+            locations.add(List.copyOf(groupLocations));
+        }
         output.putInt(CRC_OFFSET, checksum(output));
         output.position(0).limit(length);
-        return output.asReadOnlyBuffer();
+        return new EncodedBlock(output.asReadOnlyBuffer(), List.copyOf(locations));
     }
 
     static DecodedBlock decode(ByteBuffer bytes, long expectedOffset, long incarnationHigh,

@@ -6,6 +6,13 @@ and `ring` remains the default. It does not include an online migration or fence
 older binaries that ignore the ownership lock. Data and checkpoint persistence
 also rely on the underlying storage's force and failure-unit guarantees.
 
+The encoder calculates append locations while constructing each block. Admission
+and allocation use encoded lengths without recalculating record CRCs, and the
+write path does not decode the freshly encoded block before dispatch. Each
+record and block still carries its checksum; reads and recovery validate both.
+This removes a pre-write self-check of encoder output. Format and location tests
+are regression checks, not a per-write check against memory corruption.
+
 The opt-in implementation was exercised with NIO and AIO through the actual
 Broker factory, including selected force/ACK, transaction, failure, restart and
 leader-reassignment cases. These tests do not establish power-loss safety,
