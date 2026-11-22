@@ -22,6 +22,8 @@
     <allow pkg="java" />
     <allow pkg="org.apache.kafka.clients" />
     <allow pkg="org.apache.kafka.common" />
+    <allow class="org.apache.kafka.server.util.KafkaScheduler" />
+    <allow class="org.apache.kafka.storage.log.metrics.BrokerTopicStats" />
     <allow pkg="org.apache.kafka.storage.internals.log" />
     <allow pkg="org.apache.kafka.storage.internals.shared" />
     <allow pkg="org.junit" />
