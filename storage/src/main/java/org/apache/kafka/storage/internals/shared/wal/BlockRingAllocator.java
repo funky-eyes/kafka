@@ -17,15 +17,16 @@
 package org.apache.kafka.storage.internals.shared.wal;
 
 import java.io.IOException;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.NavigableMap;
+import java.util.TreeMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Experimental ring reservation and reader-pin state machine. It performs no
- * I/O and is not wired into SharedWal. Callers must durably force the data and
+ * I/O. Callers must durably force the data and
  * head/tail checkpoints before invoking the corresponding confirmation methods.
  */
 final class BlockRingAllocator {
@@ -84,7 +85,7 @@ final class BlockRingAllocator {
     }
 
     private final Object lock = new Object();
-    private final ArrayDeque<Entry> entries = new ArrayDeque<>();
+    private final NavigableMap<Long, Entry> entries = new TreeMap<>();
     private final long capacity;
     private final int alignment;
     private long head;
@@ -152,7 +153,7 @@ final class BlockRingAllocator {
             Address address = new Address(cursor, start, end, start % capacity, start / capacity, start - cursor);
             Entry entry = new Entry(address);
             entry.state = State.COMMITTED;
-            result.entries.addLast(entry);
+            result.entries.put(cursor, entry);
             cursor = end;
         }
         if (cursor != tail) throw new IOException("Incomplete recovered ring blocks");
@@ -174,7 +175,7 @@ final class BlockRingAllocator {
     List<Address> committedAddresses() throws IOException {
         synchronized (lock) {
             checkOpen();
-            return entries.stream().filter(entry -> entry.state == State.COMMITTED)
+            return entries.values().stream().filter(entry -> entry.state == State.COMMITTED)
                 .map(entry -> entry.address).toList();
         }
     }
@@ -191,7 +192,7 @@ final class BlockRingAllocator {
             long end = Math.addExact(start, length);
             if (end - head > capacity) throw new CapacityException("Ring capacity exceeded");
             Address address = new Address(reservedTail, start, end, start % capacity, start / capacity, padding);
-            entries.addLast(new Entry(address));
+            entries.put(reservedTail, new Entry(address));
             reservedTail = end;
             return address;
         }
@@ -212,8 +213,7 @@ final class BlockRingAllocator {
         synchronized (lock) {
             checkOpen();
             long cursor = committedTail;
-            for (Entry entry : entries) {
-                if (entry.address.end() <= committedTail) continue;
+            for (Entry entry : entries.tailMap(committedTail, true).values()) {
                 if (entry.address.reservedStart() != cursor || entry.state != State.FORCED) break;
                 cursor = entry.address.end();
             }
@@ -227,14 +227,10 @@ final class BlockRingAllocator {
             checkOpen();
             if (newTail <= committedTail || newTail > contiguousForcedTail())
                 throw new IOException("Tail is not a forced contiguous prefix");
-            boolean boundary = false;
-            for (Entry entry : entries) {
-                if (entry.address.end() == newTail) boundary = true;
-            }
-            if (!boundary) throw new IOException("Tail must end on a block boundary");
-            for (Entry entry : entries) {
-                if (entry.address.end() <= committedTail) continue;
-                if (entry.address.end() > newTail) break;
+            var end = entries.lowerEntry(newTail);
+            if (end == null || end.getValue().address.end() != newTail)
+                throw new IOException("Tail must end on a block boundary");
+            for (Entry entry : entries.subMap(committedTail, true, newTail, false).values()) {
                 entry.state = State.COMMITTED;
             }
             committedTail = newTail;
@@ -256,7 +252,7 @@ final class BlockRingAllocator {
         synchronized (lock) {
             checkOpen();
             if (addresses.isEmpty()) throw new IOException("Empty retirement prefix");
-            var iterator = entries.iterator();
+            var iterator = entries.values().iterator();
             List<Entry> prefix = new ArrayList<>(addresses.size());
             for (Address address : addresses) {
                 if (!iterator.hasNext()) throw new IOException("Retirement prefix is not present");
@@ -280,10 +276,11 @@ final class BlockRingAllocator {
     void headCheckpointsForced(Retirement retirement) throws IOException {
         synchronized (lock) {
             checkOpen();
-            Entry first = entries.peekFirst();
-            if (retirement == null || first != retirement.entry || first.state != State.RETIRING || first.pins != 0)
+            Entry first = entries.get(head);
+            if (retirement == null || first == null || first != retirement.entry ||
+                first.state != State.RETIRING || first.pins != 0)
                 throw new IOException("Retirement is not ready");
-            entries.removeFirst();
+            entries.remove(head);
             head = first.address.end();
         }
     }
@@ -295,8 +292,9 @@ final class BlockRingAllocator {
     }
 
     private Entry find(Address address) throws IOException {
-        for (Entry entry : entries) if (entry.address == address) return entry;
-        throw new IOException("Unknown or retired block");
+        Entry entry = entries.get(address.reservedStart());
+        if (entry == null || entry.address != address) throw new IOException("Unknown or retired block");
+        return entry;
     }
     private void checkOpen() throws IOException {
         if (fenced) throw new IOException("Ring allocator fenced");

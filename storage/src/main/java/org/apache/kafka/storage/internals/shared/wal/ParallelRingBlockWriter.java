@@ -18,6 +18,8 @@ package org.apache.kafka.storage.internals.shared.wal;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -37,6 +39,9 @@ final class ParallelRingBlockWriter implements AutoCloseable {
         }
     }
     record Submission(BlockRingAllocator.Address address, CompletableFuture<BlockRingAllocator.Address> forced) { }
+    private record WrittenBlock(BlockRingAllocator.Address address,
+                                CompletableFuture<BlockRingAllocator.Address> result) { }
+
     private final Object lock = new Object();
     private final WalIoBackend.Handle io;
     private final BlockRingAllocator allocator;
@@ -48,7 +53,9 @@ final class ParallelRingBlockWriter implements AutoCloseable {
     private final int maxPending;
     private final ExecutorService writers;
     private final ThreadLocal<Boolean> worker = ThreadLocal.withInitial(() -> false);
+    private List<WrittenBlock> awaitingForce = new ArrayList<>();
     private int pending;
+    private boolean forcing;
     private boolean closed;
 
     ParallelRingBlockWriter(WalIoBackend.Handle io, BlockRingAllocator allocator, long dataStart, long capacity,
@@ -103,30 +110,71 @@ final class ParallelRingBlockWriter implements AutoCloseable {
     private void write(BlockRingAllocator.Address address, int length, LongFunction<ByteBuffer> encoder,
                        CompletableFuture<BlockRingAllocator.Address> result) {
         worker.set(true);
-        Throwable failure = null;
         try {
-            ByteBuffer data = encoder.apply(address.blockStart());
-            if (data == null || data.remaining() != length) throw new IOException("Encoded length differs from reservation");
-            if (address.padding() != 0) {
-                ByteBuffer padding = BlockRingRecovery.padding(address.reservedStart(), address.padding(), high, low,
-                    alignment, capacity);
-                writeFully(padding, dataStart + address.reservedStart() % capacity);
+            try {
+                writeBlock(address, length, encoder);
+            } catch (Throwable t) {
+                allocator.fence();
+                synchronized (lock) {
+                    pending--;
+                }
+                result.completeExceptionally(t);
+                return;
             }
-            writeFully(data.duplicate(), dataStart + address.physical());
-            io.force();
-            allocator.dataForced(address);
-        } catch (Throwable t) {
-            allocator.fence();
-            failure = t;
-        }
-        synchronized (lock) {
-            pending--;
-        }
-        try {
-            if (failure == null) result.complete(address);
-            else result.completeExceptionally(failure);
+            enqueueForForce(new WrittenBlock(address, result));
         } finally {
             worker.remove();
+        }
+    }
+
+    private void writeBlock(BlockRingAllocator.Address address, int length, LongFunction<ByteBuffer> encoder)
+            throws IOException {
+        ByteBuffer data = encoder.apply(address.blockStart());
+        if (data == null || data.remaining() != length) throw new IOException("Encoded length differs from reservation");
+        if (address.padding() != 0) {
+            ByteBuffer padding = BlockRingRecovery.padding(address.reservedStart(), address.padding(), high, low,
+                alignment, capacity);
+            writeFully(padding, dataStart + address.reservedStart() % capacity);
+        }
+        writeFully(data.duplicate(), dataStart + address.physical());
+    }
+
+    private void enqueueForForce(WrittenBlock block) {
+        synchronized (lock) {
+            awaitingForce.add(block);
+            if (forcing) return;
+            forcing = true;
+        }
+        forceWrittenBlocks();
+    }
+
+    private void forceWrittenBlocks() {
+        while (true) {
+            List<WrittenBlock> cohort;
+            synchronized (lock) {
+                if (awaitingForce.isEmpty()) {
+                    forcing = false;
+                    return;
+                }
+                cohort = awaitingForce;
+                awaitingForce = new ArrayList<>();
+            }
+            Throwable failure = null;
+            try {
+                // A force covers only the writes completed before this cohort was taken.
+                io.force();
+                for (WrittenBlock block : cohort) allocator.dataForced(block.address());
+            } catch (Throwable t) {
+                allocator.fence();
+                failure = t;
+            }
+            synchronized (lock) {
+                pending -= cohort.size();
+            }
+            for (WrittenBlock block : cohort) {
+                if (failure == null) block.result().complete(block.address());
+                else block.result().completeExceptionally(failure);
+            }
         }
     }
 

@@ -13,6 +13,13 @@ record and block still carries its checksum; reads and recovery validate both.
 This removes a pre-write self-check of encoder output. Format and location tests
 are regression checks, not a per-write check against memory corruption.
 
+Data write workers queue finished blocks for a shared force. A force covers
+a snapshot of the finished queue. Blocks that finish writing after the snapshot
+wait for the next force. The checkpoint thread can publish the full contiguous
+forced prefix over one pair of independently forced tail checkpoints. Entries
+for reservations and reads are looked up by logical position so that preceding
+committed blocks do not lengthen those searches.
+
 The experimental `shared.storage.wal.async.partition.append=true` switch, off
 by default and accepted only with `parallel-block`, pipelines RF1 `acks=1`
 client appends without producer IDs or transaction/control batches. Native

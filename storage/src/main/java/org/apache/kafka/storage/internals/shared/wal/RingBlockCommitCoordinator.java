@@ -39,7 +39,6 @@ final class RingBlockCommitCoordinator implements AutoCloseable {
         final long recordBytes;
         final AtomicReference<List<List<WalAppendResult>>> locations;
         final CompletableFuture<List<List<WalAppendResult>>> result = new CompletableFuture<>();
-        boolean forced;
 
         Pending(
                 BlockRingAllocator.Address address,
@@ -242,19 +241,18 @@ final class RingBlockCommitCoordinator implements AutoCloseable {
             Pending item = new Pending(submission.address(), after - 1, groups.size(), prepared.recordBytes(), locations);
             pending.put(item.address.reservedStart(), item);
             nextGroup = after;
-            submission.forced().whenComplete((address, error) -> onForced(item, error));
+            submission.forced().whenComplete((address, error) -> onForced(error));
             return item.result.copy();
         }
     }
 
-    private void onForced(Pending item, Throwable error) {
+    private void onForced(Throwable error) {
         synchronized (lock) {
             if (failure != null) return;
             if (error != null) {
                 fenceLocked(error);
                 return;
             }
-            item.forced = true;
             if (!scheduled) {
                 scheduled = true;
                 checkpoints.execute(this::commitLoop);
@@ -269,9 +267,10 @@ final class RingBlockCommitCoordinator implements AutoCloseable {
                 long tail;
                 synchronized (lock) {
                     if (failure != null) return;
+                    long forcedTail = allocator.contiguousForcedTail();
                     tail = committedTail;
                     for (Pending item : pending.values()) {
-                        if (item.address.reservedStart() != tail || !item.forced) break;
+                        if (item.address.reservedStart() != tail || item.address.end() > forcedTail) break;
                         tail = item.address.end();
                         cohort.add(item);
                     }

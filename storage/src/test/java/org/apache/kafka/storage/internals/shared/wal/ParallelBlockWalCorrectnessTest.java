@@ -291,13 +291,72 @@ class ParallelBlockWalCorrectnessTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
+    void finishedWritesShareTheNextDataForce(boolean aio) throws Exception {
+        for (boolean failCohort : List.of(false, true)) {
+            Path path = dir.resolve("grouped-data-force-" + aio + "-" + failCohort);
+            try (var backend = new CountingBackend(aio); var io = backend.create(path)) {
+                io.preallocate(CAPACITY);
+                var allocator = new BlockRingAllocator(CAPACITY, ALIGNMENT);
+                var queued = new CountDownLatch(1);
+                var releaseEncoder = new CountDownLatch(1);
+                backend.holdFirstForce = true;
+                backend.failAtForce = failCohort ? 2 : 0;
+                backend.countForces.set(true);
+                try (var writer = new ParallelRingBlockWriter(io, allocator, 0, CAPACITY, ALIGNMENT, 7, 8, 2, 8)) {
+                    try {
+                        var first = writer.appendOwned(ALIGNMENT, offset -> ByteBuffer.allocate(ALIGNMENT));
+                        assertTrue(backend.firstForceEntered.await(10, TimeUnit.SECONDS));
+                        var second = writer.appendOwned(ALIGNMENT, offset -> ByteBuffer.allocate(ALIGNMENT));
+                        var third = writer.appendOwned(ALIGNMENT, offset -> ByteBuffer.allocate(ALIGNMENT));
+                        // With one worker in force(), this encoder can run only after the preceding two writes queued.
+                        var fourth = writer.appendOwned(ALIGNMENT, offset -> {
+                            queued.countDown();
+                            try {
+                                awaitGate(releaseEncoder);
+                            } catch (IOException e) {
+                                throw new java.io.UncheckedIOException(e);
+                            }
+                            return ByteBuffer.allocate(ALIGNMENT);
+                        });
+                        assertTrue(queued.await(10, TimeUnit.SECONDS));
+                        assertFalse(first.isDone());
+                        assertFalse(second.isDone());
+                        assertFalse(third.isDone());
+                        backend.releaseFirstForce.countDown();
+                        first.get(10, TimeUnit.SECONDS);
+                        if (failCohort) {
+                            assertThrows(ExecutionException.class, () -> second.get(10, TimeUnit.SECONDS));
+                            assertThrows(ExecutionException.class, () -> third.get(10, TimeUnit.SECONDS));
+                        } else {
+                            second.get(10, TimeUnit.SECONDS);
+                            third.get(10, TimeUnit.SECONDS);
+                            assertEquals(3L * ALIGNMENT, allocator.contiguousForcedTail());
+                        }
+                        assertEquals(2, backend.forces.get());
+                        releaseEncoder.countDown();
+                        if (failCohort) {
+                            assertThrows(ExecutionException.class, () -> fourth.get(10, TimeUnit.SECONDS));
+                        } else {
+                            fourth.get(10, TimeUnit.SECONDS);
+                        }
+                    } finally {
+                        backend.releaseFirstForce.countDown();
+                        releaseEncoder.countDown();
+                    }
+                }
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
     void laterForcedBlockCannotPassAnEarlierFailure(boolean aio) throws Exception {
         Path path = dir.resolve("failure-" + aio);
         try (WalIoBackend backend = backend(aio); WalIoBackend.Handle io = backend.create(path)) {
             io.preallocate(3L * ALIGNMENT + CAPACITY);
             var checkpoint = BlockRingCheckpoint.initialize(io, ALIGNMENT, CAPACITY, 7, 8);
             var allocator = new BlockRingAllocator(CAPACITY, ALIGNMENT);
-            var gate = new ForceGate(io);
+            var gate = new WriteOrderGate(io);
             var writer = new ParallelRingBlockWriter(gate, allocator, 3L * ALIGNMENT, CAPACITY,
                 ALIGNMENT, 7, 8, 2, 8);
             try (var coordinator = new RingBlockCommitCoordinator(allocator, checkpoint, writer, io,
@@ -416,6 +475,9 @@ class ParallelBlockWalCorrectnessTest {
         private final AtomicBoolean countForces = new AtomicBoolean();
         private final AtomicInteger forces = new AtomicInteger();
         private volatile int failAtForce;
+        private boolean holdFirstForce;
+        private final CountDownLatch firstForceEntered = new CountDownLatch(1);
+        private final CountDownLatch releaseFirstForce = new CountDownLatch(1);
         private final AtomicBoolean holdReader = new AtomicBoolean();
         private final CountDownLatch readerEntered = new CountDownLatch(1);
         private final CountDownLatch releaseReader = new CountDownLatch(1);
@@ -493,8 +555,14 @@ class ParallelBlockWalCorrectnessTest {
 
                 @Override
                 public void force() throws IOException {
-                    if (countForces.get() && forces.incrementAndGet() == failAtForce)
-                        throw new IOException("injected head checkpoint force failure");
+                    if (countForces.get()) {
+                        int count = forces.incrementAndGet();
+                        if (holdFirstForce && count == 1) {
+                            firstForceEntered.countDown();
+                            awaitGate(releaseFirstForce);
+                        }
+                        if (count == failAtForce) throw new IOException("injected WAL force failure");
+                    }
                     handle.force();
                 }
 
@@ -511,14 +579,22 @@ class ParallelBlockWalCorrectnessTest {
         }
     }
 
-    private static final class ForceGate implements WalIoBackend.Handle {
+    private static void awaitGate(CountDownLatch gate) throws IOException {
+        try {
+            if (!gate.await(10, TimeUnit.SECONDS)) throw new IOException("WAL I/O gate timed out");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("WAL I/O gate interrupted", e);
+        }
+    }
+
+    private static final class WriteOrderGate implements WalIoBackend.Handle {
         private final WalIoBackend.Handle delegate;
-        private final ThreadLocal<Boolean> earlier = ThreadLocal.withInitial(() -> false);
         private final CountDownLatch earlierEntered = new CountDownLatch(1);
         private final CountDownLatch laterForced = new CountDownLatch(1);
         private final CountDownLatch release = new CountDownLatch(1);
 
-        private ForceGate(WalIoBackend.Handle delegate) {
+        private WriteOrderGate(WalIoBackend.Handle delegate) {
             this.delegate = delegate;
         }
 
@@ -534,7 +610,11 @@ class ParallelBlockWalCorrectnessTest {
 
         @Override
         public int write(ByteBuffer src, long position) throws IOException {
-            earlier.set(position == 3L * ALIGNMENT);
+            if (position == 3L * ALIGNMENT) {
+                earlierEntered.countDown();
+                awaitGate(release);
+                throw new IOException("injected earlier block write failure");
+            }
             return delegate.write(src, position);
         }
 
@@ -545,16 +625,6 @@ class ParallelBlockWalCorrectnessTest {
 
         @Override
         public void force() throws IOException {
-            if (earlier.get()) {
-                earlierEntered.countDown();
-                try {
-                    if (!release.await(10, TimeUnit.SECONDS)) throw new IOException("force gate timed out");
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    throw new IOException(e);
-                }
-                throw new IOException("injected earlier block force failure");
-            }
             delegate.force();
             laterForced.countDown();
         }
