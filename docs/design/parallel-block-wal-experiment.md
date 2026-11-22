@@ -26,6 +26,11 @@ remote recovery, close and synchronous fallback. Segment rolls wait for prior
 writes before taking producer snapshots. An async failure fences the tracked
 path; recovery may require restarting the Broker.
 
+`shared.storage.wal.block.linger.ms` controls the maximum assembly wait for
+the parallel-block engine (default 1 ms, allowed range 0–1000 ms). A longer
+window can increase batching but adds latency; its effect must be measured for
+the actual workload. It does not alter the synchronous ring engine.
+
 The tracker rejects gaps and confirms only a contiguous prefix whose WAL and
 Kafka-state signals have both completed. NIO/AIO experiments through the real
 Broker factory observed six concurrent requests in four blocks, with controlled

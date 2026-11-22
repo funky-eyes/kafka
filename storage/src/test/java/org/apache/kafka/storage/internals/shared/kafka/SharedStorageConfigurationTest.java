@@ -49,6 +49,7 @@ class SharedStorageConfigurationTest {
 
         assertEquals(SharedStorageConfiguration.WalEngine.RING, config.walEngine());
         assertFalse(config.walAsyncPartitionAppend());
+        assertEquals(1L, config.walBlockLingerMs());
         assertEquals(SharedStorageConfiguration.DEFAULT_WAL_CAPACITY_BYTES, config.walCapacityBytes());
         assertEquals(SharedStorageConfiguration.DEFAULT_WAL_SEGMENT_BYTES, config.walSegmentBytes());
         assertEquals(SharedStorageConfiguration.DEFAULT_WAL_ADMISSION_MAX_GROUPS,
@@ -69,6 +70,20 @@ class SharedStorageConfigurationTest {
         assertFalse(config.useSharedStorage("__consumer_offsets"));
         assertFalse(config.useSharedStorage("__transaction_state"));
         assertFalse(config.useSharedStorage("__shared_storage_metadata"));
+    }
+
+    @Test
+    void blockLingerIsBoundedAndAcceptsZero() {
+        File logDir = TestUtils.tempDirectory();
+        for (long value : List.of(0L, 5L, 1_000L)) {
+            var config = SharedStorageConfiguration.from(context(Map.of(
+                SharedStorageConfiguration.WAL_BLOCK_LINGER_MS_CONFIG, value), logDir));
+            assertEquals(value, config.walBlockLingerMs());
+        }
+        for (long value : List.of(-1L, 1_001L)) {
+            assertThrows(IllegalArgumentException.class, () -> SharedStorageConfiguration.from(context(Map.of(
+                SharedStorageConfiguration.WAL_BLOCK_LINGER_MS_CONFIG, value), logDir)));
+        }
     }
 
     @Test

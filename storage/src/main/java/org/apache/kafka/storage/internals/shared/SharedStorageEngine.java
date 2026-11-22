@@ -44,6 +44,7 @@ import java.util.TreeMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.LongFunction;
 
 /**
@@ -58,6 +59,7 @@ public final class SharedStorageEngine implements AutoCloseable {
     private final PartitionWalIndex walIndex = new PartitionWalIndex();
     private final StartupWalReplayEvidence startupWalReplayEvidence;
     private final LocalWalDurabilityObservation liveWalDurability = new LocalWalDurabilityObservation();
+    private final LongAdder trackedAppends = new LongAdder();
     private final RemoteObjectIndex remoteIndex = new RemoteObjectIndex();
     private final LocalRemoteObjectCheckpoint remoteCheckpoint;
     private final ConcurrentLinkedQueue<SharedObjectMetadata> pendingRemoteCheckpoints = new ConcurrentLinkedQueue<>();
@@ -105,6 +107,14 @@ public final class SharedStorageEngine implements AutoCloseable {
             throw new IllegalStateException("Shared remote reader is already installed");
         }
         remoteReader = reader;
+    }
+
+    public void recordTrackedAppend() {
+        trackedAppends.increment();
+    }
+
+    public long trackedAppendCount() {
+        return trackedAppends.sum();
     }
 
     public CompletableFuture<WalLocation> appendData(

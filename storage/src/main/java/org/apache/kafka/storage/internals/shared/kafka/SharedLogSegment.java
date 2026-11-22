@@ -211,6 +211,7 @@ public final class SharedLogSegment extends LogSegment {
         long endOffset = Math.addExact(largestOffset, 1L);
         PartitionDurableOffsetTracker.Reservation reservation =
             tracker.reserve(generation, firstOffset, endOffset, records.sizeInBytes());
+        storage.recordTrackedAppend();
         SharedAppendScope scope = SharedAppendScope.current();
         if (scope != null) {
             scope.markReserved();

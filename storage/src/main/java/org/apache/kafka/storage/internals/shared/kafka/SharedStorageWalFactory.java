@@ -28,6 +28,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Objects;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
@@ -65,11 +66,12 @@ public final class SharedStorageWalFactory {
                 Files.createDirectories(configuration.walDir());
                 Path path = ringWalPath(configuration.walDir());
                 WalIoBackend backend = selectBackend(configuration);
+                long lingerNanos = TimeUnit.MILLISECONDS.toNanos(configuration.walBlockLingerMs());
                 try {
                     yield Files.exists(path)
-                        ? CoordinatedRingWalAdapter.reopen(path, backend, capacity, maxBlock, 1_000_000L,
+                        ? CoordinatedRingWalAdapter.reopen(path, backend, capacity, maxBlock, lingerNanos,
                             configuration.walAdmissionMaxGroups(), configuration.walAdmissionMaxBytes())
-                        : CoordinatedRingWalAdapter.create(path, backend, capacity, maxBlock, 1_000_000L,
+                        : CoordinatedRingWalAdapter.create(path, backend, capacity, maxBlock, lingerNanos,
                             configuration.walAdmissionMaxGroups(), configuration.walAdmissionMaxBytes());
                 } catch (IOException | RuntimeException | Error failure) {
                     closeFailedBackend(backend, failure);
