@@ -694,8 +694,9 @@ class ReplicaManager(val config: KafkaConfig,
   }
 
   /**
-   * The restricted RF1 shared-log path submits on the request thread, then schedules completion back onto a request
-   * handler after the ordered durable prefix advances. Other requests retain the ordinary append path.
+   * The restricted shared-log path submits on the request thread and schedules completion on a request handler.
+   * The default RF1 path waits for durability. The explicit early-ACK mode also permits RF2 and completes after
+   * physical reservation, while a separate callback handles durable confirmation.
    */
   private def tryAppendSingleSharedPartitionAsync(
     requiredAcks: Short,
@@ -726,9 +727,12 @@ class ReplicaManager(val config: KafkaConfig,
     } catch {
       case scala.util.control.NonFatal(_) => return false
     }
+    val earlyAck = storageExtensionContext.exists(context =>
+      java.lang.Boolean.parseBoolean(String.valueOf(context.originals().get(
+        SharedStorageConfiguration.WAL_EARLY_ACK_CONFIG))))
     val attempt: Either[Throwable, Option[Partition.PendingLeaderAppend]] = try {
       Right(partition.tryAppendRecordsToLeaderAsync(records, origin, requiredAcks, requestLocal,
-        guards.getOrElse(topicIdPartition.topicPartition(), VerificationGuard.SENTINEL), transactionVersion))
+        guards.getOrElse(topicIdPartition.topicPartition(), VerificationGuard.SENTINEL), transactionVersion, earlyAck))
     } catch {
       case failure: Throwable => Left(failure)
     }
@@ -742,6 +746,33 @@ class ReplicaManager(val config: KafkaConfig,
     val pending = attempt.toOption.get
     if (pending.isEmpty) return false
     val append = pending.get
+    // The response can precede WAL completion only in the explicit early-ACK
+    // mode. Completion still advances the confirmed leader end and wakes
+    // follower fetches / delayed operations on a scheduler thread.
+    append.confirmation.foreach(_.whenComplete((info: LogAppendInfo, failure: Throwable) => {
+      if (failure != null) {
+        append.failAfterAdmission(failure)
+      } else {
+        try {
+          scheduler.scheduleOnce("shared-wal-confirmed", () => {
+            try {
+              val confirmed = append.finish(info)
+              val result = new LogAppendResult(LogAppendSummary.fromAppendInfo(confirmed), Optional.empty(), false)
+              addCompletePurgatoryAction(defaultActionQueue, Map(topicIdPartition -> result))
+              tryCompleteActions()
+            } catch {
+              case _: NotLeaderOrFollowerException => // Old leader must not advance the new leader's HW.
+              case scala.util.control.NonFatal(exception) =>
+                error(s"Unable to publish shared WAL confirmation for $topicIdPartition", exception)
+            }
+          })
+        } catch {
+          case scala.util.control.NonFatal(exception) =>
+            error(s"Unable to schedule shared WAL confirmation for $topicIdPartition", exception)
+            append.failAfterAdmission(exception)
+        }
+      }
+    }))
     val bytes = records.sizeInBytes
     brokerTopicStats.topicStats(topicIdPartition.topic).totalProduceRequestRate.mark()
     brokerTopicStats.allTopicsStats.totalProduceRequestRate.mark()

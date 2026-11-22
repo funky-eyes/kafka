@@ -39,8 +39,8 @@ public final class CoordinatedRingWalAdapter implements SharedWal {
     record BlockMetrics(long blocks, long groups, long bytes, long maxGroupsPerBlock) { }
     private static final int ALIGNMENT = 4096;
 
-    private record Request(
-            List<WalRecord> records, int bytes, CompletableFuture<List<WalAppendResult>> result) { }
+    private record Request(List<WalRecord> records, int bytes, CompletableFuture<Void> reserved,
+                           CompletableFuture<List<WalAppendResult>> result) { }
 
     private final Object lock = new Object();
     private final WalIoBackend.Handle handle;
@@ -263,6 +263,16 @@ public final class CoordinatedRingWalAdapter implements SharedWal {
 
     @Override
     public CompletableFuture<List<WalAppendResult>> appendBatch(List<WalRecord> input) {
+        return submitBatch(input).durable();
+    }
+
+    @Override
+    public boolean supportsEarlyReservation() {
+        return true;
+    }
+
+    @Override
+    public AppendSubmission submitBatch(List<WalRecord> input) {
         java.util.Objects.requireNonNull(input, "records");
         final List<WalRecord> records;
         long size;
@@ -276,16 +286,16 @@ public final class CoordinatedRingWalAdapter implements SharedWal {
                 size = Math.addExact(size, WalRecordCodec.encodedLength(record));
             }
         } catch (Throwable error) {
-            return CompletableFuture.failedFuture(error);
+            return failedSubmission(error);
         }
         if (size + AlignedWalBlockCodec.HEADER_BYTES > maxBlock)
-            return CompletableFuture.failedFuture(new WalCapacityExceededException("WAL group exceeds block limit"));
-        var request = new Request(records, Math.toIntExact(size), new CompletableFuture<>());
+            return failedSubmission(new WalCapacityExceededException("WAL group exceeds block limit"));
+        var request = new Request(records, Math.toIntExact(size), new CompletableFuture<>(), new CompletableFuture<>());
         synchronized (lock) {
             if (closing || failure != null)
-                return CompletableFuture.failedFuture(new IOException("WAL closed", failure));
+                return failedSubmission(new IOException("WAL closed", failure));
             if (outstanding.size() >= maxAdmissionGroups || size > maxAdmissionBytes - outstandingBytes)
-                return CompletableFuture.failedFuture(
+                return failedSubmission(
                         new WalCapacityExceededException("WAL queue full"));
             outstanding.add(request);
             outstandingBytes += size;
@@ -293,7 +303,11 @@ public final class CoordinatedRingWalAdapter implements SharedWal {
             queuedBytes += size;
             lock.notifyAll();
         }
-        return request.result().copy();
+        return new AppendSubmission(request.reserved().copy(), request.result().copy());
+    }
+
+    private static AppendSubmission failedSubmission(Throwable error) {
+        return new AppendSubmission(CompletableFuture.failedFuture(error), CompletableFuture.failedFuture(error));
     }
 
     private void assemble() {
@@ -301,9 +315,15 @@ public final class CoordinatedRingWalAdapter implements SharedWal {
             while (true) {
                 var batch = awaitBatch();
                 if (batch.isEmpty()) return;
-                coordinator
-                        .appendGroups(batch.stream().map(Request::records).toList())
-                        .whenComplete((results, error) -> complete(batch, results, error));
+                var completion = coordinator.appendGroups(batch.stream().map(Request::records).toList());
+                if (completion.isCompletedExceptionally()) {
+                    completion.whenComplete((ignored, error) -> batch.forEach(request ->
+                        request.reserved().completeExceptionally(normalize(error))));
+                } else {
+                    // appendGroups reserved physical ring space before returning.
+                    batch.forEach(request -> request.reserved().complete(null));
+                }
+                completion.whenComplete((results, error) -> complete(batch, results, error));
             }
         } catch (Throwable t) {
             fail(t);
@@ -380,7 +400,10 @@ public final class CoordinatedRingWalAdapter implements SharedWal {
             queuedBytes = 0;
             lock.notifyAll();
         }
-        for (Request request : failed) request.result().completeExceptionally(error);
+        for (Request request : failed) {
+            request.reserved().completeExceptionally(error);
+            request.result().completeExceptionally(error);
+        }
     }
 
     @Override

@@ -79,8 +79,10 @@ class SharedUnifiedLogTrackedAppendTest {
                 backend.arm();
                 MemoryRecords records = MemoryRecords.withRecords(0L, Compression.NONE, 3,
                     new SimpleRecord(1L, new byte[24]));
-                var pending = log.appendAsLeaderAsync(records, 3, AppendOrigin.CLIENT, RequestLocal.noCaching(),
+                var submitted = log.submitAsLeader(records, 3, AppendOrigin.CLIENT, RequestLocal.noCaching(),
                     VerificationGuard.SENTINEL, (short) 0);
+                assertEquals(0L, submitted.admitted().get(10, TimeUnit.SECONDS).firstOffset());
+                var pending = submitted.confirmed();
                 assertTrue(backend.forceEntered.await(10, TimeUnit.SECONDS));
                 assertFalse(pending.isDone());
                 assertEquals(0L, log.logEndOffset());
@@ -101,6 +103,50 @@ class SharedUnifiedLogTrackedAppendTest {
             }
         } finally {
             stats.close();
+        }
+    }
+
+    @Test
+    void admittedAppendReportsLaterWalFailureWithoutAdvancingVisibility() throws Exception {
+        for (boolean aio : java.util.List.of(false, true)) {
+            var backend = new TrackedWalTestBackend(aio, 1);
+            Uuid topicId = Uuid.randomUuid();
+            var partition = new SharedPartitionId(topicId.getMostSignificantBits(), topicId.getLeastSignificantBits(), 0);
+            MockTime time = new MockTime();
+            BrokerTopicStats stats = new BrokerTopicStats(false);
+            var wal = CoordinatedRingWalAdapter.create(tempDir.resolve("accepted-failure-wal-" + aio),
+                backend, 65536L, 4096, 1_000_000L, 8, 8192L);
+            try (SharedStorageEngine engine = new SharedStorageEngine(wal)) {
+                Path dir = tempDir.resolve("accepted-failure-" + aio + "-0");
+                var context = new UnifiedLogCreationContext(dir.toFile(), new LogConfig(new Properties()), 0L, 0L,
+                    time.scheduler, stats, time, 3600000, new ProducerStateManagerConfig(3600000, false),
+                    600000, new LogDirFailureChannel(10), true, Optional.of(topicId), new ConcurrentHashMap<>(),
+                    false, LogOffsetsListener.NO_OP_OFFSETS_LISTENER);
+                SharedUnifiedLog log = (SharedUnifiedLog) new SharedUnifiedLogFactory(engine).create(context);
+                log.enableExperimentalAsyncAppend(partition, 8, 8192L);
+                try {
+                    backend.arm();
+                    MemoryRecords records = MemoryRecords.withRecords(0L, Compression.NONE, 3,
+                        new SimpleRecord(1L, new byte[24]));
+                    var submitted = log.submitAsLeader(records, 3, AppendOrigin.CLIENT, RequestLocal.noCaching(),
+                        VerificationGuard.SENTINEL, (short) 0);
+                    assertEquals(0L, submitted.admitted().get(10, TimeUnit.SECONDS).firstOffset());
+                    assertTrue(backend.forceEntered.await(10, TimeUnit.SECONDS));
+                    assertFalse(submitted.confirmed().isDone());
+                    backend.forceRelease.countDown();
+                    assertThrows(ExecutionException.class, () -> submitted.confirmed().get(10, TimeUnit.SECONDS));
+                    assertEquals(0L, log.logEndOffset());
+                    assertEquals(0L, log.highWatermark());
+                    assertThrows(RuntimeException.class, () -> log.submitAsLeader(records, 3, AppendOrigin.CLIENT,
+                        RequestLocal.noCaching(), VerificationGuard.SENTINEL, (short) 0));
+                    assertThrows(KafkaStorageException.class, log::close);
+                } finally {
+                    backend.forceRelease.countDown();
+                }
+            } finally {
+                backend.forceRelease.countDown();
+                stats.close();
+            }
         }
     }
 

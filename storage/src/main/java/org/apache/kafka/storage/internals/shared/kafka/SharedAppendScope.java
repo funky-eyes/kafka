@@ -30,6 +30,7 @@ final class SharedAppendScope implements AutoCloseable {
     private boolean consumed;
     private boolean reserved;
     private final CompletableFuture<Void> published = new CompletableFuture<>();
+    private final CompletableFuture<Void> walReserved = new CompletableFuture<>();
 
     private SharedAppendScope(PartitionDurableOffsetTracker tracker, SharedPartitionId partition, long generation) {
         this.tracker = tracker;
@@ -74,12 +75,24 @@ final class SharedAppendScope implements AutoCloseable {
         return published;
     }
 
+    void bindWalReservation(CompletableFuture<Void> reservation) {
+        reservation.whenComplete((ignored, failure) -> {
+            if (failure == null) walReserved.complete(null);
+            else walReserved.completeExceptionally(failure);
+        });
+    }
+
+    CompletableFuture<Void> walReserved() {
+        return walReserved;
+    }
+
     void publish() {
         published.complete(null);
     }
 
     void fail(Throwable error) {
         published.completeExceptionally(error);
+        walReserved.completeExceptionally(error);
     }
 
     PartitionDurableOffsetTracker tracker() {
@@ -100,6 +113,7 @@ final class SharedAppendScope implements AutoCloseable {
             IllegalStateException failure = new IllegalStateException("tracked append exited before Kafka state publication");
             tracker.fence(failure);
             published.completeExceptionally(failure);
+            walReserved.completeExceptionally(failure);
         }
     }
 }

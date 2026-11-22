@@ -221,8 +221,12 @@ public final class SharedLogSegment extends LogSegment {
         reservation.bind(materializedAndDurable, published);
         CompletableFuture<List<WalLocation>> walFuture = null;
         try {
-            walFuture = group.isEmpty() ? CompletableFuture.completedFuture(List.of())
-                : storage.appendOwnedBatchGroup(partition, group);
+            var submission = group.isEmpty()
+                ? new SharedStorageEngine.OwnedBatchSubmission(CompletableFuture.completedFuture(null),
+                    CompletableFuture.completedFuture(List.of()))
+                : storage.submitOwnedBatchGroup(partition, group);
+            walFuture = submission.durable();
+            if (scope != null) scope.bindWalReservation(submission.reserved());
             if (walFuture.isDone()) {
                 await(walFuture);
             }

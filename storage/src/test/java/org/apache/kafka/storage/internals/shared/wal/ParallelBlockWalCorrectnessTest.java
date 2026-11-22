@@ -180,6 +180,23 @@ class ParallelBlockWalCorrectnessTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
+    void reservationFailsBeforeAcknowledgementWhenPhysicalRingIsFull(boolean aio) throws Exception {
+        Path path = dir.resolve("reservation-full-" + aio);
+        try (WalIoBackend backend = backend(aio);
+             var wal = CoordinatedRingWalAdapter.create(path, backend, CAPACITY, ALIGNMENT, 0)) {
+            for (int i = 0; i < 4; i++) {
+                var submitted = wal.submitBatch(List.of(record(i, 1)));
+                submitted.reserved().get(10, TimeUnit.SECONDS);
+                submitted.durable().get(10, TimeUnit.SECONDS);
+            }
+            var rejected = wal.submitBatch(List.of(record(4, 1)));
+            assertThrows(ExecutionException.class, () -> rejected.reserved().get(10, TimeUnit.SECONDS));
+            assertThrows(ExecutionException.class, () -> rejected.durable().get(10, TimeUnit.SECONDS));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
     void cachedReadRespectsRealWalFailureFence(boolean aio) throws Exception {
         Path path = dir.resolve("cached-read-fence-" + aio);
         SharedPartitionId partition = new SharedPartitionId(1, 2, 0);

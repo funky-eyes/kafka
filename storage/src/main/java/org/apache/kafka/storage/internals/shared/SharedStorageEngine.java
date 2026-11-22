@@ -65,6 +65,7 @@ public final class SharedStorageEngine implements AutoCloseable {
     private final LocalWalDurabilityObservation liveWalDurability = new LocalWalDurabilityObservation();
     private final LongAdder trackedAppends = new LongAdder();
     private final LongAdder nonBlockingRequests = new LongAdder();
+    private final LongAdder earlyAckAdmissions = new LongAdder();
     private final LongAdder localCacheHits = new LongAdder();
     private final LongAdder localCacheMisses = new LongAdder();
     private final LongAdder localCacheEvictions = new LongAdder();
@@ -150,6 +151,14 @@ public final class SharedStorageEngine implements AutoCloseable {
         return nonBlockingRequests.sum();
     }
 
+    public void recordEarlyAckAdmission() {
+        earlyAckAdmissions.increment();
+    }
+
+    public long earlyAckAdmissionCount() {
+        return earlyAckAdmissions.sum();
+    }
+
     public long localCacheHitCount() {
         return localCacheHits.sum();
     }
@@ -190,10 +199,20 @@ public final class SharedStorageEngine implements AutoCloseable {
         SharedPartitionId partition,
         List<OwnedDataBatch> batches
     ) {
+        return submitOwnedBatchGroup(partition, batches).durable();
+    }
+
+    public record OwnedBatchSubmission(CompletableFuture<Void> reserved, CompletableFuture<List<WalLocation>> durable) { }
+
+    public OwnedBatchSubmission submitOwnedBatchGroup(
+        SharedPartitionId partition,
+        List<OwnedDataBatch> batches
+    ) {
         Objects.requireNonNull(partition, "partition");
         Objects.requireNonNull(batches, "batches");
         if (batches.isEmpty()) {
-            return CompletableFuture.failedFuture(new IllegalArgumentException("batches must not be empty"));
+            IllegalArgumentException error = new IllegalArgumentException("batches must not be empty");
+            return new OwnedBatchSubmission(CompletableFuture.failedFuture(error), CompletableFuture.failedFuture(error));
         }
 
         List<WalRecord> records = new ArrayList<>(batches.size());
@@ -203,9 +222,8 @@ public final class SharedStorageEngine implements AutoCloseable {
             // Kafka record batches must be disjoint and ordered within
             // one WAL group. Reject malformed input before any WAL admission.
             if (batch.firstOffset() <= priorLastOffset) {
-                return CompletableFuture.failedFuture(
-                    new IllegalArgumentException("Kafka batch group offsets overlap or move backwards")
-                );
+                IllegalArgumentException error = new IllegalArgumentException("Kafka batch group offsets overlap or move backwards");
+                return new OwnedBatchSubmission(CompletableFuture.failedFuture(error), CompletableFuture.failedFuture(error));
             }
             priorLastOffset = batch.lastOffset();
             records.add(WalRecord.dataOwned(
@@ -222,12 +240,26 @@ public final class SharedStorageEngine implements AutoCloseable {
         // Transfer an immutable group definition to the asynchronous WAL.
         // The backend cannot change the members while the future is pending.
         List<WalRecord> immutableRecords = List.copyOf(records);
-        return walIndex.trackDurableWrite(walKey(partition), () ->
-            wal.appendBatch(immutableRecords).thenApply(results -> {
+        CompletableFuture<Void> reserved = new CompletableFuture<>();
+        CompletableFuture<List<WalLocation>> durable = walIndex.trackDurableWrite(walKey(partition), () -> {
+            SharedWal.AppendSubmission submission;
+            if (wal.supportsEarlyReservation()) {
+                submission = wal.submitBatch(immutableRecords);
+            } else {
+                CompletableFuture<List<WalAppendResult>> completion = wal.appendBatch(immutableRecords);
+                submission = new SharedWal.AppendSubmission(completion.thenApply(ignored -> null), completion);
+            }
+            submission.reserved().whenComplete((ignored, failure) -> {
+                if (failure == null) reserved.complete(null);
+                else reserved.completeExceptionally(failure);
+            });
+            return submission.durable().thenApply(results -> {
                 List<WalLocation> published = walIndex.applyDataGroup(immutableRecords, List.copyOf(results));
                 liveWalDurability.dataGroupCompleted(partition, published);
                 return published;
-            }));
+            });
+        });
+        return new OwnedBatchSubmission(reserved, durable);
     }
 
     private static WalLocation validatedLocation(WalRecord record, WalAppendResult result) {

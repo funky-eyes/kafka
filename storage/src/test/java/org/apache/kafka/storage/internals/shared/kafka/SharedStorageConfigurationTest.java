@@ -49,6 +49,7 @@ class SharedStorageConfigurationTest {
 
         assertEquals(SharedStorageConfiguration.WalEngine.RING, config.walEngine());
         assertFalse(config.walAsyncPartitionAppend());
+        assertFalse(config.walEarlyAck());
         assertEquals(1L, config.walBlockLingerMs());
         assertEquals(SharedStorageConfiguration.DEFAULT_WAL_CAPACITY_BYTES, config.walCapacityBytes());
         assertEquals(SharedStorageConfiguration.DEFAULT_WAL_SEGMENT_BYTES, config.walSegmentBytes());
@@ -98,6 +99,18 @@ class SharedStorageConfigurationTest {
         assertThrows(IllegalArgumentException.class, () -> SharedStorageConfiguration.from(context(Map.of(
             SharedStorageConfiguration.WAL_ENGINE_CONFIG, "parallel-block",
             SharedStorageConfiguration.WAL_ASYNC_PARTITION_APPEND_CONFIG, "yes"), logDir)));
+    }
+
+    @Test
+    void earlyAckRequiresExplicitAsyncPipeline() {
+        File logDir = TestUtils.tempDirectory();
+        assertThrows(IllegalArgumentException.class, () -> SharedStorageConfiguration.from(context(Map.of(
+            SharedStorageConfiguration.WAL_EARLY_ACK_CONFIG, true), logDir)));
+        var config = SharedStorageConfiguration.from(context(Map.of(
+            SharedStorageConfiguration.WAL_ENGINE_CONFIG, "parallel-block",
+            SharedStorageConfiguration.WAL_ASYNC_PARTITION_APPEND_CONFIG, true,
+            SharedStorageConfiguration.WAL_EARLY_ACK_CONFIG, true), logDir));
+        assertTrue(config.walEarlyAck());
     }
 
     @Test

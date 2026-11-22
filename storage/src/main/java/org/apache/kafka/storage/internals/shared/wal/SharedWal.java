@@ -31,6 +31,19 @@ public interface SharedWal extends AutoCloseable {
      */
     CompletableFuture<List<WalAppendResult>> appendBatch(List<WalRecord> records);
 
+    /** Reservation and recoverable durability are separate events. */
+    record AppendSubmission(CompletableFuture<Void> reserved, CompletableFuture<List<WalAppendResult>> durable) { }
+
+    default boolean supportsEarlyReservation() {
+        return false;
+    }
+
+    /** Backends without an earlier reservation signal conservatively wait for durability. */
+    default AppendSubmission submitBatch(List<WalRecord> records) {
+        CompletableFuture<List<WalAppendResult>> durable = appendBatch(records);
+        return new AppendSubmission(durable.thenApply(ignored -> null), durable);
+    }
+
     default CompletableFuture<WalAppendResult> append(WalRecord record) {
         Objects.requireNonNull(record, "record");
         return appendBatch(List.of(record)).thenApply(results -> {

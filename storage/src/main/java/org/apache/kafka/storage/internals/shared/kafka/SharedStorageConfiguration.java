@@ -41,6 +41,7 @@ public final class SharedStorageConfiguration {
     public static final String WAL_ADMISSION_MAX_GROUPS_CONFIG = "shared.storage.wal.admission.max.groups";
     public static final String WAL_ADMISSION_MAX_BYTES_CONFIG = "shared.storage.wal.admission.max.bytes";
     public static final String WAL_ASYNC_PARTITION_APPEND_CONFIG = "shared.storage.wal.async.partition.append";
+    public static final String WAL_EARLY_ACK_CONFIG = "shared.storage.wal.experimental.early.acks.one";
     public static final String WAL_BLOCK_LINGER_MS_CONFIG = "shared.storage.wal.block.linger.ms";
     public static final String OBJECT_TARGET_BYTES_CONFIG = "shared.storage.object.target.bytes";
     public static final String READ_INDEX_CACHE_ENTRIES_CONFIG = "shared.storage.read.index.cache.entries";
@@ -80,6 +81,7 @@ public final class SharedStorageConfiguration {
     private final int walAdmissionMaxGroups;
     private final long walAdmissionMaxBytes;
     private final boolean walAsyncPartitionAppend;
+    private final boolean walEarlyAck;
     private final long walBlockLingerMs;
     private final long objectTargetBytes;
     private final int readIndexCacheEntries;
@@ -117,6 +119,7 @@ public final class SharedStorageConfiguration {
         this.walAdmissionMaxGroups = walAdmissionMaxGroups;
         this.walAdmissionMaxBytes = walAdmissionMaxBytes;
         this.walAsyncPartitionAppend = walPipeline.asyncPartitionAppend();
+        this.walEarlyAck = walPipeline.earlyAck();
         this.walBlockLingerMs = walPipeline.blockLingerMs();
         this.objectTargetBytes = objectTargetBytes;
         this.readIndexCacheEntries = readCache.indexEntries();
@@ -164,6 +167,7 @@ public final class SharedStorageConfiguration {
         );
         boolean walAsyncPartitionAppend = booleanValue(
             context.originals().get(WAL_ASYNC_PARTITION_APPEND_CONFIG), WAL_ASYNC_PARTITION_APPEND_CONFIG);
+        boolean walEarlyAck = earlyAckEnabled(context, walAsyncPartitionAppend);
         long walBlockLingerMs = nonNegativeLong(context.originals().get(WAL_BLOCK_LINGER_MS_CONFIG),
             DEFAULT_WAL_BLOCK_LINGER_MS, WAL_BLOCK_LINGER_MS_CONFIG);
         if (walBlockLingerMs > 1_000L) {
@@ -246,7 +250,7 @@ public final class SharedStorageConfiguration {
             walSegmentBytes,
             walAdmissionMaxGroups,
             walAdmissionMaxBytes,
-            new WalPipelineConfiguration(walAsyncPartitionAppend, walBlockLingerMs),
+            new WalPipelineConfiguration(walAsyncPartitionAppend, walEarlyAck, walBlockLingerMs),
             objectTargetBytes,
             readCache,
             upload,
@@ -310,6 +314,10 @@ public final class SharedStorageConfiguration {
 
     public boolean walAsyncPartitionAppend() {
         return walAsyncPartitionAppend;
+    }
+
+    public boolean walEarlyAck() {
+        return walEarlyAck;
     }
 
     public long walBlockLingerMs() {
@@ -470,7 +478,15 @@ public final class SharedStorageConfiguration {
         }
     }
 
-    private record WalPipelineConfiguration(boolean asyncPartitionAppend, long blockLingerMs) {
+    private static boolean earlyAckEnabled(StorageExtensionContext context, boolean asyncPartitionAppend) {
+        boolean enabled = booleanValue(context.originals().get(WAL_EARLY_ACK_CONFIG), WAL_EARLY_ACK_CONFIG);
+        if (enabled && !asyncPartitionAppend) {
+            throw new IllegalArgumentException(WAL_EARLY_ACK_CONFIG + " requires " + WAL_ASYNC_PARTITION_APPEND_CONFIG);
+        }
+        return enabled;
+    }
+
+    private record WalPipelineConfiguration(boolean asyncPartitionAppend, boolean earlyAck, long blockLingerMs) {
     }
 
     private record TopicSelection(boolean legacyEnabled, Set<String> topics, Pattern pattern) {

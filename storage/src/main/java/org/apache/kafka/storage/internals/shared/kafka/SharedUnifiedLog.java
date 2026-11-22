@@ -67,27 +67,32 @@ public final class SharedUnifiedLog extends UnifiedLog {
     private record ExperimentalVisibility(PartitionDurableOffsetTracker tracker, LogOffsetMetadata confirmed) { }
     private final AtomicReference<ExperimentalVisibility> experimentalVisibility = new AtomicReference<>();
     private record ExperimentalAsyncSettings(SharedPartitionId partition, int maxGroups, long maxBytes,
-                                             Runnable recordNonBlockingRequest) { }
+                                             Runnable recordNonBlockingRequest, Runnable recordEarlyAckAdmission) { }
     private volatile ExperimentalAsyncSettings experimentalAsyncSettings;
     private final Object experimentalTrackerLock = new Object();
     private PartitionDurableOffsetTracker experimentalOwnedTracker;
 
     void enableExperimentalAsyncAppend(SharedPartitionId partition, int maxGroups, long maxBytes) {
-        enableExperimentalAsyncAppend(partition, maxGroups, maxBytes, () -> { });
+        enableExperimentalAsyncAppend(partition, maxGroups, maxBytes, () -> { }, () -> { });
     }
 
     void enableExperimentalAsyncAppend(SharedPartitionId partition, int maxGroups, long maxBytes,
-                                       Runnable recordNonBlockingRequest) {
+                                       Runnable recordNonBlockingRequest, Runnable recordEarlyAckAdmission) {
         Objects.requireNonNull(partition, "partition");
         Objects.requireNonNull(recordNonBlockingRequest, "recordNonBlockingRequest");
+        Objects.requireNonNull(recordEarlyAckAdmission, "recordEarlyAckAdmission");
         if (maxGroups <= 0 || maxBytes <= 0) throw new IllegalArgumentException("Invalid async append limits");
         if (experimentalAsyncSettings != null) throw new IllegalStateException("Async append is already configured");
         experimentalAsyncSettings = new ExperimentalAsyncSettings(partition, maxGroups, maxBytes,
-            recordNonBlockingRequest);
+            recordNonBlockingRequest, recordEarlyAckAdmission);
     }
 
     public void recordNonBlockingRequest() {
         Objects.requireNonNull(experimentalAsyncSettings, "async settings").recordNonBlockingRequest().run();
+    }
+
+    public void recordEarlyAckAdmission() {
+        Objects.requireNonNull(experimentalAsyncSettings, "async settings").recordEarlyAckAdmission().run();
     }
 
     /** Only non-transactional records without producer state use the experimental pipeline. */
@@ -121,6 +126,17 @@ public final class SharedUnifiedLog extends UnifiedLog {
      */
     public CompletableFuture<LogAppendInfo> appendAsLeaderAsync(MemoryRecords records, int leaderEpoch,
         AppendOrigin origin, RequestLocal requestLocal, VerificationGuard verificationGuard, short transactionVersion) {
+        return submitAsLeader(records, leaderEpoch, origin, requestLocal, verificationGuard, transactionVersion)
+            .confirmed();
+    }
+
+    /**
+     * Separates successful local admission from ordered WAL confirmation.
+     * The caller must independently fence leadership before using the admitted
+     * result and must observe failures of the confirmation future.
+     */
+    public SubmittedAppend submitAsLeader(MemoryRecords records, int leaderEpoch,
+        AppendOrigin origin, RequestLocal requestLocal, VerificationGuard verificationGuard, short transactionVersion) {
         ExperimentalAsyncSettings settings = Objects.requireNonNull(experimentalAsyncSettings, "async settings");
         TrackedAppend append;
         remoteRecoveryFence.readLock().lock();
@@ -138,8 +154,11 @@ public final class SharedUnifiedLog extends UnifiedLog {
         } finally {
             remoteRecoveryFence.readLock().unlock();
         }
-        return append.confirmation().thenApply(ignored -> append.info());
+        return new SubmittedAppend(append.reserved().thenApply(ignored -> append.info()),
+            append.confirmation().thenApply(ignored -> append.info()));
     }
+
+    public record SubmittedAppend(CompletableFuture<LogAppendInfo> admitted, CompletableFuture<LogAppendInfo> confirmed) { }
 
     private static void awaitExperimental(CompletableFuture<?> future) {
         try {
@@ -340,7 +359,8 @@ public final class SharedUnifiedLog extends UnifiedLog {
                                     current.confirmed().messageOffset >= appended.messageOffset
                                     ? current : new ExperimentalVisibility(tracker, appended)));
                         }
-                        return new TrackedAppend(info, confirmation);
+                        CompletableFuture<Void> reserved = scope.hasReservation() ? scope.walReserved() : confirmation;
+                        return new TrackedAppend(info, confirmation, reserved);
                     } catch (RuntimeException | Error failure) {
                         if (scope.hasReservation()) tracker.fence(failure);
                         scope.fail(failure);
@@ -413,7 +433,7 @@ public final class SharedUnifiedLog extends UnifiedLog {
         });
     }
 
-    record TrackedAppend(LogAppendInfo info, CompletableFuture<Void> confirmation) {
+    record TrackedAppend(LogAppendInfo info, CompletableFuture<Void> confirmation, CompletableFuture<Void> reserved) {
     }
 
     /**

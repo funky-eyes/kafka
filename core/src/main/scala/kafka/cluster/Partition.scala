@@ -81,7 +81,9 @@ class DelayedOperations(topicId: Option[Uuid],
 
 object Partition {
   final case class PendingLeaderAppend(completion: CompletableFuture[LogAppendInfo],
-                                       finish: LogAppendInfo => LogAppendInfo)
+                                       finish: LogAppendInfo => LogAppendInfo,
+                                       confirmation: Option[CompletableFuture[LogAppendInfo]],
+                                       failAfterAdmission: Throwable => Unit)
   // Changing the package or class name may cause incompatibility with existing code and metrics configuration
   private val metricsPackage = "kafka.cluster"
   private val metricsClassName = "Partition"
@@ -1275,7 +1277,7 @@ class Partition(val topicPartition: TopicPartition,
   }
 
   /**
-   * Reserve an eligible shared-log append without blocking the request thread on WAL durability.
+   * Submit an eligible shared-log append without blocking the request thread on WAL durability.
    * The completion callback must invoke `finish` on a request handler thread, not the WAL completion thread.
    */
   def tryAppendRecordsToLeaderAsync(records: MemoryRecords,
@@ -1283,17 +1285,25 @@ class Partition(val topicPartition: TopicPartition,
                                     requiredAcks: Int,
                                     requestLocal: RequestLocal,
                                     verificationGuard: VerificationGuard,
-                                    transactionVersion: Short): Option[Partition.PendingLeaderAppend] = {
+                                    transactionVersion: Short,
+                                    earlyAck: Boolean): Option[Partition.PendingLeaderAppend] = {
     inReadLock(leaderIsrUpdateLock, () => {
-      if (assignmentState.replicationFactor != 1 || requiredAcks != 1 || origin != AppendOrigin.CLIENT ||
+      val replicationFactor = assignmentState.replicationFactor
+      if ((!earlyAck && replicationFactor != 1) || (earlyAck && (replicationFactor < 1 || replicationFactor > 2)) ||
+        requiredAcks != 1 || origin != AppendOrigin.CLIENT ||
         verificationGuard != VerificationGuard.SENTINEL) {
         None
       } else {
         leaderLogIfLocal match {
           case Some(shared: SharedUnifiedLog) if shared.allowsExperimentalAsyncAppend(records) =>
             val expectedEpoch = leaderEpoch
-            val completion = shared.appendAsLeaderAsync(records, expectedEpoch, origin, requestLocal,
+            val submitted = shared.submitAsLeader(records, expectedEpoch, origin, requestLocal,
               verificationGuard, transactionVersion)
+            val confirmation = submitted.confirmed()
+            val completion = if (earlyAck) submitted.admitted().thenApply(info => {
+              shared.recordEarlyAckAdmission()
+              info
+            }) else confirmation
             shared.recordNonBlockingRequest()
             val finish = (info: LogAppendInfo) => inReadLock(leaderIsrUpdateLock, () => {
               leaderLogIfLocal match {
@@ -1303,7 +1313,13 @@ class Partition(val topicPartition: TopicPartition,
                   throw new NotLeaderOrFollowerException(s"Leadership changed before the append completed for $topicPartition")
               }
             })
-            Some(Partition.PendingLeaderAppend(completion, finish))
+            val failAfterAdmission = (failure: Throwable) => {
+              val ioFailure = new java.io.IOException("Shared WAL failed after append admission", failure)
+              shared.logDirFailureChannel().maybeAddOfflineLogDir(shared.parentDir(),
+                s"Shared WAL failed after admitting append for $topicPartition", ioFailure)
+            }
+            Some(Partition.PendingLeaderAppend(completion, finish,
+              if (earlyAck) Some(confirmation) else None, failAfterAdmission))
           case _ => None
         }
       }

@@ -64,3 +64,18 @@ power-loss guarantee, and they do not establish production readiness or a
 performance comparison. Broader failure windows and sustained-load behavior remain
 to be verified. The implementation does not yet promise concurrent batching for
 transactional, idempotent, follower or RF>1 appends.
+
+The proposed `shared.storage.wal.experimental.early.acks.one` option is off by
+default and requires the experimental partition pipeline and `parallel-block`.
+When enabled, eligible single-partition, non-transactional and non-idempotent
+client `acks=1` requests may return after physical WAL space is reserved and
+before any WAL copy is durable. RF2 replicates after the leader's confirmed WAL frontier
+advances; it does not make an early ACK safe against immediate permanent loss
+of the leader. Other requests retain the existing durable path. The feature
+must not be considered usable until real-Broker RF1/RF2 ACK, replica progress,
+failure, restart and epoch-fencing tests pass. `WalEarlyAckAdmissionCount`
+counts successfully reserved appends on this path, not successful network responses.
+If physical reservation fails after Kafka has provisionally assigned offsets,
+the request fails and the partition's log directory is fenced; automatic
+rollback and continued operation under WAL capacity pressure are not yet
+implemented.
