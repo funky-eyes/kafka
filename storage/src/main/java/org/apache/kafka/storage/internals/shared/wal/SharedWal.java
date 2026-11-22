@@ -45,6 +45,15 @@ public interface SharedWal extends AutoCloseable {
 
     WalRecord read(WalLocation location) throws IOException;
 
+    /** Whether the backend permits a caller to retain and serve validated records. */
+    default boolean supportsCachedRead() {
+        return false;
+    }
+
+    /** Check backend lifecycle and failure fences before returning a cached record. */
+    default void validateCachedRead() throws IOException {
+    }
+
     default List<WalRecord> readBatch(List<WalLocation> locations) throws IOException {
         List<WalRecord> records = new ArrayList<>(locations.size());
         for (WalLocation location : locations) {

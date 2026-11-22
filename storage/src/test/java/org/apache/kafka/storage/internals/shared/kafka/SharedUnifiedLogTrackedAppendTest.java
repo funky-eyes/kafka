@@ -331,6 +331,10 @@ class SharedUnifiedLogTrackedAppendTest {
                     assertEquals(3L, log.logEndOffset());
                     assertEquals(3L, log.logEndOffsetMetadata().messageOffset);
                     assertEquals(3L, log.endOffsetForEpoch(3).orElseThrow().offset());
+                    assertEquals(0L, log.highWatermark());
+                    assertTrue(log.read(0L, 65536, FetchIsolation.LOG_END, false).records.sizeInBytes() > 0,
+                        "replica fetch must reach the confirmed leader end before HW advances");
+                    assertEquals(0, log.read(0L, 65536, FetchIsolation.HIGH_WATERMARK, false).records.sizeInBytes());
                     log.updateHighWatermark(3L);
                     assertTrue(log.read(0L, 65536, FetchIsolation.LOG_END, false).records.sizeInBytes() > 0);
                     assertEquals(2L, ParallelWalTestInspector.blocks(wal));

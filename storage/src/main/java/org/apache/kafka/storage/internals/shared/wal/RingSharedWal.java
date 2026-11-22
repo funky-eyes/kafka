@@ -296,6 +296,16 @@ public final class RingSharedWal implements SharedWal {
     }
 
     @Override
+    public boolean supportsCachedRead() {
+        return true;
+    }
+
+    @Override
+    public void validateCachedRead() {
+        ensureOpen();
+    }
+
+    @Override
     public WalRecord read(WalLocation location) throws IOException {
         Objects.requireNonNull(location, "location");
         synchronized (ioLock) {

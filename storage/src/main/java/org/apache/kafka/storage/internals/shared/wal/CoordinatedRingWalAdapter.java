@@ -384,6 +384,16 @@ public final class CoordinatedRingWalAdapter implements SharedWal {
     }
 
     @Override
+    public boolean supportsCachedRead() {
+        return true;
+    }
+
+    @Override
+    public void validateCachedRead() throws IOException {
+        coordinator.validateCachedRead();
+    }
+
+    @Override
     public WalRecord read(WalLocation location) throws IOException {
         var entry = coordinator.read(location.walOffset());
         var record = entry.record();

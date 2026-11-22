@@ -117,6 +117,14 @@ public final class RotatingFileSharedWal implements SharedWal {
     }
 
     @Override
+    public void validateCachedRead() {
+        synchronized (lifecycleLock) {
+            awaitReclaim();
+            ensureOpen();
+        }
+    }
+
+    @Override
     public WalRecord read(WalLocation location) throws IOException {
         Objects.requireNonNull(location, "location");
         beginReadOperation();

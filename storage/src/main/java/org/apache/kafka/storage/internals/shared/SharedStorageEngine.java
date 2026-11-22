@@ -88,7 +88,10 @@ public final class SharedStorageEngine implements AutoCloseable {
     }
 
     public SharedStorageEngine(SharedWal wal, LocalRemoteObjectCheckpoint remoteCheckpoint) throws IOException {
-        this(wal, remoteCheckpoint, DEFAULT_LOCAL_CACHE_BYTES);
+        // Backends must explicitly support cache-hit lifecycle validation.
+        // RotatingFileSharedWal already has its own confirmed-record cache.
+        this(wal, remoteCheckpoint,
+            Objects.requireNonNull(wal, "wal").supportsCachedRead() ? DEFAULT_LOCAL_CACHE_BYTES : 0);
     }
 
     SharedStorageEngine(SharedWal wal, LocalRemoteObjectCheckpoint remoteCheckpoint, int localCacheLimit)
@@ -492,6 +495,7 @@ public final class SharedStorageEngine implements AutoCloseable {
         List<WalRecord> records = new ArrayList<>(java.util.Collections.nCopies(locations.size(), null));
         List<WalLocation> misses = new ArrayList<>();
         List<Integer> missingIndexes = new ArrayList<>();
+        boolean hasCacheHit = false;
         for (int i = 0; i < locations.size(); i++) {
             WalRecord cached = localCache.get(new LocalCacheKey(partitions.get(i), locations.get(i)));
             if (cached == null) {
@@ -500,8 +504,14 @@ public final class SharedStorageEngine implements AutoCloseable {
                 missingIndexes.add(i);
             } else {
                 localCacheHits.increment();
+                hasCacheHit = true;
                 records.set(i, cached);
             }
+        }
+        if (hasCacheHit) {
+            // The backend may have fenced itself after this entry was cached.
+            // A cache hit must not bypass the read path's lifecycle checks.
+            wal.validateCachedRead();
         }
         if (!misses.isEmpty()) {
             List<WalRecord> loaded = wal.readBatch(misses);

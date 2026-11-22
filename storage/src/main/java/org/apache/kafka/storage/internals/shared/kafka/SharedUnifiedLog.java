@@ -370,9 +370,13 @@ public final class SharedUnifiedLog extends UnifiedLog {
     @Override
     public FetchDataInfo read(long startOffset, int maxLength, FetchIsolation isolation, boolean minOneMessage)
         throws IOException {
-        FetchIsolation bounded = experimentalVisibility != null && experimentalVisibility.get() != null && isolation == FetchIsolation.LOG_END
-            ? FetchIsolation.HIGH_WATERMARK : isolation;
-        return super.read(startOffset, maxLength, bounded, minOneMessage);
+        ExperimentalVisibility visible = experimentalVisibility == null ? null : experimentalVisibility.get();
+        if (visible != null && isolation == FetchIsolation.LOG_END) {
+            // Replica fetch needs the confirmed leader end even when the HW
+            // still waits for that replica; using HW here can deadlock RF2.
+            return readWithMaxOffset(startOffset, maxLength, minOneMessage, visible.confirmed());
+        }
+        return super.read(startOffset, maxLength, isolation, minOneMessage);
     }
 
     @Override

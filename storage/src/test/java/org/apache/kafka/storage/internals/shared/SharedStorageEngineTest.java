@@ -381,6 +381,10 @@ class SharedStorageEngineTest {
             assertEquals(1, engine.readUploadCandidates(List.of(candidates.get(0))).get(0).payload().get());
             assertEquals(1, engine.readLocalBatches(PARTITION, 100, 1, true).records().size());
             assertEquals(1, backend.reads, "fetch and upload reuse the same validated batch");
+            backend.failCachedRead = true;
+            assertThrows(IOException.class, () -> engine.readLocal(PARTITION, 100));
+            assertThrows(IOException.class, () -> engine.readUploadCandidates(List.of(candidates.get(0))));
+            backend.failCachedRead = false;
 
             assertEquals(2, engine.readLocal(PARTITION, 110).orElseThrow().payload().get());
             assertEquals(1, engine.readLocal(PARTITION, 100).orElseThrow().payload().get());
@@ -431,6 +435,7 @@ class SharedStorageEngineTest {
         private final SharedWal delegate;
         private Runnable onNextRead;
         private int reads;
+        private boolean failCachedRead;
 
         private ReadMutationWal(SharedWal delegate) {
             this.delegate = delegate;
@@ -443,6 +448,12 @@ class SharedStorageEngineTest {
         @Override
         public CompletableFuture<List<WalAppendResult>> appendBatch(List<WalRecord> records) {
             return delegate.appendBatch(records);
+        }
+
+        @Override
+        public void validateCachedRead() throws IOException {
+            if (failCachedRead) throw new IOException("injected cache read fence");
+            delegate.validateCachedRead();
         }
 
         @Override

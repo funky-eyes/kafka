@@ -1695,6 +1695,13 @@ public class UnifiedLog implements AutoCloseable {
         return localLog.read(startOffset, maxLength, minOneMessage, maxOffsetMetadata, isolation == FetchIsolation.TXN_COMMITTED);
     }
 
+    /** Read against an explicitly bounded end, for storage implementations with asynchronous confirmation. */
+    protected FetchDataInfo readWithMaxOffset(long startOffset, int maxLength, boolean minOneMessage,
+                                            LogOffsetMetadata maxOffsetMetadata) throws IOException {
+        checkLogStartOffset(startOffset);
+        return localLog.read(startOffset, maxLength, minOneMessage, maxOffsetMetadata, false);
+    }
+
     public List<AbortedTxn> collectAbortedTransactions(long startOffset, long upperBoundOffset) {
         return localLog.collectAbortedTransactions(logStartOffset, startOffset, upperBoundOffset);
     }

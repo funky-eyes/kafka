@@ -215,6 +215,18 @@ public final class FileSharedWal implements SharedWal {
     }
 
     @Override
+    public boolean supportsCachedRead() {
+        return true;
+    }
+
+    @Override
+    public void validateCachedRead() throws IOException {
+        if (closed.get()) {
+            throw new IOException("WAL is closed");
+        }
+    }
+
+    @Override
     public WalRecord read(WalLocation location) throws IOException {
         Objects.requireNonNull(location, "location");
         try (WalIoBackend.Handle handle = ioBackend.openRead(segmentPath(location.segmentId()))) {

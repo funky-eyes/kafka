@@ -16,6 +16,9 @@
  */
 package org.apache.kafka.storage.internals.shared.wal;
 
+import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
+import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
+
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -172,6 +175,26 @@ class ParallelBlockWalCorrectnessTest {
             List<Long> recovered = new ArrayList<>();
             wal.replay((record, location) -> recovered.add(record.firstOffset()));
             assertEquals(List.of(3L), recovered);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void cachedReadRespectsRealWalFailureFence(boolean aio) throws Exception {
+        Path path = dir.resolve("cached-read-fence-" + aio);
+        SharedPartitionId partition = new SharedPartitionId(1, 2, 0);
+        try (var backend = new CountingBackend(aio);
+             var engine = new SharedStorageEngine(
+                 CoordinatedRingWalAdapter.create(path, backend, CAPACITY, ALIGNMENT, 0))) {
+            engine.appendData(partition, 1, 0, 0, ByteBuffer.wrap(new byte[] {1})).get(10, TimeUnit.SECONDS);
+            assertTrue(engine.readLocal(partition, 0).isPresent());
+            assertTrue(engine.readLocal(partition, 0).isPresent());
+            backend.failAtForce = 1;
+            backend.countForces.set(true);
+            assertThrows(ExecutionException.class, () ->
+                engine.appendData(partition, 1, 1, 1, ByteBuffer.wrap(new byte[] {2})).get(10, TimeUnit.SECONDS));
+            assertThrows(IOException.class, () -> engine.readLocal(partition, 0),
+                "a cache hit must not bypass a fenced WAL backend");
         }
     }
 

@@ -567,6 +567,12 @@ final class RingBlockCommitCoordinator implements AutoCloseable {
             throw new IOException("Ring coordinator fenced or closed", failure);
     }
 
+    void validateCachedRead() throws IOException {
+        synchronized (lock) {
+            checkOpen();
+        }
+    }
+
     WalDurabilityStats durabilityStats() {
         synchronized (lock) {
             return new WalDurabilityStats(durableCohorts, durableGroups, durableBytes, 0, maxGroupsPerCohort);
