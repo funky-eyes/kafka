@@ -18,6 +18,7 @@ package org.apache.kafka.storage.internals.shared.wal;
 
 import java.io.IOException;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -250,17 +251,28 @@ final class BlockRingAllocator {
         }
     }
 
-    /** Caller must establish durable remote coverage for the complete first block. */
-    Retirement prepareRetirement(boolean remoteCovered) throws IOException {
+    /** Caller must establish durable remote coverage for every block in the prefix. */
+    List<Retirement> prepareRetirements(List<Address> addresses) throws IOException {
         synchronized (lock) {
             checkOpen();
-            Entry first = entries.peekFirst();
-            if (!remoteCovered || first == null || first.state != State.COMMITTED)
-                throw new IOException("Oldest block is not safely reclaimable");
-            first.state = State.RETIRING;
-            first.drained = new CompletableFuture<>();
-            if (first.pins == 0) first.drained.complete(null);
-            return new Retirement(first);
+            if (addresses.isEmpty()) throw new IOException("Empty retirement prefix");
+            var iterator = entries.iterator();
+            List<Entry> prefix = new ArrayList<>(addresses.size());
+            for (Address address : addresses) {
+                if (!iterator.hasNext()) throw new IOException("Retirement prefix is not present");
+                Entry entry = iterator.next();
+                if (entry.address != address || entry.state != State.COMMITTED)
+                    throw new IOException("Retirement prefix is not safely reclaimable");
+                prefix.add(entry);
+            }
+            List<Retirement> retirements = new ArrayList<>(prefix.size());
+            for (Entry entry : prefix) {
+                entry.state = State.RETIRING;
+                entry.drained = new CompletableFuture<>();
+                if (entry.pins == 0) entry.drained.complete(null);
+                retirements.add(new Retirement(entry));
+            }
+            return retirements;
         }
     }
 

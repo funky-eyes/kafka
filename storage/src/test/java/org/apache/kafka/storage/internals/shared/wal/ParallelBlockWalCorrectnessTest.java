@@ -33,7 +33,11 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -45,6 +49,130 @@ class ParallelBlockWalCorrectnessTest {
     private static final long CAPACITY = 4L * ALIGNMENT;
     @TempDir
     Path dir;
+
+    @Test
+    void batchRetirementWaitsForEachReaderBeforeReusingItsBlock() throws Exception {
+        var allocator = new BlockRingAllocator(CAPACITY, ALIGNMENT);
+        var first = allocator.reserve(ALIGNMENT);
+        var second = allocator.reserve(ALIGNMENT);
+        allocator.dataForced(first);
+        allocator.dataForced(second);
+        allocator.tailCheckpointForced(second.end());
+        var firstPin = allocator.pin(first);
+        var secondPin = allocator.pin(second);
+        var retirements = allocator.prepareRetirements(List.of(first, second));
+        assertFalse(retirements.get(0).readersDrained().isDone());
+        assertFalse(retirements.get(1).readersDrained().isDone());
+        assertThrows(IOException.class, () -> allocator.headCheckpointsForced(retirements.get(0)));
+        firstPin.close();
+        retirements.get(0).readersDrained().get(10, TimeUnit.SECONDS);
+        assertFalse(retirements.get(1).readersDrained().isDone());
+        secondPin.close();
+        retirements.get(1).readersDrained().get(10, TimeUnit.SECONDS);
+        allocator.headCheckpointsForced(retirements.get(0));
+        allocator.headCheckpointsForced(retirements.get(1));
+        assertEquals(0, allocator.usedBytes());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void reclaimsOnlyCoveredPrefixWithOneDurableHeadCheckpoint(boolean aio) throws Exception {
+        Path path = dir.resolve("batch-reclaim-" + aio);
+        try (var backend = new CountingBackend(aio);
+             var wal = CoordinatedRingWalAdapter.create(path, backend, CAPACITY, ALIGNMENT, 0)) {
+            for (int i = 0; i < 4; i++) wal.append(record(i, 1)).get(10, TimeUnit.SECONDS);
+            backend.countForces.set(true);
+            assertEquals(3L * ALIGNMENT, wal.reclaim((record, location) -> record.firstOffset() < 3, CAPACITY));
+            assertEquals(2, backend.forces.get(), "one head transition must force both checkpoint copies");
+            assertEquals(ALIGNMENT, wal.usedBytes());
+        }
+        try (WalIoBackend backend = backend(aio);
+             var wal = CoordinatedRingWalAdapter.reopen(path, backend, CAPACITY, ALIGNMENT, 0)) {
+            List<Long> recovered = new ArrayList<>();
+            wal.replay((record, location) -> recovered.add(record.firstOffset()));
+            assertEquals(List.of(3L), recovered);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void failedBatchHeadForceFencesWritesAndKeepsUncoveredSuffix(boolean aio) throws Exception {
+        for (int failAt : List.of(1, 2)) {
+            Path path = dir.resolve("batch-head-failure-" + aio + "-" + failAt);
+            try (var backend = new CountingBackend(aio);
+                 var wal = CoordinatedRingWalAdapter.create(path, backend, CAPACITY, ALIGNMENT, 0)) {
+                for (int i = 0; i < 4; i++) wal.append(record(i, 1)).get(10, TimeUnit.SECONDS);
+                backend.failAtForce = failAt;
+                backend.countForces.set(true);
+                assertThrows(IOException.class, () -> wal.reclaim((record, location) -> record.firstOffset() < 3,
+                    CAPACITY));
+                var rejected = assertThrows(ExecutionException.class,
+                    () -> wal.append(record(4, 1)).get(10, TimeUnit.SECONDS));
+                assertFalse(rejected.getCause() instanceof WalCapacityExceededException,
+                    "the failed checkpoint must fence writes rather than merely fill the ring");
+            }
+            try (WalIoBackend backend = backend(aio);
+                 var wal = CoordinatedRingWalAdapter.reopen(path, backend, CAPACITY, ALIGNMENT, 0)) {
+                List<Long> recovered = new ArrayList<>();
+                wal.replay((record, location) -> recovered.add(record.firstOffset()));
+                assertTrue(recovered.equals(List.of(0L, 1L, 2L, 3L)) || recovered.equals(List.of(3L)),
+                    "only the fully covered prefix may be retired: " + recovered);
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void batchReclaimWaitsForAnActualReaderBeforeForcingHead(boolean aio) throws Exception {
+        Path path = dir.resolve("batch-reader-" + aio);
+        var readerExecutor = Executors.newSingleThreadExecutor(task -> new Thread(task, "held-wal-reader"));
+        var reclaimExecutor = Executors.newSingleThreadExecutor();
+        try (var backend = new CountingBackend(aio);
+             var wal = CoordinatedRingWalAdapter.create(path, backend, CAPACITY, ALIGNMENT, 0)) {
+            WalAppendResult second = null;
+            for (int i = 0; i < 4; i++) {
+                var location = wal.append(record(i, 1)).get(10, TimeUnit.SECONDS);
+                if (i == 1) second = location;
+            }
+            var location = new WalLocation(second.offset(), second.length(), 1, 1, 1, 1);
+            backend.holdReader.set(true);
+            var reader = readerExecutor.submit(() -> wal.read(location));
+            assertTrue(backend.readerEntered.await(10, TimeUnit.SECONDS));
+            backend.countForces.set(true);
+            var reclaim = reclaimExecutor.submit(() -> wal.reclaim((record, ignored) -> record.firstOffset() < 3,
+                CAPACITY));
+            assertThrows(TimeoutException.class, () -> reclaim.get(200, TimeUnit.MILLISECONDS));
+            assertEquals(0, backend.forces.get(), "head must not be forced while a reader holds a block");
+            assertEquals(CAPACITY, wal.usedBytes());
+            backend.releaseReader.countDown();
+            assertEquals(1L, reader.get(10, TimeUnit.SECONDS).firstOffset());
+            assertEquals(3L * ALIGNMENT, reclaim.get(10, TimeUnit.SECONDS));
+            assertEquals(2, backend.forces.get());
+        } finally {
+            readerExecutor.shutdownNow();
+            reclaimExecutor.shutdownNow();
+        }
+    }
+
+    @Test
+    void reclaimContinuesAcrossBoundedBatches() throws Exception {
+        long capacity = 72L * ALIGNMENT;
+        Path path = dir.resolve("bounded-reclaim");
+        try (var backend = new CountingBackend(false);
+             var wal = CoordinatedRingWalAdapter.create(path, backend, capacity, ALIGNMENT, 0)) {
+            for (int i = 0; i < 70; i++) wal.append(record(i, 1)).get(10, TimeUnit.SECONDS);
+            backend.countForces.set(true);
+            assertEquals(69L * ALIGNMENT, wal.reclaim((record, location) -> record.firstOffset() < 69, capacity));
+            assertEquals(4, backend.forces.get(), "69 blocks need two double-copy head checkpoints");
+            assertEquals(ALIGNMENT, wal.usedBytes());
+        }
+        try (WalIoBackend backend = backend(false);
+             var wal = CoordinatedRingWalAdapter.reopen(path, backend, capacity, ALIGNMENT, 0)) {
+            List<Long> recovered = new ArrayList<>();
+            wal.replay((record, location) -> recovered.add(record.firstOffset()));
+            assertEquals(List.of(69L), recovered);
+        }
+    }
 
     @Test
     void encodedBlockMatchesPreOptimizationFormat() throws Exception {
@@ -281,6 +409,106 @@ class ParallelBlockWalCorrectnessTest {
 
     private static WalIoBackend backend(boolean aio) {
         return aio ? new AsynchronousFileChannelWalIoBackend() : new FileChannelWalIoBackend();
+    }
+
+    private static final class CountingBackend implements WalIoBackend {
+        private final WalIoBackend delegate;
+        private final AtomicBoolean countForces = new AtomicBoolean();
+        private final AtomicInteger forces = new AtomicInteger();
+        private volatile int failAtForce;
+        private final AtomicBoolean holdReader = new AtomicBoolean();
+        private final CountDownLatch readerEntered = new CountDownLatch(1);
+        private final CountDownLatch releaseReader = new CountDownLatch(1);
+
+        private CountingBackend(boolean aio) {
+            delegate = backend(aio);
+        }
+
+        @Override
+        public Handle openRead(Path path) throws IOException {
+            return wrap(delegate.openRead(path));
+        }
+
+        @Override
+        public Handle reopen(Path path) throws IOException {
+            return wrap(delegate.reopen(path));
+        }
+
+        @Override
+        public Handle create(Path path) throws IOException {
+            return wrap(delegate.create(path));
+        }
+
+        @Override
+        public long size(Path path) throws IOException {
+            return delegate.size(path);
+        }
+
+        @Override
+        public boolean supportsPreallocation() {
+            return delegate.supportsPreallocation();
+        }
+
+        @Override
+        public void close() throws IOException {
+            delegate.close();
+        }
+
+        private Handle wrap(Handle handle) {
+            return new Handle() {
+                @Override
+                public long size() throws IOException {
+                    return handle.size();
+                }
+
+                @Override
+                public int read(ByteBuffer dst, long position) throws IOException {
+                    if (holdReader.get() && Thread.currentThread().getName().equals("held-wal-reader")) {
+                        readerEntered.countDown();
+                        try {
+                            if (!releaseReader.await(10, TimeUnit.SECONDS))
+                                throw new IOException("timed out waiting for reader release");
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            throw new IOException("reader interrupted", e);
+                        }
+                    }
+                    return handle.read(dst, position);
+                }
+
+                @Override
+                public int write(ByteBuffer src, long position) throws IOException {
+                    return handle.write(src, position);
+                }
+
+                @Override
+                public void truncate(long size) throws IOException {
+                    handle.truncate(size);
+                }
+
+                @Override
+                public void preallocate(long size) throws IOException {
+                    handle.preallocate(size);
+                }
+
+                @Override
+                public void force() throws IOException {
+                    if (countForces.get() && forces.incrementAndGet() == failAtForce)
+                        throw new IOException("injected head checkpoint force failure");
+                    handle.force();
+                }
+
+                @Override
+                public void seal() throws IOException {
+                    handle.seal();
+                }
+
+                @Override
+                public void close() throws IOException {
+                    handle.close();
+                }
+            };
+        }
     }
 
     private static final class ForceGate implements WalIoBackend.Handle {

@@ -31,6 +31,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 /** Experimental block-level coordinator for the opt-in SharedWal implementation. */
 final class RingBlockCommitCoordinator implements AutoCloseable {
+    private static final int MAX_RECLAIM_BLOCKS = 64;
     private static final class Pending {
         final BlockRingAllocator.Address address;
         final long lastId;
@@ -397,7 +398,7 @@ final class RingBlockCommitCoordinator implements AutoCloseable {
         try {
             long released = 0;
             while (released < desiredBytes) {
-                long count = reclaimOne(policy);
+                long count = reclaimBatch(policy, desiredBytes - released);
                 if (count == 0) break;
                 released = Math.addExact(released, count);
             }
@@ -411,38 +412,82 @@ final class RingBlockCommitCoordinator implements AutoCloseable {
         }
     }
 
-    private long reclaimOne(WalReclaimPolicy policy) throws IOException {
-        final Committed oldest;
-        final BlockRingAllocator.Pin pin;
+    private record ReclaimSnapshot(List<Committed> blocks, List<BlockRingAllocator.Pin> pins) { }
+    private record ApprovedPrefix(List<Committed> blocks, long lastId) { }
+
+    private ReclaimSnapshot pinReclaimCandidates(long desiredBytes) throws IOException {
+        List<Committed> candidates = new ArrayList<>();
+        List<BlockRingAllocator.Pin> pins = new ArrayList<>();
         synchronized (lock) {
             checkHealthy();
-            if (committed.isEmpty() || !committed.firstEntry().getValue().published) return 0;
-            oldest = committed.firstEntry().getValue();
-            pin = allocator.pin(oldest.address());
-        }
-        BlockRingAllocator.Retirement retirement;
-        long lastId;
-        try (pin) {
-            var decoded = readBlock(oldest.address());
-            for (var group : decoded.groups())
-                for (var entry : group.records()) {
-                    if (!policy.canReclaim(
-                            entry.record(), new WalAppendResult(entry.walOffset(), entry.length())))
-                        return 0;
+            long selectedBytes = 0;
+            try {
+                for (Committed block : committed.values()) {
+                    if (!block.published || candidates.size() == MAX_RECLAIM_BLOCKS || selectedBytes >= desiredBytes)
+                        break;
+                    pins.add(allocator.pin(block.address()));
+                    candidates.add(block);
+                    selectedBytes = Math.addExact(selectedBytes,
+                        block.address().end() - block.address().reservedStart());
                 }
-            lastId = decoded.groups().get(decoded.groups().size() - 1).id();
-            synchronized (lock) {
-                checkHealthy();
-                if (committed.firstEntry().getValue() != oldest)
-                    throw new IOException("Reclaim prefix changed");
-                retirement = allocator.prepareRetirement(true);
+            } catch (IOException | RuntimeException failure) {
+                for (var pin : pins) pin.close();
+                throw failure;
             }
         }
-        awaitReaders(retirement);
+        return new ReclaimSnapshot(candidates, pins);
+    }
+
+    private ApprovedPrefix approveReclaimPrefix(List<Committed> candidates, WalReclaimPolicy policy) throws IOException {
+        List<Committed> approved = new ArrayList<>();
+        long lastId = -1;
+        for (Committed block : candidates) {
+            var decoded = readBlock(block.address());
+            if (!isCovered(decoded, policy)) break;
+            approved.add(block);
+            lastId = decoded.groups().get(decoded.groups().size() - 1).id();
+        }
+        return new ApprovedPrefix(approved, lastId);
+    }
+
+    private boolean isCovered(AlignedWalBlockCodec.DecodedBlock block, WalReclaimPolicy policy) {
+        for (var group : block.groups()) {
+            for (var entry : group.records()) {
+                if (!policy.canReclaim(entry.record(), new WalAppendResult(entry.walOffset(), entry.length())))
+                    return false;
+            }
+        }
+        return true;
+    }
+
+    private List<BlockRingAllocator.Retirement> prepareRetirements(List<Committed> approved) throws IOException {
+        synchronized (lock) {
+            checkHealthy();
+            var iterator = committed.values().iterator();
+            for (Committed block : approved) {
+                if (!iterator.hasNext() || iterator.next() != block)
+                    throw new IOException("Reclaim prefix changed");
+            }
+            return allocator.prepareRetirements(approved.stream().map(Committed::address).toList());
+        }
+    }
+
+    private long reclaimBatch(WalReclaimPolicy policy, long desiredBytes) throws IOException {
+        ReclaimSnapshot snapshot = pinReclaimCandidates(desiredBytes);
+        ApprovedPrefix approved;
+        List<BlockRingAllocator.Retirement> retirements;
+        try {
+            approved = approveReclaimPrefix(snapshot.blocks(), policy);
+            if (approved.blocks().isEmpty()) return 0;
+            retirements = prepareRetirements(approved.blocks());
+        } finally {
+            for (var pin : snapshot.pins()) pin.close();
+        }
+        for (var retirement : retirements) awaitReaders(retirement);
         var done = new CompletableFuture<Long>();
         synchronized (lock) {
             checkHealthy();
-            checkpoints.execute(() -> finishRetirement(oldest, retirement, lastId, done));
+            checkpoints.execute(() -> finishRetirements(approved.blocks(), retirements, approved.lastId(), done));
         }
         try {
             return done.get();
@@ -457,15 +502,20 @@ final class RingBlockCommitCoordinator implements AutoCloseable {
         }
     }
 
-    private void finishRetirement(Committed oldest, BlockRingAllocator.Retirement retirement,
-                                  long lastId, CompletableFuture<Long> done) {
+    private void finishRetirements(List<Committed> blocks, List<BlockRingAllocator.Retirement> retirements,
+                                   long lastId, CompletableFuture<Long> done) {
         try {
-            checkpoint.advanceHead(retirement.newHead(), lastId);
+            checkpoint.advanceHead(retirements.get(retirements.size() - 1).newHead(), lastId);
             long rebase = -1;
+            long released = 0;
             synchronized (lock) {
                 checkHealthy();
-                allocator.headCheckpointsForced(retirement);
-                committed.remove(oldest.address().blockStart());
+                for (int i = 0; i < blocks.size(); i++) {
+                    allocator.headCheckpointsForced(retirements.get(i));
+                    Committed block = blocks.get(i);
+                    committed.remove(block.address().blockStart());
+                    released = Math.addExact(released, block.address().end() - block.address().reservedStart());
+                }
                 if (committed.isEmpty() && pending.isEmpty()) {
                     long target = allocator.emptyRebaseTarget();
                     if (target != committedTail) {
@@ -483,7 +533,7 @@ final class RingBlockCommitCoordinator implements AutoCloseable {
                     rebasing = false;
                 }
             }
-            done.complete(oldest.address().end() - oldest.address().reservedStart());
+            done.complete(released);
         } catch (Throwable t) {
             synchronized (lock) {
                 fenceLocked(t);
