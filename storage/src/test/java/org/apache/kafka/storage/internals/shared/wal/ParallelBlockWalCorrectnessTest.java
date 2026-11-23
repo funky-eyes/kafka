@@ -203,9 +203,13 @@ class ParallelBlockWalCorrectnessTest {
         try (var backend = new CountingBackend(aio);
              var engine = new SharedStorageEngine(
                  CoordinatedRingWalAdapter.create(path, backend, CAPACITY, ALIGNMENT, 0))) {
-            engine.appendData(partition, 1, 0, 0, ByteBuffer.wrap(new byte[] {1})).get(10, TimeUnit.SECONDS);
+            engine.appendOwnedBatchGroup(partition, List.of(
+                new SharedStorageEngine.OwnedDataBatch(1, 0, 0, ByteBuffer.wrap(new byte[] {1}))))
+                .get(10, TimeUnit.SECONDS);
             assertTrue(engine.readLocal(partition, 0).isPresent());
             assertTrue(engine.readLocal(partition, 0).isPresent());
+            assertEquals(2, engine.localCacheHitCount(), "confirmed data is reused on the first fetch");
+            assertEquals(0, engine.localCacheMissCount());
             backend.failAtForce = 1;
             backend.countForces.set(true);
             assertThrows(ExecutionException.class, () ->

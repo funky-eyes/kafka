@@ -400,6 +400,71 @@ class SharedStorageEngineTest {
     }
 
     @Test
+    void confirmedOwnedBatchSeedsFetchAndUploadCacheOnlyAfterDurability() throws Exception {
+        ReadMutationWal backend = new ReadMutationWal(
+            new FileSharedWal(tempDir.resolve("confirmed-owned-cache"), 1024 * 1024, 4096));
+        try (SharedStorageEngine engine = new SharedStorageEngine(backend, null, 258)) {
+            CompletableFuture<Void> confirmation = new CompletableFuture<>();
+            backend.nextAppendGate = confirmation;
+            var append = engine.appendOwnedBatchGroup(PARTITION, List.of(
+                new SharedStorageEngine.OwnedDataBatch(3, 100, 109, ByteBuffer.wrap(new byte[]{1}))));
+            assertFalse(append.isDone());
+            assertTrue(engine.readLocal(PARTITION, 100).isEmpty());
+            assertEquals(0, engine.localCacheBytes());
+
+            confirmation.complete(null);
+            append.get(10, TimeUnit.SECONDS);
+            assertEquals(1, engine.readLocal(PARTITION, 100).orElseThrow().payload().get());
+            var candidate = engine.uploadCandidates(PARTITION, 100, 110).get(0);
+            assertEquals(1, engine.readUploadCandidates(List.of(candidate)).get(0).payload().get());
+            assertEquals(0, backend.reads, "fetch and upload should reuse the confirmed owned batch");
+
+            backend.failCachedRead = true;
+            assertThrows(IOException.class, () -> engine.readLocal(PARTITION, 100));
+            backend.failCachedRead = false;
+            engine.truncate(PARTITION, 4, 100).get(10, TimeUnit.SECONDS);
+            assertThrows(WalCorruptionException.class, () -> engine.readUploadCandidates(List.of(candidate)));
+            engine.appendOwnedBatchGroup(PARTITION, List.of(
+                new SharedStorageEngine.OwnedDataBatch(5, 100, 109, ByteBuffer.wrap(new byte[]{9}))))
+                .get(10, TimeUnit.SECONDS);
+            assertEquals(9, engine.readLocal(PARTITION, 100).orElseThrow().payload().get());
+            assertEquals(0, backend.reads, "a replacement must use its new WAL location");
+            assertTrue(engine.localCacheBytes() <= 258);
+        }
+    }
+
+    @Test
+    void lateCompletionCannotRepopulateCacheAfterClose() throws Exception {
+        ReadMutationWal backend = new ReadMutationWal(
+            new FileSharedWal(tempDir.resolve("late-confirmed-cache"), 1024 * 1024, 4096));
+        SharedStorageEngine engine = new SharedStorageEngine(backend, null, 129);
+        CompletableFuture<Void> confirmation = new CompletableFuture<>();
+        backend.nextAppendGate = confirmation;
+        var append = engine.appendOwnedBatchGroup(PARTITION, List.of(
+            new SharedStorageEngine.OwnedDataBatch(3, 100, 109, ByteBuffer.wrap(new byte[]{1}))));
+        engine.close();
+        confirmation.complete(null);
+        append.get(10, TimeUnit.SECONDS);
+        assertEquals(0, engine.localCacheBytes(), "a completion from before close must not resurrect entries");
+    }
+
+    @Test
+    void failedOwnedAppendDoesNotPublishCacheOrIndex() throws Exception {
+        ReadMutationWal backend = new ReadMutationWal(
+            new FileSharedWal(tempDir.resolve("failed-owned-cache"), 1024 * 1024, 4096));
+        try (SharedStorageEngine engine = new SharedStorageEngine(backend, null, 129)) {
+            CompletableFuture<Void> confirmation = new CompletableFuture<>();
+            backend.nextAppendGate = confirmation;
+            var append = engine.appendOwnedBatchGroup(PARTITION, List.of(
+                new SharedStorageEngine.OwnedDataBatch(3, 100, 109, ByteBuffer.wrap(new byte[]{1}))));
+            confirmation.completeExceptionally(new IOException("injected failure"));
+            assertThrows(java.util.concurrent.CompletionException.class, append::join);
+            assertTrue(engine.readLocal(PARTITION, 100).isEmpty());
+            assertEquals(0, engine.localCacheBytes());
+        }
+    }
+
+    @Test
     void concurrentTruncateDuringLocalReadCannotReturnStaleWalBatch() throws Exception {
         ReadMutationWal backend = new ReadMutationWal(
             new FileSharedWal(tempDir.resolve("read-race"), 1024 * 1024, 4096));
@@ -436,6 +501,7 @@ class SharedStorageEngineTest {
         private Runnable onNextRead;
         private int reads;
         private boolean failCachedRead;
+        private CompletableFuture<Void> nextAppendGate;
 
         private ReadMutationWal(SharedWal delegate) {
             this.delegate = delegate;
@@ -447,7 +513,10 @@ class SharedStorageEngineTest {
 
         @Override
         public CompletableFuture<List<WalAppendResult>> appendBatch(List<WalRecord> records) {
-            return delegate.appendBatch(records);
+            CompletableFuture<List<WalAppendResult>> result = delegate.appendBatch(records);
+            CompletableFuture<Void> gate = nextAppendGate;
+            nextAppendGate = null;
+            return gate == null ? result : result.thenCombine(gate, (locations, ignored) -> locations);
         }
 
         @Override

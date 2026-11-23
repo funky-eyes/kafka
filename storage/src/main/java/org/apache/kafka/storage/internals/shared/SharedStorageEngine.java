@@ -46,6 +46,7 @@ import java.util.TreeMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.LongFunction;
 
@@ -77,10 +78,13 @@ public final class SharedStorageEngine implements AutoCloseable {
     // lock. Never acquire this maintenance lock in a completion callback:
     // reclamation takes it before entering WAL I/O, creating a lock cycle.
     private final Object walMaintenanceLock = new Object();
-    // Accessed only under walMaintenanceLock; the limit includes a fixed per-entry
-    // allowance so a stream of tiny batches cannot grow the map without bound.
+    // The cache has its own lock: a WAL completion must never acquire the
+    // maintenance lock while reclaim/close may be waiting for that completion.
+    // The limit includes a per-entry allowance for streams of tiny batches.
+    private final Object localCacheLock = new Object();
     private final int localCacheLimit;
     private final Map<LocalCacheKey, WalRecord> localCache = new LinkedHashMap<>(16, 0.75f, true);
+    private final AtomicLong localCacheGeneration = new AtomicLong();
     private volatile long localCacheBytes;
     private volatile SharedObjectReader remoteReader;
 
@@ -240,6 +244,7 @@ public final class SharedStorageEngine implements AutoCloseable {
         // Transfer an immutable group definition to the asynchronous WAL.
         // The backend cannot change the members while the future is pending.
         List<WalRecord> immutableRecords = List.copyOf(records);
+        long cacheGeneration = localCacheGeneration.get();
         CompletableFuture<Void> reserved = new CompletableFuture<>();
         CompletableFuture<List<WalLocation>> durable = walIndex.trackDurableWrite(walKey(partition), () -> {
             SharedWal.AppendSubmission submission;
@@ -256,6 +261,14 @@ public final class SharedStorageEngine implements AutoCloseable {
             return submission.durable().thenApply(results -> {
                 List<WalLocation> published = walIndex.applyDataGroup(immutableRecords, List.copyOf(results));
                 liveWalDurability.dataGroupCompleted(partition, published);
+                if (localCacheLimit > CACHE_ENTRY_OVERHEAD) {
+                    for (int i = 0; i < published.size(); i++) {
+                        WalLocation location = published.get(i);
+                        if (walIndex.find(walKey(partition), location.firstOffset()).filter(location::equals).isPresent()) {
+                            cacheLocalBatch(partition, location, immutableRecords.get(i), cacheGeneration);
+                        }
+                    }
+                }
                 return published;
             });
         });
@@ -529,7 +542,10 @@ public final class SharedStorageEngine implements AutoCloseable {
         List<Integer> missingIndexes = new ArrayList<>();
         boolean hasCacheHit = false;
         for (int i = 0; i < locations.size(); i++) {
-            WalRecord cached = localCache.get(new LocalCacheKey(partitions.get(i), locations.get(i)));
+            WalRecord cached;
+            synchronized (localCacheLock) {
+                cached = localCache.get(new LocalCacheKey(partitions.get(i), locations.get(i)));
+            }
             if (cached == null) {
                 localCacheMisses.increment();
                 misses.add(locations.get(i));
@@ -558,15 +574,16 @@ public final class SharedStorageEngine implements AutoCloseable {
                 requireLocalDataIdentity(partition, location, record);
                 requireCurrentLocalLocation(partition, location);
                 records.set(index, record);
-                cacheLocalBatch(partition, location, record);
+                cacheLocalBatch(partition, location, record, localCacheGeneration.get());
             }
         }
         return records;
     }
 
-    private void cacheLocalBatch(SharedPartitionId partition, WalLocation location, WalRecord record) {
+    private void cacheLocalBatch(SharedPartitionId partition, WalLocation location, WalRecord record,
+                                 long expectedGeneration) {
         long weight = (long) location.payloadLength() + CACHE_ENTRY_OVERHEAD;
-        if (weight > localCacheLimit) {
+        if (weight > localCacheLimit || localCacheGeneration.get() != expectedGeneration) {
             return;
         }
         // Copy exactly the payload: a decoded slice may otherwise retain an
@@ -574,21 +591,27 @@ public final class SharedStorageEngine implements AutoCloseable {
         WalRecord copy = WalRecord.data(record.topicIdHigh(), record.topicIdLow(), record.partition(),
             record.leaderEpoch(), record.firstOffset(), record.lastOffset(), record.payload());
         LocalCacheKey key = new LocalCacheKey(partition, location);
-        WalRecord previous = localCache.put(key, copy);
-        if (previous == null) {
-            localCacheBytes += weight;
-        }
-        while (localCacheBytes > localCacheLimit) {
-            Map.Entry<LocalCacheKey, WalRecord> eldest = localCache.entrySet().iterator().next();
-            localCacheBytes -= (long) eldest.getKey().location().payloadLength() + CACHE_ENTRY_OVERHEAD;
-            localCache.remove(eldest.getKey());
-            localCacheEvictions.increment();
+        synchronized (localCacheLock) {
+            if (localCacheGeneration.get() != expectedGeneration) return;
+            WalRecord previous = localCache.put(key, copy);
+            if (previous == null) {
+                localCacheBytes += weight;
+            }
+            while (localCacheBytes > localCacheLimit) {
+                Map.Entry<LocalCacheKey, WalRecord> eldest = localCache.entrySet().iterator().next();
+                localCacheBytes -= (long) eldest.getKey().location().payloadLength() + CACHE_ENTRY_OVERHEAD;
+                localCache.remove(eldest.getKey());
+                localCacheEvictions.increment();
+            }
         }
     }
 
     private void clearLocalCache() {
-        localCache.clear();
-        localCacheBytes = 0;
+        synchronized (localCacheLock) {
+            localCacheGeneration.incrementAndGet();
+            localCache.clear();
+            localCacheBytes = 0;
+        }
     }
 
     private record LocalCacheKey(SharedPartitionId partition, WalLocation location) {
