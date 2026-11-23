@@ -26,3 +26,17 @@ RF2 adds a follower WAL path and replica transfer. Its resource demand includes 
 4. **Measure the actual pipeline.** Existing `WalBlockCount`, `WalBlockGroupCount`, `WalBlockRecordBytes`, early-ACK and cache counters can show path use and average groups per completed block. `WalDurabilityBatchCount` counts checkpoint cohorts, not physical blocks. In the parallel-block coordinator the exposed force/barrier time fields are currently zero placeholders; zero must not be interpreted as zero I/O latency. To decide whether admission, coalescing, CPU copies, force latency, follower replication or consumer reads dominate, add accurate bounded measurements at their actual boundaries and retain test/JAR/setting provenance. Do not infer p99 from averages or maxima.
 
 Existing AutoMQ results remain historical reference data. Any claim that this candidate is close to or faster than AutoMQ requires its own comparable candidate measurements and a clearly labeled effective replica count, acknowledgement boundary and storage mode; no additional AutoMQ run is required to establish the above source-level facts.
+
+## Local Broker diagnostic after active-block admission
+
+On one macOS host, an isolated controller and one or two Broker processes compared source `01110af924` with `74be15d6b8`. Each run used three partitions, four producers, 1 KiB values, `acks=1`, three rounds of 20,000 records, and a 3,000-record warm-up. Each run verified the requested replica count and full ISR before writing, then consumed and checked all 63,000 records. A test-only delegating storage extension exposed the existing WAL counters; early-ACK admissions and completed WAL blocks/groups were nonzero. There was no object-store upload or concurrent consumer during the timed producer rounds. All Broker processes and WAL files shared one machine and filesystem.
+
+| Replicas and I/O | Baseline median records/s | Candidate median records/s | Baseline / candidate median p99 ACK ms |
+| --- | ---: | ---: | ---: |
+| RF1 NIO | 216,975 | 308,553 | 72.8 / 58.4 |
+| RF1 AIO | 225,972 | 155,890 | 80.5 / 95.4 |
+| RF1 AIO repeat | 188,591 | 279,345 | 90.3 / 58.4 |
+| RF2 NIO | 176,559 | 180,878 | 93.5 / 97.8 |
+| RF2 AIO | 176,901 | 184,764 | 93.2 / 87.1 |
+
+These are short diagnostic samples, not a controlled long-duration performance gate. The opposite RF1 AIO outcomes and RF2 NIO p99 result show why a regression cannot be ruled out from this sample. In particular, it cannot be compared fairly to the historical k3s AutoMQ measurements. The test harness, per-run logs, path counters, effective settings and JAR hashes were retained under `/private/tmp/kafka-active-wal-baseline.PvwTSW/`; this temporary path is not a durable artifact. Actual k3s RF1/RF2 comparisons, concurrent reads and sustained-load measurements remain outstanding.
