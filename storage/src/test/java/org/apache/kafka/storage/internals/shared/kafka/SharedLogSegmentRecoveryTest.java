@@ -30,6 +30,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.File;
+import java.nio.ByteBuffer;
+import java.nio.ReadOnlyBufferException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -37,6 +39,7 @@ import java.util.Optional;
 import java.util.Properties;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -48,6 +51,66 @@ class SharedLogSegmentRecoveryTest {
 
     @TempDir
     Path tempDir;
+
+    @Test
+    void cachedSingleBatchFetchKeepsAnImmutableViewAfterClose() throws Exception {
+        Path walDir = tempDir.resolve("cached-fetch-wal");
+        File logDir = tempDir.resolve("cached-fetch-topic-0").toFile();
+        Files.createDirectories(logDir.toPath());
+        MemoryRecords input = records(0L, 7, 1000L, "first", "second");
+        ByteBuffer expected = input.buffer();
+        MemoryRecords fetched;
+        try (SharedStorageEngine engine = engine(walDir)) {
+            SharedLogSegment segment = SharedLogSegment.open(
+                logDir, 0L, new LogConfig(new Properties()), new MockTime(), engine, PARTITION, false, "");
+            segment.append(1L, input);
+            fetched = (MemoryRecords) segment.read(0L, Integer.MAX_VALUE, Optional.of((long) segment.size()), false).records;
+            ByteBuffer bytes = fetched.buffer();
+            assertTrue(bytes.isReadOnly());
+            assertEquals(expected, bytes);
+            assertThrows(ReadOnlyBufferException.class, () -> bytes.put(0, (byte) 0));
+            segment.close();
+        }
+        assertEquals(expected, fetched.buffer(), "an in-flight Fetch retains its batch after cache shutdown");
+        assertEquals(2L, fetched.batches().iterator().next().lastOffset() + 1);
+        try (SharedStorageEngine recovered = engine(walDir)) {
+            var cold = recovered.readBatches(PARTITION, 0L, Integer.MAX_VALUE, false);
+            var warm = recovered.readBatches(PARTITION, 0L, Integer.MAX_VALUE, false);
+            assertFalse(cold.reusableSingleBatch(), "a decoded WAL block must not be retained by Fetch");
+            assertTrue(warm.reusableSingleBatch(), "the separately owned cache entry can be reused");
+            assertEquals(expected, cold.batches().get(0));
+            assertEquals(expected, warm.batches().get(0));
+            SharedLogSegment segment = SharedLogSegment.open(
+                logDir, 0L, new LogConfig(new Properties()), new MockTime(), recovered, PARTITION, true, "");
+            MemoryRecords recoveredFetch = (MemoryRecords) segment.read(
+                0L, Integer.MAX_VALUE, Optional.of((long) segment.size()), false).records;
+            assertTrue(recoveredFetch.buffer().isReadOnly());
+            assertEquals(expected, recoveredFetch.buffer());
+            segment.close();
+        }
+    }
+
+    @Test
+    void multipleBatchesStillProduceAContiguousFetchBuffer() throws Exception {
+        Path walDir = tempDir.resolve("multi-fetch-wal");
+        File logDir = tempDir.resolve("multi-fetch-topic-0").toFile();
+        Files.createDirectories(logDir.toPath());
+        MemoryRecords first = records(0L, 7, 1000L, "a", "b");
+        MemoryRecords second = records(2L, 7, 2000L, "c", "d");
+        try (SharedStorageEngine engine = engine(walDir)) {
+            SharedLogSegment segment = SharedLogSegment.open(
+                logDir, 0L, new LogConfig(new Properties()), new MockTime(), engine, PARTITION, false, "");
+            segment.append(1L, first);
+            segment.append(3L, second);
+            MemoryRecords fetched = (MemoryRecords) segment.read(
+                0L, Integer.MAX_VALUE, Optional.of((long) segment.size()), false).records;
+            ByteBuffer expected = ByteBuffer.allocate(first.sizeInBytes() + second.sizeInBytes());
+            expected.put(first.buffer()).put(second.buffer()).flip();
+            assertEquals(expected, fetched.buffer());
+            assertFalse(fetched.buffer().isReadOnly());
+            segment.close();
+        }
+    }
 
     @Test
     void shouldRecoverLogicalSegmentsFromBrokerWal() throws Exception {

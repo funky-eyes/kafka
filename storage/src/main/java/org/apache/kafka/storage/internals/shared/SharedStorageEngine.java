@@ -421,9 +421,11 @@ public final class SharedStorageEngine implements AutoCloseable {
             startOffset, maxBytes, minOneBatch);
         if (selected.batches().isEmpty())
             return new BatchReadResult(selected.firstOffset(), List.of(), 0, selected.firstBatchIncomplete());
-        List<ByteBuffer> payloads = readSelectedLocalBatches(partition, selected.batches());
+        LocalBatchRead local = readSelectedLocalBatches(partition, selected.batches());
+        List<ByteBuffer> payloads = local.payloads();
         resolveRemoteBatches(partition, selected.batches(), payloads);
-        return new BatchReadResult(selected.firstOffset(), List.copyOf(payloads), selected.bytes(), false);
+        return new BatchReadResult(selected.firstOffset(), List.copyOf(payloads), selected.bytes(), false,
+            local.reusableSingleBatch());
     }
 
     private record StoredReadSelection(long firstOffset, List<StoredBatchMetadata> batches, int bytes,
@@ -449,11 +451,14 @@ public final class SharedStorageEngine implements AutoCloseable {
         return new StoredReadSelection(firstBatchOffset, selected, selectedBytes, false);
     }
 
-    private List<ByteBuffer> readSelectedLocalBatches(SharedPartitionId partition, List<StoredBatchMetadata> selected)
+    private record LocalBatchRead(List<ByteBuffer> payloads, boolean reusableSingleBatch) { }
+
+    private LocalBatchRead readSelectedLocalBatches(SharedPartitionId partition, List<StoredBatchMetadata> selected)
         throws IOException {
         List<ByteBuffer> payloads = new ArrayList<>(java.util.Collections.nCopies(selected.size(), null));
         List<WalLocation> locations = new ArrayList<>();
         List<Integer> localIndexes = new ArrayList<>();
+        boolean reusableSingleBatch = false;
         synchronized (walMaintenanceLock) {
             for (int i = 0; i < selected.size(); i++) {
                 Optional<WalLocation> location = walIndex.find(walKey(partition), selected.get(i).firstOffset());
@@ -469,9 +474,16 @@ public final class SharedStorageEngine implements AutoCloseable {
                     requireCurrentLocalLocation(partition, locations.get(i));
                     payloads.set(localIndexes.get(i), records.get(i).payload().asReadOnlyBuffer());
                 }
+                if (selected.size() == 1 && locations.size() == 1) {
+                    synchronized (localCacheLock) {
+                        // Only cache entries have independently owned, exact-sized storage.
+                        // A freshly decoded WAL record may retain a much larger block.
+                        reusableSingleBatch = localCache.get(new LocalCacheKey(partition, locations.get(0))) == records.get(0);
+                    }
+                }
             }
         }
-        return payloads;
+        return new LocalBatchRead(payloads, reusableSingleBatch);
     }
 
     private void resolveRemoteBatches(SharedPartitionId partition, List<StoredBatchMetadata> selected,
@@ -1224,10 +1236,20 @@ public final class SharedStorageEngine implements AutoCloseable {
         long firstBatchOffset,
         List<ByteBuffer> batches,
         int sizeInBytes,
-        boolean firstBatchIncomplete
+        boolean firstBatchIncomplete,
+        boolean reusableSingleBatch
     ) {
+        public BatchReadResult(long firstBatchOffset, List<ByteBuffer> batches, int sizeInBytes,
+                               boolean firstBatchIncomplete) {
+            this(firstBatchOffset, batches, sizeInBytes, firstBatchIncomplete, false);
+        }
+
         public BatchReadResult {
             batches = batches.stream().map(ByteBuffer::asReadOnlyBuffer).toList();
+            if (reusableSingleBatch && (batches.size() != 1 || firstBatchIncomplete ||
+                batches.get(0).remaining() != sizeInBytes)) {
+                throw new IllegalArgumentException("Invalid reusable batch result");
+            }
         }
     }
 

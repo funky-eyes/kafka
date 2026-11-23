@@ -452,6 +452,12 @@ public final class SharedLogSegment extends LogSegment {
         if (readResult.batches().isEmpty()) {
             return new FetchDataInfo(offsetMetadata, MemoryRecords.EMPTY, readResult.firstBatchIncomplete(), Optional.empty());
         }
+        if (readResult.reusableSingleBatch()) {
+            // The cache owns an exact-sized immutable payload; keep that storage alive
+            // through the returned records without copying it into a second buffer.
+            ByteBuffer data = readResult.batches().get(0).slice().asReadOnlyBuffer();
+            return new FetchDataInfo(offsetMetadata, MemoryRecords.readableRecords(data));
+        }
         ByteBuffer data = ByteBuffer.allocate(readResult.sizeInBytes());
         for (ByteBuffer batch : readResult.batches()) {
             data.put(batch.duplicate());
