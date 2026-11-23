@@ -446,6 +446,9 @@ public final class SharedUnifiedLog extends UnifiedLog {
         remoteRecoveryFence.writeLock().lock();
         try {
             if (experimentalAsyncSettings != null) drainExperimentalAppend();
+            if (targetOffset >= 0 && targetOffset < super.logEndOffset()) {
+                rejectKnownRemoteTruncation(targetOffset);
+            }
             SourceLogStartCallbackFence tracker = sourceLogStartTracker;
             if (tracker != null) {
                 tracker.invalidateForRebase();
@@ -469,6 +472,7 @@ public final class SharedUnifiedLog extends UnifiedLog {
         remoteRecoveryFence.writeLock().lock();
         try {
             if (experimentalAsyncSettings != null) drainExperimentalAppend();
+            if (newOffset >= 0) rejectKnownRemoteTruncation(newOffset);
             SourceLogStartCallbackFence tracker = sourceLogStartTracker;
             if (tracker != null) {
                 tracker.invalidateForRebase();
@@ -477,6 +481,14 @@ public final class SharedUnifiedLog extends UnifiedLog {
             observeLogRebase();
         } finally {
             remoteRecoveryFence.writeLock().unlock();
+        }
+    }
+
+    private void rejectKnownRemoteTruncation(long offset) {
+        LogSegment active = activeSegment();
+        if (active instanceof SharedLogSegment shared && shared.hasRemoteBatchAtOrAfter(offset)) {
+            throw new KafkaStorageException("Cannot truncate " + topicPartition() + " to " + offset +
+                ": committed remote batches require an authoritative truncation fence");
         }
     }
 

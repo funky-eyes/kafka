@@ -505,6 +505,11 @@ public final class SharedLogSegment extends LogSegment {
         return oldSize - newSize;
     }
 
+    /** Local preflight only; this does not fence a later remote metadata COMMIT. */
+    boolean hasRemoteBatchAtOrAfter(long offset) {
+        return storage.remoteIndex().rangesFrom(partition, offset).hasNext();
+    }
+
     @Override
     public long readNextOffset() {
         return lastOffset < baseOffset() ? baseOffset() : lastOffset + 1;

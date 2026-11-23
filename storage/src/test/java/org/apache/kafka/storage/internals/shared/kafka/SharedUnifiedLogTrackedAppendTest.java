@@ -32,6 +32,9 @@ import org.apache.kafka.storage.internals.log.ProducerStateManagerConfig;
 import org.apache.kafka.storage.internals.log.UnifiedLogCreationContext;
 import org.apache.kafka.storage.internals.log.VerificationGuard;
 import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
+import org.apache.kafka.storage.internals.shared.metadata.OffsetRange;
+import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
+import org.apache.kafka.storage.internals.shared.metadata.SharedObjectRange;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 import org.apache.kafka.storage.internals.shared.wal.CoordinatedRingWalAdapter;
 import org.apache.kafka.storage.internals.shared.wal.ParallelWalTestInspector;
@@ -41,6 +44,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Optional;
 import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
@@ -57,6 +61,90 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class SharedUnifiedLogTrackedAppendTest {
     @TempDir
     Path tempDir;
+
+    @Test
+    void knownRemoteTailRejectsTruncationBeforeAnySegmentsAreDeleted() throws Exception {
+        var backend = new TrackedWalTestBackend(false, 0);
+        Uuid topicId = Uuid.randomUuid();
+        var partition = new SharedPartitionId(topicId.getMostSignificantBits(), topicId.getLeastSignificantBits(), 0);
+        MockTime time = new MockTime();
+        BrokerTopicStats stats = new BrokerTopicStats(false);
+        var wal = CoordinatedRingWalAdapter.create(tempDir.resolve("remote-truncation-wal"), backend,
+            65536L, 4096, 1_000_000L, 8, 8192L);
+        try (SharedStorageEngine engine = new SharedStorageEngine(wal)) {
+            Path dir = tempDir.resolve("remote-truncation-0");
+            var context = new UnifiedLogCreationContext(dir.toFile(), new LogConfig(new Properties()), 0L, 0L,
+                time.scheduler, stats, time, 3600000, new ProducerStateManagerConfig(3600000, false),
+                600000, new LogDirFailureChannel(10), true, Optional.of(topicId), new ConcurrentHashMap<>(),
+                false, LogOffsetsListener.NO_OP_OFFSETS_LISTENER);
+            SharedUnifiedLog log = (SharedUnifiedLog) new SharedUnifiedLogFactory(engine).create(context);
+            try {
+                MemoryRecords records = MemoryRecords.withRecords(0L, Compression.NONE, 3,
+                    new SimpleRecord(1L, new byte[24]));
+                log.appendAsLeader(records, 3, AppendOrigin.CLIENT, RequestLocal.noCaching(),
+                    VerificationGuard.SENTINEL, (short) 0);
+                log.roll();
+                log.appendAsLeader(records, 3, AppendOrigin.CLIENT, RequestLocal.noCaching(),
+                    VerificationGuard.SENTINEL, (short) 0);
+                assertEquals(2L, log.logEndOffset());
+                assertEquals(2, log.numberOfSegments());
+
+                engine.commitRemoteObject(new SharedObjectMetadata(1L, 1L, 0L, List.of(
+                    new SharedObjectRange(partition, new OffsetRange(1L, 2L), 3, 0L, 1, 0L))));
+                assertThrows(KafkaStorageException.class, () -> log.truncateTo(0L));
+                assertThrows(KafkaStorageException.class, () -> log.truncateTo(1L));
+                assertThrows(KafkaStorageException.class, () -> log.truncateFullyAndStartAt(0L, Optional.empty()));
+                assertEquals(2, log.numberOfSegments(), "rejection must happen before Kafka deletes later segments");
+                assertEquals(2L, log.logEndOffset());
+                assertTrue(engine.readLocal(partition, 0L).isPresent());
+                assertTrue(engine.readLocal(partition, 1L).isPresent());
+                assertFalse(log.truncateTo(2L), "a no-op truncation should remain a no-op");
+            } finally {
+                log.close();
+            }
+        } finally {
+            stats.close();
+        }
+    }
+
+    @Test
+    void localTailCanBeTruncatedAfterKnownRemotePrefix() throws Exception {
+        var backend = new TrackedWalTestBackend(false, 0);
+        Uuid topicId = Uuid.randomUuid();
+        var partition = new SharedPartitionId(topicId.getMostSignificantBits(), topicId.getLeastSignificantBits(), 0);
+        MockTime time = new MockTime();
+        BrokerTopicStats stats = new BrokerTopicStats(false);
+        var wal = CoordinatedRingWalAdapter.create(tempDir.resolve("remote-prefix-wal"), backend,
+            65536L, 4096, 1_000_000L, 8, 8192L);
+        try (SharedStorageEngine engine = new SharedStorageEngine(wal)) {
+            Path dir = tempDir.resolve("remote-prefix-0");
+            var context = new UnifiedLogCreationContext(dir.toFile(), new LogConfig(new Properties()), 0L, 0L,
+                time.scheduler, stats, time, 3600000, new ProducerStateManagerConfig(3600000, false),
+                600000, new LogDirFailureChannel(10), true, Optional.of(topicId), new ConcurrentHashMap<>(),
+                false, LogOffsetsListener.NO_OP_OFFSETS_LISTENER);
+            SharedUnifiedLog log = (SharedUnifiedLog) new SharedUnifiedLogFactory(engine).create(context);
+            try {
+                MemoryRecords records = MemoryRecords.withRecords(0L, Compression.NONE, 3,
+                    new SimpleRecord(1L, new byte[24]));
+                log.appendAsLeader(records, 3, AppendOrigin.CLIENT, RequestLocal.noCaching(),
+                    VerificationGuard.SENTINEL, (short) 0);
+                log.roll();
+                log.appendAsLeader(records, 3, AppendOrigin.CLIENT, RequestLocal.noCaching(),
+                    VerificationGuard.SENTINEL, (short) 0);
+                engine.commitRemoteObject(new SharedObjectMetadata(1L, 1L, 0L, List.of(
+                    new SharedObjectRange(partition, new OffsetRange(0L, 1L), 3, 0L, 1, 0L))));
+
+                assertTrue(log.truncateTo(1L));
+                assertEquals(1L, log.logEndOffset());
+                assertTrue(engine.readLocal(partition, 0L).isPresent());
+                assertTrue(engine.readLocal(partition, 1L).isEmpty());
+            } finally {
+                log.close();
+            }
+        } finally {
+            stats.close();
+        }
+    }
 
     @Test
     void asynchronousLeaderAppendReturnsBeforeForceButCompletesAfterDurability() throws Exception {
