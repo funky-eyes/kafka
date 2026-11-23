@@ -40,8 +40,9 @@ released after admission; ordered WAL completion schedules a request-handler
 callback that rechecks leadership and epoch before ACK. Eligible multi-partition
 requests submit each shared partition before waiting and send one combined
 response. An advisory preflight rejects mixed or otherwise ineligible requests
-before any submission; a partition that becomes ineligible after preflight uses
-the existing synchronous path once. Role changes drain the admitted prefix
+before any submission; an unavailable partition is handled individually so it
+does not force healthy partitions onto the synchronous path. A partition that
+becomes ineligible after preflight uses the existing synchronous path once. Role changes drain the admitted prefix
 before updating partition state. Other entry points retain the synchronous wait
 with the leader read lock held. Ineligible appends use the ordinary path after draining tracked writes.
 The implementation caps log-end visibility, fetches, offset snapshots
@@ -83,4 +84,6 @@ the request fails and the partition's log directory is fenced; automatic
 rollback and continued operation under WAL capacity pressure are not yet
 implemented.
 
-The multi-partition request path has targeted mocked ReplicaManager coverage for independent completion failures, leadership change at completion, single response and preflight fallback. A real SharedUnifiedLog test exercises two partitions sharing one WAL block with NIO and AIO, force held and confirmed visibility fenced. These checks do not yet establish end-to-end Broker network behavior, multi-node failover, or throughput for this path.
+The multi-partition request path has targeted mocked ReplicaManager coverage for independent completion failures, leadership change at completion, single response and preflight fallback. A Kafka request-handler test exercises callback scheduling and post-admission failure reporting. A real SharedUnifiedLog test exercises two partitions sharing one WAL block with NIO and AIO, force held and confirmed visibility fenced.
+
+The local single-Broker test in `tests/wal/multi_partition_broker/run.sh` sends one protocol-level Produce request containing two ready partitions. It verifies NIO and AIO with early acknowledgement both enabled and disabled: the enabled response precedes the held data force, whereas the disabled response waits; both high watermarks remain behind until force is released. The test compiles a temporary instrumented copy of the WAL writer with a force gate and captures artifact hashes; it does not ship that hook. Initial attempts without waiting for both partitions to become ready took the synchronous fallback and timed out at the gate. The preflight now defers unavailable-partition errors to the individual submission pass; the force-gate test waits for both leaders because its purpose is to verify two successful appends. These checks do not establish multi-node failover, power-loss durability, or throughput for this path.

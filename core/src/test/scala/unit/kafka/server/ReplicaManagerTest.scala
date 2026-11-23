@@ -21,6 +21,7 @@ import com.yammer.metrics.core.{Gauge, Meter, Timer}
 import kafka.cluster.PartitionTest.MockPartitionListener
 import kafka.cluster.Partition
 import kafka.log.LogManager
+import kafka.network.RequestChannel
 import org.apache.kafka.server.log.remote.quota.RLMQuotaManagerConfig.INACTIVE_SENSOR_EXPIRATION_TIME_SECONDS
 import org.apache.kafka.server.log.remote.quota.RLMQuotaMetrics
 import kafka.server.QuotaFactory.{QuotaManagers, UNBOUNDED_QUOTA}
@@ -41,7 +42,8 @@ import org.apache.kafka.common.metadata.{PartitionChangeRecord, PartitionRecord,
 import org.apache.kafka.common.metrics.Metrics
 import org.apache.kafka.common.metrics.Monitorable
 import org.apache.kafka.common.metrics.PluginMetrics
-import org.apache.kafka.common.network.ListenerName
+import org.apache.kafka.common.memory.MemoryPool
+import org.apache.kafka.common.network.{ClientInformation, ListenerName}
 import org.apache.kafka.common.protocol.{ApiKeys, Errors}
 import org.apache.kafka.common.record.internal._
 import org.apache.kafka.common.replica.ClientMetadata.DefaultClientMetadata
@@ -50,10 +52,11 @@ import org.apache.kafka.common.replica.{ClientMetadata, PartitionView, ReplicaSe
 import org.apache.kafka.common.requests.FetchRequest.PartitionData
 import org.apache.kafka.common.requests.ProduceResponse.PartitionResponse
 import org.apache.kafka.common.requests._
-import org.apache.kafka.common.security.auth.KafkaPrincipal
+import org.apache.kafka.common.security.auth.{KafkaPrincipal, SecurityProtocol}
 import org.apache.kafka.common.utils.{LogContext, Time, Utils}
 import org.apache.kafka.coordinator.transaction.{AddPartitionsToTxnConfig, TransactionLogConfig}
 import org.apache.kafka.image._
+import org.apache.kafka.network.metrics.RequestChannelMetrics
 import org.apache.kafka.metadata.KRaftMetadataCache
 import org.apache.kafka.metadata.LeaderConstants.NO_LEADER
 import org.apache.kafka.metadata.{LeaderRecoveryState, MetadataCache, PartitionRegistration}
@@ -95,6 +98,7 @@ import org.mockito.{ArgumentCaptor, ArgumentMatchers, Mockito}
 
 import java.io.{ByteArrayInputStream, File}
 import java.net.InetAddress
+import java.nio.ByteBuffer
 import java.nio.file.{Files, Paths}
 import java.util
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicLong, AtomicReference}
@@ -195,7 +199,7 @@ class ReplicaManagerTest {
   }
 
   @ParameterizedTest
-  @ValueSource(ints = Array(0, 1, 2))
+  @ValueSource(ints = Array(0, 1, 2, 3))
   def testMultipleSharedAppendsSubmitBeforeWaitingAndReturnIndependentResults(mode: Int): Unit = {
     val rm = spy(setupReplicaManagerWithMockedPurgatories(new MockTimer(time)))
     val extension = new StorageExtensionContext(
@@ -225,6 +229,12 @@ class ReplicaManagerTest {
         doReturn(LogAppendInfo.UNKNOWN_LOG_APPEND_INFO).when(partition).appendRecordsToLeader(
           any(), any(), anyInt(), any(), any(), anyShort())
       }
+      if (topic == secondTopic && mode == 3) {
+        doThrow(new org.apache.kafka.common.errors.NotLeaderOrFollowerException("not ready"))
+          .when(partition).localLogOrException
+        doThrow(new org.apache.kafka.common.errors.NotLeaderOrFollowerException("not ready"))
+          .when(partition).tryAppendRecordsToLeaderAsync(any(), any(), anyInt(), any(), any(), anyShort(), anyBoolean())
+      }
       doReturn(partition).when(rm).getPartitionOrException(topic)
       partition
     }
@@ -251,12 +261,14 @@ class ReplicaManagerTest {
         any(), any(), anyInt(), any(), any(), anyShort(), anyBoolean()))
       assertNull(responses.get(), "pending partitions must prevent a response")
       first.complete(LogAppendInfo.UNKNOWN_LOG_APPEND_INFO)
-      if (mode != 2) {
+      if (mode < 2) {
         assertNull(responses.get(), "one completed partition must not complete the request")
         if (mode == 1) second.complete(LogAppendInfo.UNKNOWN_LOG_APPEND_INFO)
         else second.completeExceptionally(new org.apache.kafka.common.errors.NotLeaderOrFollowerException("changed"))
-      } else {
+      } else if (mode == 2) {
         verify(partitions(1), times(1)).appendRecordsToLeader(any(), any(), anyInt(), any(), any(), anyShort())
+      } else {
+        verify(partitions(1), never()).appendRecordsToLeader(any(), any(), anyInt(), any(), any(), anyShort())
       }
       assertEquals(1, callbackCount.get())
       assertEquals(1, statsCount.get())
@@ -266,6 +278,87 @@ class ReplicaManagerTest {
     } finally {
       KafkaRequestHandler.setBypassThreadCheck(false)
       rm.shutdown(checkpointHW = false)
+    }
+  }
+
+  @Test
+  def testMultipleSharedAppendsScheduleOneResponseOnRealRequestHandler(): Unit = {
+    val rm = spy(setupReplicaManagerWithMockedPurgatories(new MockTimer(time)))
+    KafkaRequestHandler.setBypassThreadCheck(false)
+    rm.setStorageExtensionContext(new StorageExtensionContext(
+      util.Map.of(SharedStorageConfiguration.WAL_ASYNC_PARTITION_APPEND_CONFIG, "true",
+        SharedStorageConfiguration.WAL_EARLY_ACK_CONFIG, "true"),
+      util.List.of(new File(config.logDirs.get(0))), config.brokerId, time))
+    val topicId = Uuid.randomUuid()
+    val topics = Seq(new TopicIdPartition(topicId, 0, "shared-handler"),
+      new TopicIdPartition(topicId, 1, "shared-handler"))
+    val records = MemoryRecords.withRecords(Compression.NONE, new SimpleRecord("value".getBytes))
+    val admitted = topics.map(_ => new CompletableFuture[LogAppendInfo]())
+    val durable = topics.map(_ => new CompletableFuture[LogAppendInfo]())
+    val postAdmissionFailures = new AtomicInteger()
+    topics.indices.foreach { i =>
+      val partition = mock(classOf[Partition])
+      val shared = mock(classOf[SharedUnifiedLog])
+      when(partition.localLogOrException).thenReturn(shared)
+      when(shared.allowsExperimentalAsyncAppend(records)).thenReturn(true)
+      val pending = Partition.PendingLeaderAppend(admitted(i), info => info, Some(durable(i)),
+        _ => postAdmissionFailures.incrementAndGet())
+      doReturn(Some(pending)).when(partition).tryAppendRecordsToLeaderAsync(
+        any(), any(), anyInt(), any(), any(), anyShort(), anyBoolean())
+      doReturn(partition).when(rm).getPartitionOrException(topics(i))
+    }
+    val channelMetrics = mock(classOf[RequestChannelMetrics])
+    val channel = new RequestChannel(10, time, channelMetrics)
+    val apiHandler = mock(classOf[ApiRequestHandler])
+    val handler = new KafkaRequestHandler(0, 0, mock(classOf[Meter]), new AtomicInteger(1),
+      mock(classOf[Meter]), new AtomicInteger(1), channel, apiHandler, time, "broker")
+    val header = mock(classOf[RequestHeader])
+    when(header.apiKey()).thenReturn(ApiKeys.API_VERSIONS)
+    when(header.apiVersion()).thenReturn(0.toShort)
+    val context = new RequestContext(header, "0", mock(classOf[InetAddress]), new KafkaPrincipal("", ""),
+      new ListenerName(""), SecurityProtocol.PLAINTEXT, mock(classOf[ClientInformation]), false)
+    val request = new RequestChannel.Request(0, context, time.nanoseconds(), mock(classOf[MemoryPool]),
+      ByteBuffer.allocate(0), channelMetrics)
+    val submitted = new CountDownLatch(1)
+    val responded = new CountDownLatch(1)
+    val callbackCount = new AtomicInteger()
+    val callbackOnHandler = new AtomicBoolean()
+    val response = new AtomicReference[util.Map[TopicIdPartition, PartitionResponse]]()
+    when(apiHandler.handle(ArgumentMatchers.eq(request), any())).thenAnswer { invocation =>
+      val local = invocation.getArgument(1, classOf[RequestLocal])
+      rm.appendRecords(10000L, 1, false, AppendOrigin.CLIENT, topics.map(_ -> records).toMap, result => {
+        callbackOnHandler.set(KafkaRequestHandler.isRequestThread)
+        callbackCount.incrementAndGet()
+        response.set(result)
+        responded.countDown()
+      }, _ => (), local)
+      submitted.countDown()
+    }
+    val thread = new Thread(() => handler.run(), "multi-shared-request-handler-test")
+    try {
+      channel.sendRequest(request)
+      thread.start()
+      assertTrue(submitted.await(10, TimeUnit.SECONDS), "request handler must submit both partitions without waiting")
+      admitted.head.complete(LogAppendInfo.UNKNOWN_LOG_APPEND_INFO)
+      assertFalse(responded.await(100, TimeUnit.MILLISECONDS))
+      admitted(1).complete(LogAppendInfo.UNKNOWN_LOG_APPEND_INFO)
+      assertTrue(responded.await(10, TimeUnit.SECONDS))
+      assertTrue(callbackOnHandler.get(), "response callback must run on a Kafka request handler")
+      assertEquals(1, callbackCount.get())
+      topics.foreach(topic => assertEquals(Errors.NONE.code, response.get().get(topic).error.code))
+      durable.foreach(_.completeExceptionally(new java.io.IOException("injected post-admission failure")))
+      assertEquals(2, postAdmissionFailures.get())
+      assertEquals(1, callbackCount.get(), "later durability failure cannot send another response")
+    } finally {
+      handler.stop()
+      thread.join(10000)
+      if (thread.isAlive) {
+        channel.sendShutdownRequest()
+        thread.join(10000)
+      }
+      channel.shutdown()
+      rm.shutdown(checkpointHW = false)
+      assertFalse(thread.isAlive, "request handler must terminate")
     }
   }
 

@@ -741,7 +741,9 @@ class ReplicaManager(val config: KafkaConfig,
             case _ => false
           }
         } catch {
-          case scala.util.control.NonFatal(_) => false
+          // Resolve unavailable partitions in the submission pass so one
+          // transient error does not serialize all healthy partitions.
+          case scala.util.control.NonFatal(_) => true
         })
     }
     if (!allEligible) return false
