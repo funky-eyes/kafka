@@ -138,10 +138,14 @@ class ParallelBlockWalCorrectnessTest {
             }
             io.force();
             checkpoint.advanceTail(ALIGNMENT, 0);
-            var reopened = BlockRingCheckpoint.openByFileSize(io, ALIGNMENT, fileBytes);
+            var reopened = BlockRingCheckpoint.open(io, ALIGNMENT, CAPACITY, 7, 8);
             assertEquals(ALIGNMENT, reopened.checkpoint().current().scanCeiling());
             assertEquals(1, reopened.scan().blocks().size());
             assertEquals(0, reopened.scan().blocks().get(0).groups().get(0).records().get(0).record().firstOffset());
+            byte[] before = Files.readAllBytes(path);
+            assertThrows(IOException.class, () -> BlockRingCheckpoint.open(io, ALIGNMENT, CAPACITY));
+            assertThrows(IOException.class, () -> BlockRingCheckpoint.openByFileSize(io, ALIGNMENT, fileBytes));
+            assertArrayEquals(before, Files.readAllBytes(path), "broker format rejection must not mutate the WAL");
         }
     }
 
@@ -501,6 +505,26 @@ class ParallelBlockWalCorrectnessTest {
             assertThrows(IOException.class, () -> BlockRingCheckpoint.inspectWindow(io, ALIGNMENT, CAPACITY,
                 7, 8, ALIGNMENT, visitor));
         }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void brokerAdapterRejectsWindowedWalWithoutChangingItOrLeakingOwnership(boolean aio) throws Exception {
+        Path path = dir.resolve("window-adapter-rejection-" + aio);
+        long fileBytes = CAPACITY + BlockRingCheckpoint.Layout.WINDOWED.metadataBytes(ALIGNMENT);
+        try (WalIoBackend backend = backend(aio); WalIoBackend.Handle io = backend.create(path)) {
+            io.preallocate(fileBytes);
+            BlockRingCheckpoint.initialize(io, ALIGNMENT, CAPACITY, 7, 8);
+        }
+        byte[] before = Files.readAllBytes(path);
+        try (WalIoBackend backend = backend(aio)) {
+            for (int attempt = 0; attempt < 2; attempt++) {
+                IOException failure = assertThrows(IOException.class, () ->
+                    CoordinatedRingWalAdapter.reopenByFileSize(path, backend, fileBytes, 0, 8, 8L * ALIGNMENT));
+                assertTrue(failure.getMessage().contains("not enabled"));
+            }
+        }
+        assertArrayEquals(before, Files.readAllBytes(path));
     }
 
     private static BlockRingRecovery.WindowVisitor inspectionEvents(List<String> events) {

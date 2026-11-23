@@ -201,6 +201,7 @@ final class BlockRingCheckpoint {
     static Opened open(WalIoBackend.Handle io, int alignment, long capacity) throws IOException {
         Layout layout = layoutForSize(io.size(), alignment, capacity);
         validateLayout(alignment, capacity, layout);
+        if (layout == Layout.WINDOWED) throw new IOException("Windowed WAL recovery is not enabled for broker use");
         Identity identity = discoverIdentity(io, alignment, capacity, layout);
         if (identity == null) throw new IOException("No valid ring checkpoint identity");
         return open(io, alignment, capacity, identity.high(), identity.low(), layout);
@@ -223,6 +224,7 @@ final class BlockRingCheckpoint {
             }
         }
         if (detected == null) throw new IOException("No valid ring checkpoint format");
+        if (detected == Layout.WINDOWED) throw new IOException("Windowed WAL recovery is not enabled for broker use");
         return open(io, alignment, size - detected.metadataBytes(alignment), identity.high(), identity.low(), detected);
     }
 
