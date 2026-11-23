@@ -32,6 +32,7 @@ import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 import org.apache.kafka.storage.internals.shared.object.ObjectStore;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectReader;
 import org.apache.kafka.storage.internals.shared.wal.FileSharedWal;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.Mockito;
@@ -57,6 +58,34 @@ class SharedLogSegmentRemoteRecoveryTest {
 
     @TempDir
     Path tempDir;
+
+    @Test
+    @Disabled("Remote truncation needs an authoritative durable fence; reopening currently resurrects the batch")
+    void truncatedRemoteBatchMustNotReappearWhenSegmentReopens() throws Exception {
+        MemoryRecords records = records(0L, 9, 1000L, "remote-a", "remote-b");
+        KafkaRecordBatchAdapter.SerializedBatch batch = onlyBatch(records);
+        long objectId = 1003L;
+        var reference = remoteReference(objectId, batch, batch.leaderEpoch(), batch.bytes().remaining(), crc32c(batch.bytes()));
+        File logDir = tempDir.resolve("truncated-remote-topic-0").toFile();
+        Files.createDirectories(logDir.toPath());
+        try (SharedStorageEngine engine = engine(tempDir.resolve("truncated-remote-wal"))) {
+            engine.remoteIndex().restore(List.of(reference));
+            engine.installRemoteReader(new SharedObjectReader(new SingleObjectStore(objectId, batch.bytes()), engine.remoteIndex()));
+            SharedLogSegment segment = SharedLogSegment.open(logDir, 0L, new LogConfig(new Properties()),
+                new MockTime(), engine, PARTITION, true, "");
+            assertEquals(2L, segment.readNextOffset());
+            segment.truncateTo(0);
+            assertEquals(0L, segment.readNextOffset());
+            segment.close();
+            SharedLogSegment reopened = SharedLogSegment.open(logDir, 0L, new LogConfig(new Properties()),
+                new MockTime(), engine, PARTITION, true, "");
+            try {
+                assertEquals(0L, reopened.readNextOffset(), "a successfully truncated batch must not reappear");
+            } finally {
+                reopened.close();
+            }
+        }
+    }
 
     @Test
     void trackedRemoteBatchWaitsForKafkaStateWithoutRewritingWal() throws Exception {
