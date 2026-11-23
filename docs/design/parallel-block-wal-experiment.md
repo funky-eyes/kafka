@@ -35,12 +35,15 @@ The experimental `shared.storage.wal.async.partition.append=true` switch, off
 by default and accepted only with `parallel-block`, pipelines RF1 `acks=1`
 client appends without producer IDs or transaction/control batches. Native
 Kafka validation and offset assignment remain serialized by the log monitor.
-For a single-partition Produce request handled by a Kafka request thread, the
-leader lock is released after admission; ordered WAL completion schedules a
-request-handler callback that rechecks leadership and epoch before ACK. Role
-changes drain the admitted prefix before updating partition state. Multi-partition
-requests and other entry points retain the synchronous wait with the leader read
-lock held. Ineligible appends use the ordinary path after draining tracked writes.
+For a Produce request handled by a Kafka request thread, the leader lock is
+released after admission; ordered WAL completion schedules a request-handler
+callback that rechecks leadership and epoch before ACK. Eligible multi-partition
+requests submit each shared partition before waiting and send one combined
+response. An advisory preflight rejects mixed or otherwise ineligible requests
+before any submission; a partition that becomes ineligible after preflight uses
+the existing synchronous path once. Role changes drain the admitted prefix
+before updating partition state. Other entry points retain the synchronous wait
+with the leader read lock held. Ineligible appends use the ordinary path after draining tracked writes.
 The implementation caps log-end visibility, fetches, offset snapshots
 and high-watermark updates at the confirmed prefix, and drains before truncation,
 remote recovery, close and synchronous fallback. Segment rolls wait for prior
@@ -67,8 +70,8 @@ transactional, idempotent, follower or RF>1 appends.
 
 The proposed `shared.storage.wal.experimental.early.acks.one` option is off by
 default and requires the experimental partition pipeline and `parallel-block`.
-When enabled, eligible single-partition, non-transactional and non-idempotent
-client `acks=1` requests may return after physical WAL space is reserved and
+When enabled, eligible non-transactional and non-idempotent client `acks=1`
+requests, including fully eligible multi-partition requests, may return after physical WAL space is reserved and
 before any WAL copy is durable. RF2 replicates after the leader's confirmed WAL frontier
 advances; it does not make an early ACK safe against immediate permanent loss
 of the leader. Other requests retain the existing durable path. The feature
@@ -79,3 +82,5 @@ If physical reservation fails after Kafka has provisionally assigned offsets,
 the request fails and the partition's log directory is fenced; automatic
 rollback and continued operation under WAL capacity pressure are not yet
 implemented.
+
+The multi-partition request path has targeted mocked ReplicaManager coverage for independent completion failures, leadership change at completion, single response and preflight fallback. A real SharedUnifiedLog test exercises two partitions sharing one WAL block with NIO and AIO, force held and confirmed visibility fenced. These checks do not yet establish end-to-end Broker network behavior, multi-node failover, or throughput for this path.

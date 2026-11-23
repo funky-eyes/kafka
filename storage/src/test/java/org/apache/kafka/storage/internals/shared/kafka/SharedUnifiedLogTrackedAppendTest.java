@@ -107,6 +107,59 @@ class SharedUnifiedLogTrackedAppendTest {
     }
 
     @Test
+    void separatePartitionsCanShareABlockBeforeEitherIsDurable() throws Exception {
+        for (boolean aio : java.util.List.of(false, true)) {
+            var backend = new TrackedWalTestBackend(aio, 0);
+            Uuid topicId = Uuid.randomUuid();
+            MockTime time = new MockTime();
+            BrokerTopicStats stats = new BrokerTopicStats(false);
+            var wal = CoordinatedRingWalAdapter.create(tempDir.resolve("multi-wal-" + aio), backend,
+                65536L, 4096, TimeUnit.SECONDS.toNanos(5), 2, 8192L);
+            try (SharedStorageEngine engine = new SharedStorageEngine(wal)) {
+                SharedUnifiedLog[] logs = new SharedUnifiedLog[2];
+                for (int i = 0; i < logs.length; i++) {
+                    var partition = new SharedPartitionId(topicId.getMostSignificantBits(), topicId.getLeastSignificantBits(), i);
+                    Path dir = tempDir.resolve("multi-" + aio + "-" + i);
+                    var context = new UnifiedLogCreationContext(dir.toFile(), new LogConfig(new Properties()), 0L, 0L,
+                        time.scheduler, stats, time, 3600000, new ProducerStateManagerConfig(3600000, false),
+                        600000, new LogDirFailureChannel(10), true, Optional.of(topicId), new ConcurrentHashMap<>(),
+                        false, LogOffsetsListener.NO_OP_OFFSETS_LISTENER);
+                    logs[i] = (SharedUnifiedLog) new SharedUnifiedLogFactory(engine).create(context);
+                    logs[i].enableExperimentalAsyncAppend(partition, 2, 8192L);
+                }
+                try {
+                    backend.arm();
+                    var first = logs[0].submitAsLeader(MemoryRecords.withRecords(0L, Compression.NONE, 3,
+                            new SimpleRecord(1L, new byte[] {1})), 3, AppendOrigin.CLIENT, RequestLocal.noCaching(),
+                        VerificationGuard.SENTINEL, (short) 0);
+                    var second = logs[1].submitAsLeader(MemoryRecords.withRecords(0L, Compression.NONE, 3,
+                            new SimpleRecord(1L, new byte[] {2})), 3, AppendOrigin.CLIENT, RequestLocal.noCaching(),
+                        VerificationGuard.SENTINEL, (short) 0);
+                    first.admitted().get(10, TimeUnit.SECONDS);
+                    second.admitted().get(10, TimeUnit.SECONDS);
+                    assertTrue(backend.forceEntered.await(10, TimeUnit.SECONDS));
+                    assertFalse(first.confirmed().isDone());
+                    assertFalse(second.confirmed().isDone());
+                    assertEquals(0L, logs[0].logEndOffset());
+                    assertEquals(0L, logs[1].logEndOffset());
+                    backend.forceRelease.countDown();
+                    first.confirmed().get(10, TimeUnit.SECONDS);
+                    second.confirmed().get(10, TimeUnit.SECONDS);
+                    assertEquals(1L, logs[0].logEndOffset());
+                    assertEquals(1L, logs[1].logEndOffset());
+                    assertEquals(1L, ParallelWalTestInspector.blocks(wal));
+                } finally {
+                    backend.forceRelease.countDown();
+                    for (SharedUnifiedLog log : logs) if (log != null) log.close();
+                }
+            } finally {
+                backend.forceRelease.countDown();
+                stats.close();
+            }
+        }
+    }
+
+    @Test
     void admittedAppendReportsLaterWalFailureWithoutAdvancingVisibility() throws Exception {
         for (boolean aio : java.util.List.of(false, true)) {
             var backend = new TrackedWalTestBackend(aio, 1);

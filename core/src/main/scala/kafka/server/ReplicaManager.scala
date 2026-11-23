@@ -677,6 +677,11 @@ class ReplicaManager(val config: KafkaConfig,
       return
     }
 
+    if (KafkaRequestHandler.isRequestThread && tryAppendMultipleSharedPartitionsAsync(requiredAcks, internalTopicsAllowed, origin, entriesPerPartition,
+      responseCallback, recordValidationStatsCallback, requestLocal, verificationGuards, transactionVersion)) {
+      return
+    }
+
     if (tryAppendSingleSharedPartitionAsync(requiredAcks, internalTopicsAllowed, origin, entriesPerPartition,
       responseCallback, recordValidationStatsCallback, requestLocal, verificationGuards, transactionVersion)) {
       return
@@ -707,6 +712,114 @@ class ReplicaManager(val config: KafkaConfig,
       produceStatus,
       responseCallback
     )
+  }
+
+  /** Submit eligible shared partitions before waiting for their independent completion futures. */
+  private[server] def tryAppendMultipleSharedPartitionsAsync(
+    requiredAcks: Short,
+    internalTopicsAllowed: Boolean,
+    origin: AppendOrigin,
+    entries: Map[TopicIdPartition, MemoryRecords],
+    responseCallback: util.Map[TopicIdPartition, PartitionResponse] => Unit,
+    statsCallback: Map[TopicIdPartition, RecordValidationStats] => Unit,
+    requestLocal: RequestLocal,
+    guards: Map[TopicPartition, VerificationGuard],
+    transactionVersion: Short
+  ): Boolean = {
+    if (requiredAcks != 1 || origin != AppendOrigin.CLIENT || entries.size < 2 ||
+      !storageExtensionContext.exists(context =>
+        java.lang.Boolean.parseBoolean(String.valueOf(context.originals().get(
+          SharedStorageConfiguration.WAL_ASYNC_PARTITION_APPEND_CONFIG))))) return false
+
+    // Preflight is advisory: leadership or replica assignment can change before submission.
+    // An ineligible partition at submission time uses the existing synchronous path once.
+    val allEligible = entries.forall { case (topic, records) =>
+      guards.getOrElse(topic.topicPartition(), VerificationGuard.SENTINEL) == VerificationGuard.SENTINEL &&
+        (!Topic.isInternal(topic.topic) || internalTopicsAllowed) && (try {
+          getPartitionOrException(topic).localLogOrException match {
+            case shared: SharedUnifiedLog => shared.allowsExperimentalAsyncAppend(records)
+            case _ => false
+          }
+        } catch {
+          case scala.util.control.NonFatal(_) => false
+        })
+    }
+    if (!allEligible) return false
+
+    val earlyAck = storageExtensionContext.exists(context =>
+      java.lang.Boolean.parseBoolean(String.valueOf(context.originals().get(
+        SharedStorageConfiguration.WAL_EARLY_ACK_CONFIG))))
+    val submitted = entries.toSeq.map { case (topic, records) =>
+      val result: Either[LogAppendResult, Partition.PendingLeaderAppend] = try {
+        val partition = getPartitionOrException(topic)
+        if (!Topic.isInternal(topic.topic) && diskPressureGuard.enabled()) {
+          diskPressureGuard.check(Paths.get(partition.localLogOrException.parentDir()))
+          diskPressureGuard.check(sharedWalPath)
+        }
+        partition.tryAppendRecordsToLeaderAsync(records, origin, requiredAcks, requestLocal,
+          guards.getOrElse(topic.topicPartition(), VerificationGuard.SENTINEL), transactionVersion, earlyAck) match {
+          case Some(pending) =>
+            brokerTopicStats.topicStats(topic.topic).totalProduceRequestRate.mark()
+            brokerTopicStats.allTopicsStats.totalProduceRequestRate.mark()
+            pending.confirmation.foreach(_.whenComplete((info: LogAppendInfo, failure: Throwable) => {
+              if (failure != null) pending.failAfterAdmission(failure)
+              else {
+                val lane = (topic.topicPartition.hashCode & Int.MaxValue) % sharedWalConfirmations.size
+                sharedWalConfirmations(lane).submit(new SharedWalConfirmation(topic, pending, info))
+              }
+            }))
+            Right(pending)
+          case None =>
+            Left(appendToLocalLog(internalTopicsAllowed, origin, Map(topic -> records), requiredAcks,
+              requestLocal, guards, transactionVersion)(topic))
+        }
+      } catch {
+        case failure: Throwable =>
+          brokerTopicStats.topicStats(topic.topic).totalProduceRequestRate.mark()
+          brokerTopicStats.allTopicsStats.totalProduceRequestRate.mark()
+          Left(appendFailureResult(topic, failure))
+      }
+      (topic, records.sizeInBytes, result)
+    }
+    val waits = submitted.collect { case (_, _, Right(pending)) =>
+      pending.completion.handle[Unit]((_: LogAppendInfo, _: Throwable) => ())
+    }
+    val callback = KafkaRequestHandler.wrapAsyncCallback[Unit]({ (_, _) =>
+      val results = submitted.map { case (topic, bytes, result) =>
+        val completed = result match {
+          case Left(done) => done
+          case Right(pending) =>
+            try {
+              val info = pending.finish(pending.completion.join())
+              brokerTopicStats.topicStats(topic.topic).bytesInRate.mark(bytes)
+              brokerTopicStats.allTopicsStats.bytesInRate.mark(bytes)
+              brokerTopicStats.topicStats(topic.topic).messagesInRate.mark(info.numMessages)
+              brokerTopicStats.allTopicsStats.messagesInRate.mark(info.numMessages)
+              new LogAppendResult(LogAppendSummary.fromAppendInfo(info), Optional.empty(), false)
+            } catch {
+              case failure: Throwable =>
+                val cause = failure match {
+                  case wrapped: java.util.concurrent.CompletionException if wrapped.getCause != null => wrapped.getCause
+                  case other => other
+                }
+                val mapped = cause match {
+                  case runtime: RuntimeException => runtime
+                  case fatal: Error => fatal
+                  case other => new KafkaStorageException("Shared WAL append failed", other)
+                }
+                appendFailureResult(topic, mapped)
+            }
+        }
+        topic -> completed
+      }.toMap
+      addCompletePurgatoryAction(defaultActionQueue, results)
+      statsCallback(results.map { case (key, value) => key -> value.logAppendSummary().recordValidationStats() })
+      val responses = new util.HashMap[TopicIdPartition, PartitionResponse]()
+      buildProducePartitionStatus(results).foreach { case (key, status) => responses.put(key, status.responseStatus) }
+      responseCallback(responses)
+    }, requestLocal)
+    CompletableFuture.allOf(waits: _*).whenComplete((_: Void, _: Throwable) => callback(()))
+    true
   }
 
   /**

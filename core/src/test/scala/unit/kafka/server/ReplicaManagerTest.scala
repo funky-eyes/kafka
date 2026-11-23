@@ -79,6 +79,8 @@ import org.apache.kafka.server.util.timer.{MockTimer, SystemTimer}
 import org.apache.kafka.server.util.{MockScheduler, MockTime, Scheduler}
 import org.apache.kafka.storage.internals.checkpoint.LazyOffsetCheckpoints
 import org.apache.kafka.storage.internals.epoch.LeaderEpochFileCache
+import org.apache.kafka.storage.internals.shared.kafka.{SharedStorageConfiguration, SharedUnifiedLog}
+import org.apache.kafka.storage.internals.log.StorageExtensionContext
 import org.apache.kafka.storage.internals.log.{AppendOrigin, CleanerConfig, FetchDataInfo, LocalLog, LogAppendInfo, LogConfig, LogDirFailureChannel, LogLoader, LogOffsetMetadata, LogOffsetSnapshot, LogOffsetsListener, LogReadResult, LogSegments, ProducerStateManager, ProducerStateManagerConfig, RemoteLogReadResult, RemoteStorageFetchInfo, UnifiedLog, VerificationGuard}
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats
 import org.junit.jupiter.api.Assertions._
@@ -95,7 +97,7 @@ import java.io.{ByteArrayInputStream, File}
 import java.net.InetAddress
 import java.nio.file.{Files, Paths}
 import java.util
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong, AtomicReference}
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicLong, AtomicReference}
 import java.util.concurrent.{Callable, CompletableFuture, ConcurrentHashMap, CountDownLatch, Future, TimeUnit}
 import java.util.function.{BiConsumer, Consumer}
 import java.util.stream.IntStream
@@ -190,6 +192,81 @@ class ReplicaManagerTest {
     // validate that the shutdown is working correctly by ensuring no lingering threads.
     // assert at the very end otherwise the other tear down steps will not be performed
     assertNoNonDaemonThreadsWithWaiting(this.getClass.getName)
+  }
+
+  @ParameterizedTest
+  @ValueSource(ints = Array(0, 1, 2))
+  def testMultipleSharedAppendsSubmitBeforeWaitingAndReturnIndependentResults(mode: Int): Unit = {
+    val rm = spy(setupReplicaManagerWithMockedPurgatories(new MockTimer(time)))
+    val extension = new StorageExtensionContext(
+      util.Map.of(SharedStorageConfiguration.WAL_ASYNC_PARTITION_APPEND_CONFIG, "true",
+        SharedStorageConfiguration.WAL_EARLY_ACK_CONFIG, "true"),
+      util.List.of(new File(config.logDirs.get(0))), config.brokerId, time)
+    rm.setStorageExtensionContext(extension)
+    val topicId = Uuid.randomUuid()
+    val firstTopic = new TopicIdPartition(topicId, 0, "shared-multi")
+    val secondTopic = new TopicIdPartition(topicId, 1, "shared-multi")
+    val records = MemoryRecords.withRecords(Compression.NONE, new SimpleRecord("value".getBytes))
+    val first = new CompletableFuture[LogAppendInfo]()
+    val second = new CompletableFuture[LogAppendInfo]()
+    val partitions = Seq(firstTopic -> first, secondTopic -> second).map { case (topic, completion) =>
+      val partition = mock(classOf[Partition])
+      val shared = mock(classOf[SharedUnifiedLog])
+      when(partition.localLogOrException).thenReturn(shared)
+      when(shared.allowsExperimentalAsyncAppend(records)).thenReturn(true)
+      val pending = Partition.PendingLeaderAppend(completion, info => {
+        if (topic == secondTopic && mode == 1)
+          throw new org.apache.kafka.common.errors.NotLeaderOrFollowerException("changed")
+        info
+      }, None, _ => ())
+      doReturn(if (topic == secondTopic && mode == 2) None else Some(pending)).when(partition)
+        .tryAppendRecordsToLeaderAsync(any(), any(), anyInt(), any(), any(), anyShort(), anyBoolean())
+      if (topic == secondTopic && mode == 2) {
+        doReturn(LogAppendInfo.UNKNOWN_LOG_APPEND_INFO).when(partition).appendRecordsToLeader(
+          any(), any(), anyInt(), any(), any(), anyShort())
+      }
+      doReturn(partition).when(rm).getPartitionOrException(topic)
+      partition
+    }
+    val responses = new AtomicReference[util.Map[TopicIdPartition, PartitionResponse]]()
+    val callbackCount = new AtomicInteger()
+    val statsCount = new AtomicInteger()
+    try {
+      val firstShared = partitions.head.localLogOrException.asInstanceOf[SharedUnifiedLog]
+      when(firstShared.allowsExperimentalAsyncAppend(records)).thenReturn(false)
+      val skipped = rm.tryAppendMultipleSharedPartitionsAsync(1, false, AppendOrigin.CLIENT,
+        Map(firstTopic -> records, secondTopic -> records), _ => fail("unexpected response"),
+        _ => fail("unexpected stats"), RequestLocal.noCaching, Map.empty, 0.toShort)
+      assertFalse(skipped)
+      partitions.foreach(partition => verify(partition, never()).tryAppendRecordsToLeaderAsync(
+        any(), any(), anyInt(), any(), any(), anyShort(), anyBoolean()))
+      when(firstShared.allowsExperimentalAsyncAppend(records)).thenReturn(true)
+      val accepted = rm.tryAppendMultipleSharedPartitionsAsync(1, false, AppendOrigin.CLIENT,
+        Map(firstTopic -> records, secondTopic -> records), response => {
+          callbackCount.incrementAndGet()
+          responses.set(response)
+        }, _ => statsCount.incrementAndGet(), RequestLocal.noCaching, Map.empty, 0.toShort)
+      assertTrue(accepted)
+      partitions.foreach(partition => verify(partition).tryAppendRecordsToLeaderAsync(
+        any(), any(), anyInt(), any(), any(), anyShort(), anyBoolean()))
+      assertNull(responses.get(), "pending partitions must prevent a response")
+      first.complete(LogAppendInfo.UNKNOWN_LOG_APPEND_INFO)
+      if (mode != 2) {
+        assertNull(responses.get(), "one completed partition must not complete the request")
+        if (mode == 1) second.complete(LogAppendInfo.UNKNOWN_LOG_APPEND_INFO)
+        else second.completeExceptionally(new org.apache.kafka.common.errors.NotLeaderOrFollowerException("changed"))
+      } else {
+        verify(partitions(1), times(1)).appendRecordsToLeader(any(), any(), anyInt(), any(), any(), anyShort())
+      }
+      assertEquals(1, callbackCount.get())
+      assertEquals(1, statsCount.get())
+      assertEquals(Errors.NONE.code, responses.get().get(firstTopic).error.code)
+      assertEquals(if (mode == 2) Errors.NONE.code else Errors.NOT_LEADER_OR_FOLLOWER.code,
+        responses.get().get(secondTopic).error.code)
+    } finally {
+      KafkaRequestHandler.setBypassThreadCheck(false)
+      rm.shutdown(checkpointHW = false)
+    }
   }
 
   @Test
