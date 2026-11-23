@@ -31,25 +31,32 @@ final class BlockRingCheckpoint {
     private static final int CRC_OFFSET = 80;
     private static final int BANK_COPIES = 3;
     enum Layout {
-        LEGACY(1, 3),
-        BANKED(2, 2 * BANK_COPIES);
+        LEGACY(1, 3, 0),
+        BANKED(2, 2 * BANK_COPIES, 0),
+        // A separate metadata length lets open-by-file-size distinguish this
+        // format without changing the interpretation of existing WAL files.
+        WINDOWED(3, 2 * BANK_COPIES, 1);
 
         final int version;
         final int slots;
+        final int reservedSectors;
 
-        Layout(int version, int slots) {
+        Layout(int version, int slots, int reservedSectors) {
             this.version = version;
             this.slots = slots;
+            this.reservedSectors = reservedSectors;
         }
 
         long metadataBytes(int alignment) {
-            return (long) slots * alignment;
+            return (long) (slots + reservedSectors) * alignment;
         }
     }
 
-    record State(long generation, long head, long tail, long retiredLastGroup, long lastGroup) { }
+    record State(long generation, long head, long tail, long retiredLastGroup, long lastGroup,
+                 long scanCeiling) { }
     record Opened(BlockRingCheckpoint checkpoint, BlockRingRecovery.Scan scan) { }
     record Identity(long high, long low) { }
+    private record Selected(BlockRingCheckpoint checkpoint, State[] slots, State newest) { }
 
     private final WalIoBackend.Handle io;
     private final int alignment;
@@ -76,13 +83,13 @@ final class BlockRingCheckpoint {
         throws IOException {
         Layout layout = layoutForSize(io.size(), alignment, capacity);
         validateLayout(alignment, capacity, layout);
-        var initial = new State(1, 0, 0, -1, -1);
+        var initial = new State(1, 0, 0, -1, -1, 0);
         var checkpoint = new BlockRingCheckpoint(io, alignment, capacity, high, low, initial, layout);
         for (int slot = 0; slot < layout.slots; slot++) {
             checkpoint.writeSlot(initial, slot);
             if (layout == Layout.LEGACY) io.force();
         }
-        if (layout == Layout.BANKED) io.force();
+        if (layout != Layout.LEGACY) io.force();
         return checkpoint;
     }
 
@@ -93,6 +100,42 @@ final class BlockRingCheckpoint {
 
     private static Opened open(WalIoBackend.Handle io, int alignment, long capacity, long high, long low,
                                Layout layout) throws IOException {
+        Selected selected = select(io, alignment, capacity, high, low, layout);
+        BlockRingCheckpoint checkpoint = selected.checkpoint();
+        State newest = selected.newest();
+        // Until sparse-window recovery and Kafka reconciliation are wired,
+        // opening a potentially nonempty speculative region must fail closed.
+        if (layout == Layout.WINDOWED && newest.scanCeiling() != newest.tail())
+            throw new IOException("Unreconciled WAL recovery window");
+        var scan = BlockRingRecovery.scan(io, checkpoint.metadataBytes(), capacity, alignment,
+            newest.head(), newest.tail(), newest.retiredLastGroup(), newest.lastGroup(), high, low);
+        checkpoint.repair(selected.slots(), newest);
+        synchronized (checkpoint) {
+            checkpoint.current = newest;
+        }
+        return new Opened(checkpoint, scan);
+    }
+
+    /**
+     * Inspect only after validating the stored identity, checkpoints and strict
+     * prefix. The caller must hold exclusive WAL ownership. This method does
+     * not repair metadata, publish records or authorize physical reuse.
+     */
+    static void inspectWindow(WalIoBackend.Handle io, int alignment, long capacity, long high, long low,
+                              int maxBlock, BlockRingRecovery.WindowVisitor visitor) throws IOException {
+        Layout layout = layoutForSize(io.size(), alignment, capacity);
+        if (layout != Layout.WINDOWED) throw new IOException("WAL does not use a scan window");
+        Selected selected = select(io, alignment, capacity, high, low, layout);
+        State state = selected.newest();
+        long dataStart = selected.checkpoint().metadataBytes();
+        BlockRingRecovery.scan(io, dataStart, capacity, alignment, state.head(), state.tail(),
+            state.retiredLastGroup(), state.lastGroup(), high, low);
+        BlockRingRecovery.inspectWindow(io, dataStart, capacity, alignment, maxBlock,
+            state.head(), state.tail(), state.scanCeiling(), high, low, visitor);
+    }
+
+    private static Selected select(WalIoBackend.Handle io, int alignment, long capacity, long high, long low,
+                                   Layout layout) throws IOException {
         validateLayout(alignment, capacity, layout);
         var checkpoint = new BlockRingCheckpoint(io, alignment, capacity, high, low, null, layout);
         State[] slots = new State[layout.slots];
@@ -107,14 +150,17 @@ final class BlockRingCheckpoint {
         }
         int requiredValid = layout == Layout.LEGACY ? 2 : BANK_COPIES;
         if (valid < requiredValid) throw new IOException("Insufficient valid ring checkpoints");
+        if (layout == Layout.WINDOWED && (!hasValidCopy(slots, 0) || !hasValidCopy(slots, BANK_COPIES)))
+            throw new IOException("A WAL scan-window checkpoint bank is unreadable");
         verifyCopies(slots, newest);
-        var scan = BlockRingRecovery.scan(io, checkpoint.metadataBytes(), capacity, alignment,
-            newest.head(), newest.tail(), newest.retiredLastGroup(), newest.lastGroup(), high, low);
-        checkpoint.repair(slots, newest);
-        synchronized (checkpoint) {
-            checkpoint.current = newest;
+        return new Selected(checkpoint, slots, newest);
+    }
+
+    private static boolean hasValidCopy(State[] slots, int start) {
+        for (int slot = start; slot < start + BANK_COPIES; slot++) {
+            if (slots[slot] != null) return true;
         }
-        return new Opened(checkpoint, scan);
+        return false;
     }
 
     private void repair(State[] slots, State newest) throws IOException {
@@ -210,7 +256,8 @@ final class BlockRingCheckpoint {
             if (old == null) continue;
             if (newest.generation() - old.generation() > 2 || old.head() > newest.head() ||
                 old.tail() > newest.tail() || old.retiredLastGroup() > newest.retiredLastGroup() ||
-                old.lastGroup() > newest.lastGroup()) throw new IOException("Inconsistent ring checkpoint copies");
+                old.lastGroup() > newest.lastGroup() || old.scanCeiling() > newest.scanCeiling())
+                throw new IOException("Inconsistent ring checkpoint copies");
             if (old.generation() == newest.generation() && !old.equals(newest))
                 throw new IOException("Inconsistent ring checkpoint copies");
         }
@@ -230,7 +277,17 @@ final class BlockRingCheckpoint {
         checkOpen();
         if (tail <= current.tail() || lastGroup <= current.lastGroup())
             throw new IOException("Tail checkpoint did not advance");
-        return commit(new State(nextGeneration(), current.head(), tail, current.retiredLastGroup(), lastGroup));
+        long ceiling = layout == Layout.WINDOWED ? current.scanCeiling() : tail;
+        return commit(new State(nextGeneration(), current.head(), tail, current.retiredLastGroup(), lastGroup, ceiling));
+    }
+
+    /** Persist the exclusive scan bound before permitting writes in its extension. */
+    synchronized State extendScanCeiling(long ceiling) throws IOException {
+        checkOpen();
+        if (layout != Layout.WINDOWED || ceiling <= current.scanCeiling())
+            throw new IOException("Invalid WAL scan window extension");
+        return commit(new State(nextGeneration(), current.head(), current.tail(), current.retiredLastGroup(),
+            current.lastGroup(), ceiling));
     }
 
     /** Caller confirms reader drainage and durable coverage through the new head. */
@@ -238,17 +295,18 @@ final class BlockRingCheckpoint {
         checkOpen();
         if (head <= current.head() || retiredLastGroup <= current.retiredLastGroup())
             throw new IOException("Head checkpoint did not advance");
-        return commit(new State(nextGeneration(), head, current.tail(), retiredLastGroup, current.lastGroup()));
+        return commit(new State(nextGeneration(), head, current.tail(), retiredLastGroup, current.lastGroup(),
+            current.scanCeiling()));
     }
 
     /** Moves an entirely empty logical window to the next physical origin. */
     synchronized State rebaseEmpty(long newOffset) throws IOException {
         checkOpen();
-        if (current.head() != current.tail() || current.tail() % capacity == 0 ||
+        if (current.head() != current.tail() || current.scanCeiling() != current.tail() || current.tail() % capacity == 0 ||
             newOffset != Math.addExact(current.tail(), capacity - current.tail() % capacity))
             throw new IOException("Invalid empty ring rebase");
         return commit(new State(nextGeneration(), newOffset, newOffset,
-            current.retiredLastGroup(), current.lastGroup()));
+            current.retiredLastGroup(), current.lastGroup(), newOffset));
     }
 
     private State commit(State candidate) throws IOException {
@@ -292,6 +350,9 @@ final class BlockRingCheckpoint {
         if (state.generation() <= 0 || state.head() < 0 || state.tail() < state.head()) return false;
         if (state.tail() - state.head() > capacity || state.head() % alignment != 0 || state.tail() % alignment != 0)
             return false;
+        if (state.scanCeiling() < state.tail() || state.scanCeiling() - state.head() > capacity ||
+            state.scanCeiling() % alignment != 0 || (layout != Layout.WINDOWED && state.scanCeiling() != state.tail()))
+            return false;
         if (state.retiredLastGroup() < -1 || state.lastGroup() < state.retiredLastGroup()) return false;
         return state.head() != state.tail() || state.retiredLastGroup() == state.lastGroup();
     }
@@ -301,6 +362,7 @@ final class BlockRingCheckpoint {
         data.putInt(MAGIC).putInt(layout.version).putInt(alignment).putInt(0).putLong(capacity)
             .putLong(state.generation()).putLong(state.head()).putLong(state.tail())
             .putLong(state.retiredLastGroup()).putLong(state.lastGroup()).putLong(high).putLong(low).putInt(0);
+        if (layout == Layout.WINDOWED) data.putLong(state.scanCeiling());
         data.putInt(CRC_OFFSET, checksum(data));
         data.position(0);
         long offset = (long) slot * alignment;
@@ -330,8 +392,10 @@ final class BlockRingCheckpoint {
             data.getInt(12) != 0 || data.getLong(16) != capacity) return null;
         if (data.getLong(64) != high || data.getLong(72) != low || data.getInt(CRC_OFFSET) != checksum(data))
             return null;
-        var state = new State(data.getLong(24), data.getLong(32), data.getLong(40), data.getLong(48), data.getLong(56));
-        if (layout == Layout.BANKED && state.generation() > 1 &&
+        long tail = data.getLong(40);
+        long ceiling = layout == Layout.WINDOWED ? data.getLong(CRC_OFFSET + Integer.BYTES) : tail;
+        var state = new State(data.getLong(24), data.getLong(32), tail, data.getLong(48), data.getLong(56), ceiling);
+        if (layout != Layout.LEGACY && state.generation() > 1 &&
             slot / BANK_COPIES != bankStart(state) / BANK_COPIES) return null;
         return valid(state) ? state : null;
     }

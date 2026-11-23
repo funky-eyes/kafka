@@ -20,6 +20,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.zip.CRC32C;
 
 /** Experimental ring framing/recovery; callers supply an already forced checkpoint. */
@@ -31,6 +32,16 @@ final class BlockRingRecovery {
     record RecoveredBlock(long reservedStart, long blockStart, long end,
                           List<AlignedWalBlockCodec.DecodedGroup> groups) { }
     record Scan(List<RecoveredBlock> blocks, long lastGroup) { }
+
+    /**
+     * Inspection results are not a durability, continuity or Kafka visibility certificate.
+     * A later read can fail after callbacks have already run, so visitors must
+     * stage results and discard them if inspection does not complete.
+     */
+    interface WindowVisitor {
+        void candidate(long start, AlignedWalBlockCodec.DecodedBlock block) throws IOException;
+        void unclassified(long start, long end) throws IOException;
+    }
 
     private BlockRingRecovery() { }
 
@@ -65,6 +76,73 @@ final class BlockRingRecovery {
         }
         if (cursor != tail || previous != lastGroup) throw new IOException("Incomplete committed ring prefix");
         return new Scan(List.copyOf(blocks), previous);
+    }
+
+    /**
+     * Inspect the speculative part of a bounded window without publishing any
+     * record. Unclassified sectors include unwritten, stale and damaged bytes;
+     * callers must not interpret them as safe holes. The checkpointed prefix
+     * must be validated separately with {@link #scan}.
+     */
+    static void inspectWindow(WalIoBackend.Handle io, long dataStart, long capacity, int alignment,
+                              int maxBlock, long head, long tail, long ceiling, long high, long low,
+                              WindowVisitor visitor) throws IOException {
+        validateLayout(alignment, capacity);
+        Objects.requireNonNull(visitor, "visitor");
+        validateInspectionBounds(dataStart, capacity, alignment, maxBlock, head, tail, ceiling);
+
+        long cursor = tail;
+        long unclassifiedStart = -1;
+        while (cursor < ceiling) {
+            long physical = cursor % capacity;
+            ByteBuffer header = readFully(io, dataStart + physical, alignment);
+            AlignedWalBlockCodec.DecodedBlock block = inspectCandidate(io, header, dataStart, capacity, alignment,
+                maxBlock, cursor, ceiling, high, low);
+            if (block == null) {
+                if (unclassifiedStart < 0) unclassifiedStart = cursor;
+                cursor = Math.addExact(cursor, alignment);
+            } else {
+                if (unclassifiedStart >= 0) {
+                    visitor.unclassified(unclassifiedStart, cursor);
+                    unclassifiedStart = -1;
+                }
+                visitor.candidate(cursor, block);
+                cursor = Math.addExact(cursor, block.length());
+            }
+        }
+        if (unclassifiedStart >= 0) visitor.unclassified(unclassifiedStart, ceiling);
+    }
+
+    private static void validateInspectionBounds(long dataStart, long capacity, int alignment, int maxBlock,
+                                                 long head, long tail, long ceiling) throws IOException {
+        if (dataStart < 0 || dataStart > Long.MAX_VALUE - capacity || head < 0 || tail < head || ceiling < tail)
+            throw new IOException("Invalid WAL inspection window");
+        if (ceiling - head > capacity || head % alignment != 0 || tail % alignment != 0 || ceiling % alignment != 0)
+            throw new IOException("Invalid WAL inspection window");
+        if (maxBlock < alignment || maxBlock % alignment != 0 || maxBlock > AlignedWalBlockCodec.MAX_BLOCK_BYTES ||
+            maxBlock > capacity)
+            throw new IOException("Invalid WAL inspection block limit");
+    }
+
+    private static AlignedWalBlockCodec.DecodedBlock inspectCandidate(WalIoBackend.Handle io, ByteBuffer header,
+        long dataStart, long capacity, int alignment, int maxBlock, long cursor, long ceiling, long high, long low)
+        throws IOException {
+        if (header.getInt(0) != AlignedWalBlockCodec.MAGIC || header.getInt(4) != AlignedWalBlockCodec.VERSION)
+            return null;
+        if (header.getLong(16) != cursor || header.getLong(24) != high || header.getLong(32) != low)
+            return null;
+        long physical = cursor % capacity;
+        int length = header.getInt(8);
+        if (length < alignment || length > maxBlock || length % alignment != 0 ||
+            length > ceiling - cursor || length > capacity - physical)
+            return null;
+        ByteBuffer bytes = readFully(io, dataStart + physical, length);
+        try {
+            return AlignedWalBlockCodec.decode(bytes, cursor, high, low, alignment);
+        } catch (IOException invalid) {
+            // Never turn damaged bytes into an empty or reclaimable range.
+            return null;
+        }
     }
 
     private static void validateBounds(long dataStart, long capacity, int alignment, long head, long tail,

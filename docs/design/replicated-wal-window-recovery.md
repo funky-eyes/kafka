@@ -8,6 +8,8 @@ AutoMQ 1.3.4 separates each Stream's completion sequence from its in-memory glob
 
 This document specifies the next design boundary. It does not change the current format or claim that independent block confirmation is implemented.
 
+The initial implementation adds an internal, distinct checkpoint layout with a forced scan ceiling and a bounded, read-only physical-window inspector. The inspector validates the stored checkpoint and strict prefix first, then reports checksum-valid candidates and unclassified ranges; neither is published to Kafka or treated as proof that a hole can be reclaimed. A visitor must discard staged results if a later read fails. Opening the new layout still fails closed whenever the ceiling exceeds the strictly checkpointed tail. To avoid silently falling back behind a possibly acknowledged window, the new layout requires at least one valid checkpoint copy from each bank; losing an entire bank fails closed. The Broker factory does not select this layout, and existing layouts retain their prior format and confirmation rules. Per-partition reconciliation, restart address fencing, and independent confirmation remain to be implemented.
+
 ## Required invariants
 
 * Kafka acceptance, physical block force, partition confirmation, replica confirmation, high watermark and reclaim head are separate positions. Early `acks=1` acceptance is explicitly allowed to precede every durable copy; it does not prove failover survival.

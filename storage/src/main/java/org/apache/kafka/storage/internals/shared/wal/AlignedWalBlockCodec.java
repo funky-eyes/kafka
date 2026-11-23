@@ -30,7 +30,7 @@ final class AlignedWalBlockCodec {
     static final int HEADER_BYTES = 64;
     static final int CRC_OFFSET = 48;
     static final int MAX_BLOCK_BYTES = 256 * 1024 * 1024;
-    private static final int VERSION = 1;
+    static final int VERSION = 1;
 
     private AlignedWalBlockCodec() { }
 

@@ -42,6 +42,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -105,6 +106,319 @@ class ParallelBlockWalCorrectnessTest {
         assertReplayByFileSize(path, aio, fileBytes, List.of(0L, 1L, 2L));
         corruptSlots(path, 1, 2);
         assertReplayByFileSize(path, aio, fileBytes, List.of(0L, 1L, 2L));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void windowCheckpointRequiresPersistedBoundAndFailsClosedUntilReconciled(boolean aio) throws Exception {
+        Path path = dir.resolve("window-checkpoint-" + aio);
+        long fileBytes = CAPACITY + BlockRingCheckpoint.Layout.WINDOWED.metadataBytes(ALIGNMENT);
+        try (WalIoBackend backend = backend(aio); WalIoBackend.Handle io = backend.create(path)) {
+            io.preallocate(fileBytes);
+            var checkpoint = BlockRingCheckpoint.initialize(io, ALIGNMENT, CAPACITY, 7, 8);
+            assertEquals(BlockRingCheckpoint.Layout.WINDOWED.metadataBytes(ALIGNMENT), checkpoint.metadataBytes());
+            assertEquals(0, checkpoint.current().scanCeiling());
+            assertThrows(IOException.class, () -> checkpoint.advanceTail(ALIGNMENT, 0));
+            assertThrows(IOException.class, () -> checkpoint.extendScanCeiling(1));
+            assertThrows(IOException.class, () -> checkpoint.extendScanCeiling(CAPACITY + ALIGNMENT));
+            assertEquals(0, checkpoint.current().scanCeiling());
+
+            checkpoint.extendScanCeiling(ALIGNMENT);
+            assertEquals(ALIGNMENT, checkpoint.current().scanCeiling());
+            assertThrows(IOException.class, () -> BlockRingCheckpoint.open(io, ALIGNMENT, CAPACITY, 7, 8));
+            assertThrows(IOException.class, () -> BlockRingCheckpoint.openByFileSize(io, ALIGNMENT, fileBytes));
+
+            ByteBuffer block = AlignedWalBlockCodec.encode(0, 7, 8, ALIGNMENT,
+                List.of(new AlignedWalBlockCodec.Group(0, List.of(record(0, 1)))));
+            long offset = checkpoint.metadataBytes();
+            while (block.hasRemaining()) {
+                int written = io.write(block, offset);
+                assertTrue(written > 0);
+                offset += written;
+            }
+            io.force();
+            checkpoint.advanceTail(ALIGNMENT, 0);
+            var reopened = BlockRingCheckpoint.openByFileSize(io, ALIGNMENT, fileBytes);
+            assertEquals(ALIGNMENT, reopened.checkpoint().current().scanCeiling());
+            assertEquals(1, reopened.scan().blocks().size());
+            assertEquals(0, reopened.scan().blocks().get(0).groups().get(0).records().get(0).record().firstOffset());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void failedWindowCheckpointForceFencesAndCannotReopenAnUnreconciledWindow(boolean aio) throws Exception {
+        Path path = dir.resolve("window-force-failure-" + aio);
+        try (var backend = new CountingBackend(aio); WalIoBackend.Handle io = backend.create(path)) {
+            io.preallocate(CAPACITY + BlockRingCheckpoint.Layout.WINDOWED.metadataBytes(ALIGNMENT));
+            var checkpoint = BlockRingCheckpoint.initialize(io, ALIGNMENT, CAPACITY, 7, 8);
+            backend.countForces.set(true);
+            backend.failAtForce = 1;
+            assertThrows(IOException.class, () -> checkpoint.extendScanCeiling(ALIGNMENT));
+            assertThrows(IOException.class, checkpoint::current);
+            assertThrows(IOException.class, () -> BlockRingCheckpoint.open(io, ALIGNMENT, CAPACITY, 7, 8));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void interruptedWindowCheckpointWritesNeverAdmitAnUnreconciledWindow(boolean aio) throws Exception {
+        for (int failAt : List.of(1, 2, 3)) {
+            Path path = dir.resolve("window-write-failure-" + aio + "-" + failAt);
+            try (var backend = new CountingBackend(aio); WalIoBackend.Handle io = backend.create(path)) {
+                io.preallocate(CAPACITY + BlockRingCheckpoint.Layout.WINDOWED.metadataBytes(ALIGNMENT));
+                var checkpoint = BlockRingCheckpoint.initialize(io, ALIGNMENT, CAPACITY, 7, 8);
+                backend.failAtWrite = failAt;
+                backend.countWrites.set(true);
+                assertThrows(IOException.class, () -> checkpoint.extendScanCeiling(ALIGNMENT));
+                assertThrows(IOException.class, checkpoint::current);
+                backend.countWrites.set(false);
+                if (failAt == 1) {
+                    assertEquals(0, BlockRingCheckpoint.open(io, ALIGNMENT, CAPACITY, 7, 8)
+                        .checkpoint().current().scanCeiling());
+                } else {
+                    assertThrows(IOException.class, () -> BlockRingCheckpoint.open(io, ALIGNMENT, CAPACITY, 7, 8));
+                }
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void sparseWindowInspectionKeepsDamagedAndUnwrittenRangesUnclassified(boolean aio) throws Exception {
+        Path path = dir.resolve("inspect-sparse-window-" + aio);
+        long dataStart = BlockRingCheckpoint.Layout.WINDOWED.metadataBytes(ALIGNMENT);
+        try (WalIoBackend backend = backend(aio); WalIoBackend.Handle io = backend.create(path)) {
+            io.preallocate(dataStart + CAPACITY);
+            writeInspectionBlock(io, dataStart, ALIGNMENT, 7, record(10, 1));
+            writeInspectionBlock(io, dataStart, 3L * ALIGNMENT, 9, record(20, 1));
+            assertEquals(1, io.write(ByteBuffer.wrap(new byte[] {42}), dataStart + 3L * ALIGNMENT + 70));
+            io.force();
+
+            List<String> events = new ArrayList<>();
+            BlockRingRecovery.inspectWindow(io, dataStart, CAPACITY, ALIGNMENT, ALIGNMENT, 0, 0, CAPACITY, 7, 8,
+                inspectionEvents(events));
+            assertEquals(List.of("unknown:0:4096", "block:4096:10", "unknown:8192:16384"), events);
+            assertThrows(IOException.class, () -> BlockRingRecovery.inspectWindow(io, dataStart, CAPACITY,
+                ALIGNMENT, ALIGNMENT, 0, 0, CAPACITY + ALIGNMENT, 7, 8, inspectionEvents(events)));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void windowInspectionRejectsStalePhysicalBlocksAcrossWrap(boolean aio) throws Exception {
+        Path path = dir.resolve("inspect-wrap-window-" + aio);
+        long dataStart = BlockRingCheckpoint.Layout.WINDOWED.metadataBytes(ALIGNMENT);
+        try (WalIoBackend backend = backend(aio); WalIoBackend.Handle io = backend.create(path)) {
+            io.preallocate(dataStart + CAPACITY);
+            writeInspectionBlock(io, dataStart, 3L * ALIGNMENT, 3, record(30, 1));
+            writeInspectionBlock(io, dataStart, 4L * ALIGNMENT, 4, record(40, 1));
+            List<String> events = new ArrayList<>();
+            BlockRingRecovery.inspectWindow(io, dataStart, CAPACITY, ALIGNMENT, ALIGNMENT, 2L * ALIGNMENT,
+                3L * ALIGNMENT, 5L * ALIGNMENT, 7, 8, inspectionEvents(events));
+            assertEquals(List.of("block:12288:30", "block:16384:40"), events);
+
+            // The same physical sector contains a valid block from an older
+            // logical cycle. It must not be treated as the new candidate.
+            writeInspectionBlock(io, dataStart, 0, 1, record(1, 1));
+            events.clear();
+            BlockRingRecovery.inspectWindow(io, dataStart, CAPACITY, ALIGNMENT, ALIGNMENT, 2L * ALIGNMENT,
+                3L * ALIGNMENT, 5L * ALIGNMENT, 7, 8, inspectionEvents(events));
+            assertEquals(List.of("block:12288:30", "unknown:16384:20480"), events);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void windowInspectionPropagatesIoFailureInsteadOfClassifyingItAsAHole(boolean aio) throws Exception {
+        Path path = dir.resolve("inspect-read-failure-" + aio);
+        long dataStart = BlockRingCheckpoint.Layout.WINDOWED.metadataBytes(ALIGNMENT);
+        try (var backend = new CountingBackend(aio); WalIoBackend.Handle io = backend.create(path)) {
+            io.preallocate(dataStart + CAPACITY);
+            writeInspectionBlock(io, dataStart, 0, 0, record(0, 1));
+            backend.failAtRead = 2;
+            backend.countReads.set(true);
+            List<String> events = new ArrayList<>();
+            assertThrows(IOException.class, () -> BlockRingRecovery.inspectWindow(io, dataStart, CAPACITY,
+                ALIGNMENT, ALIGNMENT, 0, 0, ALIGNMENT, 7, 8, inspectionEvents(events)));
+            assertTrue(events.isEmpty());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void windowInspectionRejectsOversizedHeaderBeforeReadingItsClaimedBlock(boolean aio) throws Exception {
+        Path path = dir.resolve("inspect-oversized-header-" + aio);
+        long dataStart = BlockRingCheckpoint.Layout.WINDOWED.metadataBytes(ALIGNMENT);
+        try (var backend = new CountingBackend(aio); WalIoBackend.Handle io = backend.create(path)) {
+            io.preallocate(dataStart + CAPACITY);
+            ByteBuffer header = ByteBuffer.allocate(ALIGNMENT);
+            header.putInt(0, AlignedWalBlockCodec.MAGIC);
+            header.putInt(4, AlignedWalBlockCodec.VERSION);
+            header.putInt(8, 2 * ALIGNMENT);
+            header.putLong(16, 0);
+            header.putLong(24, 7);
+            header.putLong(32, 8);
+            long position = dataStart;
+            while (header.hasRemaining()) {
+                int written = io.write(header, position);
+                assertTrue(written > 0);
+                position += written;
+            }
+            backend.countReads.set(true);
+            List<String> events = new ArrayList<>();
+            BlockRingRecovery.inspectWindow(io, dataStart, CAPACITY, ALIGNMENT, ALIGNMENT,
+                0, 0, ALIGNMENT, 7, 8, inspectionEvents(events));
+            assertEquals(List.of("unknown:0:4096"), events);
+            assertTrue(backend.reads.get() > 0);
+            assertTrue(backend.maxReadRequest.get() <= ALIGNMENT,
+                "an oversized length must not trigger a block read");
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void windowInspectionFindsALaterForcedBlockWhileAnEarlierWriteIsBlocked(boolean aio) throws Exception {
+        Path path = dir.resolve("inspect-out-of-order-force-" + aio);
+        long dataStart = BlockRingCheckpoint.Layout.WINDOWED.metadataBytes(ALIGNMENT);
+        try (WalIoBackend backend = backend(aio); WalIoBackend.Handle io = backend.create(path)) {
+            io.preallocate(dataStart + CAPACITY);
+            var checkpoint = BlockRingCheckpoint.initialize(io, ALIGNMENT, CAPACITY, 7, 8);
+            checkpoint.extendScanCeiling(2L * ALIGNMENT);
+            var gate = new WriteOrderGate(io, dataStart);
+            var allocator = new BlockRingAllocator(CAPACITY, ALIGNMENT);
+            try (var writer = new ParallelRingBlockWriter(gate, allocator, dataStart, CAPACITY,
+                ALIGNMENT, 7, 8, 2, 8)) {
+                var first = writer.submitOwned(ALIGNMENT, offset -> AlignedWalBlockCodec.encode(offset, 7, 8,
+                    ALIGNMENT, List.of(new AlignedWalBlockCodec.Group(0, List.of(record(0, 1))))));
+                assertTrue(gate.earlierEntered.await(10, TimeUnit.SECONDS));
+                var second = writer.submitOwned(ALIGNMENT, offset -> AlignedWalBlockCodec.encode(offset, 7, 8,
+                    ALIGNMENT, List.of(new AlignedWalBlockCodec.Group(1, List.of(record(1, 1))))));
+                try {
+                    second.forced().get(10, TimeUnit.SECONDS);
+                    assertFalse(first.forced().isDone());
+                    List<String> events = new ArrayList<>();
+                    BlockRingRecovery.inspectWindow(io, dataStart, CAPACITY, ALIGNMENT, ALIGNMENT, 0, 0,
+                        checkpoint.current().scanCeiling(), 7, 8, inspectionEvents(events));
+                    assertEquals(List.of("unknown:0:4096", "block:4096:1"), events);
+                    assertThrows(IOException.class, () -> BlockRingCheckpoint.open(io, ALIGNMENT, CAPACITY, 7, 8));
+                } finally {
+                    gate.release.countDown();
+                }
+                assertThrows(ExecutionException.class, () -> first.forced().get(10, TimeUnit.SECONDS));
+            } finally {
+                gate.release.countDown();
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void checkpointBoundInspectionValidatesPrefixAndNeverRepairsOrPublishes(boolean aio) throws Exception {
+        Path path = dir.resolve("checkpoint-bound-inspection-" + aio);
+        long dataStart = BlockRingCheckpoint.Layout.WINDOWED.metadataBytes(ALIGNMENT);
+        try (WalIoBackend backend = backend(aio); WalIoBackend.Handle io = backend.create(path)) {
+            io.preallocate(dataStart + CAPACITY);
+            var checkpoint = BlockRingCheckpoint.initialize(io, ALIGNMENT, CAPACITY, 7, 8);
+            checkpoint.extendScanCeiling(2L * ALIGNMENT);
+            writeInspectionBlock(io, dataStart, ALIGNMENT, 1, record(1, 1));
+            io.force();
+            byte[] before = Files.readAllBytes(path);
+            List<String> events = new ArrayList<>();
+            BlockRingCheckpoint.inspectWindow(io, ALIGNMENT, CAPACITY, 7, 8, ALIGNMENT, inspectionEvents(events));
+            assertEquals(List.of("unknown:0:4096", "block:4096:1"), events);
+            assertArrayEquals(before, Files.readAllBytes(path), "inspection must not repair or mutate the WAL");
+            assertThrows(IOException.class, () -> BlockRingCheckpoint.open(io, ALIGNMENT, CAPACITY, 7, 8));
+
+            writeInspectionBlock(io, dataStart, 0, 0, record(0, 1));
+            io.force();
+            checkpoint.advanceTail(ALIGNMENT, 0);
+            assertEquals(1, io.write(ByteBuffer.wrap(new byte[] {42}), dataStart + 70));
+            io.force();
+            events.clear();
+            assertThrows(IOException.class, () -> BlockRingCheckpoint.inspectWindow(io, ALIGNMENT, CAPACITY,
+                7, 8, ALIGNMENT, inspectionEvents(events)));
+            assertTrue(events.isEmpty(), "a corrupt committed prefix must fail before any candidate is returned");
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void windowCheckpointDoesNotFallBackPastAnUnreadableBank(boolean aio) throws Exception {
+        Path path = dir.resolve("window-unreadable-bank-" + aio);
+        long dataStart = BlockRingCheckpoint.Layout.WINDOWED.metadataBytes(ALIGNMENT);
+        try (WalIoBackend backend = backend(aio); WalIoBackend.Handle io = backend.create(path)) {
+            io.preallocate(dataStart + CAPACITY);
+            var checkpoint = BlockRingCheckpoint.initialize(io, ALIGNMENT, CAPACITY, 7, 8);
+            checkpoint.extendScanCeiling(2L * ALIGNMENT);
+            writeInspectionBlock(io, dataStart, ALIGNMENT, 1, record(1, 1));
+            io.force();
+
+            // Generation two is in slots 0..2. Two lost copies are tolerable
+            // while at least one copy of each bank identifies the window.
+            corruptSlots(path, 0, 1);
+            List<String> events = new ArrayList<>();
+            BlockRingCheckpoint.inspectWindow(io, ALIGNMENT, CAPACITY, 7, 8, ALIGNMENT, inspectionEvents(events));
+            assertEquals(List.of("unknown:0:4096", "block:4096:1"), events);
+
+            // If the entire newest bank is lost, accepting the older empty
+            // window could hide a previously confirmed later block.
+            corruptSlots(path, 2);
+            events.clear();
+            assertThrows(IOException.class, () -> BlockRingCheckpoint.inspectWindow(io, ALIGNMENT, CAPACITY,
+                7, 8, ALIGNMENT, inspectionEvents(events)));
+            assertThrows(IOException.class, () -> BlockRingCheckpoint.open(io, ALIGNMENT, CAPACITY, 7, 8));
+            assertTrue(events.isEmpty());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void reopenedWindowCanBeInspectedWithoutOpeningAnUnreconciledWal(boolean aio) throws Exception {
+        Path path = dir.resolve("window-inspect-after-reopen-" + aio);
+        long dataStart = BlockRingCheckpoint.Layout.WINDOWED.metadataBytes(ALIGNMENT);
+        try (WalIoBackend backend = backend(aio)) {
+            try (WalIoBackend.Handle io = backend.create(path)) {
+                io.preallocate(dataStart + CAPACITY);
+                var checkpoint = BlockRingCheckpoint.initialize(io, ALIGNMENT, CAPACITY, 7, 8);
+                checkpoint.extendScanCeiling(2L * ALIGNMENT);
+                writeInspectionBlock(io, dataStart, ALIGNMENT, 1, record(1, 1));
+                io.force();
+            }
+            try (WalIoBackend.Handle io = backend.reopen(path)) {
+                List<String> events = new ArrayList<>();
+                BlockRingCheckpoint.inspectWindow(io, ALIGNMENT, CAPACITY, 7, 8, ALIGNMENT, inspectionEvents(events));
+                assertEquals(List.of("unknown:0:4096", "block:4096:1"), events);
+                assertThrows(IOException.class, () -> BlockRingCheckpoint.open(io, ALIGNMENT, CAPACITY, 7, 8));
+            }
+        }
+    }
+
+    private static BlockRingRecovery.WindowVisitor inspectionEvents(List<String> events) {
+        return new BlockRingRecovery.WindowVisitor() {
+            @Override
+            public void candidate(long start, AlignedWalBlockCodec.DecodedBlock block) {
+                long first = block.groups().get(0).records().get(0).record().firstOffset();
+                events.add("block:" + start + ":" + first);
+            }
+
+            @Override
+            public void unclassified(long start, long end) {
+                events.add("unknown:" + start + ":" + end);
+            }
+        };
+    }
+
+    private static void writeInspectionBlock(WalIoBackend.Handle io, long dataStart, long logicalOffset,
+                                             long groupId, WalRecord record) throws IOException {
+        ByteBuffer bytes = AlignedWalBlockCodec.encode(logicalOffset, 7, 8, ALIGNMENT,
+            List.of(new AlignedWalBlockCodec.Group(groupId, List.of(record))));
+        long position = dataStart + logicalOffset % CAPACITY;
+        while (bytes.hasRemaining()) {
+            int written = io.write(bytes, position);
+            if (written <= 0) throw new IOException("Short inspection test write");
+            position += written;
+        }
     }
 
     @ParameterizedTest
@@ -599,6 +913,13 @@ class ParallelBlockWalCorrectnessTest {
         private final WalIoBackend delegate;
         private final AtomicBoolean countForces = new AtomicBoolean();
         private final AtomicInteger forces = new AtomicInteger();
+        private final AtomicBoolean countWrites = new AtomicBoolean();
+        private final AtomicInteger writes = new AtomicInteger();
+        private final AtomicBoolean countReads = new AtomicBoolean();
+        private final AtomicInteger reads = new AtomicInteger();
+        private final AtomicInteger maxReadRequest = new AtomicInteger();
+        private volatile int failAtWrite;
+        private volatile int failAtRead;
         private volatile int failAtForce;
         private boolean holdFirstForce;
         private final CountDownLatch firstForceEntered = new CountDownLatch(1);
@@ -650,6 +971,10 @@ class ParallelBlockWalCorrectnessTest {
 
                 @Override
                 public int read(ByteBuffer dst, long position) throws IOException {
+                    if (countReads.get()) {
+                        maxReadRequest.accumulateAndGet(dst.remaining(), Math::max);
+                        if (reads.incrementAndGet() == failAtRead) throw new IOException("injected WAL read failure");
+                    }
                     if (holdReader.get() && Thread.currentThread().getName().equals("held-wal-reader")) {
                         readerEntered.countDown();
                         try {
@@ -665,6 +990,8 @@ class ParallelBlockWalCorrectnessTest {
 
                 @Override
                 public int write(ByteBuffer src, long position) throws IOException {
+                    if (countWrites.get() && writes.incrementAndGet() == failAtWrite)
+                        throw new IOException("injected WAL write failure");
                     return handle.write(src, position);
                 }
 
@@ -715,12 +1042,18 @@ class ParallelBlockWalCorrectnessTest {
 
     private static final class WriteOrderGate implements WalIoBackend.Handle {
         private final WalIoBackend.Handle delegate;
+        private final long firstBlockPosition;
         private final CountDownLatch earlierEntered = new CountDownLatch(1);
         private final CountDownLatch laterForced = new CountDownLatch(1);
         private final CountDownLatch release = new CountDownLatch(1);
 
         private WriteOrderGate(WalIoBackend.Handle delegate) {
+            this(delegate, 3L * ALIGNMENT);
+        }
+
+        private WriteOrderGate(WalIoBackend.Handle delegate, long firstBlockPosition) {
             this.delegate = delegate;
+            this.firstBlockPosition = firstBlockPosition;
         }
 
         @Override
@@ -735,7 +1068,7 @@ class ParallelBlockWalCorrectnessTest {
 
         @Override
         public int write(ByteBuffer src, long position) throws IOException {
-            if (position == 3L * ALIGNMENT) {
+            if (position == firstBlockPosition) {
                 earlierEntered.countDown();
                 awaitGate(release);
                 throw new IOException("injected earlier block write failure");
