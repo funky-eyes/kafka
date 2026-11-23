@@ -469,9 +469,15 @@ class ReplicaManagerTest {
       // shutdown ReplicaManager so that metrics are removed
       rm.shutdown(checkpointHW = false)
 
-      // Use the second instance of metrics group that is constructed. The first instance is constructed by
-      // ReplicaManager constructor > BrokerTopicStats > BrokerTopicMetrics.
-      val mockMetricsGroup = mockMetricsGroupCtor.constructed.get(1)
+      // Other components such as BrokerTopicStats and DiskPressureGuard also
+      // construct metric groups. Identify ReplicaManager's group by its gauge,
+      // not by the order in which those components happen to be constructed.
+      val mockMetricsGroup = mockMetricsGroupCtor.constructed.asScala.find { group =>
+        Mockito.mockingDetails(group).getInvocations.asScala.exists { invocation =>
+          invocation.getMethod.getName == "newGauge" &&
+            invocation.getArgument[String](0) == "UnderReplicatedPartitions"
+        }
+      }.getOrElse(fail("ReplicaManager metrics group was not constructed"))
       ReplicaManager.GaugeMetricNames.foreach(metricName => verify(mockMetricsGroup).newGauge(ArgumentMatchers.eq(metricName), any()))
       ReplicaManager.MeterMetricNames.foreach(metricName => verify(mockMetricsGroup).newMeter(ArgumentMatchers.eq(metricName), anyString(), any(classOf[TimeUnit])))
       ReplicaManager.MetricNames.foreach(verify(mockMetricsGroup).removeMetric(_))

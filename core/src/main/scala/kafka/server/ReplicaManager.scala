@@ -218,6 +218,22 @@ class ReplicaManager(val config: KafkaConfig,
       shareFetchPurgatoryName, delayedShareFetchTimer, config.brokerId,
       config.shareGroupConfig.shareFetchPurgatoryPurgeIntervalRequests))
 
+  private final class SharedWalConfirmation(val topic: TopicIdPartition,
+                                            val append: Partition.PendingLeaderAppend,
+                                            val info: LogAppendInfo)
+
+  // A stalled partition must not serialize confirmation work for every other
+  // partition on the broker. The same partition always uses the same lane.
+  private val sharedWalConfirmations = Vector.fill(16) {
+    new SharedWalConfirmationBatcher[SharedWalConfirmation](
+      task => scheduler.scheduleOnce("shared-wal-confirmed", () => task.run()),
+      confirmations => publishSharedWalConfirmations(confirmations),
+      (confirmation, failure) => {
+        error(s"Unable to publish shared WAL confirmation for ${confirmation.topic}", failure)
+        confirmation.append.failAfterAdmission(failure)
+      })
+  }
+
   /* epoch of the controller that last changed the leader */
   protected val localBrokerId = config.brokerId
   protected val allPartitions = new ConcurrentHashMap[TopicPartition, HostedPartition[Partition]]
@@ -753,24 +769,8 @@ class ReplicaManager(val config: KafkaConfig,
       if (failure != null) {
         append.failAfterAdmission(failure)
       } else {
-        try {
-          scheduler.scheduleOnce("shared-wal-confirmed", () => {
-            try {
-              val confirmed = append.finish(info)
-              val result = new LogAppendResult(LogAppendSummary.fromAppendInfo(confirmed), Optional.empty(), false)
-              addCompletePurgatoryAction(defaultActionQueue, Map(topicIdPartition -> result))
-              tryCompleteActions()
-            } catch {
-              case _: NotLeaderOrFollowerException => // Old leader must not advance the new leader's HW.
-              case scala.util.control.NonFatal(exception) =>
-                error(s"Unable to publish shared WAL confirmation for $topicIdPartition", exception)
-            }
-          })
-        } catch {
-          case scala.util.control.NonFatal(exception) =>
-            error(s"Unable to schedule shared WAL confirmation for $topicIdPartition", exception)
-            append.failAfterAdmission(exception)
-        }
+        val lane = (topicIdPartition.topicPartition.hashCode & Int.MaxValue) % sharedWalConfirmations.size
+        sharedWalConfirmations(lane).submit(new SharedWalConfirmation(topicIdPartition, append, info))
       }
     }))
     val bytes = records.sizeInBytes
@@ -804,6 +804,29 @@ class ReplicaManager(val config: KafkaConfig,
     }, requestLocal)
     append.completion.whenComplete((info: LogAppendInfo, error: Throwable) => wrapped((info, error)))
     true
+  }
+
+  private def publishSharedWalConfirmations(confirmations: Vector[SharedWalConfirmation]): Unit = {
+    val completed = mutable.Map.empty[TopicIdPartition, LogAppendResult]
+    confirmations.foreach { confirmation =>
+      try {
+        val info = confirmation.append.finish(confirmation.info)
+        val result = new LogAppendResult(LogAppendSummary.fromAppendInfo(info), Optional.empty(), false)
+        // Preserve an earlier HW increase even if a later confirmation for the
+        // same partition finds the watermark already advanced.
+        if (!completed.get(confirmation.topic).exists(_.logAppendSummary.leaderHwChange == LeaderHwChange.INCREASED))
+          completed.put(confirmation.topic, result)
+      } catch {
+        case _: NotLeaderOrFollowerException => // A stale leader must not advance the new leader's HW.
+        case scala.util.control.NonFatal(exception) =>
+          error(s"Unable to publish shared WAL confirmation for ${confirmation.topic}", exception)
+          confirmation.append.failAfterAdmission(exception)
+      }
+    }
+    if (completed.nonEmpty) {
+      addCompletePurgatoryAction(defaultActionQueue, completed.toMap)
+      tryCompleteActions()
+    }
   }
 
   private def finishSingleAsyncAppend(topicIdPartition: TopicIdPartition,
