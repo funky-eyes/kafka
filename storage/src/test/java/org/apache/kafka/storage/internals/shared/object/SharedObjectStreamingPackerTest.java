@@ -114,6 +114,27 @@ class SharedObjectStreamingPackerTest {
         }
     }
 
+    @Test
+    void streamingUploadDoesNotPopulateCacheOnMiss() throws Exception {
+        try (SharedStorageEngine engine = new SharedStorageEngine(
+            new FileSharedWal(tempDir.resolve("streaming-cache-miss"), 1024 * 1024, 4096))) {
+            engine.appendData(P0, 3, 0, 9, ByteBuffer.wrap(new byte[]{1, 2, 3}))
+                .get(10, TimeUnit.SECONDS);
+            List<SharedStorageEngine.UploadCandidate> candidates = engine.uploadCandidates(P0, 0, 10);
+            assertEquals(0, engine.localCacheBytes());
+            SharedObjectPacker packer = new SharedObjectPacker(80, 128);
+
+            assertEquals(1, packer.pack(8_004L, candidates, engine).metadata().ranges().size());
+            assertEquals(1, engine.localCacheMissCount());
+            assertEquals(0, engine.localCacheBytes());
+
+            assertEquals(1, engine.readLocal(P0, 0).orElseThrow().payload().get());
+            assertTrue(engine.localCacheBytes() > 0);
+            assertEquals(1, packer.pack(8_005L, candidates, engine).metadata().ranges().size());
+            assertEquals(1, engine.localCacheHitCount());
+        }
+    }
+
     private static long crc32c(ByteBuffer data) {
         CRC32C crc = new CRC32C();
         crc.update(data.duplicate());
