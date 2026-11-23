@@ -311,10 +311,10 @@ public final class SharedObjectPacker {
         }
 
         private ByteBuffer serializeBlock(DataBlockPlan block) throws IOException {
-            List<WalLocation> locations = block.batches().stream()
-                .map(batch -> batch.candidate().location())
+            List<SharedStorageEngine.UploadCandidate> candidates = block.batches().stream()
+                .map(BatchPlan::candidate)
                 .toList();
-            List<WalRecord> records = plan.engine.readLocalLocations(locations);
+            List<WalRecord> records = plan.engine.readUploadCandidates(candidates);
             if (records.size() != block.batches().size()) {
                 throw new IOException("WAL DataBlock read returned an unexpected record count");
             }
