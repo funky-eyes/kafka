@@ -19,7 +19,6 @@ package org.apache.kafka.storage.internals.shared.object;
 import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 import org.apache.kafka.storage.internals.shared.wal.FileSharedWal;
-import org.apache.kafka.storage.internals.shared.wal.WalCorruptionException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -84,54 +83,6 @@ class SharedObjectStreamingPackerTest {
             assertEquals(8, StreamObjectFormat.readIndex(object, footer).size());
             assertEquals(8, packed.metadata().ranges().size());
             assertEquals(packed.metadata().objectChecksum(), crc32c(object));
-        }
-    }
-
-    @Test
-    void streamingUploadReusesConfirmedFetchCacheAndRejectsTruncatedPlan() throws Exception {
-        try (SharedStorageEngine engine = new SharedStorageEngine(
-            new FileSharedWal(tempDir.resolve("streaming-cache"), 1024 * 1024, 4096))) {
-            engine.appendData(P0, 3, 0, 9, ByteBuffer.wrap(new byte[]{1, 2, 3}))
-                .get(10, TimeUnit.SECONDS);
-            List<SharedStorageEngine.UploadCandidate> candidates = engine.uploadCandidates(P0, 0, 10);
-            assertEquals(1, engine.readLocal(P0, 0).orElseThrow().payload().get());
-            long hitsBeforeUpload = engine.localCacheHitCount();
-
-            SharedObjectPacker packer = new SharedObjectPacker(80, 128);
-            PackedObject packed = packer.pack(8_002L, candidates, engine);
-            assertEquals(1, packed.metadata().ranges().size());
-            assertEquals(hitsBeforeUpload + 1, engine.localCacheHitCount());
-
-            SharedObjectPacker.UploadPlan stale = packer.plan(8_003L, candidates, engine);
-            engine.truncate(P0, 4, 0).get(10, TimeUnit.SECONDS);
-            try (ObjectStore.PartSource source = stale.openPartSource()) {
-                assertThrows(WalCorruptionException.class, () -> {
-                    while (source.nextPart() != null) {
-                        // The first part may contain only the object header.
-                    }
-                });
-            }
-        }
-    }
-
-    @Test
-    void streamingUploadDoesNotPopulateCacheOnMiss() throws Exception {
-        try (SharedStorageEngine engine = new SharedStorageEngine(
-            new FileSharedWal(tempDir.resolve("streaming-cache-miss"), 1024 * 1024, 4096))) {
-            engine.appendData(P0, 3, 0, 9, ByteBuffer.wrap(new byte[]{1, 2, 3}))
-                .get(10, TimeUnit.SECONDS);
-            List<SharedStorageEngine.UploadCandidate> candidates = engine.uploadCandidates(P0, 0, 10);
-            assertEquals(0, engine.localCacheBytes());
-            SharedObjectPacker packer = new SharedObjectPacker(80, 128);
-
-            assertEquals(1, packer.pack(8_004L, candidates, engine).metadata().ranges().size());
-            assertEquals(1, engine.localCacheMissCount());
-            assertEquals(0, engine.localCacheBytes());
-
-            assertEquals(1, engine.readLocal(P0, 0).orElseThrow().payload().get());
-            assertTrue(engine.localCacheBytes() > 0);
-            assertEquals(1, packer.pack(8_005L, candidates, engine).metadata().ranges().size());
-            assertEquals(1, engine.localCacheHitCount());
         }
     }
 

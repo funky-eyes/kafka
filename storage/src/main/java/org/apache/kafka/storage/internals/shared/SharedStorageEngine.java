@@ -664,12 +664,6 @@ public final class SharedStorageEngine implements AutoCloseable {
     /** Caller holds walMaintenanceLock. Backend reads remain batched for cache misses. */
     private List<WalRecord> readCachedBatches(List<SharedPartitionId> partitions, List<WalLocation> locations)
         throws IOException {
-        return readCachedBatches(partitions, locations, true);
-    }
-
-    private List<WalRecord> readCachedBatches(
-        List<SharedPartitionId> partitions, List<WalLocation> locations, boolean cacheMisses
-    ) throws IOException {
         List<WalRecord> records = new ArrayList<>(java.util.Collections.nCopies(locations.size(), null));
         List<WalLocation> misses = new ArrayList<>();
         List<Integer> missingIndexes = new ArrayList<>();
@@ -707,9 +701,7 @@ public final class SharedStorageEngine implements AutoCloseable {
                 requireLocalDataIdentity(partition, location, record);
                 requireCurrentLocalLocation(partition, location);
                 records.set(index, record);
-                if (cacheMisses) {
-                    cacheLocalBatch(partition, location, record, localCacheGeneration.get(), false);
-                }
+                cacheLocalBatch(partition, location, record, localCacheGeneration.get(), false);
             }
         }
         return records;
@@ -889,9 +881,7 @@ public final class SharedStorageEngine implements AutoCloseable {
             // that was truncated, replaced or reclaimed after selection.
             requireCurrentUploadLocations(candidates);
             List<SharedPartitionId> partitions = candidates.stream().map(UploadCandidate::partition).toList();
-            // Upload can reuse confirmed Fetch/append entries. Avoid copying a
-            // cache miss solely to populate the cache during object packing.
-            List<WalRecord> records = readCachedBatches(partitions, locations, false);
+            List<WalRecord> records = readCachedBatches(partitions, locations);
             if (records.size() != candidates.size()) {
                 throw new WalCorruptionException("WAL upload candidate read count does not match selection");
             }
