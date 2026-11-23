@@ -23,10 +23,15 @@ import org.apache.kafka.storage.internals.shared.metadata.SharedObjectRange;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 import org.apache.kafka.storage.internals.shared.object.ObjectStore;
 import org.apache.kafka.storage.internals.shared.object.SharedObjectReader;
+import org.apache.kafka.storage.internals.shared.wal.AsynchronousFileChannelWalIoBackend;
+import org.apache.kafka.storage.internals.shared.wal.FileChannelWalIoBackend;
 import org.apache.kafka.storage.internals.shared.wal.RotatingFileSharedWal;
+import org.apache.kafka.storage.internals.shared.wal.WalIoBackend;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
@@ -51,6 +56,34 @@ class SharedStorageReclaimTest {
 
     @TempDir
     Path tempDir;
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void differentRemotePayloadCannotAuthorizeLocalWalReclamation(boolean aio) throws Exception {
+        Path walDir = tempDir.resolve("mismatched-remote-" + aio);
+        byte[] remotePayload = new byte[96];
+        byte[] localPayload = new byte[96];
+        Arrays.fill(remotePayload, (byte) 1);
+        Arrays.fill(localPayload, (byte) 2);
+        LocalRemoteObjectCheckpoint checkpoint = new LocalRemoteObjectCheckpoint(walDir);
+        try (SharedStorageEngine engine = new SharedStorageEngine(
+            new RotatingFileSharedWal(walDir, WAL_CAPACITY_BYTES, WAL_SEGMENT_BYTES, backend(aio)), checkpoint)) {
+            engine.appendData(PARTITION, 3, 0, 0, ByteBuffer.wrap(localPayload)).get(10, TimeUnit.SECONDS);
+            engine.commitRemoteObject(metadata(remotePayload));
+            assertEquals(0, engine.reclaimCheckpointedWal(),
+                "same offsets and length are not evidence that remote bytes cover this WAL record");
+            assertArrayEquals(localPayload, bytes(engine.readLocal(PARTITION, 0).orElseThrow().payload()));
+        }
+        try (SharedStorageEngine restarted = new SharedStorageEngine(
+            new RotatingFileSharedWal(walDir, WAL_CAPACITY_BYTES, WAL_SEGMENT_BYTES, backend(aio)),
+            new LocalRemoteObjectCheckpoint(walDir))) {
+            assertArrayEquals(localPayload, bytes(restarted.readLocal(PARTITION, 0).orElseThrow().payload()));
+        }
+    }
+
+    private static WalIoBackend backend(boolean aio) {
+        return aio ? new AsynchronousFileChannelWalIoBackend() : new FileChannelWalIoBackend();
+    }
 
     @Test
     void shouldColdReadAfterPhysicalWalReclaimAndEngineRestart() throws Exception {

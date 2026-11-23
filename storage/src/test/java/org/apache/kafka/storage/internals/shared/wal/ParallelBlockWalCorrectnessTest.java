@@ -47,6 +47,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.zip.CRC32C;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -768,8 +769,15 @@ class ParallelBlockWalCorrectnessTest {
             assertEquals(blockedReads, backend.reads.get());
 
             var partition = new SharedPartitionId(1, 2, 0);
-            remote.add(new SharedObjectMetadata(1, 10, 123, List.of(new SharedObjectRange(
-                partition, new OffsetRange(0, 1), 1, 0, 10, 456))));
+            CRC32C checksum = new CRC32C();
+            checksum.update(new byte[] {0}, 0, 1);
+            var mismatch = new RemoteObjectIndex();
+            mismatch.add(new SharedObjectMetadata(2, 1, 123, List.of(new SharedObjectRange(
+                partition, new OffsetRange(0, 1), 1, 0, 1, checksum.getValue() + 1))));
+            assertEquals(0, wal.reclaim(new RemoteCoverageWalReclaimPolicy(mismatch), 1));
+            assertEquals(blockedReads, backend.reads.get(), "mismatched identity cannot unblock the negative hint");
+            remote.add(new SharedObjectMetadata(1, 1, 123, List.of(new SharedObjectRange(
+                partition, new OffsetRange(0, 1), 1, 0, 1, checksum.getValue()))));
             backend.failAtRead = backend.reads.get() + 1;
             assertThrows(IOException.class, () -> wal.reclaim(policy, 1));
             assertEquals(0, wal.reclaimedBeforeOffset(), "coverage alone cannot authorize reclaim");
@@ -777,6 +785,38 @@ class ParallelBlockWalCorrectnessTest {
             assertTrue(wal.reclaim(policy, 1) > 0);
             assertTrue(wal.reclaimedBeforeOffset() > 0);
         }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void mismatchedRemoteBatchCannotReclaimParallelWalAcrossRestart(boolean aio) throws Exception {
+        Path path = dir.resolve("reclaim-identity-restart-" + aio);
+        var partition = new SharedPartitionId(1, 2, 0);
+        CRC32C different = new CRC32C();
+        different.update(new byte[] {1}, 0, 1);
+        RemoteObjectIndex mismatched = new RemoteObjectIndex();
+        mismatched.add(new SharedObjectMetadata(1, 1, 123, List.of(new SharedObjectRange(
+            partition, new OffsetRange(0, 1), 1, 0, 1, different.getValue()))));
+        try (WalIoBackend backend = backend(aio);
+             var wal = CoordinatedRingWalAdapter.createWithBankedCheckpoints(
+                 path, backend, CAPACITY, ALIGNMENT, 0, 8, 8L * ALIGNMENT)) {
+            wal.append(record(0, 1)).get(10, TimeUnit.SECONDS);
+            assertEquals(0, wal.reclaim(new RemoteCoverageWalReclaimPolicy(mismatched), 1));
+        }
+        try (WalIoBackend backend = backend(aio);
+             var wal = CoordinatedRingWalAdapter.reopenByFileSize(path, backend,
+                 CAPACITY + CoordinatedRingWalAdapter.BANKED_METADATA_BYTES, 0, 8, 8L * ALIGNMENT)) {
+            List<Long> recovered = new ArrayList<>();
+            wal.replay((record, location) -> recovered.add(record.firstOffset()));
+            assertEquals(List.of(0L), recovered);
+            CRC32C correct = new CRC32C();
+            correct.update(new byte[] {0}, 0, 1);
+            RemoteObjectIndex matching = new RemoteObjectIndex();
+            matching.add(new SharedObjectMetadata(2, 1, 123, List.of(new SharedObjectRange(
+                partition, new OffsetRange(0, 1), 1, 0, 1, correct.getValue()))));
+            assertTrue(wal.reclaim(new RemoteCoverageWalReclaimPolicy(matching), 1) > 0);
+        }
+        assertReplayByFileSize(path, aio, CAPACITY + CoordinatedRingWalAdapter.BANKED_METADATA_BYTES, List.of());
     }
 
     @ParameterizedTest

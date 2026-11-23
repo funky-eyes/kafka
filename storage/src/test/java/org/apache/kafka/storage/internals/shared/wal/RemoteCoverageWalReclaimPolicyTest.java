@@ -25,6 +25,7 @@ import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.zip.CRC32C;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -46,19 +47,31 @@ class RemoteCoverageWalReclaimPolicyTest {
 
         remoteIndex.add(new SharedObjectMetadata(
             1,
-            10,
+            1,
             123,
             List.of(new SharedObjectRange(
                 PARTITION,
                 new OffsetRange(100, 110),
                 7,
                 0,
-                10,
-                456
+                1,
+                checksum(new byte[] {1})
             ))
         ));
 
         assertTrue(policy.canReclaim(record, LOCATION));
+        assertFalse(policy.canReclaim(WalRecord.data(
+            PARTITION.topicIdHigh(), PARTITION.topicIdLow(), PARTITION.partition(),
+            7, 100, 109, new byte[] {2}), LOCATION), "different bytes cannot be reclaimed");
+        assertFalse(policy.canReclaim(WalRecord.data(
+            PARTITION.topicIdHigh(), PARTITION.topicIdLow(), PARTITION.partition(),
+            8, 100, 109, new byte[] {1}), LOCATION), "different epochs cannot be reclaimed");
+        assertFalse(policy.canReclaim(WalRecord.data(
+            PARTITION.topicIdHigh(), PARTITION.topicIdLow(), PARTITION.partition(),
+            7, 101, 109, new byte[] {1}), LOCATION), "partial offset coverage is not the same batch");
+        assertFalse(policy.canReclaim(WalRecord.data(
+            PARTITION.topicIdHigh(), PARTITION.topicIdLow(), PARTITION.partition(),
+            7, 100, 109, new byte[] {1, 2}), LOCATION), "different lengths cannot be reclaimed");
     }
 
     @Test
@@ -68,5 +81,11 @@ class RemoteCoverageWalReclaimPolicyTest {
             PARTITION.topicIdHigh(), PARTITION.topicIdLow(), PARTITION.partition(), 8, 120
         );
         assertTrue(policy.canReclaim(truncate, LOCATION));
+    }
+
+    private static long checksum(byte[] value) {
+        CRC32C crc = new CRC32C();
+        crc.update(value, 0, value.length);
+        return crc.getValue();
     }
 }

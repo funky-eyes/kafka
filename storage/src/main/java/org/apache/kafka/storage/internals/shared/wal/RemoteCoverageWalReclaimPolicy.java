@@ -16,14 +16,18 @@
  */
 package org.apache.kafka.storage.internals.shared.wal;
 
-import org.apache.kafka.storage.internals.shared.metadata.OffsetRange;
 import org.apache.kafka.storage.internals.shared.metadata.RemoteObjectIndex;
+import org.apache.kafka.storage.internals.shared.metadata.SharedObjectRange;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 
+import java.nio.ByteBuffer;
 import java.util.Objects;
+import java.util.zip.CRC32C;
 
 /**
- * Reclaims WAL DATA only after authoritative remote metadata covers the exact logical Kafka range.
+ * Reclaims WAL DATA only when authoritative remote metadata matches its offset range,
+ * leader epoch, payload length and CRC32C. CRC32C detects accidental mismatches;
+ * it is not a cryptographic identity proof.
  *
  * <p>TRUNCATE is a local recovery control record. Because physical reclamation is prefix-only, reaching a TRUNCATE
  * means every older group was already judged reclaimable; deleting the control record together with that prefix cannot
@@ -41,15 +45,50 @@ public final class RemoteCoverageWalReclaimPolicy implements WalReclaimPolicy {
         Objects.requireNonNull(record, "record");
         Objects.requireNonNull(appendResult, "appendResult");
         return switch (record.type()) {
-            case DATA -> covers(partition(record), record.firstOffset(), record.lastOffset());
+            case DATA -> matchesRecord(record);
             case TRUNCATE -> true;
             case GROUP_COMMIT -> throw new IllegalArgumentException(
                 "GROUP_COMMIT is internal WAL framing and is not reclaim-policy input");
         };
     }
 
-    boolean covers(SharedPartitionId partition, long firstOffset, long lastOffset) {
-        return remoteIndex.coverage(partition).covers(new OffsetRange(firstOffset, Math.addExact(lastOffset, 1L)));
+    record DataIdentity(SharedPartitionId partition, long firstOffset, long lastOffset, int leaderEpoch,
+                        int payloadLength, long checksum) { }
+
+    private boolean matchesRecord(WalRecord record) {
+        var reference = remoteIndex.find(partition(record), record.firstOffset());
+        if (reference.isEmpty()) return false;
+        SharedObjectRange range = reference.get().range();
+        ByteBuffer payload = record.payload();
+        if (!sameBatchShape(range, record.firstOffset(), record.lastOffset(), record.leaderEpoch(), payload.remaining()))
+            return false;
+        CRC32C checksum = new CRC32C();
+        checksum.update(payload);
+        return range.checksum() == checksum.getValue();
+    }
+
+    static DataIdentity identity(WalRecord record) {
+        ByteBuffer payload = record.payload();
+        int length = payload.remaining();
+        CRC32C checksum = new CRC32C();
+        checksum.update(payload);
+        return new DataIdentity(partition(record), record.firstOffset(), record.lastOffset(), record.leaderEpoch(),
+            length, checksum.getValue());
+    }
+
+    boolean matches(DataIdentity expected) {
+        var reference = remoteIndex.find(expected.partition(), expected.firstOffset());
+        if (reference.isEmpty()) return false;
+        SharedObjectRange range = reference.get().range();
+        return sameBatchShape(range, expected.firstOffset(), expected.lastOffset(), expected.leaderEpoch(),
+            expected.payloadLength()) &&
+            range.checksum() == expected.checksum();
+    }
+
+    private static boolean sameBatchShape(SharedObjectRange range, long firstOffset, long lastOffset,
+                                          int leaderEpoch, int payloadLength) {
+        return range.offsets().startOffset() == firstOffset && range.offsets().endOffset() - 1 == lastOffset &&
+            range.leaderEpoch() == leaderEpoch && range.objectLength() == payloadLength;
     }
 
     private static SharedPartitionId partition(WalRecord record) {

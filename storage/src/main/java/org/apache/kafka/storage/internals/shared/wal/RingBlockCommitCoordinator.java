@@ -16,7 +16,6 @@
  */
 package org.apache.kafka.storage.internals.shared.wal;
 
-import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -507,7 +506,7 @@ final class RingBlockCommitCoordinator implements AutoCloseable {
 
     private record ReclaimSnapshot(List<Committed> blocks, List<BlockRingAllocator.Pin> pins) { }
     private record ApprovedPrefix(List<Committed> blocks, long lastId) { }
-    private record ReclaimBlocker(Committed block, SharedPartitionId partition, long firstOffset, long lastOffset) { }
+    private record ReclaimBlocker(Committed block, RemoteCoverageWalReclaimPolicy.DataIdentity identity) { }
 
     private ReclaimSnapshot pinReclaimCandidates(long desiredBytes) throws IOException {
         List<Committed> candidates = new ArrayList<>();
@@ -537,8 +536,7 @@ final class RingBlockCommitCoordinator implements AutoCloseable {
         long lastId = -1;
         for (Committed block : candidates) {
             if (policy instanceof RemoteCoverageWalReclaimPolicy remote && reclaimBlocker != null &&
-                reclaimBlocker.block() == block && !remote.covers(reclaimBlocker.partition(),
-                    reclaimBlocker.firstOffset(), reclaimBlocker.lastOffset())) break;
+                reclaimBlocker.block() == block && !remote.matches(reclaimBlocker.identity())) break;
             var decoded = readBlock(block.address());
             boolean covered = true;
             for (var group : decoded.groups()) {
@@ -546,9 +544,7 @@ final class RingBlockCommitCoordinator implements AutoCloseable {
                     WalRecord record = entry.record();
                     if (!policy.canReclaim(record, new WalAppendResult(entry.walOffset(), entry.length()))) {
                         if (policy instanceof RemoteCoverageWalReclaimPolicy && record.type() == WalRecordType.DATA) {
-                            reclaimBlocker = new ReclaimBlocker(block,
-                                new SharedPartitionId(record.topicIdHigh(), record.topicIdLow(), record.partition()),
-                                record.firstOffset(), record.lastOffset());
+                            reclaimBlocker = new ReclaimBlocker(block, RemoteCoverageWalReclaimPolicy.identity(record));
                         } else {
                             reclaimBlocker = null;
                         }
