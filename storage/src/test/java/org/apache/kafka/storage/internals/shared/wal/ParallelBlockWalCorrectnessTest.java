@@ -38,6 +38,8 @@ import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
@@ -324,6 +326,18 @@ class ParallelBlockWalCorrectnessTest {
                         });
                     assertEquals(List.of("unknown:0:4096", "block:4096:1"), events);
                     assertEquals(List.of(1), partitions);
+                    // The gate keeps the first writer from modifying the file during this controlled scan.
+                    var snapshot = BlockRingCheckpoint.inspectWindowSnapshot(io, ALIGNMENT, CAPACITY, 7, 8,
+                        ALIGNMENT, 2, 1);
+                    var a = new WalPartitionKey(1, 2, 0);
+                    var b = new WalPartitionKey(1, 2, 1);
+                    var analysis = WindowPartitionReconciler.analyze(snapshot,
+                        Map.of(a, new WindowPartitionReconciler.Boundary(0, 1, 1),
+                            b, new WindowPartitionReconciler.Boundary(1, 2, 1)));
+                    assertEquals(1, analysis.partitions().get(b).contiguous().size());
+                    assertEquals(2, analysis.partitions().get(b).nextOffset());
+                    assertTrue(analysis.partitions().get(a).problems().contains(
+                        WindowPartitionReconciler.Problem.REQUIRED_OFFSET_MISSING));
                     assertThrows(IOException.class, () -> BlockRingCheckpoint.open(io, ALIGNMENT, CAPACITY, 7, 8));
                 } finally {
                     gate.release.countDown();
@@ -448,6 +462,7 @@ class ParallelBlockWalCorrectnessTest {
             assertEquals(0, snapshot.head());
             assertEquals(0, snapshot.tail());
             assertEquals(2L * ALIGNMENT, snapshot.ceiling());
+            assertEquals(-1, snapshot.lastCommittedGroup());
             assertEquals(new BlockRingRecovery.WindowUnclassified(0, ALIGNMENT), snapshot.items().get(0));
             var candidate = (BlockRingRecovery.WindowCandidate) snapshot.items().get(1);
             assertEquals(ALIGNMENT, candidate.start());
@@ -626,6 +641,177 @@ class ParallelBlockWalCorrectnessTest {
             backend.failAtRead = 0;
             assertTrue(wal.reclaim(policy, 1) > 0);
             assertTrue(wal.reclaimedBeforeOffset() > 0);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void leasedWindowClassifiesPartitionsIndependentlyAcrossAHole(boolean aio) throws Exception {
+        Path path = dir.resolve("window-partition-analysis-" + aio);
+        long dataStart = BlockRingCheckpoint.Layout.WINDOWED.metadataBytes(ALIGNMENT);
+        long fileBytes = dataStart + CAPACITY;
+        var a = new WalPartitionKey(1, 2, 0);
+        var b = new WalPartitionKey(1, 2, 1);
+        try (WalIoBackend backend = backend(aio); WalIoBackend.Handle io = backend.create(path)) {
+            io.preallocate(fileBytes);
+            var checkpoint = BlockRingCheckpoint.initialize(io, ALIGNMENT, CAPACITY, 7, 8);
+            checkpoint.extendScanCeiling(3L * ALIGNMENT);
+            writeInspectionBlock(io, dataStart, ALIGNMENT, 1, WalRecord.data(1, 2, 1, 3, 0, 0, new byte[] {1}));
+            writeInspectionBlock(io, dataStart, 2L * ALIGNMENT, 2, WalRecord.data(1, 2, 0, 1, 1, 1, new byte[] {2}));
+            io.force();
+        }
+        byte[] before = Files.readAllBytes(path);
+        try (WalIoBackend backend = backend(aio)) {
+            WindowRecoveryLease lease = WindowRecoveryLease.open(path, backend, ALIGNMENT, fileBytes, ALIGNMENT, 3, 2);
+            try (lease) {
+                var analysis = lease.analyze(Map.of(a, new WindowPartitionReconciler.Boundary(0, 1, 1),
+                    b, new WindowPartitionReconciler.Boundary(0, 1, 3)));
+                assertEquals(7, analysis.identityHigh());
+                assertEquals(8, analysis.identityLow());
+                assertEquals(2, analysis.checkpointGeneration());
+                assertEquals(CAPACITY, analysis.capacity());
+                assertEquals(0, analysis.head());
+                assertEquals(0, analysis.tail());
+                assertEquals(3L * ALIGNMENT, analysis.ceiling());
+                assertEquals(-1, analysis.lastCommittedGroup());
+                assertEquals(List.of(new BlockRingRecovery.WindowUnclassified(0, ALIGNMENT)), analysis.unclassified());
+                assertEquals(1, analysis.partitions().get(b).nextOffset());
+                assertEquals(1, analysis.partitions().get(b).contiguous().size());
+                assertEquals(ALIGNMENT, analysis.partitions().get(b).contiguous().get(0).blockStart());
+                assertEquals(ALIGNMENT, analysis.partitions().get(b).contiguous().get(0).blockLength());
+                assertTrue(analysis.partitions().get(b).problems().isEmpty());
+                assertEquals(0, analysis.partitions().get(a).nextOffset());
+                assertEquals(1, analysis.partitions().get(a).quarantined().size());
+                assertEquals(Set.of(WindowPartitionReconciler.Problem.GAP_OR_OVERLAP,
+                    WindowPartitionReconciler.Problem.REQUIRED_OFFSET_MISSING), analysis.partitions().get(a).problems());
+                assertThrows(IOException.class, () -> CoordinatedRingWalAdapter.reopenByFileSize(path, backend,
+                    fileBytes, 0, 8, 8L * ALIGNMENT));
+            }
+            assertThrows(IOException.class, () -> lease.analyze(Map.of()));
+        }
+        assertArrayEquals(before, Files.readAllBytes(path));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void leasedWindowQuarantinesMixedGroupsEpochMismatchAndUnknownPartitions(boolean aio) throws Exception {
+        Path path = dir.resolve("window-partition-quarantine-" + aio);
+        long dataStart = BlockRingCheckpoint.Layout.WINDOWED.metadataBytes(ALIGNMENT);
+        long fileBytes = dataStart + CAPACITY;
+        var a = new WalPartitionKey(1, 2, 0);
+        var b = new WalPartitionKey(1, 2, 1);
+        var c = new WalPartitionKey(1, 2, 2);
+        var unknown = new WalPartitionKey(1, 2, 3);
+        var control = new WalPartitionKey(1, 2, 4);
+        try (WalIoBackend backend = backend(aio); WalIoBackend.Handle io = backend.create(path)) {
+            io.preallocate(fileBytes);
+            var checkpoint = BlockRingCheckpoint.initialize(io, ALIGNMENT, CAPACITY, 7, 8);
+            checkpoint.extendScanCeiling(ALIGNMENT);
+            ByteBuffer bytes = AlignedWalBlockCodec.encode(0, 7, 8, ALIGNMENT, List.of(
+                new AlignedWalBlockCodec.Group(0, List.of(record(0, 1), WalRecord.data(1, 2, 1, 1, 0, 0, new byte[] {1}))),
+                new AlignedWalBlockCodec.Group(1, List.of(record(0, 1))),
+                new AlignedWalBlockCodec.Group(2, List.of(WalRecord.data(1, 2, 2, 4, 0, 0, new byte[] {2}))),
+                new AlignedWalBlockCodec.Group(3, List.of(WalRecord.data(1, 2, 3, 1, 0, 0, new byte[] {3}))),
+                new AlignedWalBlockCodec.Group(4, List.of(WalRecord.truncate(1, 2, 4, 1, 0)))));
+            long position = dataStart;
+            while (bytes.hasRemaining()) {
+                int written = io.write(bytes, position);
+                assertTrue(written > 0);
+                position += written;
+            }
+            io.force();
+        }
+        try (WalIoBackend backend = backend(aio);
+             var lease = WindowRecoveryLease.open(path, backend, ALIGNMENT, fileBytes, ALIGNMENT, 1, 6)) {
+            var analysis = lease.analyze(Map.of(a, new WindowPartitionReconciler.Boundary(0, 1, 1),
+                b, new WindowPartitionReconciler.Boundary(0, 1, 1),
+                c, new WindowPartitionReconciler.Boundary(0, 1, 3),
+                control, new WindowPartitionReconciler.Boundary(0, 1, 1)));
+            assertTrue(analysis.partitions().get(a).problems().contains(WindowPartitionReconciler.Problem.UNSUPPORTED_ATOMIC_GROUP));
+            assertTrue(analysis.partitions().get(b).problems().contains(WindowPartitionReconciler.Problem.UNSUPPORTED_ATOMIC_GROUP));
+            assertEquals(2, analysis.partitions().get(a).quarantined().size());
+            assertTrue(analysis.partitions().get(a).contiguous().isEmpty());
+            assertTrue(analysis.partitions().get(c).problems().contains(WindowPartitionReconciler.Problem.EPOCH_MISMATCH));
+            assertTrue(analysis.partitions().get(unknown).problems().contains(WindowPartitionReconciler.Problem.MISSING_BOUNDARY));
+            assertTrue(analysis.partitions().get(control).problems().contains(WindowPartitionReconciler.Problem.CONTROL_RECORD));
+            assertThrows(UnsupportedOperationException.class, () -> analysis.partitions().clear());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void leasedWindowRejectsNonmonotonicPhysicalGroupIds(boolean aio) throws Exception {
+        Path path = dir.resolve("window-group-order-" + aio);
+        long dataStart = BlockRingCheckpoint.Layout.WINDOWED.metadataBytes(ALIGNMENT);
+        long fileBytes = dataStart + CAPACITY;
+        try (WalIoBackend backend = backend(aio); WalIoBackend.Handle io = backend.create(path)) {
+            io.preallocate(fileBytes);
+            var checkpoint = BlockRingCheckpoint.initialize(io, ALIGNMENT, CAPACITY, 7, 8);
+            checkpoint.extendScanCeiling(2L * ALIGNMENT);
+            writeInspectionBlock(io, dataStart, 0, 2, record(0, 1));
+            writeInspectionBlock(io, dataStart, ALIGNMENT, 1, record(1, 1));
+            io.force();
+        }
+        try (WalIoBackend backend = backend(aio);
+             var lease = WindowRecoveryLease.open(path, backend, ALIGNMENT, fileBytes, ALIGNMENT, 2, 2)) {
+            assertThrows(IOException.class, () -> lease.analyze(Map.of(new WalPartitionKey(1, 2, 0),
+                new WindowPartitionReconciler.Boundary(0, 2, 1))));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void leasedWindowDoesNotPartiallyAcceptAnAtomicGroup(boolean aio) throws Exception {
+        Path path = dir.resolve("window-group-partial-" + aio);
+        long dataStart = BlockRingCheckpoint.Layout.WINDOWED.metadataBytes(ALIGNMENT);
+        long fileBytes = dataStart + CAPACITY;
+        var a = new WalPartitionKey(1, 2, 0);
+        try (WalIoBackend backend = backend(aio); WalIoBackend.Handle io = backend.create(path)) {
+            io.preallocate(fileBytes);
+            var checkpoint = BlockRingCheckpoint.initialize(io, ALIGNMENT, CAPACITY, 7, 8);
+            checkpoint.extendScanCeiling(ALIGNMENT);
+            ByteBuffer bytes = AlignedWalBlockCodec.encode(0, 7, 8, ALIGNMENT, List.of(
+                new AlignedWalBlockCodec.Group(0, List.of(record(0, 1), record(2, 1)))));
+            long position = dataStart;
+            while (bytes.hasRemaining()) {
+                int written = io.write(bytes, position);
+                assertTrue(written > 0);
+                position += written;
+            }
+            io.force();
+        }
+        try (WalIoBackend backend = backend(aio);
+             var lease = WindowRecoveryLease.open(path, backend, ALIGNMENT, fileBytes, ALIGNMENT, 1, 2)) {
+            var result = lease.analyze(Map.of(a, new WindowPartitionReconciler.Boundary(0, 1, 1))).partitions().get(a);
+            assertEquals(0, result.nextOffset());
+            assertTrue(result.contiguous().isEmpty());
+            assertEquals(1, result.quarantined().size());
+            assertTrue(result.problems().contains(WindowPartitionReconciler.Problem.GAP_OR_OVERLAP));
+            assertTrue(result.problems().contains(WindowPartitionReconciler.Problem.REQUIRED_OFFSET_MISSING));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void leasedWindowChecksGroupOrderAgainstCommittedPrefix(boolean aio) throws Exception {
+        Path path = dir.resolve("window-prefix-group-order-" + aio);
+        long dataStart = BlockRingCheckpoint.Layout.WINDOWED.metadataBytes(ALIGNMENT);
+        long fileBytes = dataStart + CAPACITY;
+        try (WalIoBackend backend = backend(aio); WalIoBackend.Handle io = backend.create(path)) {
+            io.preallocate(fileBytes);
+            var checkpoint = BlockRingCheckpoint.initialize(io, ALIGNMENT, CAPACITY, 7, 8);
+            checkpoint.extendScanCeiling(2L * ALIGNMENT);
+            writeInspectionBlock(io, dataStart, 0, 0, record(0, 1));
+            io.force();
+            checkpoint.advanceTail(ALIGNMENT, 0);
+            writeInspectionBlock(io, dataStart, ALIGNMENT, 0, record(1, 1));
+            io.force();
+        }
+        try (WalIoBackend backend = backend(aio);
+             var lease = WindowRecoveryLease.open(path, backend, ALIGNMENT, fileBytes, ALIGNMENT, 1, 1)) {
+            assertEquals(0, lease.snapshot().lastCommittedGroup());
+            assertThrows(IOException.class, () -> lease.analyze(Map.of(new WalPartitionKey(1, 2, 0),
+                new WindowPartitionReconciler.Boundary(1, 2, 1))));
         }
     }
 

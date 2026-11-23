@@ -18,6 +18,7 @@ package org.apache.kafka.storage.internals.shared.wal;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.Map;
 
 /**
  * Holds cooperative exclusive ownership while inspecting an experimental windowed WAL.
@@ -66,6 +67,13 @@ final class WindowRecoveryLease implements AutoCloseable {
     synchronized BlockRingRecovery.WindowSnapshot snapshot() throws IOException {
         if (closed) throw new IOException("WAL recovery lease is closed");
         return snapshot;
+    }
+
+    /** Classifies candidates while this lease still owns the WAL; it does not publish or reclaim them. */
+    synchronized WindowPartitionReconciler.Analysis analyze(
+        Map<WalPartitionKey, WindowPartitionReconciler.Boundary> boundaries) throws IOException {
+        if (closed) throw new IOException("WAL recovery lease is closed");
+        return WindowPartitionReconciler.analyze(snapshot, boundaries);
     }
 
     @Override

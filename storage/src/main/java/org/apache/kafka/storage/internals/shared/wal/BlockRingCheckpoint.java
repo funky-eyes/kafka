@@ -143,7 +143,7 @@ final class BlockRingCheckpoint {
         long capacity, long high, long low, int maxBlock, int maxItems, int maxRecords) throws IOException {
         var builder = new BlockRingRecovery.WindowSnapshotBuilder(maxItems, maxRecords);
         State state = inspectWindow(io, alignment, capacity, high, low, maxBlock, builder);
-        return builder.complete(high, low, state);
+        return builder.complete(high, low, capacity, state);
     }
 
     private static Selected select(WalIoBackend.Handle io, int alignment, long capacity, long high, long low,

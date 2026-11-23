@@ -48,7 +48,7 @@ final class BlockRingRecovery {
     record WindowEntry(WalRecordType type, WalPartitionKey partition, int leaderEpoch, long firstOffset,
                        long lastOffset, long walOffset, int length, int payloadLength) { }
     record WindowSnapshot(long identityHigh, long identityLow, long checkpointGeneration,
-                          long head, long tail, long ceiling, List<WindowItem> items) {
+                          long capacity, long head, long tail, long ceiling, long lastCommittedGroup, List<WindowItem> items) {
         WindowSnapshot {
             items = List.copyOf(items);
         }
@@ -106,8 +106,9 @@ final class BlockRingRecovery {
             if (items.size() == maxItems) throw new IOException("WAL inspection item limit exceeded");
         }
 
-        WindowSnapshot complete(long high, long low, BlockRingCheckpoint.State state) {
-            return new WindowSnapshot(high, low, state.generation(), state.head(), state.tail(), state.scanCeiling(), items);
+        WindowSnapshot complete(long high, long low, long capacity, BlockRingCheckpoint.State state) {
+            return new WindowSnapshot(high, low, state.generation(), capacity, state.head(), state.tail(), state.scanCeiling(),
+                state.lastGroup(), items);
         }
     }
 
