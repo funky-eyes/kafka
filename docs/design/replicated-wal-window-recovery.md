@@ -1,0 +1,46 @@
+# Recoverable window for independently confirmed WAL blocks
+
+## Problem and scope
+
+The experimental parallel-block WAL currently acknowledges a block's durable future only after `RingBlockCommitCoordinator` has forced a checkpoint for the complete preceding physical prefix. A slow block for partition A therefore holds the confirmation, follower Fetch and high-watermark progress of an already-forced block for partition B. `PartitionDurableOffsetTracker` already sequences Kafka offsets within each partition, but its input future is still gated by that global checkpoint.
+
+AutoMQ 1.3.4 separates each Stream's completion sequence from its in-memory global trim position and recovers records by scanning a persisted window. Its recovery then reconciles Stream continuity against authoritative Stream metadata. See the pinned source analysis in [the comparison](automq-1.3.4-wal-comparison.md). Our implementation must preserve Kafka's own ISR and leader-epoch rules and recover from an independent follower's WAL when the leader and its disk are lost.
+
+This document specifies the next design boundary. It does not change the current format or claim that independent block confirmation is implemented.
+
+## Required invariants
+
+* Kafka acceptance, physical block force, partition confirmation, replica confirmation, high watermark and reclaim head are separate positions. Early `acks=1` acceptance is explicitly allowed to precede every durable copy; it does not prove failover survival.
+* A partition may confirm a forced group only after every earlier group of that partition has completed and its Kafka state is published. A slow or failed group in another partition must not prevent that confirmation.
+* A follower may fetch only leader-confirmed data, and must not advertise its own durable progress until its independent WAL can recover the same records. Kafka's ISR and epoch rules continue to determine the high watermark.
+* Every block called recoverably durable must lie within a recovery window whose upper bound was itself persisted before that block became eligible for confirmation. The window must be bounded by the physical ring and the persisted reclaim head.
+* Recovery must reject stale physical generations, torn or corrupt data, malformed groups and invalid epoch/offset transitions. It must not silently discard a potentially committed record merely because another block is incomplete.
+* A WAL range may be reused only after its data is covered by authoritative committed remote objects, the corresponding reclaim head is persisted, and readers holding the old range have exited.
+
+## Proposed window protocol
+
+Introduce a separately versioned checkpoint layout rather than changing the meaning of existing version-1 or version-2 files. Its durable state needs at least a WAL identity, metadata generation, reclaim head `H`, a strictly validated contiguous prefix ending at `T`, and an exclusive scan ceiling `C`. With current in-memory reservation position `R`, maintain `H <= T <= R <= C` and `C - H <= ringCapacity`. Any design that changes these quantities must prove the corresponding wrap and overflow rules.
+
+Before reserving outside the current window, extend `C` in a batched checkpoint and force the new checkpoint before a block in the extension may complete its recoverable-durability future. Once `C` covers a reservation, the worker may write and force the block and deliver that block's result independently. Per-partition sequencing controls publication to Fetch and replication; a separate contiguous physical frontier controls reclaim. The durable contiguous prefix may still advance in batches, but a block outside it must not depend on that advancement for partition confirmation.
+
+The ceiling is a bound, not evidence that every byte inside the window was written. Block framing must validate absolute logical address, WAL identity/incarnation, complete length, checksum and atomic-group contents. A speculative window can contain unwritten sectors, wrap padding, a torn block, and independently completed later blocks. Corruption inside the durable prefix remains a hard failure. Outside that prefix, recovery must distinguish provably unused or stale sectors from ambiguous damage; ambiguous data must be quarantined and reconciled with an independent replica, not silently treated as an ordinary hole.
+
+Recovery is two-phase. First scan and validate physical candidates without publishing them as Kafka-visible data. Then reconcile each partition against an authoritative starting boundary, committed remote coverage, Kafka leader epoch, and replica state; publish only a contiguous safe sequence. A later valid block for partition B may survive a hole for A. A later block for A must not become visible across an A-offset gap. Where metadata or an independent replica cannot prove a required boundary, fail or fence the affected recovery rather than inventing an offset or silently losing committed data.
+
+Before accepting new writes after a crash, the implementation must also prevent logical-address reuse from making stale bytes from a previous attempt look current. One candidate is to advance the next reservation past the entire previously persisted ceiling, preserving explicit hole ranges until they are safe to reclaim; another is a durably fenced per-writer incarnation with a recovery scheme that still recognizes retained older blocks. Neither alternative is implemented or established safe yet. Exhausting the ring with such reserved holes must apply bounded backpressure and allow shutdown, leader change and recovery to cancel or drain work without deadlock.
+
+## Integration order
+
+1. Define and test the versioned checkpoint, window extension, incarnation and restart rules independently of changing Kafka confirmation semantics. Old layouts must reopen with their existing strict-prefix behavior; migration must be explicit and crash-safe.
+2. Implement physical-window scanning and per-partition reconciliation with an authoritative recovery boundary. Retain enough physical metadata to pin readers and prove reclaim across holes.
+3. Introduce a distinct block-forced completion signal without weakening existing `SharedWal` durable futures. Only after restart proof is complete may the new format use it to advance partition confirmation.
+4. Wire confirmed leader positions into follower Fetch and Kafka HW while preserving epoch fencing, and validate RF1, RF2, `acks=1`, `acks=all`, retries and lifecycle transitions. Keep unsupported producer-state and transaction cases on the existing safe path until separately proven.
+
+## Required failure cases
+
+* Pause block A before force, force later block B for a different partition, and prove B can be confirmed and replicated without waiting for A. Crash and recover the broker with B still present.
+* Repeat with A and B in the same partition; B must not pass the missing earlier offset. Exercise leader change, ISR change and local log replacement while confirmations are queued.
+* Crash before and after window checkpoint force, partial writes, data force, per-partition publication, remote-object commit and reclaim-head force. Repeat at wrap boundaries, including repeated crashes and reused physical sectors.
+* Corrupt a previously confirmed block, including its header, and prove recovery either obtains a validated independent copy or fences the affected recovery. A corruption must not be reclassified as an unacknowledged hole merely to continue.
+* With full ISR, kill a leader and permanently remove its local WAL before and after a follower has durably confirmed the record. Distinguish the permitted early-ACK loss window from the post-replication survival guarantee. Run NIO and AIO on distinct failure domains.
+* Cover idempotent and transactional recovery, offset/epoch truncation, concurrent Fetch/upload/reclaim and pinned readers, queue exhaustion, shutdown and disk-full backpressure before broadening the supported fast path.
