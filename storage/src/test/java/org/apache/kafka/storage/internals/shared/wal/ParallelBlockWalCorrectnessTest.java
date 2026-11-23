@@ -17,6 +17,10 @@
 package org.apache.kafka.storage.internals.shared.wal;
 
 import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
+import org.apache.kafka.storage.internals.shared.metadata.OffsetRange;
+import org.apache.kafka.storage.internals.shared.metadata.RemoteObjectIndex;
+import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
+import org.apache.kafka.storage.internals.shared.metadata.SharedObjectRange;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 
 import org.junit.jupiter.api.Test;
@@ -586,6 +590,43 @@ class ParallelBlockWalCorrectnessTest {
             }
         }
         assertArrayEquals(before, Files.readAllBytes(path));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void uncoveredReclaimHintAvoidsRereadsButNeverAuthorizesReclaim(boolean aio) throws Exception {
+        Path path = dir.resolve("reclaim-negative-hint-" + aio);
+        RemoteObjectIndex remote = new RemoteObjectIndex();
+        var policy = new RemoteCoverageWalReclaimPolicy(remote);
+        try (var backend = new CountingBackend(aio);
+             var wal = CoordinatedRingWalAdapter.create(path, backend, CAPACITY, ALIGNMENT, 0)) {
+            wal.append(record(0, 1)).get(10, TimeUnit.SECONDS);
+            backend.countReads.set(true);
+            assertEquals(0, wal.reclaim(policy, 1));
+            int reads = backend.reads.get();
+            assertTrue(reads > 0);
+            assertEquals(0, wal.reclaim(policy, 1));
+            assertEquals(reads, backend.reads.get(), "unchanged uncovered range should not reread a block");
+            assertEquals(0, wal.reclaimedBeforeOffset());
+
+            // Arbitrary policies must still receive the full, freshly decoded record.
+            assertEquals(0, wal.reclaim((record, location) -> false, 1));
+            assertTrue(backend.reads.get() > reads);
+            assertEquals(0, wal.reclaim(policy, 1));
+            int blockedReads = backend.reads.get();
+            assertEquals(0, wal.reclaim(policy, 1));
+            assertEquals(blockedReads, backend.reads.get());
+
+            var partition = new SharedPartitionId(1, 2, 0);
+            remote.add(new SharedObjectMetadata(1, 10, 123, List.of(new SharedObjectRange(
+                partition, new OffsetRange(0, 1), 1, 0, 10, 456))));
+            backend.failAtRead = backend.reads.get() + 1;
+            assertThrows(IOException.class, () -> wal.reclaim(policy, 1));
+            assertEquals(0, wal.reclaimedBeforeOffset(), "coverage alone cannot authorize reclaim");
+            backend.failAtRead = 0;
+            assertTrue(wal.reclaim(policy, 1) > 0);
+            assertTrue(wal.reclaimedBeforeOffset() > 0);
+        }
     }
 
     private static BlockRingRecovery.WindowVisitor inspectionEvents(List<String> events) {

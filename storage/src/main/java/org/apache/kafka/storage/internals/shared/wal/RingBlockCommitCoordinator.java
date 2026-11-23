@@ -16,6 +16,8 @@
  */
 package org.apache.kafka.storage.internals.shared.wal;
 
+import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
+
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -107,6 +109,9 @@ final class RingBlockCommitCoordinator implements AutoCloseable {
     private boolean scheduled;
     private boolean rebasing;
     private boolean reclaiming;
+    // A negative coverage result is only a hint to defer another disk read.
+    // Actual reclamation always rereads and validates the complete block.
+    private ReclaimBlocker reclaimBlocker;
     private boolean closing;
     private int activeReads;
     private Throwable failure;
@@ -413,6 +418,7 @@ final class RingBlockCommitCoordinator implements AutoCloseable {
 
     private record ReclaimSnapshot(List<Committed> blocks, List<BlockRingAllocator.Pin> pins) { }
     private record ApprovedPrefix(List<Committed> blocks, long lastId) { }
+    private record ReclaimBlocker(Committed block, SharedPartitionId partition, long firstOffset, long lastOffset) { }
 
     private ReclaimSnapshot pinReclaimCandidates(long desiredBytes) throws IOException {
         List<Committed> candidates = new ArrayList<>();
@@ -441,22 +447,34 @@ final class RingBlockCommitCoordinator implements AutoCloseable {
         List<Committed> approved = new ArrayList<>();
         long lastId = -1;
         for (Committed block : candidates) {
+            if (policy instanceof RemoteCoverageWalReclaimPolicy remote && reclaimBlocker != null &&
+                reclaimBlocker.block() == block && !remote.covers(reclaimBlocker.partition(),
+                    reclaimBlocker.firstOffset(), reclaimBlocker.lastOffset())) break;
             var decoded = readBlock(block.address());
-            if (!isCovered(decoded, policy)) break;
+            boolean covered = true;
+            for (var group : decoded.groups()) {
+                for (var entry : group.records()) {
+                    WalRecord record = entry.record();
+                    if (!policy.canReclaim(record, new WalAppendResult(entry.walOffset(), entry.length()))) {
+                        if (policy instanceof RemoteCoverageWalReclaimPolicy && record.type() == WalRecordType.DATA) {
+                            reclaimBlocker = new ReclaimBlocker(block,
+                                new SharedPartitionId(record.topicIdHigh(), record.topicIdLow(), record.partition()),
+                                record.firstOffset(), record.lastOffset());
+                        } else {
+                            reclaimBlocker = null;
+                        }
+                        covered = false;
+                        break;
+                    }
+                }
+                if (!covered) break;
+            }
+            if (!covered) break;
+            if (reclaimBlocker != null && reclaimBlocker.block() == block) reclaimBlocker = null;
             approved.add(block);
             lastId = decoded.groups().get(decoded.groups().size() - 1).id();
         }
         return new ApprovedPrefix(approved, lastId);
-    }
-
-    private boolean isCovered(AlignedWalBlockCodec.DecodedBlock block, WalReclaimPolicy policy) {
-        for (var group : block.groups()) {
-            for (var entry : group.records()) {
-                if (!policy.canReclaim(entry.record(), new WalAppendResult(entry.walOffset(), entry.length())))
-                    return false;
-            }
-        }
-        return true;
     }
 
     private List<BlockRingAllocator.Retirement> prepareRetirements(List<Committed> approved) throws IOException {

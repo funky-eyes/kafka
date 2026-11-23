@@ -41,14 +41,15 @@ public final class RemoteCoverageWalReclaimPolicy implements WalReclaimPolicy {
         Objects.requireNonNull(record, "record");
         Objects.requireNonNull(appendResult, "appendResult");
         return switch (record.type()) {
-            case DATA -> remoteIndex.coverage(partition(record)).covers(new OffsetRange(
-                record.firstOffset(),
-                Math.addExact(record.lastOffset(), 1L)
-            ));
+            case DATA -> covers(partition(record), record.firstOffset(), record.lastOffset());
             case TRUNCATE -> true;
             case GROUP_COMMIT -> throw new IllegalArgumentException(
                 "GROUP_COMMIT is internal WAL framing and is not reclaim-policy input");
         };
+    }
+
+    boolean covers(SharedPartitionId partition, long firstOffset, long lastOffset) {
+        return remoteIndex.coverage(partition).covers(new OffsetRange(firstOffset, Math.addExact(lastOffset, 1L)));
     }
 
     private static SharedPartitionId partition(WalRecord record) {
