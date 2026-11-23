@@ -1592,6 +1592,34 @@ class ParallelBlockWalCorrectnessTest {
     }
 
     @Test
+    void blockRecordEncodingMatchesExistingCodecForDifferentPayloadBuffers() {
+        List<WalRecord> records = new ArrayList<>();
+        for (int size : List.of(1, 31, 1024, 4097, 16385)) {
+            byte[] bytes = new byte[size + 6];
+            for (int i = 0; i < bytes.length; i++) bytes[i] = (byte) (i * 73 + size);
+            ByteBuffer heap = ByteBuffer.wrap(bytes);
+            heap.position(3).limit(size + 3);
+            records.add(WalRecord.dataOwned(1, 2, 0, 7, size, size + 1L, heap));
+            ByteBuffer direct = ByteBuffer.allocateDirect(size + 6);
+            direct.put(bytes).position(3).limit(size + 3);
+            records.add(WalRecord.dataOwned(1, 2, 0, 8, size, size + 1L, direct));
+        }
+        records.add(WalRecord.truncate(1, 2, 0, 9, 123));
+        records.add(WalRecord.groupCommit(123, 2));
+        for (WalRecord record : records) {
+            var old = WalRecordCodec.encode(record);
+            ByteBuffer expected = ByteBuffer.allocate(old.totalLength());
+            expected.put(old.header()).put(old.payload()).flip();
+            ByteBuffer output = ByteBuffer.allocateDirect(old.totalLength() + 13);
+            output.position(7);
+            assertEquals(old.totalLength(), WalRecordCodec.writeTo(output, record));
+            assertEquals(7 + old.totalLength(), output.position());
+            output.flip().position(7);
+            assertEquals(expected, output.slice(), "block and existing WAL record encoding must be identical");
+        }
+    }
+
+    @Test
     void encodedBlockMatchesPreOptimizationFormat() throws Exception {
         var groups = List.of(
             new AlignedWalBlockCodec.Group(10, List.of(

@@ -55,6 +55,37 @@ final class WalRecordCodec {
         int totalLength = encodedLength(record);
 
         ByteBuffer header = ByteBuffer.allocate(HEADER_BYTES).order(ByteOrder.BIG_ENDIAN);
+        writeHeader(header, record, payloadLength, totalLength);
+
+        CRC32C crc = new CRC32C();
+        ByteBuffer fixedBody = header.duplicate();
+        fixedBody.flip();
+        fixedBody.position(PREFIX_BYTES);
+        crc.update(fixedBody);
+        crc.update(payload.duplicate());
+        header.putInt(12, (int) crc.getValue());
+        header.flip();
+
+        return new EncodedRecord(header, payload, totalLength);
+    }
+
+    /** Writes the unchanged record format into a writable block and checksums the bytes already copied there. */
+    static int writeTo(ByteBuffer output, WalRecord record) {
+        if (output.order() != ByteOrder.BIG_ENDIAN) throw new IllegalArgumentException("WAL output must be big endian");
+        ByteBuffer payload = record.payloadUnsafe();
+        int length = encodedLength(record);
+        int start = output.position();
+        writeHeader(output, record, payload.remaining(), length);
+        output.put(payload);
+        ByteBuffer body = output.duplicate();
+        body.position(start + PREFIX_BYTES).limit(output.position());
+        CRC32C crc = new CRC32C();
+        crc.update(body);
+        output.putInt(start + 12, (int) crc.getValue());
+        return length;
+    }
+
+    private static void writeHeader(ByteBuffer header, WalRecord record, int payloadLength, int totalLength) {
         header.putInt(MAGIC);
         header.putShort(VERSION);
         header.put(record.type().id());
@@ -68,17 +99,6 @@ final class WalRecordCodec {
         header.putLong(record.firstOffset());
         header.putLong(record.lastOffset());
         header.putInt(payloadLength);
-
-        CRC32C crc = new CRC32C();
-        ByteBuffer fixedBody = header.duplicate();
-        fixedBody.flip();
-        fixedBody.position(PREFIX_BYTES);
-        crc.update(fixedBody);
-        crc.update(payload.duplicate());
-        header.putInt(12, (int) crc.getValue());
-        header.flip();
-
-        return new EncodedRecord(header, payload, totalLength);
     }
 
     static ReadResult read(WalIoBackend.Handle handle, long position) throws IOException {

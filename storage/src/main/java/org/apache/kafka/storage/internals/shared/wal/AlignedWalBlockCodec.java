@@ -61,7 +61,6 @@ final class AlignedWalBlockCodec {
         checkAlignment(alignment);
         if (offset < 0 || offset % alignment != 0 || groups == null || groups.isEmpty())
             throw new IllegalArgumentException("invalid block offset or groups");
-        List<WalRecordCodec.EncodedRecord> encoded = new ArrayList<>();
         long payload = 0;
         long previousId = -1;
         for (Group group : groups) {
@@ -69,13 +68,9 @@ final class AlignedWalBlockCodec {
             if (group.id() <= previousId) throw new IllegalArgumentException("non-increasing group id");
             previousId = group.id();
             for (WalRecord record : group.records()) {
-                WalRecordCodec.EncodedRecord item = WalRecordCodec.encode(record);
-                payload = Math.addExact(payload, item.totalLength());
-                encoded.add(item);
+                payload = Math.addExact(payload, WalRecordCodec.encodedLength(record));
             }
-            WalRecordCodec.EncodedRecord commit = WalRecordCodec.encode(WalRecord.groupCommit(group.id(), group.records().size()));
-            payload = Math.addExact(payload, commit.totalLength());
-            encoded.add(commit);
+            payload = Math.addExact(payload, WalRecordCodec.HEADER_BYTES);
         }
         long unaligned = Math.addExact(HEADER_BYTES, payload);
         long rounded = Math.multiplyExact(Math.floorDiv(Math.addExact(unaligned, alignment - 1L), alignment), alignment);
@@ -87,16 +82,14 @@ final class AlignedWalBlockCodec {
         output.putLong(offset).putLong(incarnationHigh).putLong(incarnationLow);
         output.putInt(groups.size()).putInt(0).putInt(0).putInt(0).putLong(0L);
         List<List<WalAppendResult>> locations = new ArrayList<>();
-        int encodedIndex = 0;
         for (Group group : groups) {
             List<WalAppendResult> groupLocations = new ArrayList<>();
-            for (int i = 0; i < group.records().size(); i++) {
-                WalRecordCodec.EncodedRecord item = encoded.get(encodedIndex++);
-                groupLocations.add(new WalAppendResult(Math.addExact(offset, output.position()), item.totalLength()));
-                output.put(item.header()).put(item.payload());
+            for (WalRecord record : group.records()) {
+                long recordOffset = Math.addExact(offset, output.position());
+                int recordLength = WalRecordCodec.writeTo(output, record);
+                groupLocations.add(new WalAppendResult(recordOffset, recordLength));
             }
-            WalRecordCodec.EncodedRecord commit = encoded.get(encodedIndex++);
-            output.put(commit.header()).put(commit.payload());
+            WalRecordCodec.writeTo(output, WalRecord.groupCommit(group.id(), group.records().size()));
             locations.add(List.copyOf(groupLocations));
         }
         output.putInt(CRC_OFFSET, checksum(output));
