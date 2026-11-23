@@ -45,7 +45,7 @@ public final class RemoteCoverageWalReclaimPolicy implements WalReclaimPolicy {
         Objects.requireNonNull(record, "record");
         Objects.requireNonNull(appendResult, "appendResult");
         return switch (record.type()) {
-            case DATA -> matchesRecord(record);
+            case DATA -> matchesRecordUnchecked(record, record.payload());
             case TRUNCATE -> true;
             case GROUP_COMMIT -> throw new IllegalArgumentException(
                 "GROUP_COMMIT is internal WAL framing and is not reclaim-policy input");
@@ -55,11 +55,16 @@ public final class RemoteCoverageWalReclaimPolicy implements WalReclaimPolicy {
     record DataIdentity(SharedPartitionId partition, long firstOffset, long lastOffset, int leaderEpoch,
                         int payloadLength, long checksum) { }
 
-    private boolean matchesRecord(WalRecord record) {
+    /** The payload must be the verified body of this record from the currently pinned block. */
+    boolean matchesRecord(WalRecord record, ByteBuffer payload) {
+        requireRecordPayload(record, payload);
+        return matchesRecordUnchecked(record, payload.duplicate());
+    }
+
+    private boolean matchesRecordUnchecked(WalRecord record, ByteBuffer payload) {
         var reference = remoteIndex.find(partition(record), record.firstOffset());
         if (reference.isEmpty()) return false;
         SharedObjectRange range = reference.get().range();
-        ByteBuffer payload = record.payload();
         if (!sameBatchShape(range, record.firstOffset(), record.lastOffset(), record.leaderEpoch(), payload.remaining()))
             return false;
         CRC32C checksum = new CRC32C();
@@ -67,13 +72,20 @@ public final class RemoteCoverageWalReclaimPolicy implements WalReclaimPolicy {
         return range.checksum() == checksum.getValue();
     }
 
-    static DataIdentity identity(WalRecord record) {
-        ByteBuffer payload = record.payload();
+    static DataIdentity identity(WalRecord record, ByteBuffer payload) {
+        requireRecordPayload(record, payload);
         int length = payload.remaining();
         CRC32C checksum = new CRC32C();
-        checksum.update(payload);
+        checksum.update(payload.duplicate());
         return new DataIdentity(partition(record), record.firstOffset(), record.lastOffset(), record.leaderEpoch(),
             length, checksum.getValue());
+    }
+
+    private static void requireRecordPayload(WalRecord record, ByteBuffer payload) {
+        Objects.requireNonNull(record, "record");
+        Objects.requireNonNull(payload, "payload");
+        if (record.type() != WalRecordType.DATA || payload.remaining() != record.payloadUnsafe().remaining())
+            throw new IllegalArgumentException("Expected the complete DATA payload from a validated WAL record");
     }
 
     boolean matches(DataIdentity expected) {

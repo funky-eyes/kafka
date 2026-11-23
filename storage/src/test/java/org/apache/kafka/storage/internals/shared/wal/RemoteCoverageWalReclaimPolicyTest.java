@@ -24,10 +24,13 @@ import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 
 import org.junit.jupiter.api.Test;
 
+import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.zip.CRC32C;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RemoteCoverageWalReclaimPolicyTest {
@@ -72,6 +75,28 @@ class RemoteCoverageWalReclaimPolicyTest {
         assertFalse(policy.canReclaim(WalRecord.data(
             PARTITION.topicIdHigh(), PARTITION.topicIdLow(), PARTITION.partition(),
             7, 100, 109, new byte[] {1, 2}), LOCATION), "different lengths cannot be reclaimed");
+    }
+
+    @Test
+    void verifiedBlockSliceUsesOnlyPayloadAndDoesNotChangeItsBounds() {
+        byte[] data = new byte[] {9, 1, 2, 8};
+        ByteBuffer payload = ByteBuffer.wrap(data);
+        payload.position(1).limit(3);
+        WalRecord record = WalRecord.data(
+            PARTITION.topicIdHigh(), PARTITION.topicIdLow(), PARTITION.partition(), 7, 100, 109, new byte[] {1, 2});
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(new SharedObjectMetadata(1, 2, 0, List.of(new SharedObjectRange(
+            PARTITION, new OffsetRange(100, 110), 7, 0, 2, checksum(new byte[] {1, 2})))));
+        var policy = new RemoteCoverageWalReclaimPolicy(index);
+        assertTrue(policy.matchesRecord(record, payload));
+        assertTrue(policy.matches(RemoteCoverageWalReclaimPolicy.identity(record, payload)));
+        assertEquals(1, payload.position());
+        assertEquals(3, payload.limit());
+        assertFalse(policy.matchesRecord(record, ByteBuffer.wrap(new byte[] {2, 1})));
+        assertThrows(IllegalArgumentException.class, () -> policy.matchesRecord(record, ByteBuffer.wrap(new byte[] {1})));
+        assertThrows(IllegalArgumentException.class, () -> policy.matchesRecord(
+            WalRecord.truncate(PARTITION.topicIdHigh(), PARTITION.topicIdLow(), PARTITION.partition(), 7, 100),
+            ByteBuffer.allocate(0)));
     }
 
     @Test

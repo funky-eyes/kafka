@@ -429,11 +429,10 @@ final class RingBlockCommitCoordinator implements AutoCloseable {
 
     private AlignedWalBlockCodec.DecodedBlock readBlock(BlockRingAllocator.Address address)
             throws IOException {
-        return readBlock(address, false);
+        return AlignedWalBlockCodec.decode(readBlockBytes(address), address.blockStart(), high, low, alignment);
     }
 
-    private AlignedWalBlockCodec.DecodedBlock readBlock(BlockRingAllocator.Address address, boolean remoteReclaim)
-            throws IOException {
+    private ByteBuffer readBlockBytes(BlockRingAllocator.Address address) throws IOException {
         int length = Math.toIntExact(address.end() - address.blockStart());
         ByteBuffer data = ByteBuffer.allocate(length);
         long offset = Math.addExact(dataStart, address.physical());
@@ -441,10 +440,7 @@ final class RingBlockCommitCoordinator implements AutoCloseable {
             int read = reader.read(data, offset + data.position());
             if (read <= 0) throw new IOException("Short ring read");
         }
-        data.flip();
-        return remoteReclaim
-            ? AlignedWalBlockCodec.decodeForRemoteReclaim(data, address.blockStart(), high, low, alignment)
-            : AlignedWalBlockCodec.decode(data, address.blockStart(), high, low, alignment);
+        return data.flip();
     }
 
     void replay(WalReplayConsumer consumer) throws IOException {
@@ -545,17 +541,14 @@ final class RingBlockCommitCoordinator implements AutoCloseable {
         for (Committed block : candidates) {
             if (policy instanceof RemoteCoverageWalReclaimPolicy remote && reclaimBlocker != null &&
                 reclaimBlocker.block() == block && !remote.matches(reclaimBlocker.identity())) break;
-            var decoded = readBlock(block.address(), policy instanceof RemoteCoverageWalReclaimPolicy);
+            ByteBuffer blockBytes = readBlockBytes(block.address());
+            var decoded = policy instanceof RemoteCoverageWalReclaimPolicy
+                ? AlignedWalBlockCodec.decodeForRemoteReclaim(blockBytes, block.address().blockStart(), high, low, alignment)
+                : AlignedWalBlockCodec.decode(blockBytes, block.address().blockStart(), high, low, alignment);
             boolean covered = true;
             for (var group : decoded.groups()) {
                 for (var entry : group.records()) {
-                    WalRecord record = entry.record();
-                    if (!policy.canReclaim(record, new WalAppendResult(entry.walOffset(), entry.length()))) {
-                        if (policy instanceof RemoteCoverageWalReclaimPolicy && record.type() == WalRecordType.DATA) {
-                            reclaimBlocker = new ReclaimBlocker(block, RemoteCoverageWalReclaimPolicy.identity(record));
-                        } else {
-                            reclaimBlocker = null;
-                        }
+                    if (!recordReclaimable(block, blockBytes, entry, policy)) {
                         covered = false;
                         break;
                     }
@@ -568,6 +561,21 @@ final class RingBlockCommitCoordinator implements AutoCloseable {
             lastId = decoded.groups().get(decoded.groups().size() - 1).id();
         }
         return new ApprovedPrefix(approved, lastId);
+    }
+
+    private boolean recordReclaimable(Committed block, ByteBuffer blockBytes, AlignedWalBlockCodec.Entry entry,
+                                      WalReclaimPolicy policy) {
+        WalRecord record = entry.record();
+        if (policy instanceof RemoteCoverageWalReclaimPolicy remote && record.type() == WalRecordType.DATA) {
+            int start = Math.toIntExact(entry.walOffset() - block.address().blockStart()) + WalRecordCodec.HEADER_BYTES;
+            ByteBuffer payload = blockBytes.slice(start, entry.length() - WalRecordCodec.HEADER_BYTES);
+            if (remote.matchesRecord(record, payload)) return true;
+            reclaimBlocker = new ReclaimBlocker(block, RemoteCoverageWalReclaimPolicy.identity(record, payload));
+            return false;
+        }
+        boolean accepted = policy.canReclaim(record, new WalAppendResult(entry.walOffset(), entry.length()));
+        if (!accepted) reclaimBlocker = null;
+        return accepted;
     }
 
     private List<BlockRingAllocator.Retirement> prepareRetirements(List<Committed> approved) throws IOException {

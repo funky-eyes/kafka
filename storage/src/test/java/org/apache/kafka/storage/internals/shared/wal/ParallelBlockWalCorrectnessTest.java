@@ -826,19 +826,22 @@ class ParallelBlockWalCorrectnessTest {
         var partition = new SharedPartitionId(1, 2, 0);
         CRC32C firstCrc = new CRC32C();
         firstCrc.update(new byte[1024], 0, 1024);
+        byte[] secondPayload = new byte[1024];
+        java.util.Arrays.fill(secondPayload, (byte) 1);
         CRC32C secondCrc = new CRC32C();
-        secondCrc.update(new byte[512], 0, 512);
+        secondCrc.update(secondPayload, 0, secondPayload.length);
         var first = new SharedObjectRange(partition, new OffsetRange(0, 1), 1, 0, 1024, firstCrc.getValue());
-        var wrong = new SharedObjectRange(partition, new OffsetRange(1, 2), 1, 1024, 512, secondCrc.getValue() + 1);
-        var second = new SharedObjectRange(partition, new OffsetRange(1, 2), 1, 1024, 512, secondCrc.getValue());
+        var wrong = new SharedObjectRange(partition, new OffsetRange(1, 2), 1, 1024, 1024, firstCrc.getValue());
+        var second = new SharedObjectRange(partition, new OffsetRange(1, 2), 1, 1024, 1024, secondCrc.getValue());
         var mismatched = new RemoteObjectIndex();
-        mismatched.add(new SharedObjectMetadata(1, 1536, 0, List.of(first, wrong)));
+        mismatched.add(new SharedObjectMetadata(1, 2048, 0, List.of(first, wrong)));
         var matching = new RemoteObjectIndex();
-        matching.add(new SharedObjectMetadata(2, 1536, 0, List.of(first, second)));
+        matching.add(new SharedObjectMetadata(2, 2048, 0, List.of(first, second)));
         try (WalIoBackend backend = backend(aio);
              var wal = CoordinatedRingWalAdapter.createWithBankedCheckpoints(
                  path, backend, CAPACITY, ALIGNMENT, 0, 8, 8L * ALIGNMENT)) {
-            wal.appendBatch(List.of(record(0, 1024), record(1, 512))).get(10, TimeUnit.SECONDS);
+            wal.appendBatch(List.of(record(0, 1024), WalRecord.data(1, 2, 0, 1, 1, 1, secondPayload)))
+                .get(10, TimeUnit.SECONDS);
             assertEquals(0, wal.reclaim(new RemoteCoverageWalReclaimPolicy(mismatched), 1));
             assertEquals(0, wal.reclaimedBeforeOffset());
             assertTrue(wal.reclaim(new RemoteCoverageWalReclaimPolicy(matching), 1) > 0);
