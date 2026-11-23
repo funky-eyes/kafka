@@ -57,6 +57,7 @@ final class BlockRingCheckpoint {
     record Opened(BlockRingCheckpoint checkpoint, BlockRingRecovery.Scan scan) { }
     record Identity(long high, long low) { }
     private record Selected(BlockRingCheckpoint checkpoint, State[] slots, State newest) { }
+    private record Detected(Layout layout, long capacity, Identity identity) { }
 
     private final WalIoBackend.Handle io;
     private final int alignment;
@@ -209,9 +210,25 @@ final class BlockRingCheckpoint {
 
     /** Select the format from checksummed headers, with a fixed configured file size. */
     static Opened openByFileSize(WalIoBackend.Handle io, int alignment, long size) throws IOException {
+        Detected detected = detectByFileSize(io, alignment, size);
+        if (detected.layout() == Layout.WINDOWED)
+            throw new IOException("Windowed WAL recovery is not enabled for broker use");
+        return open(io, alignment, detected.capacity(), detected.identity().high(), detected.identity().low(),
+            detected.layout());
+    }
+
+    /** Read-only inspection; the caller must hold exclusive ownership throughout use of the snapshot. */
+    static BlockRingRecovery.WindowSnapshot inspectWindowSnapshotByFileSize(WalIoBackend.Handle io, int alignment,
+        long size, int maxBlock, int maxItems, int maxRecords) throws IOException {
+        Detected detected = detectByFileSize(io, alignment, size);
+        if (detected.layout() != Layout.WINDOWED) throw new IOException("WAL does not use a scan window");
+        return inspectWindowSnapshot(io, alignment, detected.capacity(), detected.identity().high(),
+            detected.identity().low(), maxBlock, maxItems, maxRecords);
+    }
+
+    private static Detected detectByFileSize(WalIoBackend.Handle io, int alignment, long size) throws IOException {
         if (io.size() != size) throw new IOException("Unexpected ring WAL file size");
-        Layout detected = null;
-        Identity identity = null;
+        Detected detected = null;
         for (Layout layout : Layout.values()) {
             long capacity = size - layout.metadataBytes(alignment);
             if (capacity <= 0) continue;
@@ -219,13 +236,11 @@ final class BlockRingCheckpoint {
             Identity candidate = discoverIdentity(io, alignment, capacity, layout);
             if (candidate != null) {
                 if (detected != null) throw new IOException("Conflicting ring checkpoint formats");
-                detected = layout;
-                identity = candidate;
+                detected = new Detected(layout, capacity, candidate);
             }
         }
         if (detected == null) throw new IOException("No valid ring checkpoint format");
-        if (detected == Layout.WINDOWED) throw new IOException("Windowed WAL recovery is not enabled for broker use");
-        return open(io, alignment, size - detected.metadataBytes(alignment), identity.high(), identity.low(), detected);
+        return detected;
     }
 
     private static Layout layoutForSize(long size, int alignment, long capacity) throws IOException {

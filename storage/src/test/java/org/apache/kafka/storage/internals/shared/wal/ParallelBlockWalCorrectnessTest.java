@@ -527,6 +527,67 @@ class ParallelBlockWalCorrectnessTest {
         assertArrayEquals(before, Files.readAllBytes(path));
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void recoveryLeaseKeepsWindowReadOnlyAndExclusivelyOwned(boolean aio) throws Exception {
+        Path path = dir.resolve("window-recovery-lease-" + aio);
+        long dataStart = BlockRingCheckpoint.Layout.WINDOWED.metadataBytes(ALIGNMENT);
+        long fileBytes = dataStart + CAPACITY;
+        try (WalIoBackend backend = backend(aio); WalIoBackend.Handle io = backend.create(path)) {
+            io.preallocate(fileBytes);
+            var checkpoint = BlockRingCheckpoint.initialize(io, ALIGNMENT, CAPACITY, 7, 8);
+            checkpoint.extendScanCeiling(2L * ALIGNMENT);
+            writeInspectionBlock(io, dataStart, ALIGNMENT, 1, record(1, 1));
+            io.force();
+        }
+        byte[] before = Files.readAllBytes(path);
+        try (WalIoBackend backend = backend(aio)) {
+            WindowRecoveryLease lease = WindowRecoveryLease.open(path, backend, ALIGNMENT, fileBytes,
+                ALIGNMENT, 2, 1);
+            try (lease) {
+                var snapshot = lease.snapshot();
+                assertEquals(7, snapshot.identityHigh());
+                assertEquals(8, snapshot.identityLow());
+                assertEquals(2L * ALIGNMENT, snapshot.ceiling());
+                assertEquals(2, snapshot.items().size());
+                assertThrows(IOException.class, () -> WindowRecoveryLease.open(path, backend, ALIGNMENT,
+                    fileBytes, ALIGNMENT, 2, 1));
+                assertThrows(IOException.class, () -> CoordinatedRingWalAdapter.reopenByFileSize(path, backend,
+                    fileBytes, 0, 8, 8L * ALIGNMENT));
+            }
+            lease.close();
+            assertThrows(IOException.class, lease::snapshot);
+            // An incomplete scan must release both the reader and ownership.
+            assertThrows(IOException.class, () -> WindowRecoveryLease.open(path, backend, ALIGNMENT, fileBytes,
+                ALIGNMENT, 1, 1));
+            try (var reopened = WindowRecoveryLease.open(path, backend, ALIGNMENT, fileBytes, ALIGNMENT, 2, 1)) {
+                assertEquals(2, reopened.snapshot().items().size());
+            }
+        }
+        assertArrayEquals(before, Files.readAllBytes(path));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void recoveryLeaseRejectsLegacyWalAndReleasesOwnership(boolean aio) throws Exception {
+        Path path = dir.resolve("legacy-recovery-lease-" + aio);
+        long fileBytes = CAPACITY + BlockRingCheckpoint.Layout.BANKED.metadataBytes(ALIGNMENT);
+        try (WalIoBackend backend = backend(aio); WalIoBackend.Handle io = backend.create(path)) {
+            io.preallocate(fileBytes);
+            BlockRingCheckpoint.initialize(io, ALIGNMENT, CAPACITY, 7, 8);
+        }
+        byte[] before = Files.readAllBytes(path);
+        try (WalIoBackend backend = backend(aio)) {
+            assertThrows(IOException.class, () -> WindowRecoveryLease.open(path, backend, ALIGNMENT, fileBytes,
+                ALIGNMENT, 2, 1));
+            try (var wal = CoordinatedRingWalAdapter.reopenByFileSize(path, backend, fileBytes, 0, 8,
+                8L * ALIGNMENT)) {
+                assertEquals(0, wal.usedBytes());
+            }
+        }
+        assertArrayEquals(before, Files.readAllBytes(path));
+    }
+
     private static BlockRingRecovery.WindowVisitor inspectionEvents(List<String> events) {
         return new BlockRingRecovery.WindowVisitor() {
             @Override
