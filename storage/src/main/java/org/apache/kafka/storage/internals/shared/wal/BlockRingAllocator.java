@@ -38,10 +38,10 @@ final class BlockRingAllocator {
     record Address(long reservedStart, long blockStart, long end, long physical, long generation, long padding) { }
 
     private enum State {
-        RESERVED, FORCED, COMMITTED, RETIRING, QUARANTINED
+        OPEN, RESERVED, FORCED, COMMITTED, RETIRING, QUARANTINED
     }
     private static final class Entry {
-        final Address address;
+        Address address;
         State state = State.RESERVED;
         int pins;
         CompletableFuture<Void> drained;
@@ -89,11 +89,12 @@ final class BlockRingAllocator {
     private final long capacity;
     private final int alignment;
     private BlockRingCheckpoint windowCheckpoint;
+    private OpenAddress openTail;
     private long nextWindowGroup;
     private long head;
     private long reservedTail;
     private long committedTail;
-    private boolean fenced;
+    private volatile boolean fenced;
 
     BlockRingAllocator(long capacity, int alignment) {
         if (alignment <= 0 || capacity <= 0 || capacity % alignment != 0)
@@ -227,10 +228,89 @@ final class BlockRingAllocator {
 
     record WindowAddress(Address address, long firstGroupId, int groupCount) { }
 
+    static final class OpenAddress {
+        private final Entry entry;
+
+        private OpenAddress(Entry entry) {
+            this.entry = entry;
+        }
+    }
+
+    /** Reserve the first aligned extent of the sole, still-growable tail block. */
+    OpenAddress reserveOpen(int length) throws IOException {
+        validateLength(length);
+        synchronized (lock) {
+            if (windowCheckpoint != null) throw new IOException("Windowed reservations require group fencing");
+            if (openTail != null) throw new IOException("An open WAL block already owns the tail");
+            final Address address;
+            try {
+                address = reserveLocked(length);
+            } catch (ArithmeticException exhausted) {
+                throw new IOException("WAL logical address space exhausted", exhausted);
+            }
+            Entry entry = entries.get(address.reservedStart());
+            entry.state = State.OPEN;
+            openTail = new OpenAddress(entry);
+            return openTail;
+        }
+    }
+
+    /** Grow only the most recently reserved block without moving its physical start. */
+    void growOpen(OpenAddress open, int length) throws IOException {
+        validateLength(length);
+        synchronized (lock) {
+            checkOpen();
+            Entry entry = requireOpen(open);
+            Address old = entry.address;
+            if (length < old.end() - old.blockStart()) throw new IOException("Cannot shrink open block");
+            if (length > capacity - old.physical()) throw new CapacityException("Open block reaches ring end");
+            final long end;
+            try {
+                end = Math.addExact(old.blockStart(), length);
+            } catch (ArithmeticException exhausted) {
+                throw new IOException("WAL logical address space exhausted", exhausted);
+            }
+            if (end - head > capacity) throw new CapacityException("Ring capacity exceeded");
+            if (end != old.end()) {
+                entry.address = new Address(old.reservedStart(), old.blockStart(), end, old.physical(),
+                    old.generation(), old.padding());
+                reservedTail = end;
+            }
+        }
+    }
+
+    Address sealOpen(OpenAddress open) throws IOException {
+        synchronized (lock) {
+            checkOpen();
+            Entry entry = requireOpen(open);
+            entry.state = State.RESERVED;
+            openTail = null;
+            return entry.address;
+        }
+    }
+
+    private Entry requireOpen(OpenAddress open) throws IOException {
+        if (open == null || openTail != open || open.entry.state != State.OPEN ||
+            entries.get(open.entry.address.reservedStart()) != open.entry || open.entry.address.end() != reservedTail)
+            throw new IOException("WAL block is not the open tail reservation");
+        return open.entry;
+    }
+
+    boolean empty() {
+        synchronized (lock) {
+            return entries.isEmpty();
+        }
+    }
+
+    boolean fenced() {
+        return fenced;
+    }
+
     Address reserve(int length) throws IOException {
         validateLength(length);
         synchronized (lock) {
             if (windowCheckpoint != null) throw new IOException("Windowed reservations require group fencing");
+            if (openTail != null) throw new IOException("An open WAL block already owns the tail");
             return reserveLocked(length);
         }
     }

@@ -220,7 +220,9 @@ public final class SharedStorageEngine implements AutoCloseable {
         }
 
         List<WalRecord> records = new ArrayList<>(batches.size());
-        boolean[] exactHeapStorage = new boolean[batches.size()];
+        boolean cacheEnabled = localCacheLimit > CACHE_ENTRY_OVERHEAD;
+        boolean singleExact = cacheEnabled && batches.size() == 1 && batches.get(0).exactHeapStorage;
+        boolean[] exactHeapStorage = cacheEnabled && batches.size() > 1 ? new boolean[batches.size()] : null;
         long priorLastOffset = -1L;
         for (OwnedDataBatch batch : batches) {
             Objects.requireNonNull(batch, "batch");
@@ -240,7 +242,7 @@ public final class SharedStorageEngine implements AutoCloseable {
                 batch.lastOffset(),
                 batch.bytes
             ));
-            exactHeapStorage[records.size() - 1] = batch.exactHeapStorage;
+            setExactStorage(exactHeapStorage, records.size() - 1, batch.exactHeapStorage);
         }
 
         // Transfer an immutable group definition to the asynchronous WAL.
@@ -263,12 +265,12 @@ public final class SharedStorageEngine implements AutoCloseable {
             return submission.durable().thenApply(results -> {
                 List<WalLocation> published = walIndex.applyDataGroup(immutableRecords, List.copyOf(results));
                 liveWalDurability.dataGroupCompleted(partition, published);
-                if (localCacheLimit > CACHE_ENTRY_OVERHEAD) {
+                if (cacheEnabled) {
                     for (int i = 0; i < published.size(); i++) {
                         WalLocation location = published.get(i);
                         if (walIndex.find(walKey(partition), location.firstOffset()).filter(location::equals).isPresent()) {
                             cacheLocalBatch(partition, location, immutableRecords.get(i), cacheGeneration,
-                                exactHeapStorage[i]);
+                                exactHeapStorage == null ? singleExact : exactHeapStorage[i]);
                         }
                     }
                 }
@@ -276,6 +278,10 @@ public final class SharedStorageEngine implements AutoCloseable {
             });
         });
         return new OwnedBatchSubmission(reserved, durable);
+    }
+
+    private static void setExactStorage(boolean[] storage, int index, boolean exact) {
+        if (storage != null) storage[index] = exact;
     }
 
     private static WalLocation validatedLocation(WalRecord record, WalAppendResult result) {

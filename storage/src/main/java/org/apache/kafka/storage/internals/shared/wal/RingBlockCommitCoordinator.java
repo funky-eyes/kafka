@@ -118,7 +118,7 @@ final class RingBlockCommitCoordinator implements AutoCloseable {
     private ReclaimBlocker reclaimBlocker;
     private boolean closing;
     private int activeReads;
-    private Throwable failure;
+    private volatile Throwable failure;
 
     RingBlockCommitCoordinator(
             BlockRingAllocator allocator,
@@ -217,7 +217,46 @@ final class RingBlockCommitCoordinator implements AutoCloseable {
 
     /** One block may contain multiple atomic groups. Caller owns request aggregation. */
     CompletableFuture<List<List<WalAppendResult>>> appendGroups(List<List<WalRecord>> input) {
-        Prepared prepared = prepare(input);
+        return submitPrepared(prepare(input), null);
+    }
+
+    ParallelRingBlockWriter.OpenSubmission reserveOpen(int length) throws IOException {
+        synchronized (lock) {
+            checkHealthy();
+            if (rebasing) throw new ParallelRingBlockWriter.BusyException("Empty ring rebase in progress");
+            return writer.reserveOpen(length);
+        }
+    }
+
+    /** Fast failure check for a group fitting in already-reserved space. */
+    void checkAdmission() throws IOException {
+        Throwable cause = failure;
+        if (cause != null || allocator.fenced()) throw new IOException("Ring coordinator fenced", cause);
+    }
+
+    void growOpen(ParallelRingBlockWriter.OpenSubmission open, int length) throws IOException {
+        synchronized (lock) {
+            checkHealthy();
+            writer.growOpen(open, length);
+        }
+    }
+
+    void sealOpen(ParallelRingBlockWriter.OpenSubmission open) throws IOException {
+        synchronized (lock) {
+            checkHealthy();
+            writer.sealOpen(open);
+        }
+    }
+
+    CompletableFuture<List<List<WalAppendResult>>> submitOpen(
+        ParallelRingBlockWriter.OpenSubmission open, List<List<WalRecord>> input
+    ) {
+        return submitPrepared(prepare(input), open);
+    }
+
+    private CompletableFuture<List<List<WalAppendResult>>> submitPrepared(
+        Prepared prepared, ParallelRingBlockWriter.OpenSubmission open
+    ) {
         List<List<WalRecord>> groups = prepared.groups();
         int length = prepared.length();
         synchronized (lock) {
@@ -234,16 +273,12 @@ final class RingBlockCommitCoordinator implements AutoCloseable {
                     new AtomicReference<>();
             final ParallelRingBlockWriter.Submission submission;
             try {
-                submission =
-                        writer.submitOwned(
-                                length,
-                                offset -> {
-                                    var block =
-                                            AlignedWalBlockCodec.encodeWithLocations(
-                                                    offset, high, low, alignment, encoded);
-                                    locations.set(block.groups());
-                                    return block.bytes();
-                                });
+                java.util.function.LongFunction<ByteBuffer> encoder = offset -> {
+                    var block = AlignedWalBlockCodec.encodeWithLocations(offset, high, low, alignment, encoded);
+                    locations.set(block.groups());
+                    return block.bytes();
+                };
+                submission = open == null ? writer.submitOwned(length, encoder) : writer.submitReserved(open, length, encoder);
             } catch (IOException e) {
                 return CompletableFuture.failedFuture(e);
             }
@@ -587,7 +622,7 @@ final class RingBlockCommitCoordinator implements AutoCloseable {
                     committed.remove(block.address().blockStart());
                     released = Math.addExact(released, block.address().end() - block.address().reservedStart());
                 }
-                if (committed.isEmpty() && pending.isEmpty()) {
+                if (committed.isEmpty() && pending.isEmpty() && allocator.empty()) {
                     long target = allocator.emptyRebaseTarget();
                     if (target != committedTail) {
                         rebasing = true;

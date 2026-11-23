@@ -61,6 +61,20 @@ class ParallelBlockWalCorrectnessTest {
     Path dir;
 
     @Test
+    void openTailCannotBeOvertakenOrReusedAfterSealing() throws Exception {
+        var allocator = new BlockRingAllocator(CAPACITY, ALIGNMENT);
+        var open = allocator.reserveOpen(ALIGNMENT);
+        assertThrows(IOException.class, () -> allocator.reserveOpen(ALIGNMENT));
+        assertThrows(IOException.class, () -> allocator.reserve(ALIGNMENT));
+        allocator.growOpen(open, 2 * ALIGNMENT);
+        assertEquals(2L * ALIGNMENT, allocator.usedBytes());
+        var sealed = allocator.sealOpen(open);
+        assertThrows(IOException.class, () -> allocator.growOpen(open, 2 * ALIGNMENT));
+        var next = allocator.reserve(ALIGNMENT);
+        assertEquals(sealed.end(), next.reservedStart());
+    }
+
+    @Test
     void batchRetirementWaitsForEachReaderBeforeReusingItsBlock() throws Exception {
         var allocator = new BlockRingAllocator(CAPACITY, ALIGNMENT);
         var first = allocator.reserve(ALIGNMENT);
@@ -1030,6 +1044,167 @@ class ParallelBlockWalCorrectnessTest {
             List<Long> recovered = new ArrayList<>();
             wal.replay((record, location) -> recovered.add(record.firstOffset()));
             assertEquals(List.of(3L), recovered);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void activeBlockReservesImmediatelyAndBatchesSequentialAdmissions(boolean aio) throws Exception {
+        Path path = dir.resolve("active-block-sequential-" + aio);
+        List<SharedWal.AppendSubmission> admissions = new ArrayList<>();
+        try (WalIoBackend backend = backend(aio);
+             var wal = CoordinatedRingWalAdapter.create(path, backend, CAPACITY, ALIGNMENT,
+                 TimeUnit.SECONDS.toNanos(30))) {
+            for (int i = 0; i < 4; i++) {
+                var admission = wal.submitBatch(List.of(record(i, 1)));
+                assertTrue(admission.reserved().isDone(), "physical space is reserved during admission");
+                admission.reserved().get(1, TimeUnit.SECONDS);
+                assertFalse(admission.durable().isDone());
+                admissions.add(admission);
+            }
+            assertEquals(ALIGNMENT, wal.usedBytes());
+            wal.close();
+            for (var admission : admissions) admission.durable().get(10, TimeUnit.SECONDS);
+            assertEquals(1, wal.blockStats().blocks());
+            assertEquals(4, wal.blockStats().groups());
+        }
+        try (WalIoBackend backend = backend(aio);
+             var wal = CoordinatedRingWalAdapter.reopen(path, backend, CAPACITY, ALIGNMENT, 0)) {
+            List<Long> replay = new ArrayList<>();
+            wal.replay((record, location) -> replay.add(record.firstOffset()));
+            assertEquals(List.of(0L, 1L, 2L, 3L), replay);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void concurrentAdmissionsShareReservedBlockWithoutLosingGroups(boolean aio) throws Exception {
+        Path path = dir.resolve("active-block-concurrent-" + aio);
+        var pool = Executors.newFixedThreadPool(16);
+        var start = new CountDownLatch(1);
+        try (WalIoBackend backend = backend(aio);
+             var wal = CoordinatedRingWalAdapter.create(path, backend, CAPACITY, ALIGNMENT,
+                 TimeUnit.SECONDS.toNanos(30))) {
+            List<java.util.concurrent.Future<SharedWal.AppendSubmission>> submitted = new ArrayList<>();
+            for (int i = 0; i < 16; i++) {
+                long offset = i;
+                submitted.add(pool.submit(() -> {
+                    start.await();
+                    return wal.submitBatch(List.of(record(offset, 1)));
+                }));
+            }
+            start.countDown();
+            List<SharedWal.AppendSubmission> admissions = new ArrayList<>();
+            for (var future : submitted) {
+                var admission = future.get(10, TimeUnit.SECONDS);
+                admission.reserved().get(1, TimeUnit.SECONDS);
+                admissions.add(admission);
+            }
+            assertEquals(ALIGNMENT, wal.usedBytes());
+            wal.close();
+            for (var admission : admissions) admission.durable().get(10, TimeUnit.SECONDS);
+            assertEquals(1, wal.blockStats().blocks());
+            assertEquals(16, wal.blockStats().groups());
+        } finally {
+            pool.shutdownNow();
+        }
+        try (WalIoBackend backend = backend(aio);
+             var wal = CoordinatedRingWalAdapter.reopen(path, backend, CAPACITY, ALIGNMENT, 0)) {
+            Set<Long> recovered = new java.util.HashSet<>();
+            wal.replay((record, location) -> assertTrue(recovered.add(record.firstOffset())));
+            assertEquals(16, recovered.size());
+            for (long i = 0; i < 16; i++) assertTrue(recovered.contains(i));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void activeBlockGrowsOnlyWithinTheAvailablePhysicalExtent(boolean aio) throws Exception {
+        Path path = dir.resolve("active-block-grow-wrap-" + aio);
+        List<SharedWal.AppendSubmission> later = new ArrayList<>();
+        try (WalIoBackend backend = backend(aio);
+             var wal = CoordinatedRingWalAdapter.create(path, backend, CAPACITY, 2 * ALIGNMENT,
+                 TimeUnit.SECONDS.toNanos(30))) {
+            var first = wal.submitBatch(List.of(record(0, 3000)));
+            var second = wal.submitBatch(List.of(record(1, 7600)));
+            var third = wal.submitBatch(List.of(record(2, 500)));
+            first.durable().get(10, TimeUnit.SECONDS);
+            second.durable().get(10, TimeUnit.SECONDS);
+            third.reserved().get(1, TimeUnit.SECONDS);
+            assertFalse(third.durable().isDone());
+            long reclaimed = 0;
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (reclaimed < 3L * ALIGNMENT && System.nanoTime() < deadline) {
+                reclaimed += wal.reclaim((record, location) -> record.firstOffset() < 2, CAPACITY);
+                if (reclaimed < 3L * ALIGNMENT) Thread.yield();
+            }
+            assertEquals(3L * ALIGNMENT, reclaimed);
+            var fourth = wal.submitBatch(List.of(record(3, 5000)));
+            fourth.reserved().get(1, TimeUnit.SECONDS);
+            assertEquals(3L * ALIGNMENT, wal.usedBytes(), "the new 8 KiB block wraps after the open 4 KiB block");
+            later.add(third);
+            later.add(fourth);
+            wal.close();
+            for (var admission : later) admission.durable().get(10, TimeUnit.SECONDS);
+        }
+        try (WalIoBackend backend = backend(aio);
+             var wal = CoordinatedRingWalAdapter.reopen(path, backend, CAPACITY, 2 * ALIGNMENT, 0)) {
+            List<Long> replay = new ArrayList<>();
+            wal.replay((record, location) -> replay.add(record.firstOffset()));
+            assertEquals(List.of(2L, 3L), replay);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void reclaimDoesNotRebasePastAnAdmittedOpenBlock(boolean aio) throws Exception {
+        Path path = dir.resolve("active-block-reclaim-" + aio);
+        try (WalIoBackend backend = backend(aio);
+             var wal = CoordinatedRingWalAdapter.create(path, backend, CAPACITY, ALIGNMENT,
+                 TimeUnit.SECONDS.toNanos(30))) {
+            var first = wal.submitBatch(List.of(record(0, 3000)));
+            var second = wal.submitBatch(List.of(record(1, 3000)));
+            first.reserved().get(1, TimeUnit.SECONDS);
+            second.reserved().get(1, TimeUnit.SECONDS);
+            first.durable().get(10, TimeUnit.SECONDS);
+            assertFalse(second.durable().isDone());
+            long reclaimed = 0;
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (reclaimed == 0 && System.nanoTime() < deadline) {
+                reclaimed = wal.reclaim((record, location) -> true, ALIGNMENT);
+                if (reclaimed == 0) Thread.yield();
+            }
+            assertEquals(ALIGNMENT, reclaimed);
+            assertEquals(ALIGNMENT, wal.reclaimedBeforeOffset());
+            assertEquals(ALIGNMENT, wal.usedBytes());
+            wal.close();
+            second.durable().get(10, TimeUnit.SECONDS);
+        }
+        try (WalIoBackend backend = backend(aio);
+             var wal = CoordinatedRingWalAdapter.reopen(path, backend, CAPACITY, ALIGNMENT, 0)) {
+            List<Long> replay = new ArrayList<>();
+            wal.replay((record, location) -> replay.add(record.firstOffset()));
+            assertEquals(List.of(1L), replay);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void earlierForceFailureFencesAdmittedOpenBlock(boolean aio) throws Exception {
+        Path path = dir.resolve("active-block-force-failure-" + aio);
+        try (var backend = new CountingBackend(aio);
+             var wal = CoordinatedRingWalAdapter.create(path, backend, CAPACITY, ALIGNMENT,
+                 TimeUnit.SECONDS.toNanos(30))) {
+            backend.failAtForce = 1;
+            backend.countForces.set(true);
+            var first = wal.submitBatch(List.of(record(0, 3000)));
+            var second = wal.submitBatch(List.of(record(1, 3000)));
+            first.reserved().get(1, TimeUnit.SECONDS);
+            second.reserved().get(1, TimeUnit.SECONDS);
+            assertThrows(ExecutionException.class, () -> first.durable().get(10, TimeUnit.SECONDS));
+            assertThrows(ExecutionException.class, () -> second.durable().get(10, TimeUnit.SECONDS));
+            var rejected = wal.submitBatch(List.of(record(2, 1)));
+            assertThrows(ExecutionException.class, () -> rejected.reserved().get(1, TimeUnit.SECONDS));
         }
     }
 

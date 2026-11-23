@@ -42,6 +42,18 @@ public final class CoordinatedRingWalAdapter implements SharedWal {
     private record Request(List<WalRecord> records, int bytes, CompletableFuture<Void> reserved,
                            CompletableFuture<List<WalAppendResult>> result) { }
 
+    private static final class OpenBlock {
+        private final ParallelRingBlockWriter.OpenSubmission reservation;
+        private final List<Request> requests = new ArrayList<>();
+        private int bytes = AlignedWalBlockCodec.HEADER_BYTES;
+        private int reservedBytes;
+
+        private OpenBlock(ParallelRingBlockWriter.OpenSubmission reservation, int reservedBytes) {
+            this.reservation = reservation;
+            this.reservedBytes = reservedBytes;
+        }
+    }
+
     private final Object lock = new Object();
     private final WalIoBackend.Handle handle;
     private final WalIoBackend backend;
@@ -54,11 +66,11 @@ public final class CoordinatedRingWalAdapter implements SharedWal {
     private final long lingerNanos;
     private final int maxAdmissionGroups;
     private final long maxAdmissionBytes;
-    private final ArrayDeque<Request> queue = new ArrayDeque<>();
+    private final ArrayDeque<OpenBlock> sealedBlocks = new ArrayDeque<>();
     private final Set<Request> outstanding = new HashSet<>();
     private final CompletableFuture<Void> closed = new CompletableFuture<>();
     private final Thread assembler;
-    private long queuedBytes;
+    private OpenBlock activeBlock;
     private long outstandingBytes;
     private long blocks;
     private long groups;
@@ -274,36 +286,88 @@ public final class CoordinatedRingWalAdapter implements SharedWal {
     @Override
     public AppendSubmission submitBatch(List<WalRecord> input) {
         java.util.Objects.requireNonNull(input, "records");
-        final List<WalRecord> records;
-        long size;
+        final Request request;
         try {
-            records = List.copyOf(input);
-            if (records.isEmpty()) throw new IllegalArgumentException("Empty WAL group");
-            size = WalRecordCodec.HEADER_BYTES;
-            for (WalRecord record : records) {
-                if (record.type() == WalRecordType.GROUP_COMMIT)
-                    throw new IllegalArgumentException("Internal record");
-                size = Math.addExact(size, WalRecordCodec.encodedLength(record));
-            }
+            request = prepareRequest(input);
         } catch (Throwable error) {
             return failedSubmission(error);
         }
-        if (size + AlignedWalBlockCodec.HEADER_BYTES > maxBlock)
-            return failedSubmission(new WalCapacityExceededException("WAL group exceeds block limit"));
-        var request = new Request(records, Math.toIntExact(size), new CompletableFuture<>(), new CompletableFuture<>());
+        Throwable rejected = null;
         synchronized (lock) {
             if (closing || failure != null)
                 return failedSubmission(new IOException("WAL closed", failure));
-            if (outstanding.size() >= maxAdmissionGroups || size > maxAdmissionBytes - outstandingBytes)
+            if (outstanding.size() >= maxAdmissionGroups || request.bytes() > maxAdmissionBytes - outstandingBytes)
                 return failedSubmission(
                         new WalCapacityExceededException("WAL queue full"));
-            outstanding.add(request);
-            outstandingBytes += size;
-            queue.addLast(request);
-            queuedBytes += size;
+            try {
+                reserveFor(request);
+            } catch (IOException error) {
+                rejected = normalize(error);
+            }
+            if (rejected == null) {
+                outstanding.add(request);
+                outstandingBytes += request.bytes();
+            }
             lock.notifyAll();
         }
+        if (rejected != null) {
+            if (!(rejected instanceof WalCapacityExceededException)) fail(rejected);
+            return failedSubmission(rejected);
+        }
+        request.reserved().complete(null);
         return new AppendSubmission(request.reserved().copy(), request.result().copy());
+    }
+
+    private Request prepareRequest(List<WalRecord> input) throws IOException {
+        List<WalRecord> records = List.copyOf(input);
+        if (records.isEmpty()) throw new IllegalArgumentException("Empty WAL group");
+        long size = WalRecordCodec.HEADER_BYTES;
+        for (WalRecord record : records) {
+            if (record.type() == WalRecordType.GROUP_COMMIT) throw new IllegalArgumentException("Internal record");
+            size = Math.addExact(size, WalRecordCodec.encodedLength(record));
+        }
+        if (size + AlignedWalBlockCodec.HEADER_BYTES > maxBlock)
+            throw new WalCapacityExceededException("WAL group exceeds block limit");
+        return new Request(records, Math.toIntExact(size), new CompletableFuture<>(), new CompletableFuture<>());
+    }
+
+    /** Caller holds the admission lock; every accepted group owns its aligned ring space. */
+    private void reserveFor(Request request) throws IOException {
+        if (activeBlock != null) {
+            coordinator.checkAdmission();
+            long nextBytes = (long) activeBlock.bytes + request.bytes();
+            if (nextBytes <= maxBlock) {
+                try {
+                    int nextLength = alignedLength(nextBytes);
+                    if (nextLength > activeBlock.reservedBytes) {
+                        coordinator.growOpen(activeBlock.reservation, nextLength);
+                        activeBlock.reservedBytes = nextLength;
+                    }
+                    activeBlock.requests.add(request);
+                    activeBlock.bytes = (int) nextBytes;
+                    return;
+                } catch (BlockRingAllocator.CapacityException full) {
+                    // The open block cannot grow across the physical end or
+                    // beyond capacity. Seal it before trying a new block.
+                }
+            }
+            sealActive();
+        }
+        int length = alignedLength((long) AlignedWalBlockCodec.HEADER_BYTES + request.bytes());
+        var reservation = coordinator.reserveOpen(length);
+        activeBlock = new OpenBlock(reservation, length);
+        activeBlock.requests.add(request);
+        activeBlock.bytes += request.bytes();
+    }
+
+    private int alignedLength(long bytes) {
+        return Math.toIntExact(((bytes + ALIGNMENT - 1) / ALIGNMENT) * ALIGNMENT);
+    }
+
+    private void sealActive() throws IOException {
+        coordinator.sealOpen(activeBlock.reservation);
+        sealedBlocks.addLast(activeBlock);
+        activeBlock = null;
     }
 
     private static AppendSubmission failedSubmission(Throwable error) {
@@ -313,16 +377,10 @@ public final class CoordinatedRingWalAdapter implements SharedWal {
     private void assemble() {
         try {
             while (true) {
-                var batch = awaitBatch();
-                if (batch.isEmpty()) return;
-                var completion = coordinator.appendGroups(batch.stream().map(Request::records).toList());
-                if (completion.isCompletedExceptionally()) {
-                    completion.whenComplete((ignored, error) -> batch.forEach(request ->
-                        request.reserved().completeExceptionally(normalize(error))));
-                } else {
-                    // appendGroups reserved physical ring space before returning.
-                    batch.forEach(request -> request.reserved().complete(null));
-                }
+                OpenBlock block = awaitBlock();
+                if (block == null) return;
+                var batch = block.requests;
+                var completion = coordinator.submitOpen(block.reservation, batch.stream().map(Request::records).toList());
                 completion.whenComplete((results, error) -> complete(batch, results, error));
             }
         } catch (Throwable t) {
@@ -330,27 +388,27 @@ public final class CoordinatedRingWalAdapter implements SharedWal {
         }
     }
 
-    private List<Request> awaitBatch() throws InterruptedException {
-        List<Request> batch = new ArrayList<>();
-        int used = AlignedWalBlockCodec.HEADER_BYTES;
+    private OpenBlock awaitBlock() throws InterruptedException, IOException {
         synchronized (lock) {
-            while (queue.isEmpty() && !closing && failure == null) lock.wait();
-            if (failure != null || closing && queue.isEmpty()) return batch;
-            long deadline = System.nanoTime() + lingerNanos;
-            while (!closing
-                    && failure == null
-                    && queue.size() < maxAdmissionGroups
-                    && queuedBytes < maxBlock - used
-                    && deadline - System.nanoTime() > 0)
-                TimeUnit.NANOSECONDS.timedWait(lock, deadline - System.nanoTime());
-            while (!queue.isEmpty() && queue.peekFirst().bytes() <= maxBlock - used) {
-                Request request = queue.removeFirst();
-                used += request.bytes();
-                queuedBytes -= request.bytes();
-                batch.add(request);
-            }
+            while (sealedBlocks.isEmpty() && activeBlock == null && !closing && failure == null) lock.wait();
+            if (failure != null || closing && sealedBlocks.isEmpty() && activeBlock == null) return null;
+            if (!sealedBlocks.isEmpty()) return sealedBlocks.removeFirst();
+            waitForActiveBlock();
+            if (failure != null) return null;
+            if (sealedBlocks.isEmpty()) sealActive();
+            return sealedBlocks.removeFirst();
         }
-        return batch;
+    }
+
+    /** Caller holds the admission lock; waiting releases it for more appends. */
+    private void waitForActiveBlock() throws InterruptedException {
+        long deadline = System.nanoTime() + lingerNanos;
+        while (!closing && failure == null && sealedBlocks.isEmpty() &&
+            activeBlock.requests.size() < maxAdmissionGroups && activeBlock.bytes < maxBlock) {
+            long remaining = deadline - System.nanoTime();
+            if (remaining <= 0) return;
+            TimeUnit.NANOSECONDS.timedWait(lock, remaining);
+        }
     }
 
     private void complete(
@@ -396,8 +454,8 @@ public final class CoordinatedRingWalAdapter implements SharedWal {
             failed = List.copyOf(outstanding);
             outstanding.clear();
             outstandingBytes = 0;
-            queue.clear();
-            queuedBytes = 0;
+            sealedBlocks.clear();
+            activeBlock = null;
             lock.notifyAll();
         }
         for (Request request : failed) {

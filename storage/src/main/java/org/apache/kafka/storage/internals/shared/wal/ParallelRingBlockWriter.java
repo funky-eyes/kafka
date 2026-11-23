@@ -42,6 +42,15 @@ final class ParallelRingBlockWriter implements AutoCloseable {
     record Submission(BlockRingAllocator.Address address, CompletableFuture<BlockRingAllocator.Address> forced) { }
     record WindowSubmission(BlockRingAllocator.Address address, long firstGroupId,
                             CompletableFuture<List<List<WalAppendResult>>> forced) { }
+    static final class OpenSubmission {
+        private final BlockRingAllocator.OpenAddress open;
+        private BlockRingAllocator.Address address;
+        private boolean submitted;
+
+        private OpenSubmission(BlockRingAllocator.OpenAddress open) {
+            this.open = open;
+        }
+    }
     private record WrittenBlock(BlockRingAllocator.Address address,
                                 CompletableFuture<BlockRingAllocator.Address> result) { }
 
@@ -108,6 +117,51 @@ final class ParallelRingBlockWriter implements AutoCloseable {
                 result.completeExceptionally(t);
             }
             return new Submission(address, result.copy());
+        }
+    }
+
+    /** Charge both a writer slot and ring space before admitting any group. */
+    OpenSubmission reserveOpen(int length) throws IOException {
+        synchronized (lock) {
+            if (closed) throw new IOException("Ring writer closed");
+            if (pending >= maxPending) throw new BusyException("Ring writer busy");
+            var open = allocator.reserveOpen(length);
+            pending++;
+            return new OpenSubmission(open);
+        }
+    }
+
+    void growOpen(OpenSubmission submission, int length) throws IOException {
+        synchronized (lock) {
+            if (closed || submission == null || submission.address != null) throw new IOException("Block is not open");
+            allocator.growOpen(submission.open, length);
+        }
+    }
+
+    void sealOpen(OpenSubmission submission) throws IOException {
+        synchronized (lock) {
+            if (closed || submission == null || submission.address != null) throw new IOException("Block is not open");
+            submission.address = allocator.sealOpen(submission.open);
+        }
+    }
+
+    Submission submitReserved(OpenSubmission submission, int length, LongFunction<ByteBuffer> encoder) throws IOException {
+        if (encoder == null) throw new IllegalArgumentException("Missing block encoder");
+        synchronized (lock) {
+            if (closed || submission == null || submission.address == null || submission.submitted)
+                throw new IOException("Block was not sealed or was already submitted");
+            if (submission.address.end() - submission.address.blockStart() != length)
+                throw new IOException("Sealed length differs from reservation");
+            submission.submitted = true;
+            CompletableFuture<BlockRingAllocator.Address> result = new CompletableFuture<>();
+            try {
+                writers.execute(() -> write(submission.address, length, encoder, result));
+            } catch (Throwable failure) {
+                pending--;
+                allocator.fence();
+                result.completeExceptionally(failure);
+            }
+            return new Submission(submission.address, result.copy());
         }
     }
 
