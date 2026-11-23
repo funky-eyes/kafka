@@ -51,6 +51,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -818,12 +819,132 @@ class ParallelBlockWalCorrectnessTest {
                 assertEquals(1, analysis.partitions().get(a).quarantined().size());
                 assertEquals(Set.of(WindowPartitionReconciler.Problem.GAP_OR_OVERLAP,
                     WindowPartitionReconciler.Problem.REQUIRED_OFFSET_MISSING), analysis.partitions().get(a).problems());
+                var bBoundary = new WindowPartitionReconciler.Boundary(0, 1, 3);
+                var staged = lease.readContiguous(b, bBoundary, 1);
+                assertEquals(1, staged.size());
+                assertEquals(1, staged.get(0).size());
+                assertEquals(1, staged.get(0).get(0).partition());
+                assertEquals(1, staged.get(0).get(0).payload().get(0));
+                assertThrows(IOException.class, () -> lease.readContiguous(b, bBoundary, 0));
+                assertThrows(IOException.class, () -> lease.readContiguous(a,
+                    new WindowPartitionReconciler.Boundary(0, 1, 1), 1024));
                 assertThrows(IOException.class, () -> CoordinatedRingWalAdapter.reopenByFileSize(path, backend,
                     fileBytes, 0, 8, 8L * ALIGNMENT));
             }
             assertThrows(IOException.class, () -> lease.analyze(Map.of()));
+            assertThrows(IOException.class, () -> lease.readContiguous(b,
+                new WindowPartitionReconciler.Boundary(0, 1, 3), 1024));
         }
         assertArrayEquals(before, Files.readAllBytes(path));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void leasedCandidateReadRejectsChangesAndKeepsOwnership(boolean aio) throws Exception {
+        Path path = dir.resolve("window-candidate-read-" + aio);
+        long dataStart = BlockRingCheckpoint.Layout.WINDOWED.metadataBytes(ALIGNMENT);
+        long fileBytes = dataStart + CAPACITY;
+        WalRecord original = WalRecord.data(1, 2, 1, 3, 0, 0, new byte[] {1});
+        try (WalIoBackend backend = backend(aio); WalIoBackend.Handle io = backend.create(path)) {
+            io.preallocate(fileBytes);
+            var checkpoint = BlockRingCheckpoint.initialize(io, ALIGNMENT, CAPACITY, 7, 8);
+            checkpoint.extendScanCeiling(2L * ALIGNMENT);
+            writeInspectionBlock(io, dataStart, ALIGNMENT, 1, original);
+            io.force();
+            WindowRecoveryLease lease = WindowRecoveryLease.open(path, backend, ALIGNMENT, fileBytes, ALIGNMENT, 2, 1);
+            try (lease) {
+                assertThrows(IOException.class, () -> RingWalOwnership.acquire(path));
+                assertThrows(IOException.class, () -> lease.readCandidate(0));
+                var block = lease.readCandidate(ALIGNMENT);
+                assertEquals(1, block.groups().size());
+                assertEquals(1, block.groups().get(0).id());
+                var record = block.groups().get(0).records().get(0).record();
+                assertEquals(1, record.partition());
+                assertEquals(1, record.payload().get(0));
+
+                assertEquals(1, io.write(ByteBuffer.wrap(new byte[] {42}), dataStart + ALIGNMENT + 70));
+                io.force();
+                assertThrows(IOException.class, () -> lease.readCandidate(ALIGNMENT));
+
+                // A non-cooperating writer changes the payload but leaves the
+                // partition, offsets and group identity identical and valid.
+                writeInspectionBlock(io, dataStart, ALIGNMENT, 1,
+                    WalRecord.data(1, 2, 1, 3, 0, 0, new byte[] {2}));
+                io.force();
+                assertThrows(IOException.class, () -> lease.readCandidate(ALIGNMENT));
+
+                writeInspectionBlock(io, dataStart, ALIGNMENT, 1, original);
+                io.force();
+                assertEquals(1, lease.readCandidate(ALIGNMENT).groups().get(0).records().get(0).record().payload().get(0));
+                checkpoint.extendScanCeiling(3L * ALIGNMENT);
+                assertThrows(IOException.class, () -> lease.readCandidate(ALIGNMENT));
+            }
+            assertThrows(IOException.class, () -> lease.readCandidate(ALIGNMENT));
+            try (var ownership = RingWalOwnership.acquire(path)) {
+                assertNotNull(ownership);
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void partitionRecoveryDoesNotReturnAPartialPrefixWhenALaterCandidateChanges(boolean aio) throws Exception {
+        Path path = dir.resolve("window-partition-stage-failure-" + aio);
+        long dataStart = BlockRingCheckpoint.Layout.WINDOWED.metadataBytes(ALIGNMENT);
+        long fileBytes = dataStart + CAPACITY;
+        var partition = new WalPartitionKey(1, 2, 1);
+        var boundary = new WindowPartitionReconciler.Boundary(0, 2, 3);
+        try (WalIoBackend backend = backend(aio); WalIoBackend.Handle io = backend.create(path)) {
+            io.preallocate(fileBytes);
+            var checkpoint = BlockRingCheckpoint.initialize(io, ALIGNMENT, CAPACITY, 7, 8);
+            checkpoint.extendScanCeiling(3L * ALIGNMENT);
+            writeInspectionBlock(io, dataStart, ALIGNMENT, 1, WalRecord.data(1, 2, 1, 3, 0, 0, new byte[] {1}));
+            writeInspectionBlock(io, dataStart, 2L * ALIGNMENT, 2, WalRecord.data(1, 2, 1, 3, 1, 1, new byte[] {2}));
+            io.force();
+            try (var lease = WindowRecoveryLease.open(path, backend, ALIGNMENT, fileBytes, ALIGNMENT, 3, 2)) {
+                var staged = lease.readContiguous(partition, boundary, 2);
+                assertEquals(2, staged.size());
+                assertEquals(0, staged.get(0).get(0).firstOffset());
+                assertEquals(1, staged.get(1).get(0).firstOffset());
+                writeInspectionBlock(io, dataStart, 2L * ALIGNMENT, 2,
+                    WalRecord.data(1, 2, 1, 3, 1, 1, new byte[] {3}));
+                io.force();
+                assertThrows(IOException.class, () -> lease.readContiguous(partition, boundary, 2));
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void partitionRecoveryPreservesGroupsWhenPartitionsShareABlock(boolean aio) throws Exception {
+        Path path = dir.resolve("window-partition-shared-block-" + aio);
+        long dataStart = BlockRingCheckpoint.Layout.WINDOWED.metadataBytes(ALIGNMENT);
+        long fileBytes = dataStart + CAPACITY;
+        var partition = new WalPartitionKey(1, 2, 1);
+        try (WalIoBackend backend = backend(aio); WalIoBackend.Handle io = backend.create(path)) {
+            io.preallocate(fileBytes);
+            var checkpoint = BlockRingCheckpoint.initialize(io, ALIGNMENT, CAPACITY, 7, 8);
+            checkpoint.extendScanCeiling(2L * ALIGNMENT);
+            ByteBuffer block = AlignedWalBlockCodec.encode(ALIGNMENT, 7, 8, ALIGNMENT, List.of(
+                new AlignedWalBlockCodec.Group(1, List.of(WalRecord.data(1, 2, 1, 3, 0, 0, new byte[] {1}))),
+                new AlignedWalBlockCodec.Group(2, List.of(WalRecord.data(1, 2, 0, 4, 0, 0, new byte[] {9}))),
+                new AlignedWalBlockCodec.Group(3, List.of(WalRecord.data(1, 2, 1, 3, 1, 1, new byte[] {2})))));
+            long position = dataStart + ALIGNMENT;
+            while (block.hasRemaining()) {
+                int written = io.write(block, position);
+                assertTrue(written > 0);
+                position += written;
+            }
+            io.force();
+            try (var lease = WindowRecoveryLease.open(path, backend, ALIGNMENT, fileBytes, ALIGNMENT, 2, 3)) {
+                var groups = lease.readContiguous(partition, new WindowPartitionReconciler.Boundary(0, 2, 3), 2);
+                assertEquals(2, groups.size());
+                assertEquals(0, groups.get(0).get(0).firstOffset());
+                assertEquals(1, groups.get(1).get(0).firstOffset());
+                assertEquals(1, groups.get(0).get(0).payload().get(0));
+                assertEquals(2, groups.get(1).get(0).payload().get(0));
+            }
+        }
     }
 
     @ParameterizedTest

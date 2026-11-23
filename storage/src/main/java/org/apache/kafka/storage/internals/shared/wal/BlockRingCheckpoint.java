@@ -249,6 +249,18 @@ final class BlockRingCheckpoint {
             detected.identity().low(), maxBlock, maxItems, maxRecords);
     }
 
+    /** Check the entire read-only checkpoint state without repairing either bank. */
+    static void validateWindowSnapshot(WalIoBackend.Handle io, int alignment,
+                                       BlockRingRecovery.WindowSnapshot snapshot) throws IOException {
+        long size = Math.addExact(Layout.WINDOWED.metadataBytes(alignment), snapshot.capacity());
+        if (io.size() != size) throw new IOException("WAL file size changed during recovery");
+        State actual = select(io, alignment, snapshot.capacity(), snapshot.identityHigh(), snapshot.identityLow(),
+            Layout.WINDOWED).newest();
+        State expected = new State(snapshot.checkpointGeneration(), snapshot.head(), snapshot.tail(),
+            snapshot.retiredLastGroup(), snapshot.lastCommittedGroup(), snapshot.ceiling());
+        if (!expected.equals(actual)) throw new IOException("WAL checkpoint changed during recovery");
+    }
+
     private static Detected detectByFileSize(WalIoBackend.Handle io, int alignment, long size) throws IOException {
         if (io.size() != size) throw new IOException("Unexpected ring WAL file size");
         Detected detected = null;

@@ -48,7 +48,7 @@ final class AlignedWalBlockCodec {
 
     record Entry(WalRecord record, long walOffset, int length) { }
     record DecodedGroup(long id, List<Entry> records) { }
-    record DecodedBlock(int length, List<DecodedGroup> groups) { }
+    record DecodedBlock(int length, int checksum, List<DecodedGroup> groups) { }
     record EncodedBlock(ByteBuffer bytes, List<List<WalAppendResult>> groups) { }
 
     static ByteBuffer encode(long offset, long incarnationHigh, long incarnationLow,
@@ -139,7 +139,7 @@ final class AlignedWalBlockCodec {
             cursor = Math.addExact(cursor, result.length());
         }
         if (!pending.isEmpty() || groups.size() != groupCount) throw corrupt("incomplete or missing group");
-        return new DecodedBlock(length, List.copyOf(groups));
+        return new DecodedBlock(length, block.getInt(CRC_OFFSET), List.copyOf(groups));
     }
 
     private static void validateHeader(ByteBuffer block, long expectedOffset, long high, long low,

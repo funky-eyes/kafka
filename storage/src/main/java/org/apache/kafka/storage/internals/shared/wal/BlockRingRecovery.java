@@ -34,7 +34,7 @@ final class BlockRingRecovery {
     record Scan(List<RecoveredBlock> blocks, long lastGroup) { }
 
     sealed interface WindowItem permits WindowCandidate, WindowUnclassified { }
-    record WindowCandidate(long start, int length, List<WindowGroup> groups) implements WindowItem {
+    record WindowCandidate(long start, int length, int checksum, List<WindowGroup> groups) implements WindowItem {
         WindowCandidate {
             groups = List.copyOf(groups);
         }
@@ -48,7 +48,8 @@ final class BlockRingRecovery {
     record WindowEntry(WalRecordType type, WalPartitionKey partition, int leaderEpoch, long firstOffset,
                        long lastOffset, long walOffset, int length, int payloadLength) { }
     record WindowSnapshot(long identityHigh, long identityLow, long checkpointGeneration,
-                          long capacity, long head, long tail, long ceiling, long lastCommittedGroup, List<WindowItem> items) {
+                          long capacity, long head, long tail, long ceiling, long retiredLastGroup,
+                          long lastCommittedGroup, List<WindowItem> items) {
         WindowSnapshot {
             items = List.copyOf(items);
         }
@@ -93,7 +94,7 @@ final class BlockRingRecovery {
                 }
                 groups.add(new WindowGroup(group.id(), entries));
             }
-            items.add(new WindowCandidate(start, block.length(), groups));
+            items.add(new WindowCandidate(start, block.length(), block.checksum(), groups));
         }
 
         @Override
@@ -108,7 +109,7 @@ final class BlockRingRecovery {
 
         WindowSnapshot complete(long high, long low, long capacity, BlockRingCheckpoint.State state) {
             return new WindowSnapshot(high, low, state.generation(), capacity, state.head(), state.tail(), state.scanCeiling(),
-                state.lastGroup(), items);
+                state.retiredLastGroup(), state.lastGroup(), items);
         }
     }
 
@@ -212,6 +213,29 @@ final class BlockRingRecovery {
             // Never turn damaged bytes into an empty or reclaimable range.
             return null;
         }
+    }
+
+    /** Reread one previously inspected candidate without treating it as committed data. */
+    static AlignedWalBlockCodec.DecodedBlock rereadCandidate(WalIoBackend.Handle io, int alignment, int maxBlock,
+        WindowSnapshot snapshot, WindowCandidate expected, int maxRecords) throws IOException {
+        long dataStart = BlockRingCheckpoint.Layout.WINDOWED.metadataBytes(alignment);
+        validateLayout(alignment, snapshot.capacity());
+        validateInspectionBounds(dataStart, snapshot.capacity(), alignment, maxBlock,
+            snapshot.head(), snapshot.tail(), snapshot.ceiling());
+        long start = expected.start();
+        if (start < snapshot.tail() || start >= snapshot.ceiling() || start % alignment != 0 ||
+            expected.length() < alignment || expected.length() > maxBlock)
+            throw new IOException("Candidate is outside the recovery window");
+        ByteBuffer header = readFully(io, dataStart + start % snapshot.capacity(), alignment);
+        if (header.getInt(8) != expected.length() || header.getInt(AlignedWalBlockCodec.CRC_OFFSET) != expected.checksum())
+            throw new IOException("Recovery candidate changed after inspection");
+        var decoded = inspectCandidate(io, header, dataStart, snapshot.capacity(), alignment, maxBlock,
+            start, snapshot.ceiling(), snapshot.identityHigh(), snapshot.identityLow());
+        if (decoded == null) throw new IOException("Recovery candidate is missing or corrupt");
+        var builder = new WindowSnapshotBuilder(1, maxRecords);
+        builder.candidate(start, decoded);
+        if (!expected.equals(builder.items.get(0))) throw new IOException("Recovery candidate changed after inspection");
+        return decoded;
     }
 
     private static void validateBounds(long dataStart, long capacity, int alignment, long head, long tail,
