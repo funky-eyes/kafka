@@ -118,6 +118,28 @@ final class BlockRingCheckpoint {
     }
 
     /**
+     * Select a windowed checkpoint for the internal restart fence. The caller
+     * must exclusively own the file; this does not repair metadata, publish
+     * candidates, authorize reclamation or enable Broker startup.
+     */
+    static Opened openWindowForReservationFence(WalIoBackend.Handle io, int alignment, long capacity,
+                                                 long high, long low) throws IOException {
+        Layout layout = layoutForSize(io.size(), alignment, capacity);
+        if (layout != Layout.WINDOWED) throw new IOException("WAL does not use a scan window");
+        Selected selected = select(io, alignment, capacity, high, low, layout);
+        BlockRingCheckpoint checkpoint = selected.checkpoint();
+        State state = selected.newest();
+        var scan = BlockRingRecovery.scan(io, checkpoint.metadataBytes(), capacity, alignment,
+            state.head(), state.tail(), state.retiredLastGroup(), state.lastGroup(), high, low);
+        if (!state.equals(select(io, alignment, capacity, high, low, layout).newest()))
+            throw new IOException("WAL checkpoint changed during reservation recovery");
+        synchronized (checkpoint) {
+            checkpoint.current = state;
+        }
+        return new Opened(checkpoint, scan);
+    }
+
+    /**
      * Inspect only after validating the stored identity, checkpoints and strict
      * prefix. The caller must hold exclusive WAL ownership. This method does
      * not repair metadata, publish records or authorize physical reuse.
@@ -294,6 +316,14 @@ final class BlockRingCheckpoint {
     synchronized State current() throws IOException {
         checkOpen();
         return current;
+    }
+
+    boolean windowed() {
+        return layout == Layout.WINDOWED;
+    }
+
+    boolean matchesWindowWriter(WalIoBackend.Handle handle, long start, long writerHigh, long writerLow) {
+        return io == handle && start == metadataBytes() && high == writerHigh && low == writerLow;
     }
 
     boolean matchesLayout(int expectedAlignment, long expectedHigh, long expectedLow) {

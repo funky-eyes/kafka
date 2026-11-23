@@ -157,6 +157,124 @@ class ParallelBlockWalCorrectnessTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
+    void windowRestartFencesAddressesAndGroupIdsAcrossRepeatedReopens(boolean aio) throws Exception {
+        Path path = dir.resolve("window-restart-fence-" + aio);
+        long dataStart = BlockRingCheckpoint.Layout.WINDOWED.metadataBytes(ALIGNMENT);
+        try (WalIoBackend backend = backend(aio); WalIoBackend.Handle io = backend.create(path)) {
+            io.preallocate(dataStart + CAPACITY);
+            var checkpoint = BlockRingCheckpoint.initialize(io, ALIGNMENT, CAPACITY, 7, 8);
+            checkpoint.extendScanCeiling(2L * ALIGNMENT);
+            writeInspectionBlock(io, dataStart, ALIGNMENT, 1, record(1, 1));
+            io.force();
+        }
+        for (int restart = 0; restart < 2; restart++) {
+            try (WalIoBackend backend = backend(aio); WalIoBackend.Handle io = backend.reopen(path)) {
+                byte[] before = Files.readAllBytes(path);
+                var opened = BlockRingCheckpoint.openWindowForReservationFence(io, ALIGNMENT, CAPACITY, 7, 8);
+                assertArrayEquals(before, Files.readAllBytes(path));
+                var recovery = BlockRingAllocator.recoverWindow(opened.checkpoint(), opened.scan(), CAPACITY, ALIGNMENT);
+                var allocator = recovery.allocator();
+                long ceiling = (2L + restart) * ALIGNMENT;
+                assertEquals(ceiling, allocator.usedBytes());
+                assertEquals(ceiling, recovery.firstGroupId());
+                assertThrows(IOException.class, () -> allocator.reserve(ALIGNMENT));
+                assertThrows(IOException.class, () -> allocator.reserveWindow(ALIGNMENT, 1));
+                assertThrows(IllegalArgumentException.class, () ->
+                    new ParallelRingBlockWriter(io, allocator, dataStart, CAPACITY, ALIGNMENT, 7, 9, 1, 2));
+                opened.checkpoint().extendScanCeiling(ceiling + ALIGNMENT);
+                try (var writer = new ParallelRingBlockWriter(io, allocator, dataStart, CAPACITY, ALIGNMENT, 7, 8, 1, 2)) {
+                    var submitted = writer.submitWindowed(ALIGNMENT, List.of(List.of(record(2, 1)), List.of(record(3, 1))));
+                    assertEquals(ceiling, submitted.address().reservedStart());
+                    assertEquals(ceiling, submitted.firstGroupId());
+                    assertEquals(2, submitted.forced().get(10, TimeUnit.SECONDS).size());
+                    assertEquals(0, allocator.contiguousForcedTail(), "the old hole remains quarantined");
+                }
+            }
+        }
+        try (WalIoBackend backend = backend(aio); WalIoBackend.Handle io = backend.reopen(path)) {
+            var opened = BlockRingCheckpoint.openWindowForReservationFence(io, ALIGNMENT, CAPACITY, 7, 8);
+            var recovery = BlockRingAllocator.recoverWindow(opened.checkpoint(), opened.scan(), CAPACITY, ALIGNMENT);
+            assertEquals(CAPACITY, recovery.allocator().usedBytes());
+            assertThrows(IOException.class, () -> recovery.allocator().reserveWindow(ALIGNMENT, 1));
+            assertThrows(IOException.class, () -> opened.checkpoint().extendScanCeiling(CAPACITY + ALIGNMENT));
+            var snapshot = BlockRingCheckpoint.inspectWindowSnapshot(io, ALIGNMENT, CAPACITY, 7, 8,
+                ALIGNMENT, 4, 8);
+            var candidates = snapshot.items().stream().filter(BlockRingRecovery.WindowCandidate.class::isInstance)
+                .map(BlockRingRecovery.WindowCandidate.class::cast).toList();
+            assertEquals(List.of(1L, 2L * ALIGNMENT, 3L * ALIGNMENT), candidates.stream()
+                .map(candidate -> candidate.groups().get(0).id()).toList());
+            assertEquals(List.of(2L * ALIGNMENT, 2L * ALIGNMENT + 1), candidates.get(1).groups().stream()
+                .map(BlockRingRecovery.WindowGroup::id).toList());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void windowReservationStopsAfterCeilingForceFailure(boolean aio) throws Exception {
+        Path path = dir.resolve("window-reservation-force-failure-" + aio);
+        try (var backend = new CountingBackend(aio); WalIoBackend.Handle io = backend.create(path)) {
+            io.preallocate(CAPACITY + BlockRingCheckpoint.Layout.WINDOWED.metadataBytes(ALIGNMENT));
+            var checkpoint = BlockRingCheckpoint.initialize(io, ALIGNMENT, CAPACITY, 7, 8);
+            checkpoint.extendScanCeiling(ALIGNMENT);
+            var opened = BlockRingCheckpoint.openWindowForReservationFence(io, ALIGNMENT, CAPACITY, 7, 8);
+            var allocator = BlockRingAllocator.recoverWindow(opened.checkpoint(), opened.scan(), CAPACITY, ALIGNMENT).allocator();
+            backend.countForces.set(true);
+            backend.failAtForce = 1;
+            assertThrows(IOException.class, () -> opened.checkpoint().extendScanCeiling(2L * ALIGNMENT));
+            assertThrows(IOException.class, () -> allocator.reserveWindow(ALIGNMENT, 1));
+            assertEquals(ALIGNMENT, allocator.usedBytes());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void windowRestartFencePreservesHoleAcrossPhysicalWrap(boolean aio) throws Exception {
+        Path path = dir.resolve("window-restart-wrap-" + aio);
+        long dataStart = BlockRingCheckpoint.Layout.WINDOWED.metadataBytes(ALIGNMENT);
+        try (WalIoBackend backend = backend(aio); WalIoBackend.Handle io = backend.create(path)) {
+            io.preallocate(dataStart + CAPACITY);
+            var checkpoint = BlockRingCheckpoint.initialize(io, ALIGNMENT, CAPACITY, 7, 8);
+            checkpoint.extendScanCeiling(3L * ALIGNMENT);
+            writeInspectionBlock(io, dataStart, 0, 0, record(0, 1));
+            writeInspectionBlock(io, dataStart, ALIGNMENT, 1, record(1, 1));
+            io.force();
+            checkpoint.advanceTail(2L * ALIGNMENT, 1);
+            checkpoint.advanceHead(ALIGNMENT, 0);
+        }
+        try (WalIoBackend backend = backend(aio); WalIoBackend.Handle io = backend.reopen(path)) {
+            var opened = BlockRingCheckpoint.openWindowForReservationFence(io, ALIGNMENT, CAPACITY, 7, 8);
+            var recovery = BlockRingAllocator.recoverWindow(opened.checkpoint(), opened.scan(), CAPACITY, ALIGNMENT);
+            var allocator = recovery.allocator();
+            assertEquals(ALIGNMENT + 2L, recovery.firstGroupId());
+            var retirement = allocator.prepareRetirements(allocator.committedAddresses()).get(0);
+            retirement.readersDrained().get(10, TimeUnit.SECONDS);
+            opened.checkpoint().advanceHead(2L * ALIGNMENT, 1);
+            allocator.headCheckpointsForced(retirement);
+            opened.checkpoint().extendScanCeiling(6L * ALIGNMENT);
+            try (var writer = new ParallelRingBlockWriter(io, allocator, dataStart, CAPACITY, ALIGNMENT, 7, 8, 1, 2)) {
+                var submitted = writer.submitWindowed(2 * ALIGNMENT, List.of(List.of(record(2, ALIGNMENT))));
+                assertEquals(3L * ALIGNMENT, submitted.address().reservedStart());
+                assertEquals(4L * ALIGNMENT, submitted.address().blockStart());
+                assertEquals(ALIGNMENT, submitted.address().padding());
+                assertEquals(0, submitted.address().physical());
+                submitted.forced().get(10, TimeUnit.SECONDS);
+                assertEquals(2L * ALIGNMENT, allocator.contiguousForcedTail());
+            }
+        }
+        try (WalIoBackend backend = backend(aio); WalIoBackend.Handle io = backend.reopen(path)) {
+            var opened = BlockRingCheckpoint.openWindowForReservationFence(io, ALIGNMENT, CAPACITY, 7, 8);
+            var recovery = BlockRingAllocator.recoverWindow(opened.checkpoint(), opened.scan(), CAPACITY, ALIGNMENT);
+            assertEquals(CAPACITY, recovery.allocator().usedBytes());
+            assertThrows(IOException.class, () -> recovery.allocator().reserveWindow(ALIGNMENT, 1));
+            var snapshot = BlockRingCheckpoint.inspectWindowSnapshot(io, ALIGNMENT, CAPACITY, 7, 8,
+                2 * ALIGNMENT, 4, 2);
+            assertTrue(snapshot.items().stream().filter(BlockRingRecovery.WindowCandidate.class::isInstance)
+                .map(BlockRingRecovery.WindowCandidate.class::cast).anyMatch(candidate -> candidate.start() == 4L * ALIGNMENT));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
     void failedWindowCheckpointForceFencesAndCannotReopenAnUnreconciledWindow(boolean aio) throws Exception {
         Path path = dir.resolve("window-force-failure-" + aio);
         try (var backend = new CountingBackend(aio); WalIoBackend.Handle io = backend.create(path)) {

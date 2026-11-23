@@ -38,7 +38,7 @@ final class BlockRingAllocator {
     record Address(long reservedStart, long blockStart, long end, long physical, long generation, long padding) { }
 
     private enum State {
-        RESERVED, FORCED, COMMITTED, RETIRING
+        RESERVED, FORCED, COMMITTED, RETIRING, QUARANTINED
     }
     private static final class Entry {
         final Address address;
@@ -88,6 +88,8 @@ final class BlockRingAllocator {
     private final NavigableMap<Long, Entry> entries = new TreeMap<>();
     private final long capacity;
     private final int alignment;
+    private BlockRingCheckpoint windowCheckpoint;
+    private long nextWindowGroup;
     private long head;
     private long reservedTail;
     private long committedTail;
@@ -163,6 +165,46 @@ final class BlockRingAllocator {
         return result;
     }
 
+    record WindowRecovery(BlockRingAllocator allocator, long firstGroupId) { }
+
+    /**
+     * Preserve every byte in the old scan window as occupied, including holes.
+     * The caller must reconcile it before publication or reclamation. A new
+     * reservation is permitted only within a separately forced scan ceiling.
+     */
+    static WindowRecovery recoverWindow(BlockRingCheckpoint checkpoint, BlockRingRecovery.Scan prefix,
+                                        long capacity, int alignment) throws IOException {
+        if (checkpoint == null || !checkpoint.windowed() || checkpoint.capacity() != capacity)
+            throw new IOException("Invalid windowed WAL checkpoint");
+        var identity = checkpoint.identity();
+        if (!checkpoint.matchesLayout(alignment, identity.high(), identity.low()))
+            throw new IOException("Invalid windowed WAL alignment");
+        var state = checkpoint.current();
+        if (prefix == null || prefix.lastGroup() != state.lastGroup())
+            throw new IOException("Recovered prefix group differs from checkpoint");
+        BlockRingAllocator result = recover(capacity, alignment, state.head(), state.tail(), prefix);
+        if (state.scanCeiling() > state.tail()) {
+            long start = state.tail();
+            Address gap = new Address(start, start, state.scanCeiling(), start % capacity, start / capacity, 0);
+            Entry quarantined = new Entry(gap);
+            quarantined.state = State.QUARANTINED;
+            result.entries.put(start, quarantined);
+        }
+        result.reservedTail = state.scanCeiling();
+        result.windowCheckpoint = checkpoint;
+        // Every allocated group consumes at least one byte inside the old
+        // window. Jump past this conservative upper bound even for groups
+        // whose headers were torn or whose writes never reached the disk.
+        final long firstGroup;
+        try {
+            firstGroup = Math.addExact(Math.addExact(state.lastGroup(), state.scanCeiling() - state.tail()), 1);
+        } catch (ArithmeticException exhausted) {
+            throw new IOException("WAL recovery group id space exhausted", exhausted);
+        }
+        result.nextWindowGroup = firstGroup;
+        return new WindowRecovery(result, firstGroup);
+    }
+
     private boolean validRecoveredBlock(BlockRingRecovery.RecoveredBlock block, long cursor, long tail) {
         long start = block.blockStart(), end = block.end(), remaining = capacity - cursor % capacity;
         if (block.reservedStart() != cursor || start < cursor || end <= start || end > tail) return false;
@@ -180,22 +222,63 @@ final class BlockRingAllocator {
         }
     }
 
+    record WindowAddress(Address address, long firstGroupId, int groupCount) { }
+
     Address reserve(int length) throws IOException {
+        validateLength(length);
+        synchronized (lock) {
+            if (windowCheckpoint != null) throw new IOException("Windowed reservations require group fencing");
+            return reserveLocked(length);
+        }
+    }
+
+    /** Reserve physical space and a fresh group-id range in one critical section. */
+    WindowAddress reserveWindow(int length, int groupCount) throws IOException {
+        validateLength(length);
+        if (groupCount <= 0 || groupCount > length) throw new IllegalArgumentException("Invalid group count");
+        synchronized (lock) {
+            if (windowCheckpoint == null) throw new IOException("Not a windowed allocator");
+            long after;
+            try {
+                after = Math.addExact(nextWindowGroup, groupCount);
+            } catch (ArithmeticException exhausted) {
+                throw new IOException("WAL recovery group id space exhausted", exhausted);
+            }
+            final Address address;
+            try {
+                address = reserveLocked(length);
+            } catch (ArithmeticException exhausted) {
+                throw new IOException("WAL logical address space exhausted", exhausted);
+            }
+            long firstGroup = nextWindowGroup;
+            nextWindowGroup = after;
+            return new WindowAddress(address, firstGroup, groupCount);
+        }
+    }
+
+    boolean matchesWindowWriter(WalIoBackend.Handle io, long dataStart, long high, long low) {
+        return windowCheckpoint == null || windowCheckpoint.matchesWindowWriter(io, dataStart, high, low);
+    }
+
+    private void validateLength(int length) {
         if (length <= 0 || length % alignment != 0 || length > capacity)
             throw new IllegalArgumentException("Invalid block length");
-        synchronized (lock) {
-            checkOpen();
-            long physical = reservedTail % capacity;
-            long remaining = capacity - physical;
-            long padding = remaining < length ? remaining : 0;
-            long start = Math.addExact(reservedTail, padding);
-            long end = Math.addExact(start, length);
-            if (end - head > capacity) throw new CapacityException("Ring capacity exceeded");
-            Address address = new Address(reservedTail, start, end, start % capacity, start / capacity, padding);
-            entries.put(reservedTail, new Entry(address));
-            reservedTail = end;
-            return address;
-        }
+    }
+
+    private Address reserveLocked(int length) throws IOException {
+        checkOpen();
+        long physical = reservedTail % capacity;
+        long remaining = capacity - physical;
+        long padding = remaining < length ? remaining : 0;
+        long start = Math.addExact(reservedTail, padding);
+        long end = Math.addExact(start, length);
+        if (end - head > capacity) throw new CapacityException("Ring capacity exceeded");
+        if (windowCheckpoint != null && end > windowCheckpoint.current().scanCeiling())
+            throw new CapacityException("Reservation exceeds the forced WAL scan ceiling");
+        Address address = new Address(reservedTail, start, end, start % capacity, start / capacity, padding);
+        entries.put(reservedTail, new Entry(address));
+        reservedTail = end;
+        return address;
     }
 
     void dataForced(Address address) throws IOException {

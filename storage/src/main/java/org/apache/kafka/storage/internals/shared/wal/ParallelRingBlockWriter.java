@@ -24,6 +24,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.LongFunction;
 
 /**
@@ -39,6 +40,8 @@ final class ParallelRingBlockWriter implements AutoCloseable {
         }
     }
     record Submission(BlockRingAllocator.Address address, CompletableFuture<BlockRingAllocator.Address> forced) { }
+    record WindowSubmission(BlockRingAllocator.Address address, long firstGroupId,
+                            CompletableFuture<List<List<WalAppendResult>>> forced) { }
     private record WrittenBlock(BlockRingAllocator.Address address,
                                 CompletableFuture<BlockRingAllocator.Address> result) { }
 
@@ -63,7 +66,8 @@ final class ParallelRingBlockWriter implements AutoCloseable {
         if (io == null || allocator == null || dataStart < 0 || capacity <= 0 || alignment < 4096)
             throw new IllegalArgumentException("Invalid ring writer configuration");
         if ((alignment & (alignment - 1)) != 0 || capacity % alignment != 0 ||
-            dataStart > Long.MAX_VALUE - capacity || !allocator.matchesLayout(capacity, alignment))
+            dataStart > Long.MAX_VALUE - capacity || !allocator.matchesLayout(capacity, alignment) ||
+            !allocator.matchesWindowWriter(io, dataStart, high, low))
             throw new IllegalArgumentException("Invalid ring writer configuration");
         if (writerCount <= 0 || maxPending <= 0)
             throw new IllegalArgumentException("Invalid ring writer configuration");
@@ -105,6 +109,56 @@ final class ParallelRingBlockWriter implements AutoCloseable {
             }
             return new Submission(address, result.copy());
         }
+    }
+
+    /**
+     * A restricted window writer owns group-id assignment and only reports the
+     * data force. It never grants Kafka visibility, checkpoint commit or trim.
+     */
+    WindowSubmission submitWindowed(int length, List<List<WalRecord>> input) throws IOException {
+        List<List<WalRecord>> groups = copyWindowGroups(input);
+        CompletableFuture<BlockRingAllocator.Address> result = new CompletableFuture<>();
+        AtomicReference<List<List<WalAppendResult>>> locations = new AtomicReference<>();
+        synchronized (lock) {
+            if (closed) throw new IOException("Ring writer closed");
+            if (pending >= maxPending) throw new BusyException("Ring writer busy");
+            var reserved = allocator.reserveWindow(length, groups.size());
+            pending++;
+            try {
+                writers.execute(() -> write(reserved.address(), length, offset -> {
+                    List<AlignedWalBlockCodec.Group> encoded = new ArrayList<>(groups.size());
+                    for (int i = 0; i < groups.size(); i++)
+                        encoded.add(new AlignedWalBlockCodec.Group(reserved.firstGroupId() + i, groups.get(i)));
+                    var block = AlignedWalBlockCodec.encodeWithLocations(offset, high, low, alignment, encoded);
+                    locations.set(block.groups());
+                    return block.bytes();
+                }, result));
+            } catch (Throwable failure) {
+                pending--;
+                allocator.fence();
+                result.completeExceptionally(failure);
+            }
+            var forced = result.thenApply(ignored -> {
+                var written = locations.get();
+                if (written == null) throw new IllegalStateException("Missing encoded WAL locations");
+                return written;
+            });
+            return new WindowSubmission(reserved.address(), reserved.firstGroupId(), forced.copy());
+        }
+    }
+
+    private static List<List<WalRecord>> copyWindowGroups(List<List<WalRecord>> input) {
+        if (input == null || input.isEmpty()) throw new IllegalArgumentException("Empty WAL groups");
+        List<List<WalRecord>> groups = new ArrayList<>(input.size());
+        for (var group : input) {
+            var records = List.copyOf(group);
+            if (records.isEmpty()) throw new IllegalArgumentException("Empty WAL group");
+            for (var record : records) {
+                if (record.type() == WalRecordType.GROUP_COMMIT) throw new IllegalArgumentException("Internal record");
+            }
+            groups.add(records);
+        }
+        return groups;
     }
 
     private void write(BlockRingAllocator.Address address, int length, LongFunction<ByteBuffer> encoder,
