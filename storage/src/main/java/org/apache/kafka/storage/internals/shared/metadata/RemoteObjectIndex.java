@@ -17,8 +17,10 @@
 package org.apache.kafka.storage.internals.shared.metadata;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.NavigableMap;
@@ -226,6 +228,17 @@ public final class RemoteObjectIndex {
             return Optional.of(floor.getValue());
         }
         return Optional.empty();
+    }
+
+    /** Weakly consistent ordered iteration starting at the range containing the offset, if any. */
+    public Iterator<RangeReference> rangesFrom(SharedPartitionId partition, long offset) {
+        Objects.requireNonNull(partition, "partition");
+        if (offset < 0) throw new IllegalArgumentException("offset must be non-negative");
+        NavigableMap<Long, RangeReference> ranges = byPartition.get(partition);
+        if (ranges == null) return Collections.emptyIterator();
+        Map.Entry<Long, RangeReference> floor = ranges.floorEntry(offset);
+        long start = floor != null && floor.getValue().range().offsets().endOffset() > offset ? floor.getKey() : offset;
+        return ranges.tailMap(start, true).values().iterator();
     }
 
     /**

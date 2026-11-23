@@ -111,6 +111,36 @@ class SharedObjectReaderTest {
             assertEquals(9, result.sizeInBytes());
             assertArrayEquals(new byte[] {1, 2, 3, 4, 5}, toArray(result.batches().get(0)));
             assertArrayEquals(new byte[] {9, 8, 7, 6}, toArray(result.batches().get(1)));
+
+            var insideRemote = engine.readBatches(PARTITION, 3, 5, false);
+            assertEquals(0, insideRemote.firstBatchOffset());
+            assertEquals(1, insideRemote.batches().size());
+            assertArrayEquals(new byte[] {1, 2, 3, 4, 5}, toArray(insideRemote.batches().get(0)));
+            var incomplete = engine.readBatches(PARTITION, 3, 4, false);
+            assertTrue(incomplete.firstBatchIncomplete());
+            assertEquals(0, incomplete.firstBatchOffset());
+            assertTrue(incomplete.batches().isEmpty());
+            var atLeastOne = engine.readBatches(PARTITION, 3, 0, true);
+            assertEquals(1, atLeastOne.batches().size());
+            assertArrayEquals(new byte[] {1, 2, 3, 4, 5}, toArray(atLeastOne.batches().get(0)));
+            var localOnly = engine.readBatches(PARTITION, 5, 4, false);
+            assertEquals(5, localOnly.firstBatchOffset());
+            assertArrayEquals(new byte[] {9, 8, 7, 6}, toArray(localOnly.batches().get(0)));
+            assertTrue(engine.readBatches(PARTITION, 10, 1024, false).batches().isEmpty());
+            assertTrue(engine.readBatches(PARTITION, Long.MAX_VALUE, 1024, false).batches().isEmpty());
+        }
+    }
+
+    @Test
+    void fetchRejectsInconsistentOverlappingLocalAndRemoteRanges() throws Exception {
+        PackedObject packed = packObject(1978);
+        RecordingObjectStore store = new RecordingObjectStore(packed.metadata().objectId(), packed.bytes());
+        try (SharedStorageEngine engine = new SharedStorageEngine(
+            new FileSharedWal(tempDir.resolve("overlap-remote-local-fetch"), 1024 * 1024, 4096))) {
+            engine.commitRemoteObject(packed.metadata());
+            engine.installRemoteReader(new SharedObjectReader(store, engine.remoteIndex(), 0, 0));
+            append(engine, 0, 2, new byte[] {9});
+            assertThrows(IOException.class, () -> engine.readBatches(PARTITION, 3, 5, false));
         }
     }
 

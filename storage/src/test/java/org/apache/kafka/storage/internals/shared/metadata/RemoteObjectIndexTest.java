@@ -36,6 +36,20 @@ class RemoteObjectIndexTest {
     private static final SharedPartitionId OTHER_PARTITION = new SharedPartitionId(3, 4, 1);
 
     @Test
+    void rangeIteratorStartsAtContainingOrNextBatch() {
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(object(10, 0, 100, 777));
+        index.add(object(11, 150, 200, 888));
+        var covering = index.rangesFrom(PARTITION, 50);
+        assertEquals(0, covering.next().range().offsets().startOffset());
+        assertEquals(150, covering.next().range().offsets().startOffset());
+        assertFalse(covering.hasNext());
+        assertEquals(150, index.rangesFrom(PARTITION, 100).next().range().offsets().startOffset());
+        assertFalse(index.rangesFrom(PARTITION, 200).hasNext());
+        assertThrows(IllegalArgumentException.class, () -> index.rangesFrom(PARTITION, -1));
+    }
+
+    @Test
     void shouldTrackHolesAndMergeCoverage() {
         PartitionRemoteCoverage coverage = new PartitionRemoteCoverage();
         coverage.add(new OffsetRange(0, 100));

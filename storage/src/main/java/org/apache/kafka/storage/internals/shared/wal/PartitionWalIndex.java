@@ -17,6 +17,8 @@
 package org.apache.kafka.storage.internals.shared.wal;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -269,6 +271,17 @@ public final class PartitionWalIndex {
             return List.of();
         }
         return List.copyOf(new ArrayList<>(partitionLocations.values()));
+    }
+
+    /** Weakly consistent ordered iteration starting at the range containing the offset, if any. */
+    public Iterator<WalLocation> rangesFrom(WalPartitionKey key, long offset) {
+        Objects.requireNonNull(key, "key");
+        if (offset < 0) throw new IllegalArgumentException("offset must be non-negative");
+        ConcurrentNavigableMap<Long, WalLocation> ranges = locations.get(key);
+        if (ranges == null) return Collections.emptyIterator();
+        Map.Entry<Long, WalLocation> floor = ranges.floorEntry(offset);
+        long start = floor != null && floor.getValue().lastOffset() >= offset ? floor.getKey() : offset;
+        return ranges.tailMap(start, true).values().iterator();
     }
 
     public void truncate(WalPartitionKey key, long truncateOffset) {

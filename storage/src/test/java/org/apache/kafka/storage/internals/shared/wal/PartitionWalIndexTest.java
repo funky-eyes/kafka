@@ -29,6 +29,21 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PartitionWalIndexTest {
     @Test
+    void rangeIteratorStartsAtContainingOrNextBatch() {
+        PartitionWalIndex index = new PartitionWalIndex();
+        WalPartitionKey key = new WalPartitionKey(1L, 2L, 3);
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 10, 19, new byte[] {1}), new WalAppendResult(1, 0, 61));
+        index.apply(WalRecord.data(1L, 2L, 3, 7, 30, 39, new byte[] {2}), new WalAppendResult(1, 100, 61));
+        var covering = index.rangesFrom(key, 15);
+        assertEquals(10, covering.next().firstOffset());
+        assertEquals(30, covering.next().firstOffset());
+        assertFalse(covering.hasNext());
+        assertEquals(30, index.rangesFrom(key, 20).next().firstOffset());
+        assertFalse(index.rangesFrom(key, 40).hasNext());
+        assertThrows(IllegalArgumentException.class, () -> index.rangesFrom(key, -1));
+    }
+
+    @Test
     void shouldInvalidateEntriesAtAndAfterTruncateOffset() {
         PartitionWalIndex index = new PartitionWalIndex();
         WalPartitionKey key = new WalPartitionKey(1L, 2L, 3);

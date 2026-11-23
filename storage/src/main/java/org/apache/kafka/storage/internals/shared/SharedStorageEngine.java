@@ -37,6 +37,7 @@ import org.apache.kafka.storage.internals.shared.wal.WalRecordType;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -417,8 +418,7 @@ public final class SharedStorageEngine implements AutoCloseable {
         boolean minOneBatch
     ) throws IOException {
         validateLocalRead(partition, startOffset, maxBytes);
-        var selected = selectStoredBatches(storedBatches(partition, startOffset, Long.MAX_VALUE),
-            startOffset, maxBytes, minOneBatch);
+        var selected = selectStoredBatches(partition, startOffset, maxBytes, minOneBatch);
         if (selected.batches().isEmpty())
             return new BatchReadResult(selected.firstOffset(), List.of(), 0, selected.firstBatchIncomplete());
         LocalBatchRead local = readSelectedLocalBatches(partition, selected.batches());
@@ -431,24 +431,82 @@ public final class SharedStorageEngine implements AutoCloseable {
     private record StoredReadSelection(long firstOffset, List<StoredBatchMetadata> batches, int bytes,
                                        boolean firstBatchIncomplete) { }
 
-    private static StoredReadSelection selectStoredBatches(List<StoredBatchMetadata> known, long startOffset,
-                                                            int maxBytes, boolean minOneBatch) {
+    private StoredReadSelection selectStoredBatches(SharedPartitionId partition, long startOffset,
+                                                     int maxBytes, boolean minOneBatch) {
+        if (startOffset == Long.MAX_VALUE) return new StoredReadSelection(startOffset, List.of(), 0, false);
         List<StoredBatchMetadata> selected = new ArrayList<>();
         int selectedBytes = 0;
         long firstBatchOffset = startOffset;
-        for (StoredBatchMetadata metadata : known) {
-            if (metadata.lastOffset() < startOffset) continue;
-            boolean first = selected.isEmpty();
-            if (first) firstBatchOffset = metadata.firstOffset();
-            if (!canSelectPayload(metadata.payloadLength(), selectedBytes, first, maxBytes, minOneBatch)) {
-                if (first) return new StoredReadSelection(firstBatchOffset, List.of(), 0, !minOneBatch);
-                break;
+        synchronized (walMaintenanceLock) {
+            var cursor = new StoredBatchCursor(partition, startOffset);
+            StoredBatchMetadata metadata;
+            while ((metadata = cursor.next()) != null) {
+                if (metadata.lastOffset() < startOffset) continue;
+                if (metadata.firstOffset() == Long.MAX_VALUE) break;
+                boolean first = selected.isEmpty();
+                if (first) firstBatchOffset = metadata.firstOffset();
+                if (!canSelectPayload(metadata.payloadLength(), selectedBytes, first, maxBytes, minOneBatch)) {
+                    if (first) return new StoredReadSelection(firstBatchOffset, List.of(), 0, !minOneBatch);
+                    break;
+                }
+                selected.add(metadata);
+                selectedBytes = Math.addExact(selectedBytes, metadata.payloadLength());
+                if (selectedBytes >= maxBytes && !(selected.size() == 1 && minOneBatch)) break;
             }
-            selected.add(metadata);
-            selectedBytes = Math.addExact(selectedBytes, metadata.payloadLength());
-            if (selectedBytes >= maxBytes && !(selected.size() == 1 && minOneBatch)) break;
         }
         return new StoredReadSelection(firstBatchOffset, selected, selectedBytes, false);
+    }
+
+    /** Merge local and remote indexes lazily; equal starts use the local range. */
+    private final class StoredBatchCursor {
+        private final Iterator<WalLocation> localRanges;
+        private final Iterator<RemoteObjectIndex.RangeReference> remoteRanges;
+        private final long startOffset;
+        private WalLocation local;
+        private RemoteObjectIndex.RangeReference remote;
+
+        StoredBatchCursor(SharedPartitionId partition, long offset) {
+            this.startOffset = offset;
+            this.localRanges = walIndex.rangesFrom(walKey(partition), offset);
+            this.remoteRanges = remoteIndex.rangesFrom(partition, offset);
+            this.local = nextLocal();
+            this.remote = nextRemote();
+        }
+
+        StoredBatchMetadata next() {
+            if (local == null && remote == null) return null;
+            long localStart = local == null ? Long.MAX_VALUE : local.firstOffset();
+            long remoteStart = remote == null ? Long.MAX_VALUE : remote.range().offsets().startOffset();
+            if (local != null && localStart <= remoteStart) {
+                WalLocation current = local;
+                local = nextLocal();
+                if (remote != null && remoteStart == localStart)
+                    remote = nextRemote();
+                return new StoredBatchMetadata(current.firstOffset(), current.lastOffset(),
+                    current.leaderEpoch(), current.payloadLength(), true);
+            }
+            var current = remote;
+            remote = nextRemote();
+            var range = current.range();
+            return new StoredBatchMetadata(range.offsets().startOffset(), range.offsets().endOffset() - 1,
+                range.leaderEpoch(), range.objectLength(), false);
+        }
+
+        private WalLocation nextLocal() {
+            while (localRanges.hasNext()) {
+                WalLocation location = localRanges.next();
+                if (location.lastOffset() >= startOffset) return location;
+            }
+            return null;
+        }
+
+        private RemoteObjectIndex.RangeReference nextRemote() {
+            while (remoteRanges.hasNext()) {
+                var reference = remoteRanges.next();
+                if (reference.range().offsets().endOffset() > startOffset) return reference;
+            }
+            return null;
+        }
     }
 
     private record LocalBatchRead(List<ByteBuffer> payloads, boolean reusableSingleBatch) { }
