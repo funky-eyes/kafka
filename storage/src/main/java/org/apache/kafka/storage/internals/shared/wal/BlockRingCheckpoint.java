@@ -66,6 +66,7 @@ final class BlockRingCheckpoint {
     private final long high;
     private final long low;
     private State current;
+    private boolean windowAllocatorClaimed;
     private boolean fenced;
 
     private BlockRingCheckpoint(WalIoBackend.Handle io, int alignment, long capacity, long high, long low,
@@ -320,6 +321,13 @@ final class BlockRingCheckpoint {
 
     boolean windowed() {
         return layout == Layout.WINDOWED;
+    }
+
+    synchronized void claimWindowAllocator(State expected) throws IOException {
+        if (layout != Layout.WINDOWED || windowAllocatorClaimed)
+            throw new IOException("WAL checkpoint already has a window allocator");
+        if (!current().equals(expected)) throw new IOException("WAL checkpoint changed during allocator recovery");
+        windowAllocatorClaimed = true;
     }
 
     boolean matchesWindowWriter(WalIoBackend.Handle handle, long start, long writerHigh, long writerLow) {

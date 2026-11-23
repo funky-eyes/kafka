@@ -174,6 +174,8 @@ class ParallelBlockWalCorrectnessTest {
                 assertArrayEquals(before, Files.readAllBytes(path));
                 var recovery = BlockRingAllocator.recoverWindow(opened.checkpoint(), opened.scan(), CAPACITY, ALIGNMENT);
                 var allocator = recovery.allocator();
+                assertThrows(IOException.class, () ->
+                    BlockRingAllocator.recoverWindow(opened.checkpoint(), opened.scan(), CAPACITY, ALIGNMENT));
                 long ceiling = (2L + restart) * ALIGNMENT;
                 assertEquals(ceiling, allocator.usedBytes());
                 assertEquals(ceiling, recovery.firstGroupId());

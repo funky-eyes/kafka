@@ -171,6 +171,8 @@ final class BlockRingAllocator {
      * Preserve every byte in the old scan window as occupied, including holes.
      * The caller must reconcile it before publication or reclamation. A new
      * reservation is permitted only within a separately forced scan ceiling.
+     * The caller must exclusively own the file and all window writes must use
+     * this one allocator, including across separately opened checkpoint objects.
      */
     static WindowRecovery recoverWindow(BlockRingCheckpoint checkpoint, BlockRingRecovery.Scan prefix,
                                         long capacity, int alignment) throws IOException {
@@ -202,6 +204,7 @@ final class BlockRingAllocator {
             throw new IOException("WAL recovery group id space exhausted", exhausted);
         }
         result.nextWindowGroup = firstGroup;
+        checkpoint.claimWindowAllocator(state);
         return new WindowRecovery(result, firstGroup);
     }
 
