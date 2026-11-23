@@ -418,7 +418,20 @@ public final class CoordinatedRingWalAdapter implements SharedWal {
 
     @Override
     public WalRecord read(WalLocation location) throws IOException {
-        var entry = coordinator.read(location.walOffset());
+        return validateRead(location, coordinator.read(location.walOffset()));
+    }
+
+    @Override
+    public List<WalRecord> readBatch(List<WalLocation> locations) throws IOException {
+        List<WalLocation> requested = List.copyOf(locations);
+        if (requested.size() == 1) return List.of(read(requested.get(0)));
+        var entries = coordinator.readBatch(requested.stream().map(WalLocation::walOffset).toList());
+        List<WalRecord> records = new ArrayList<>(requested.size());
+        for (int i = 0; i < requested.size(); i++) records.add(validateRead(requested.get(i), entries.get(i)));
+        return List.copyOf(records);
+    }
+
+    private static WalRecord validateRead(WalLocation location, AlignedWalBlockCodec.Entry entry) throws IOException {
         var record = entry.record();
         if (entry.length() != location.length()
                 || record.payload().remaining() != location.payloadLength()

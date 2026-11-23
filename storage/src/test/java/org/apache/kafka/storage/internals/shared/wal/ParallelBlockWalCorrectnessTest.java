@@ -797,6 +797,77 @@ class ParallelBlockWalCorrectnessTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
+    void coldFetchAndUploadReuseOneValidatedBlock(boolean aio) throws Exception {
+        Path path = dir.resolve("cold-fetch-block-" + aio);
+        var partition = new SharedPartitionId(1, 2, 0);
+        try (WalIoBackend backend = backend(aio);
+             var engine = new SharedStorageEngine(CoordinatedRingWalAdapter.create(path, backend, CAPACITY, ALIGNMENT, 0))) {
+            engine.appendOwnedBatchGroup(partition, List.of(
+                new SharedStorageEngine.OwnedDataBatch(1, 0, 0, ByteBuffer.wrap(new byte[] {10})),
+                new SharedStorageEngine.OwnedDataBatch(1, 1, 1, ByteBuffer.wrap(new byte[] {20}))))
+                .get(10, TimeUnit.SECONDS);
+        }
+        try (var backend = new CountingBackend(aio);
+             var engine = new SharedStorageEngine(CoordinatedRingWalAdapter.reopen(path, backend, CAPACITY, ALIGNMENT, 0))) {
+            backend.countReads.set(true);
+            var fetch = engine.readBatches(partition, 0, 10, false);
+            assertEquals(2, fetch.batches().size());
+            assertEquals(10, fetch.batches().get(0).get());
+            assertEquals(20, fetch.batches().get(1).get());
+            assertEquals(1, backend.reads.get(), "cold Fetch should decode the shared WAL block once");
+            var candidates = engine.uploadCandidates(partition, 0, 2);
+            assertEquals(2, engine.readUploadCandidates(candidates).size());
+            assertEquals(1, backend.reads.get(), "upload should reuse confirmed Fetch batches");
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void batchReadDecodesEachBlockOnceAndValidatesEveryLocation(boolean aio) throws Exception {
+        Path path = dir.resolve("batched-block-read-" + aio);
+        try (var backend = new CountingBackend(aio);
+             var wal = CoordinatedRingWalAdapter.create(path, backend, CAPACITY, ALIGNMENT, 0)) {
+            var firstGroup = wal.appendBatch(List.of(record(0, 1), record(1, 1))).get(10, TimeUnit.SECONDS);
+            var second = wal.append(record(2, 1)).get(10, TimeUnit.SECONDS);
+            var first = new WalLocation(firstGroup.get(0).offset(), firstGroup.get(0).length(), 1, 0, 0);
+            var next = new WalLocation(firstGroup.get(1).offset(), firstGroup.get(1).length(), 1, 1, 1);
+            var last = new WalLocation(second.offset(), second.length(), 1, 2, 2);
+            backend.countReads.set(true);
+            var loaded = wal.readBatch(List.of(next, last, first, next));
+            assertEquals(List.of(1L, 2L, 0L, 1L), loaded.stream().map(WalRecord::firstOffset).toList());
+            assertEquals(2, backend.reads.get(), "two blocks should be read once each");
+            var mismatched = new WalLocation(next.walOffset(), next.length(), 2, 1, 1);
+            assertThrows(WalCorruptionException.class, () -> wal.readBatch(List.of(first, mismatched)));
+            var unknown = new WalLocation(first.walOffset() + 1, first.length(), 1, 0, 0);
+            assertThrows(IOException.class, () -> wal.readBatch(List.of(first, unknown)));
+            backend.failAtRead = backend.reads.get() + 2;
+            assertThrows(IOException.class, () -> wal.readBatch(List.of(first, last)));
+            backend.failAtRead = 0;
+            assertEquals(2L * ALIGNMENT, wal.reclaim((record, location) -> true, CAPACITY));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void batchReadRejectsCorruptLaterBlockWithoutReturningPartialResults(boolean aio) throws Exception {
+        Path path = dir.resolve("batched-corrupt-read-" + aio);
+        try (WalIoBackend backend = backend(aio);
+             var wal = CoordinatedRingWalAdapter.create(path, backend, CAPACITY, ALIGNMENT, 0)) {
+            var first = wal.append(record(0, 1)).get(10, TimeUnit.SECONDS);
+            var second = wal.append(record(1, 1)).get(10, TimeUnit.SECONDS);
+            var firstLocation = new WalLocation(first.offset(), first.length(), 1, 0, 0);
+            var secondLocation = new WalLocation(second.offset(), second.length(), 1, 1, 1);
+            try (FileChannel file = FileChannel.open(path, StandardOpenOption.WRITE)) {
+                long payload = 4L * ALIGNMENT + AlignedWalBlockCodec.HEADER_BYTES + WalRecordCodec.HEADER_BYTES;
+                assertEquals(1, file.write(ByteBuffer.wrap(new byte[] {42}), payload));
+                file.force(true);
+            }
+            assertThrows(IOException.class, () -> wal.readBatch(List.of(firstLocation, secondLocation)));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
     void batchReclaimWaitsForAnActualReaderBeforeForcingHead(boolean aio) throws Exception {
         Path path = dir.resolve("batch-reader-" + aio);
         var readerExecutor = Executors.newSingleThreadExecutor(task -> new Thread(task, "held-wal-reader"));
@@ -810,7 +881,7 @@ class ParallelBlockWalCorrectnessTest {
             }
             var location = new WalLocation(second.offset(), second.length(), 1, 1, 1, 1);
             backend.holdReader.set(true);
-            var reader = readerExecutor.submit(() -> wal.read(location));
+            var reader = readerExecutor.submit(() -> wal.readBatch(List.of(location, location)));
             assertTrue(backend.readerEntered.await(10, TimeUnit.SECONDS));
             backend.countForces.set(true);
             var reclaim = reclaimExecutor.submit(() -> wal.reclaim((record, ignored) -> record.firstOffset() < 3,
@@ -819,7 +890,7 @@ class ParallelBlockWalCorrectnessTest {
             assertEquals(0, backend.forces.get(), "head must not be forced while a reader holds a block");
             assertEquals(CAPACITY, wal.usedBytes());
             backend.releaseReader.countDown();
-            assertEquals(1L, reader.get(10, TimeUnit.SECONDS).firstOffset());
+            assertEquals(List.of(1L, 1L), reader.get(10, TimeUnit.SECONDS).stream().map(WalRecord::firstOffset).toList());
             assertEquals(3L * ALIGNMENT, reclaim.get(10, TimeUnit.SECONDS));
             assertEquals(2, backend.forces.get());
         } finally {
@@ -950,6 +1021,8 @@ class ParallelBlockWalCorrectnessTest {
     private static void verifyLocations(CoordinatedRingWalAdapter wal, List<List<WalRecord>> groups,
                                         List<List<WalAppendResult>> locations) throws IOException {
         assertEquals(groups.size(), locations.size());
+        List<WalLocation> batchedLocations = new ArrayList<>();
+        List<WalRecord> expectedRecords = new ArrayList<>();
         for (int group = 0; group < groups.size(); group++) {
             assertEquals(groups.get(group).size(), locations.get(group).size());
             for (int i = 0; i < groups.get(group).size(); i++) {
@@ -959,7 +1032,17 @@ class ParallelBlockWalCorrectnessTest {
                     expected.leaderEpoch(), expected.firstOffset(), expected.lastOffset()));
                 assertEquals(expected.firstOffset(), actual.firstOffset());
                 assertEquals(expected.payload(), actual.payload());
+                batchedLocations.add(new WalLocation(result.offset(), result.length(),
+                    expected.leaderEpoch(), expected.firstOffset(), expected.lastOffset()));
+                expectedRecords.add(expected);
             }
+        }
+        java.util.Collections.reverse(batchedLocations);
+        java.util.Collections.reverse(expectedRecords);
+        var batched = wal.readBatch(batchedLocations);
+        for (int i = 0; i < batched.size(); i++) {
+            assertEquals(expectedRecords.get(i).firstOffset(), batched.get(i).firstOffset());
+            assertEquals(expectedRecords.get(i).payload(), batched.get(i).payload());
         }
     }
 

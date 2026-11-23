@@ -98,6 +98,23 @@ class SharedObjectReaderTest {
     }
 
     @Test
+    void fetchMergesRemoteAndLocalBatchesInOffsetOrder() throws Exception {
+        PackedObject packed = packObject(1979);
+        RecordingObjectStore store = new RecordingObjectStore(packed.metadata().objectId(), packed.bytes());
+        try (SharedStorageEngine engine = new SharedStorageEngine(
+            new FileSharedWal(tempDir.resolve("mixed-remote-local-fetch"), 1024 * 1024, 4096))) {
+            engine.commitRemoteObject(packed.metadata());
+            engine.installRemoteReader(new SharedObjectReader(store, engine.remoteIndex(), 0, 0));
+            append(engine, 5, 9, new byte[] {9, 8, 7, 6});
+            var result = engine.readBatches(PARTITION, 0, 1024, false);
+            assertEquals(2, result.batches().size());
+            assertEquals(9, result.sizeInBytes());
+            assertArrayEquals(new byte[] {1, 2, 3, 4, 5}, toArray(result.batches().get(0)));
+            assertArrayEquals(new byte[] {9, 8, 7, 6}, toArray(result.batches().get(1)));
+        }
+    }
+
+    @Test
     void fetchReusesVerifiedBlockOnlyWithinOneRequestWhenSharedCacheIsDisabled() throws Exception {
         PackedObject packed = packObject(1980);
         RecordingObjectStore store = new RecordingObjectStore(packed.metadata().objectId(), packed.bytes());

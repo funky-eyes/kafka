@@ -489,6 +489,12 @@ class SharedStorageEngineTest {
             assertThrows(WalCorruptionException.class, () ->
                 engine.readLocalBatches(PARTITION, 100, 1024, true));
             assertTrue(engine.readLocal(PARTITION, 100).isEmpty());
+
+            engine.appendData(PARTITION, 7, 100, 109, ByteBuffer.wrap(new byte[]{3}))
+                .get(10, TimeUnit.SECONDS);
+            backend.afterNextRead(() -> engine.truncate(PARTITION, 8, 100).join());
+            assertThrows(WalCorruptionException.class, () -> engine.readBatches(PARTITION, 100, 1024, true));
+            assertTrue(engine.readLocal(PARTITION, 100).isEmpty());
         }
     }
 

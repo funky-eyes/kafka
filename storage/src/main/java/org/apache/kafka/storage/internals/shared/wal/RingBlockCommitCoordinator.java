@@ -21,7 +21,11 @@ import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.TreeMap;
 import java.util.concurrent.CompletableFuture;
@@ -337,6 +341,56 @@ final class RingBlockCommitCoordinator implements AutoCloseable {
                 lock.notifyAll();
             }
         }
+    }
+
+    /** Read each requested block once, preserving caller order and validating every requested address. */
+    List<AlignedWalBlockCodec.Entry> readBatch(List<Long> offsets) throws IOException {
+        Objects.requireNonNull(offsets, "offsets");
+        if (offsets.isEmpty()) return List.of();
+        Map<Committed, Map<Long, List<Integer>>> blocks = new LinkedHashMap<>();
+        synchronized (lock) {
+            checkOpen();
+            for (int i = 0; i < offsets.size(); i++) {
+                long offset = Objects.requireNonNull(offsets.get(i), "offset");
+                var candidate = committed.floorEntry(offset);
+                if (candidate == null || offset >= candidate.getValue().address().end())
+                    throw new IOException("Unknown WAL location");
+                blocks.computeIfAbsent(candidate.getValue(), ignored -> new HashMap<>())
+                    .computeIfAbsent(offset, ignored -> new ArrayList<>()).add(i);
+            }
+        }
+        AlignedWalBlockCodec.Entry[] results = new AlignedWalBlockCodec.Entry[offsets.size()];
+        for (var block : blocks.entrySet()) {
+            BlockRingAllocator.Pin pin;
+            synchronized (lock) {
+                checkOpen();
+                Committed selected = block.getKey();
+                if (committed.get(selected.address().blockStart()) != selected)
+                    throw new IOException("WAL block was reclaimed during batch read");
+                pin = allocator.pin(selected.address());
+                activeReads++;
+            }
+            try (pin) {
+                var decoded = readBlock(block.getKey().address());
+                int matched = 0;
+                for (var group : decoded.groups()) {
+                    for (var entry : group.records()) {
+                        List<Integer> indexes = block.getValue().get(entry.walOffset());
+                        if (indexes != null) {
+                            for (int index : indexes) results[index] = entry;
+                            matched++;
+                        }
+                    }
+                }
+                if (matched != block.getValue().size()) throw new IOException("Unknown WAL record");
+            } finally {
+                synchronized (lock) {
+                    activeReads--;
+                    lock.notifyAll();
+                }
+            }
+        }
+        return List.copyOf(Arrays.asList(results));
     }
 
     private AlignedWalBlockCodec.DecodedBlock readBlock(BlockRingAllocator.Address address)
