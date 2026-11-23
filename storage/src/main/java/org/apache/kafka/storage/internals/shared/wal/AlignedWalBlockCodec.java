@@ -106,6 +106,17 @@ final class AlignedWalBlockCodec {
 
     static DecodedBlock decode(ByteBuffer bytes, long expectedOffset, long incarnationHigh,
                                long incarnationLow, int alignment) throws IOException {
+        return decode(bytes, expectedOffset, incarnationHigh, incarnationLow, alignment, false);
+    }
+
+    /** The decoded records borrow the block and are confined to the built-in remote reclaim check. */
+    static DecodedBlock decodeForRemoteReclaim(ByteBuffer bytes, long expectedOffset, long incarnationHigh,
+                                               long incarnationLow, int alignment) throws IOException {
+        return decode(bytes, expectedOffset, incarnationHigh, incarnationLow, alignment, true);
+    }
+
+    private static DecodedBlock decode(ByteBuffer bytes, long expectedOffset, long incarnationHigh,
+                                       long incarnationLow, int alignment, boolean borrowBodies) throws IOException {
         checkAlignment(alignment);
         Objects.requireNonNull(bytes, "bytes");
         ByteBuffer block = bytes.slice().order(ByteOrder.BIG_ENDIAN);
@@ -118,12 +129,13 @@ final class AlignedWalBlockCodec {
         for (int i = payloadEnd; i < length; i++) if (block.get(i) != 0) throw corrupt("nonzero padding");
         ByteBuffer payload = block.duplicate();
         payload.position(HEADER_BYTES).limit(payloadEnd);
-        MemoryHandle handle = new MemoryHandle(payload.slice());
+        ByteBuffer recordBytes = payload.slice();
+        MemoryHandle handle = new MemoryHandle(recordBytes);
         List<DecodedGroup> groups = new ArrayList<>();
         List<Entry> pending = new ArrayList<>();
         long cursor = 0, previousGroupId = -1;
         while (cursor < payloadLength) {
-            WalRecordCodec.ReadResult result = WalRecordCodec.read(handle, cursor);
+            WalRecordCodec.ReadResult result = readRecord(handle, recordBytes, cursor, borrowBodies);
             if (result.status() != WalRecordCodec.ReadStatus.COMPLETE || result.length() <= 0)
                 throw corrupt("incomplete record in block");
             WalRecord record = result.record();
@@ -140,6 +152,13 @@ final class AlignedWalBlockCodec {
         }
         if (!pending.isEmpty() || groups.size() != groupCount) throw corrupt("incomplete or missing group");
         return new DecodedBlock(length, block.getInt(CRC_OFFSET), List.copyOf(groups));
+    }
+
+    private static WalRecordCodec.ReadResult readRecord(MemoryHandle handle, ByteBuffer recordBytes, long cursor,
+                                                        boolean borrowBodies) throws IOException {
+        return borrowBodies
+            ? WalRecordCodec.readBorrowed(recordBytes, Math.toIntExact(cursor))
+            : WalRecordCodec.read(handle, cursor);
     }
 
     private static void validateHeader(ByteBuffer block, long expectedOffset, long high, long low,

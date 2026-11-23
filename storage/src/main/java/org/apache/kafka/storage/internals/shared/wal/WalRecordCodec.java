@@ -102,6 +102,26 @@ final class WalRecordCodec {
         return ReadResult.complete(position, prefix.totalLength(), record);
     }
 
+    /**
+     * Decodes from a caller-owned, immutable block without copying the record body. The resulting record must not
+     * outlive the block or be passed to an external callback that can retain it.
+     */
+    static ReadResult readBorrowed(ByteBuffer source, int position) throws IOException {
+        if (position < 0 || position > source.limit()) throw new IllegalArgumentException("invalid record position");
+        ByteBuffer view = source.duplicate().order(ByteOrder.BIG_ENDIAN);
+        view.position(position);
+        if (!view.hasRemaining()) return ReadResult.eof(position);
+        if (view.remaining() < PREFIX_BYTES) return ReadResult.partial(position);
+        Prefix prefix = new Prefix(view.getInt(), view.getShort(), view.get(), view.get(), view.getInt(), view.getInt());
+        validatePrefix(prefix, position);
+        if (source.limit() - position < prefix.totalLength()) return ReadResult.partial(position);
+        WalRecordType type = recordType(prefix.typeId(), position);
+        view.limit(position + prefix.totalLength());
+        ByteBuffer body = view.slice().order(ByteOrder.BIG_ENDIAN);
+        validateBodyChecksum(body, prefix.expectedCrc(), position);
+        return ReadResult.complete(position, prefix.totalLength(), decodeRecord(type, body, position));
+    }
+
     private static Prefix readPrefix(WalIoBackend.Handle handle, long position) throws IOException {
         ByteBuffer buffer = ByteBuffer.allocate(PREFIX_BYTES).order(ByteOrder.BIG_ENDIAN);
         readFully(handle, buffer, position);
@@ -153,12 +173,17 @@ final class WalRecordCodec {
         readFully(handle, body, position + PREFIX_BYTES);
         body.flip();
 
+        validateBodyChecksum(body, prefix.expectedCrc(), position);
+        return body;
+    }
+
+    private static void validateBodyChecksum(ByteBuffer body, int expectedCrc, long position)
+        throws WalCorruptionException {
         CRC32C crc = new CRC32C();
         crc.update(body.duplicate());
-        if ((int) crc.getValue() != prefix.expectedCrc()) {
+        if ((int) crc.getValue() != expectedCrc) {
             throw new WalCorruptionException("WAL checksum mismatch at position " + position);
         }
-        return body;
     }
 
     private static WalRecord decodeRecord(

@@ -429,6 +429,11 @@ final class RingBlockCommitCoordinator implements AutoCloseable {
 
     private AlignedWalBlockCodec.DecodedBlock readBlock(BlockRingAllocator.Address address)
             throws IOException {
+        return readBlock(address, false);
+    }
+
+    private AlignedWalBlockCodec.DecodedBlock readBlock(BlockRingAllocator.Address address, boolean remoteReclaim)
+            throws IOException {
         int length = Math.toIntExact(address.end() - address.blockStart());
         ByteBuffer data = ByteBuffer.allocate(length);
         long offset = Math.addExact(dataStart, address.physical());
@@ -436,7 +441,10 @@ final class RingBlockCommitCoordinator implements AutoCloseable {
             int read = reader.read(data, offset + data.position());
             if (read <= 0) throw new IOException("Short ring read");
         }
-        return AlignedWalBlockCodec.decode(data.flip(), address.blockStart(), high, low, alignment);
+        data.flip();
+        return remoteReclaim
+            ? AlignedWalBlockCodec.decodeForRemoteReclaim(data, address.blockStart(), high, low, alignment)
+            : AlignedWalBlockCodec.decode(data, address.blockStart(), high, low, alignment);
     }
 
     void replay(WalReplayConsumer consumer) throws IOException {
@@ -537,7 +545,7 @@ final class RingBlockCommitCoordinator implements AutoCloseable {
         for (Committed block : candidates) {
             if (policy instanceof RemoteCoverageWalReclaimPolicy remote && reclaimBlocker != null &&
                 reclaimBlocker.block() == block && !remote.matches(reclaimBlocker.identity())) break;
-            var decoded = readBlock(block.address());
+            var decoded = readBlock(block.address(), policy instanceof RemoteCoverageWalReclaimPolicy);
             boolean covered = true;
             for (var group : decoded.groups()) {
                 for (var entry : group.records()) {

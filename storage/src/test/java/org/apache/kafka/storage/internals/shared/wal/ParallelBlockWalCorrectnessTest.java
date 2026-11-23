@@ -821,6 +821,33 @@ class ParallelBlockWalCorrectnessTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
+    void remoteReclaimRequiresEveryRecordInAGroup(boolean aio) throws Exception {
+        Path path = dir.resolve("reclaim-multiple-records-" + aio);
+        var partition = new SharedPartitionId(1, 2, 0);
+        CRC32C firstCrc = new CRC32C();
+        firstCrc.update(new byte[1024], 0, 1024);
+        CRC32C secondCrc = new CRC32C();
+        secondCrc.update(new byte[512], 0, 512);
+        var first = new SharedObjectRange(partition, new OffsetRange(0, 1), 1, 0, 1024, firstCrc.getValue());
+        var wrong = new SharedObjectRange(partition, new OffsetRange(1, 2), 1, 1024, 512, secondCrc.getValue() + 1);
+        var second = new SharedObjectRange(partition, new OffsetRange(1, 2), 1, 1024, 512, secondCrc.getValue());
+        var mismatched = new RemoteObjectIndex();
+        mismatched.add(new SharedObjectMetadata(1, 1536, 0, List.of(first, wrong)));
+        var matching = new RemoteObjectIndex();
+        matching.add(new SharedObjectMetadata(2, 1536, 0, List.of(first, second)));
+        try (WalIoBackend backend = backend(aio);
+             var wal = CoordinatedRingWalAdapter.createWithBankedCheckpoints(
+                 path, backend, CAPACITY, ALIGNMENT, 0, 8, 8L * ALIGNMENT)) {
+            wal.appendBatch(List.of(record(0, 1024), record(1, 512))).get(10, TimeUnit.SECONDS);
+            assertEquals(0, wal.reclaim(new RemoteCoverageWalReclaimPolicy(mismatched), 1));
+            assertEquals(0, wal.reclaimedBeforeOffset());
+            assertTrue(wal.reclaim(new RemoteCoverageWalReclaimPolicy(matching), 1) > 0);
+        }
+        assertReplayByFileSize(path, aio, CAPACITY + CoordinatedRingWalAdapter.BANKED_METADATA_BYTES, List.of());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
     void leasedWindowClassifiesPartitionsIndependentlyAcrossAHole(boolean aio) throws Exception {
         Path path = dir.resolve("window-partition-analysis-" + aio);
         long dataStart = BlockRingCheckpoint.Layout.WINDOWED.metadataBytes(ALIGNMENT);
@@ -1591,8 +1618,10 @@ class ParallelBlockWalCorrectnessTest {
             long offset = (long) sample * ALIGNMENT;
             var encoded = AlignedWalBlockCodec.encodeWithLocations(offset, 7, 8, ALIGNMENT, groups);
             var decoded = AlignedWalBlockCodec.decode(encoded.bytes(), offset, 7, 8, ALIGNMENT);
+            var reclaimDecoded = AlignedWalBlockCodec.decodeForRemoteReclaim(encoded.bytes(), offset, 7, 8, ALIGNMENT);
             assertEquals(groups.size(), encoded.groups().size());
             assertEquals(groups.size(), decoded.groups().size());
+            assertEquals(decoded.groups().size(), reclaimDecoded.groups().size());
             for (int group = 0; group < groups.size(); group++) {
                 assertEquals(groups.get(group).records().size(), encoded.groups().get(group).size());
                 for (int record = 0; record < groups.get(group).records().size(); record++) {
@@ -1601,9 +1630,38 @@ class ParallelBlockWalCorrectnessTest {
                     assertEquals(entry.walOffset(), location.offset());
                     assertEquals(entry.length(), location.length());
                     assertEquals(groups.get(group).records().get(record).firstOffset(), entry.record().firstOffset());
+                    var borrowed = reclaimDecoded.groups().get(group).records().get(record);
+                    assertEquals(entry.walOffset(), borrowed.walOffset());
+                    assertEquals(entry.length(), borrowed.length());
+                    assertEquals(entry.record().type(), borrowed.record().type());
+                    assertEquals(entry.record().firstOffset(), borrowed.record().firstOffset());
+                    assertEquals(entry.record().lastOffset(), borrowed.record().lastOffset());
+                    assertEquals(entry.record().payload(), borrowed.record().payload());
                 }
             }
         }
+    }
+
+    @Test
+    void remoteReclaimBorrowedDecoderStillChecksRecordChecksum() throws Exception {
+        var encoded = AlignedWalBlockCodec.encodeWithLocations(4096, 7, 8, ALIGNMENT, List.of(
+            new AlignedWalBlockCodec.Group(1, List.of(record(0, 32)))));
+        ByteBuffer changed = ByteBuffer.allocate(encoded.bytes().remaining());
+        changed.put(encoded.bytes()).flip();
+        int payloadOffset = AlignedWalBlockCodec.HEADER_BYTES + WalRecordCodec.HEADER_BYTES;
+        changed.put(payloadOffset, (byte) (changed.get(payloadOffset) ^ 1));
+        CRC32C crc = new CRC32C();
+        ByteBuffer first = changed.duplicate();
+        first.limit(AlignedWalBlockCodec.CRC_OFFSET);
+        crc.update(first);
+        ByteBuffer second = changed.duplicate();
+        second.position(AlignedWalBlockCodec.CRC_OFFSET + Integer.BYTES);
+        crc.update(second);
+        changed.putInt(AlignedWalBlockCodec.CRC_OFFSET, (int) crc.getValue());
+
+        assertThrows(WalCorruptionException.class, () -> AlignedWalBlockCodec.decode(changed, 4096, 7, 8, ALIGNMENT));
+        assertThrows(WalCorruptionException.class,
+            () -> AlignedWalBlockCodec.decodeForRemoteReclaim(changed, 4096, 7, 8, ALIGNMENT));
     }
 
     @ParameterizedTest
