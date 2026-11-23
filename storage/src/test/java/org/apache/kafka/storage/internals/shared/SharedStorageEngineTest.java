@@ -16,6 +16,10 @@
  */
 package org.apache.kafka.storage.internals.shared;
 
+import org.apache.kafka.common.compress.Compression;
+import org.apache.kafka.common.record.internal.MemoryRecords;
+import org.apache.kafka.common.record.internal.SimpleRecord;
+import org.apache.kafka.storage.internals.shared.kafka.KafkaRecordBatchAdapter;
 import org.apache.kafka.storage.internals.shared.metadata.LocalRemoteObjectCheckpoint;
 import org.apache.kafka.storage.internals.shared.metadata.OffsetRange;
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
@@ -35,6 +39,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -47,6 +52,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -434,6 +441,53 @@ class SharedStorageEngineTest {
     }
 
     @Test
+    void cacheReusesExactOwnedStorageButCopiesSlicesOfLargerArrays() throws Exception {
+        ReadMutationWal backend = new ReadMutationWal(
+            new FileSharedWal(tempDir.resolve("owned-cache-storage"), 1024 * 1024, 4096));
+        try (SharedStorageEngine engine = new SharedStorageEngine(backend, null, 258)) {
+            CompletableFuture<Void> confirmation = new CompletableFuture<>();
+            backend.nextAppendGate = confirmation;
+            var groups = new ArrayList<>(List.of(
+                new SharedStorageEngine.OwnedDataBatch(3, 100, 109, ByteBuffer.wrap(new byte[] {1}))));
+            var append = engine.appendOwnedBatchGroup(PARTITION, groups);
+            WalRecord exact = backend.lastAppended.get(0);
+            groups.clear();
+            confirmation.complete(null);
+            append.get(10, TimeUnit.SECONDS);
+            assertSame(exact, engine.readLocal(PARTITION, 100).orElseThrow());
+            assertEquals(129, engine.localCacheBytes());
+
+            ByteBuffer large = ByteBuffer.allocate(8192);
+            large.put((byte) 2).flip();
+            engine.appendOwnedBatchGroup(PARTITION, List.of(
+                new SharedStorageEngine.OwnedDataBatch(3, 110, 119, large.slice())))
+                .get(10, TimeUnit.SECONDS);
+            WalRecord sliced = backend.lastAppended.get(0);
+            WalRecord cached = engine.readLocal(PARTITION, 110).orElseThrow();
+            assertNotSame(sliced, cached, "a small slice must not retain an unaccounted large array");
+            assertEquals(2, cached.payload().get());
+            assertEquals(258, engine.localCacheBytes());
+            assertEquals(0, backend.reads);
+        }
+    }
+
+    @Test
+    void serializedKafkaBatchTransfersItsOwnedStorageToConfirmedCache() throws Exception {
+        ReadMutationWal backend = new ReadMutationWal(
+            new FileSharedWal(tempDir.resolve("kafka-owned-cache-storage"), 1024 * 1024, 4096));
+        try (SharedStorageEngine engine = new SharedStorageEngine(backend, null, 4096)) {
+            MemoryRecords records = MemoryRecords.withRecords(100, Compression.NONE, 3,
+                new SimpleRecord(10, new byte[] {1, 2, 3}));
+            var groups = KafkaRecordBatchAdapter.toOwnedDataBatches(records);
+            engine.appendOwnedBatchGroup(PARTITION, groups).get(10, TimeUnit.SECONDS);
+            WalRecord cached = engine.readLocal(PARTITION, 100).orElseThrow();
+            assertSame(backend.lastAppended.get(0), cached);
+            assertEquals(groups.get(0).bytes(), cached.payload());
+            assertEquals(0, backend.reads);
+        }
+    }
+
+    @Test
     void lateCompletionCannotRepopulateCacheAfterClose() throws Exception {
         ReadMutationWal backend = new ReadMutationWal(
             new FileSharedWal(tempDir.resolve("late-confirmed-cache"), 1024 * 1024, 4096));
@@ -508,6 +562,7 @@ class SharedStorageEngineTest {
         private int reads;
         private boolean failCachedRead;
         private CompletableFuture<Void> nextAppendGate;
+        private List<WalRecord> lastAppended;
 
         private ReadMutationWal(SharedWal delegate) {
             this.delegate = delegate;
@@ -519,6 +574,7 @@ class SharedStorageEngineTest {
 
         @Override
         public CompletableFuture<List<WalAppendResult>> appendBatch(List<WalRecord> records) {
+            lastAppended = List.copyOf(records);
             CompletableFuture<List<WalAppendResult>> result = delegate.appendBatch(records);
             CompletableFuture<Void> gate = nextAppendGate;
             nextAppendGate = null;

@@ -54,7 +54,7 @@ public final class KafkaRecordBatchAdapter {
                 batch.lastOffset(),
                 batch.partitionLeaderEpoch(),
                 batch.maxTimestamp(),
-                serialized.asReadOnlyBuffer()
+                serialized
             ));
         }
         return List.copyOf(result);
@@ -68,31 +68,54 @@ public final class KafkaRecordBatchAdapter {
         List<SerializedBatch> serialized = serializeBatches(records);
         List<SharedStorageEngine.OwnedDataBatch> result = new ArrayList<>(serialized.size());
         for (SerializedBatch batch : serialized) {
-            result.add(new SharedStorageEngine.OwnedDataBatch(
-                batch.leaderEpoch(),
-                batch.firstOffset(),
-                batch.lastOffset(),
-                batch.bytes()
-            ));
+            result.add(batch.toOwnedDataBatch());
         }
         return List.copyOf(result);
     }
 
-    public record SerializedBatch(
-        long firstOffset,
-        long lastOffset,
-        int leaderEpoch,
-        long maxTimestamp,
-        ByteBuffer bytes
-    ) {
-        public SerializedBatch {
+    public static final class SerializedBatch {
+        private final long firstOffset;
+        private final long lastOffset;
+        private final int leaderEpoch;
+        private final long maxTimestamp;
+        private final ByteBuffer ownedBytes;
+
+        public SerializedBatch(long firstOffset, long lastOffset, int leaderEpoch, long maxTimestamp, ByteBuffer bytes) {
             if (firstOffset < 0 || lastOffset < firstOffset) {
                 throw new IllegalArgumentException("invalid Kafka batch offset range");
             }
             if (bytes == null || !bytes.hasRemaining()) {
                 throw new IllegalArgumentException("serialized Kafka batch must not be empty");
             }
-            bytes = bytes.asReadOnlyBuffer();
+            this.firstOffset = firstOffset;
+            this.lastOffset = lastOffset;
+            this.leaderEpoch = leaderEpoch;
+            this.maxTimestamp = maxTimestamp;
+            this.ownedBytes = bytes.duplicate();
+        }
+
+        public long firstOffset() {
+            return firstOffset;
+        }
+
+        public long lastOffset() {
+            return lastOffset;
+        }
+
+        public int leaderEpoch() {
+            return leaderEpoch;
+        }
+
+        public long maxTimestamp() {
+            return maxTimestamp;
+        }
+
+        public ByteBuffer bytes() {
+            return ownedBytes.asReadOnlyBuffer();
+        }
+
+        SharedStorageEngine.OwnedDataBatch toOwnedDataBatch() {
+            return new SharedStorageEngine.OwnedDataBatch(leaderEpoch, firstOffset, lastOffset, ownedBytes.duplicate());
         }
     }
 }

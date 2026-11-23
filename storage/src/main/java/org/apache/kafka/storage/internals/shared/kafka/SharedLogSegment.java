@@ -259,8 +259,7 @@ public final class SharedLogSegment extends LogSegment {
                 throw new LogSegmentOffsetOverflowException(this, batch.lastOffset());
             }
             if (!isRemoteDurable(batch)) {
-                appendGroup.add(new SharedStorageEngine.OwnedDataBatch(
-                    batch.leaderEpoch(), batch.firstOffset(), batch.lastOffset(), batch.bytes()));
+                appendGroup.add(batch.toOwnedDataBatch());
             }
         }
         return appendGroup;

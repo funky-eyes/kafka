@@ -220,6 +220,7 @@ public final class SharedStorageEngine implements AutoCloseable {
         }
 
         List<WalRecord> records = new ArrayList<>(batches.size());
+        boolean[] exactHeapStorage = new boolean[batches.size()];
         long priorLastOffset = -1L;
         for (OwnedDataBatch batch : batches) {
             Objects.requireNonNull(batch, "batch");
@@ -237,8 +238,9 @@ public final class SharedStorageEngine implements AutoCloseable {
                 batch.leaderEpoch(),
                 batch.firstOffset(),
                 batch.lastOffset(),
-                batch.bytes()
+                batch.bytes
             ));
+            exactHeapStorage[records.size() - 1] = batch.exactHeapStorage;
         }
 
         // Transfer an immutable group definition to the asynchronous WAL.
@@ -265,7 +267,8 @@ public final class SharedStorageEngine implements AutoCloseable {
                     for (int i = 0; i < published.size(); i++) {
                         WalLocation location = published.get(i);
                         if (walIndex.find(walKey(partition), location.firstOffset()).filter(location::equals).isPresent()) {
-                            cacheLocalBatch(partition, location, immutableRecords.get(i), cacheGeneration);
+                            cacheLocalBatch(partition, location, immutableRecords.get(i), cacheGeneration,
+                                exactHeapStorage[i]);
                         }
                     }
                 }
@@ -612,26 +615,27 @@ public final class SharedStorageEngine implements AutoCloseable {
                 requireLocalDataIdentity(partition, location, record);
                 requireCurrentLocalLocation(partition, location);
                 records.set(index, record);
-                cacheLocalBatch(partition, location, record, localCacheGeneration.get());
+                cacheLocalBatch(partition, location, record, localCacheGeneration.get(), false);
             }
         }
         return records;
     }
 
     private void cacheLocalBatch(SharedPartitionId partition, WalLocation location, WalRecord record,
-                                 long expectedGeneration) {
+                                 long expectedGeneration, boolean exactHeapStorage) {
         long weight = (long) location.payloadLength() + CACHE_ENTRY_OVERHEAD;
         if (weight > localCacheLimit || localCacheGeneration.get() != expectedGeneration) {
             return;
         }
-        // Copy exactly the payload: a decoded slice may otherwise retain an
-        // entire WAL block beyond the cache's accounting limit.
-        WalRecord copy = WalRecord.data(record.topicIdHigh(), record.topicIdLow(), record.partition(),
-            record.leaderEpoch(), record.firstOffset(), record.lastOffset(), record.payload());
+        // A transferred, exact-sized heap array is already independently
+        // owned. Decoded records and slices of larger buffers must be copied
+        // so the retained backing storage remains within the cache's budget.
+        WalRecord cached = exactHeapStorage ? record : WalRecord.data(record.topicIdHigh(), record.topicIdLow(),
+            record.partition(), record.leaderEpoch(), record.firstOffset(), record.lastOffset(), record.payload());
         LocalCacheKey key = new LocalCacheKey(partition, location);
         synchronized (localCacheLock) {
             if (localCacheGeneration.get() != expectedGeneration) return;
-            WalRecord previous = localCache.put(key, copy);
+            WalRecord previous = localCache.put(key, cached);
             if (previous == null) {
                 localCacheBytes += weight;
             }
@@ -1144,13 +1148,15 @@ public final class SharedStorageEngine implements AutoCloseable {
         return new WalPartitionKey(partition.topicIdHigh(), partition.topicIdLow(), partition.partition());
     }
 
-    public record OwnedDataBatch(
-        int leaderEpoch,
-        long firstOffset,
-        long lastOffset,
-        ByteBuffer bytes
-    ) {
-        public OwnedDataBatch {
+    /** The caller transfers ownership of the payload and must not modify it. */
+    public static final class OwnedDataBatch {
+        private final int leaderEpoch;
+        private final long firstOffset;
+        private final long lastOffset;
+        private final ByteBuffer bytes;
+        private final boolean exactHeapStorage;
+
+        public OwnedDataBatch(int leaderEpoch, long firstOffset, long lastOffset, ByteBuffer bytes) {
             if (firstOffset < 0 || lastOffset < firstOffset) {
                 throw new IllegalArgumentException("invalid batch offset range");
             }
@@ -1158,7 +1164,28 @@ public final class SharedStorageEngine implements AutoCloseable {
             if (!bytes.hasRemaining()) {
                 throw new IllegalArgumentException("batch bytes must not be empty");
             }
-            bytes = bytes.asReadOnlyBuffer();
+            this.leaderEpoch = leaderEpoch;
+            this.firstOffset = firstOffset;
+            this.lastOffset = lastOffset;
+            this.exactHeapStorage = bytes.hasArray() && bytes.arrayOffset() == 0 && bytes.position() == 0 &&
+                bytes.limit() == bytes.capacity() && bytes.array().length == bytes.capacity();
+            this.bytes = bytes.asReadOnlyBuffer();
+        }
+
+        public int leaderEpoch() {
+            return leaderEpoch;
+        }
+
+        public long firstOffset() {
+            return firstOffset;
+        }
+
+        public long lastOffset() {
+            return lastOffset;
+        }
+
+        public ByteBuffer bytes() {
+            return bytes.asReadOnlyBuffer();
         }
     }
 
