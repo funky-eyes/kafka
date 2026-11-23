@@ -33,6 +33,27 @@ final class BlockRingRecovery {
                           List<AlignedWalBlockCodec.DecodedGroup> groups) { }
     record Scan(List<RecoveredBlock> blocks, long lastGroup) { }
 
+    sealed interface WindowItem permits WindowCandidate, WindowUnclassified { }
+    record WindowCandidate(long start, int length, List<WindowGroup> groups) implements WindowItem {
+        WindowCandidate {
+            groups = List.copyOf(groups);
+        }
+    }
+    record WindowUnclassified(long start, long end) implements WindowItem { }
+    record WindowGroup(long id, List<WindowEntry> entries) {
+        WindowGroup {
+            entries = List.copyOf(entries);
+        }
+    }
+    record WindowEntry(WalRecordType type, WalPartitionKey partition, int leaderEpoch, long firstOffset,
+                       long lastOffset, long walOffset, int length, int payloadLength) { }
+    record WindowSnapshot(long identityHigh, long identityLow, long checkpointGeneration,
+                          long head, long tail, long ceiling, List<WindowItem> items) {
+        WindowSnapshot {
+            items = List.copyOf(items);
+        }
+    }
+
     /**
      * Inspection results are not a durability, continuity or Kafka visibility certificate.
      * A later read can fail after callbacks have already run, so visitors must
@@ -41,6 +62,53 @@ final class BlockRingRecovery {
     interface WindowVisitor {
         void candidate(long start, AlignedWalBlockCodec.DecodedBlock block) throws IOException;
         void unclassified(long start, long end) throws IOException;
+    }
+
+    /** Stages only bounded metadata and returns it only after the entire scan succeeds. */
+    static final class WindowSnapshotBuilder implements WindowVisitor {
+        private final int maxItems;
+        private final int maxRecords;
+        private final List<WindowItem> items = new ArrayList<>();
+        private int records;
+
+        WindowSnapshotBuilder(int maxItems, int maxRecords) {
+            if (maxItems <= 0 || maxRecords <= 0) throw new IllegalArgumentException("Invalid WAL inspection limits");
+            this.maxItems = maxItems;
+            this.maxRecords = maxRecords;
+        }
+
+        @Override
+        public void candidate(long start, AlignedWalBlockCodec.DecodedBlock block) throws IOException {
+            requireItemCapacity();
+            List<WindowGroup> groups = new ArrayList<>();
+            for (AlignedWalBlockCodec.DecodedGroup group : block.groups()) {
+                List<WindowEntry> entries = new ArrayList<>();
+                for (AlignedWalBlockCodec.Entry entry : group.records()) {
+                    if (records == maxRecords) throw new IOException("WAL inspection record limit exceeded");
+                    WalRecord record = entry.record();
+                    entries.add(new WindowEntry(record.type(), WalPartitionKey.of(record), record.leaderEpoch(),
+                        record.firstOffset(), record.lastOffset(), entry.walOffset(), entry.length(),
+                        record.payload().remaining()));
+                    records++;
+                }
+                groups.add(new WindowGroup(group.id(), entries));
+            }
+            items.add(new WindowCandidate(start, block.length(), groups));
+        }
+
+        @Override
+        public void unclassified(long start, long end) throws IOException {
+            requireItemCapacity();
+            items.add(new WindowUnclassified(start, end));
+        }
+
+        private void requireItemCapacity() throws IOException {
+            if (items.size() == maxItems) throw new IOException("WAL inspection item limit exceeded");
+        }
+
+        WindowSnapshot complete(long high, long low, BlockRingCheckpoint.State state) {
+            return new WindowSnapshot(high, low, state.generation(), state.head(), state.tail(), state.scanCeiling(), items);
+        }
     }
 
     private BlockRingRecovery() { }

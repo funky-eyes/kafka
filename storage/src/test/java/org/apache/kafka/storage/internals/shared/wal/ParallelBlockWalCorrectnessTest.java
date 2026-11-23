@@ -292,15 +292,30 @@ class ParallelBlockWalCorrectnessTest {
                 var first = writer.submitOwned(ALIGNMENT, offset -> AlignedWalBlockCodec.encode(offset, 7, 8,
                     ALIGNMENT, List.of(new AlignedWalBlockCodec.Group(0, List.of(record(0, 1))))));
                 assertTrue(gate.earlierEntered.await(10, TimeUnit.SECONDS));
+                WalRecord otherPartition = WalRecord.data(1, 2, 1, 1, 1, 1, new byte[] {1});
                 var second = writer.submitOwned(ALIGNMENT, offset -> AlignedWalBlockCodec.encode(offset, 7, 8,
-                    ALIGNMENT, List.of(new AlignedWalBlockCodec.Group(1, List.of(record(1, 1))))));
+                    ALIGNMENT, List.of(new AlignedWalBlockCodec.Group(1, List.of(otherPartition)))));
                 try {
                     second.forced().get(10, TimeUnit.SECONDS);
                     assertFalse(first.forced().isDone());
                     List<String> events = new ArrayList<>();
+                    List<Integer> partitions = new ArrayList<>();
                     BlockRingRecovery.inspectWindow(io, dataStart, CAPACITY, ALIGNMENT, ALIGNMENT, 0, 0,
-                        checkpoint.current().scanCeiling(), 7, 8, inspectionEvents(events));
+                        checkpoint.current().scanCeiling(), 7, 8, new BlockRingRecovery.WindowVisitor() {
+                            @Override
+                            public void candidate(long start, AlignedWalBlockCodec.DecodedBlock block) {
+                                WalRecord recovered = block.groups().get(0).records().get(0).record();
+                                events.add("block:" + start + ":" + recovered.firstOffset());
+                                partitions.add(recovered.partition());
+                            }
+
+                            @Override
+                            public void unclassified(long start, long end) {
+                                events.add("unknown:" + start + ":" + end);
+                            }
+                        });
                     assertEquals(List.of("unknown:0:4096", "block:4096:1"), events);
+                    assertEquals(List.of(1), partitions);
                     assertThrows(IOException.class, () -> BlockRingCheckpoint.open(io, ALIGNMENT, CAPACITY, 7, 8));
                 } finally {
                     gate.release.countDown();
@@ -391,6 +406,100 @@ class ParallelBlockWalCorrectnessTest {
                 assertEquals(List.of("unknown:0:4096", "block:4096:1"), events);
                 assertThrows(IOException.class, () -> BlockRingCheckpoint.open(io, ALIGNMENT, CAPACITY, 7, 8));
             }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void windowSnapshotPreservesAtomicGroupsWithoutRetainingPayloads(boolean aio) throws Exception {
+        Path path = dir.resolve("window-snapshot-groups-" + aio);
+        long dataStart = BlockRingCheckpoint.Layout.WINDOWED.metadataBytes(ALIGNMENT);
+        try (WalIoBackend backend = backend(aio); WalIoBackend.Handle io = backend.create(path)) {
+            io.preallocate(dataStart + CAPACITY);
+            var checkpoint = BlockRingCheckpoint.initialize(io, ALIGNMENT, CAPACITY, 7, 8);
+            checkpoint.extendScanCeiling(2L * ALIGNMENT);
+            WalRecord first = WalRecord.data(1, 2, 0, 3, 5, 6, new byte[] {1, 2});
+            WalRecord second = WalRecord.data(1, 2, 1, 4, 10, 10, new byte[] {3});
+            WalRecord truncate = WalRecord.truncate(1, 2, 0, 5, 7);
+            ByteBuffer bytes = AlignedWalBlockCodec.encode(ALIGNMENT, 7, 8, ALIGNMENT, List.of(
+                new AlignedWalBlockCodec.Group(5, List.of(first, second)),
+                new AlignedWalBlockCodec.Group(6, List.of(truncate))));
+            long position = dataStart + ALIGNMENT;
+            while (bytes.hasRemaining()) {
+                int written = io.write(bytes, position);
+                assertTrue(written > 0);
+                position += written;
+            }
+            io.force();
+
+            var snapshot = BlockRingCheckpoint.inspectWindowSnapshot(io, ALIGNMENT, CAPACITY, 7, 8,
+                ALIGNMENT, 2, 3);
+            assertEquals(7, snapshot.identityHigh());
+            assertEquals(8, snapshot.identityLow());
+            assertEquals(2, snapshot.checkpointGeneration());
+            assertEquals(0, snapshot.head());
+            assertEquals(0, snapshot.tail());
+            assertEquals(2L * ALIGNMENT, snapshot.ceiling());
+            assertEquals(new BlockRingRecovery.WindowUnclassified(0, ALIGNMENT), snapshot.items().get(0));
+            var candidate = (BlockRingRecovery.WindowCandidate) snapshot.items().get(1);
+            assertEquals(ALIGNMENT, candidate.start());
+            assertEquals(List.of(5L, 6L), candidate.groups().stream().map(BlockRingRecovery.WindowGroup::id).toList());
+            var entries = candidate.groups().get(0).entries();
+            assertEquals(List.of(new WalPartitionKey(1, 2, 0), new WalPartitionKey(1, 2, 1)),
+                entries.stream().map(BlockRingRecovery.WindowEntry::partition).toList());
+            assertEquals(3, entries.get(0).leaderEpoch());
+            assertEquals(5, entries.get(0).firstOffset());
+            assertEquals(6, entries.get(0).lastOffset());
+            assertEquals(2, entries.get(0).payloadLength());
+            assertEquals(WalRecordType.TRUNCATE, candidate.groups().get(1).entries().get(0).type());
+            assertThrows(UnsupportedOperationException.class, () -> snapshot.items().clear());
+            assertThrows(IOException.class, () -> BlockRingCheckpoint.inspectWindowSnapshot(io, ALIGNMENT, CAPACITY,
+                7, 8, ALIGNMENT, 1, 3));
+            assertThrows(IOException.class, () -> BlockRingCheckpoint.inspectWindowSnapshot(io, ALIGNMENT, CAPACITY,
+                7, 8, ALIGNMENT, 2, 2));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void failedWindowSnapshotDoesNotReturnPartiallyScannedResults(boolean aio) throws Exception {
+        Path path = dir.resolve("window-snapshot-read-failure-" + aio);
+        long dataStart = BlockRingCheckpoint.Layout.WINDOWED.metadataBytes(ALIGNMENT);
+        try (var backend = new CountingBackend(aio); WalIoBackend.Handle io = backend.create(path)) {
+            io.preallocate(dataStart + CAPACITY);
+            var checkpoint = BlockRingCheckpoint.initialize(io, ALIGNMENT, CAPACITY, 7, 8);
+            checkpoint.extendScanCeiling(2L * ALIGNMENT);
+            writeInspectionBlock(io, dataStart, 0, 0, record(0, 1));
+            writeInspectionBlock(io, dataStart, ALIGNMENT, 1, record(1, 1));
+            io.force();
+            backend.failReadAtPosition = dataStart + ALIGNMENT;
+            assertThrows(IOException.class, () -> BlockRingCheckpoint.inspectWindowSnapshot(io, ALIGNMENT,
+                CAPACITY, 7, 8, ALIGNMENT, 2, 2));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void windowInspectionRejectsCheckpointChangeDuringScan(boolean aio) throws Exception {
+        Path path = dir.resolve("window-inspect-checkpoint-race-" + aio);
+        long dataStart = BlockRingCheckpoint.Layout.WINDOWED.metadataBytes(ALIGNMENT);
+        try (WalIoBackend backend = backend(aio); WalIoBackend.Handle io = backend.create(path)) {
+            io.preallocate(dataStart + CAPACITY);
+            var checkpoint = BlockRingCheckpoint.initialize(io, ALIGNMENT, CAPACITY, 7, 8);
+            checkpoint.extendScanCeiling(2L * ALIGNMENT);
+            writeInspectionBlock(io, dataStart, 0, 0, record(0, 1));
+            io.force();
+            var visitor = new BlockRingRecovery.WindowVisitor() {
+                @Override
+                public void candidate(long start, AlignedWalBlockCodec.DecodedBlock block) throws IOException {
+                    checkpoint.extendScanCeiling(3L * ALIGNMENT);
+                }
+
+                @Override
+                public void unclassified(long start, long end) { }
+            };
+            assertThrows(IOException.class, () -> BlockRingCheckpoint.inspectWindow(io, ALIGNMENT, CAPACITY,
+                7, 8, ALIGNMENT, visitor));
         }
     }
 
@@ -920,6 +1029,7 @@ class ParallelBlockWalCorrectnessTest {
         private final AtomicInteger maxReadRequest = new AtomicInteger();
         private volatile int failAtWrite;
         private volatile int failAtRead;
+        private volatile long failReadAtPosition = -1;
         private volatile int failAtForce;
         private boolean holdFirstForce;
         private final CountDownLatch firstForceEntered = new CountDownLatch(1);
@@ -971,6 +1081,7 @@ class ParallelBlockWalCorrectnessTest {
 
                 @Override
                 public int read(ByteBuffer dst, long position) throws IOException {
+                    if (position == failReadAtPosition) throw new IOException("injected WAL read failure");
                     if (countReads.get()) {
                         maxReadRequest.accumulateAndGet(dst.remaining(), Math::max);
                         if (reads.incrementAndGet() == failAtRead) throw new IOException("injected WAL read failure");

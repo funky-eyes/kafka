@@ -121,8 +121,8 @@ final class BlockRingCheckpoint {
      * prefix. The caller must hold exclusive WAL ownership. This method does
      * not repair metadata, publish records or authorize physical reuse.
      */
-    static void inspectWindow(WalIoBackend.Handle io, int alignment, long capacity, long high, long low,
-                              int maxBlock, BlockRingRecovery.WindowVisitor visitor) throws IOException {
+    static State inspectWindow(WalIoBackend.Handle io, int alignment, long capacity, long high, long low,
+                               int maxBlock, BlockRingRecovery.WindowVisitor visitor) throws IOException {
         Layout layout = layoutForSize(io.size(), alignment, capacity);
         if (layout != Layout.WINDOWED) throw new IOException("WAL does not use a scan window");
         Selected selected = select(io, alignment, capacity, high, low, layout);
@@ -132,6 +132,17 @@ final class BlockRingCheckpoint {
             state.retiredLastGroup(), state.lastGroup(), high, low);
         BlockRingRecovery.inspectWindow(io, dataStart, capacity, alignment, maxBlock,
             state.head(), state.tail(), state.scanCeiling(), high, low, visitor);
+        if (!state.equals(select(io, alignment, capacity, high, low, layout).newest()))
+            throw new IOException("WAL checkpoint changed during window inspection");
+        return state;
+    }
+
+    /** Bounded metadata-only snapshot; no partially scanned result escapes on failure. */
+    static BlockRingRecovery.WindowSnapshot inspectWindowSnapshot(WalIoBackend.Handle io, int alignment,
+        long capacity, long high, long low, int maxBlock, int maxItems, int maxRecords) throws IOException {
+        var builder = new BlockRingRecovery.WindowSnapshotBuilder(maxItems, maxRecords);
+        State state = inspectWindow(io, alignment, capacity, high, low, maxBlock, builder);
+        return builder.complete(high, low, state);
     }
 
     private static Selected select(WalIoBackend.Handle io, int alignment, long capacity, long high, long low,
