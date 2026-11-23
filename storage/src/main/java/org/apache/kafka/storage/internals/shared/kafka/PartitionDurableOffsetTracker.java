@@ -103,6 +103,12 @@ final class PartitionDurableOffsetTracker {
         if (failure != null) {
             return CompletableFuture.failedFuture(failure);
         }
+        // A newly appended request normally waits for the current tail. Its
+        // exact end cannot belong to an earlier, strictly ordered reservation.
+        Reservation last = pending.peekLast();
+        if (last != null && last.endOffset == endOffset) {
+            return last.confirmed.thenApply(ignored -> null);
+        }
         for (Reservation reservation : pending) {
             if (endOffset <= reservation.endOffset) {
                 return reservation.confirmed.thenApply(ignored -> null);

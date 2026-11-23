@@ -59,6 +59,37 @@ class PartitionDurableOffsetTrackerTest {
     }
 
     @Test
+    void exactTailAndInteriorOffsetWaitForTheirOwnOrderedReservations() {
+        var tracker = new PartitionDurableOffsetTracker(1L, 0L, Runnable::run, 3, 3L);
+        var first = tracker.reserve(1L, 0L, 2L, 1L);
+        var second = tracker.reserve(1L, 2L, 5L, 1L);
+        var third = tracker.reserve(1L, 5L, 9L, 1L);
+        var firstWal = new CompletableFuture<Void>();
+        var secondWal = new CompletableFuture<Void>();
+        var thirdWal = new CompletableFuture<Void>();
+        first.bind(firstWal);
+        second.bind(secondWal);
+        third.bind(thirdWal);
+        CompletableFuture<Void> middle = tracker.awaitOffset(1L, 4L);
+        CompletableFuture<Void> tail = tracker.awaitOffset(1L, 9L);
+        CompletableFuture<Void> cancelled = tracker.awaitOffset(1L, 9L);
+        assertTrue(cancelled.cancel(false));
+        assertThrows(CompletionException.class, () -> tracker.awaitOffset(1L, 10L).join());
+
+        secondWal.complete(null);
+        assertFalse(middle.isDone());
+        assertFalse(tail.isDone());
+        firstWal.complete(null);
+        assertTrue(middle.isDone());
+        middle.join();
+        assertFalse(tail.isDone());
+        tracker.fence(new IOException("leadership lost"));
+        assertInstanceOf(IOException.class, assertThrows(CompletionException.class, tail::join).getCause());
+        assertFalse(thirdWal.isCancelled());
+        thirdWal.complete(null);
+    }
+
+    @Test
     void failureFencesAllPendingAndResetIgnoresOldCompletions() {
         PartitionDurableOffsetTracker tracker = new PartitionDurableOffsetTracker(3L, 0L, Runnable::run, 10, 100L);
         var first = tracker.reserve(3L, 0L, 1L, 1L);
