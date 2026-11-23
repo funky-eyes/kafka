@@ -25,6 +25,7 @@ import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.config.ConfigResource;
 import org.apache.kafka.common.config.TopicConfig;
 import org.apache.kafka.common.errors.InvalidReplicationFactorException;
@@ -47,18 +48,27 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.NavigableMap;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 /**
  * Authoritative shared-object metadata store backed by the classic compacted Kafka topic
@@ -81,6 +91,7 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
     private static final long TOPIC_CREATE_RETRY_BACKOFF_MS = 250L;
     private static final long CLOSE_JOIN_TIMEOUT_MS = 30_000L;
     private static final int MAX_PENDING_REPLAY_HORIZONS = 32;
+    private static final int MAX_PENDING_LIFECYCLE_OPERATIONS = 256;
 
     private final SharedMetadataClientConfiguration configuration;
     private final Admin admin;
@@ -91,7 +102,33 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
     private final AtomicBoolean closed = new AtomicBoolean();
     private final AppliedOffsetTracker appliedOffsets = new AppliedOffsetTracker();
     private final ReplayHorizonMailbox horizonRequests = new ReplayHorizonMailbox(MAX_PENDING_REPLAY_HORIZONS);
+    // Object-specific transactional producers are created only in opt-in mode.
+    // A single session is initialized BEFORE PREPARE and reused for COMMIT.
+    private final ConcurrentHashMap<Long, FencedObjectLifecycleArbiter.Uploader> fencedUploads =
+        new ConcurrentHashMap<>();
+    // Single-flight CAS admission happens before any expensive initTransactions.
+    private final Set<Long> initializingFencedUploads = ConcurrentHashMap.newKeySet();
+    private final Set<Long> claimingFencedObjects = ConcurrentHashMap.newKeySet();
+    private final Set<Long> sealingFencedObjects = ConcurrentHashMap.newKeySet();
+    // No unbounded executor queue: under overload, reject and retry later
+    // rather than retaining unlimited transactional producers / request state.
+    private final ExecutorService lifecycleExecutor = newLifecycleExecutor();
     private volatile Thread consumerThread;
+    // Topic ID observed during startup validation; never accepted from a seal caller.
+    private Uuid initialCatalogTopicId = Uuid.ZERO_UUID;
+
+    static ThreadPoolExecutor newLifecycleExecutor() {
+        return new ThreadPoolExecutor(
+            4, 4, 0L, TimeUnit.MILLISECONDS,
+            new ArrayBlockingQueue<>(MAX_PENDING_LIFECYCLE_OPERATIONS),
+            runnable -> {
+                Thread thread = new Thread(runnable, "kafka-shared-object-lifecycle");
+                thread.setDaemon(true);
+                return thread;
+            },
+            new ThreadPoolExecutor.AbortPolicy()
+        );
+    }
 
     private KafkaObjectMetadataStore(
         SharedMetadataClientConfiguration configuration,
@@ -250,6 +287,7 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
                 SharedMetadataClientConfiguration.TOPIC_NAME + " max.message.bytes " + maxMessageBytes +
                     " is below required " + SharedMetadataClientConfiguration.MIN_METADATA_MESSAGE_BYTES);
         }
+        initialCatalogTopicId = description.topicId();
     }
 
     private static String requiredConfig(Config config, String name) {
@@ -477,23 +515,119 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
         if (createdTimeMs < 0) {
             return CompletableFuture.failedFuture(new IllegalArgumentException("createdTimeMs must be non-negative"));
         }
-        return writeRecord(
-            SharedMetadataRecordCodec.objectKey(objectId),
-            SharedMetadataRecordCodec.preparedObjectValue(createdTimeMs)
-        );
+        if (!configuration.fencedLifecycleEnabled()) {
+            return writeRecord(
+                SharedMetadataRecordCodec.objectKey(objectId),
+                SharedMetadataRecordCodec.preparedObjectValue(createdTimeMs)
+            );
+        }
+        if (closed.get() || !image.isReady()) {
+            return CompletableFuture.failedFuture(new IllegalStateException("Shared metadata is not ready"));
+        }
+        if (!reserveFencedUpload(objectId, initializingFencedUploads, fencedUploads)) {
+            return CompletableFuture.failedFuture(
+                new IllegalStateException("Object ID already has a fenced writer: " + objectId));
+        }
+        try {
+            return CompletableFuture.supplyAsync(() -> {
+                if (closed.get()) {
+                    throw new IllegalStateException("Shared metadata store is closed");
+                }
+                FencedObjectLifecycleArbiter.Uploader session = new FencedObjectLifecycleArbiter.Uploader(
+                    configuration.producerProperties(),
+                    SharedMetadataClientConfiguration.TOPIC_NAME,
+                    configuration.clusterId(),
+                    objectId,
+                    () -> {
+                        captureReadCommittedReplayHorizon()
+                            .get(15L, java.util.concurrent.TimeUnit.SECONDS);
+                        return !image.objectIdentityKnown(objectId);
+                    }
+                );
+                if (fencedUploads.putIfAbsent(objectId, session) != null) {
+                    session.close();
+                    throw new IllegalStateException("Object ID already has a fenced writer: " + objectId);
+                }
+                try {
+                    return session.prepare(createdTimeMs);
+                } catch (Exception failure) {
+                    releaseUpload(objectId);
+                    throw new CompletionException(failure);
+                }
+            }, lifecycleExecutor)
+                .whenComplete((offset, failure) -> initializingFencedUploads.remove(objectId))
+                .thenCompose(this::awaitApplied);
+        } catch (RuntimeException failure) {
+            initializingFencedUploads.remove(objectId);
+            return CompletableFuture.failedFuture(failure);
+        }
+    }
+
+    /**
+     * Claim a local object ID once before creating a Kafka transactional
+     * producer. These are short CHM CAS operations, not a Java global lock.
+     * The durable Kafka catalog still rejects reused IDs after fencing.
+     */
+    static boolean reserveFencedUpload(long objectId, Set<Long> initializing, Map<Long, ?> sessions) {
+        if (objectId <= 0L) {
+            throw new IllegalArgumentException("Object ID must be positive");
+        }
+        if (!initializing.add(objectId)) {
+            return false;
+        }
+        if (sessions.containsKey(objectId)) {
+            initializing.remove(objectId);
+            return false;
+        }
+        return true;
     }
 
     @Override
     public CompletableFuture<Void> commit(SharedObjectMetadata metadata) {
         Objects.requireNonNull(metadata, "metadata");
-        return writeRecord(
-            SharedMetadataRecordCodec.objectKey(metadata.objectId()),
-            SharedMetadataRecordCodec.committedObjectValue(metadata)
-        ).thenCompose(ignored -> image.committedObject(metadata.objectId())
+        if (!configuration.fencedLifecycleEnabled()) {
+            return writeRecord(
+                SharedMetadataRecordCodec.objectKey(metadata.objectId()),
+                SharedMetadataRecordCodec.committedObjectValue(metadata)
+            ).thenCompose(ignored -> verifyPublishedCommit(metadata));
+        }
+        if (closed.get() || !image.isReady()) {
+            return CompletableFuture.failedFuture(new IllegalStateException("Shared metadata is not ready"));
+        }
+        return CompletableFuture.supplyAsync(() -> {
+            FencedObjectLifecycleArbiter.Uploader session = fencedUploads.get(metadata.objectId());
+            if (session == null) {
+                throw new IllegalStateException("COMMIT requires the same fenced producer as PREPARE");
+            }
+            try {
+                return session.commit(metadata);
+            } catch (Exception failure) {
+                throw new CompletionException(failure);
+            }
+        }, lifecycleExecutor).thenCompose(this::awaitApplied).thenCompose(ignored -> verifyPublishedCommit(metadata));
+    }
+
+    private CompletableFuture<Void> verifyPublishedCommit(SharedObjectMetadata metadata) {
+        return image.committedObject(metadata.objectId())
             .filter(metadata::equals)
             .map(committed -> CompletableFuture.<Void>completedFuture(null))
             .orElseGet(() -> CompletableFuture.failedFuture(new IllegalStateException(
-                "Object COMMIT lost to orphan cleanup fence: " + metadata.objectId()))));
+                "Object COMMIT lost to orphan cleanup fence: " + metadata.objectId())));
+    }
+
+    @Override
+    public void releaseUpload(long objectId) {
+        FencedObjectLifecycleArbiter.Uploader session = fencedUploads.remove(objectId);
+        if (session != null) {
+            try {
+                // The original upload may complete on the metadata consumer
+                // thread; do not block that thread closing Kafka networking.
+                lifecycleExecutor.execute(session::close);
+            } catch (java.util.concurrent.RejectedExecutionException closedExecutor) {
+                // A shutting-down store must still release all producers.
+                session.close();
+            }
+        }
     }
 
     @Override
@@ -509,11 +643,231 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
 
     @Override
     public CompletableFuture<Boolean> claimCleanup(long objectId, long expectedCreatedTimeMs) {
-        // COMMIT and CLAIM currently use independent compacted keys. A Kafka
-        // append order is not an atomic cross-broker CAS, and compaction can
-        // erase evidence needed to replay the winning transition. A positive
-        // reply here would authorize irreversible S3 DELETE: fail closed.
-        return CompletableFuture.failedFuture(unsafeOrphanClaim());
+        if (!configuration.fencedLifecycleEnabled()) {
+            return CompletableFuture.failedFuture(unsafeOrphanClaim());
+        }
+        if (expectedCreatedTimeMs < 0L) {
+            return CompletableFuture.failedFuture(
+                new IllegalArgumentException("expectedCreatedTimeMs must be non-negative"));
+        }
+        if (closed.get() || !image.isReady()) {
+            return CompletableFuture.failedFuture(new IllegalStateException("Shared metadata is not ready"));
+        }
+        // A duplicate local claimant should not initialize a second Kafka
+        // transactional producer and fence its own ongoing CLAIM.
+        if (!claimingFencedObjects.add(objectId)) {
+            return CompletableFuture.completedFuture(false);
+        }
+        try {
+            return CompletableFuture.supplyAsync(() -> {
+                try {
+                    return FencedObjectLifecycleArbiter.claimAfterFencing(
+                        configuration.producerProperties(),
+                        SharedMetadataClientConfiguration.TOPIC_NAME,
+                        configuration.clusterId(),
+                        objectId,
+                        expectedCreatedTimeMs,
+                        () -> {
+                            // Capture a fresh read-committed LSO only AFTER
+                            // the old upload producer was fenced.
+                            captureReadCommittedReplayHorizon()
+                                .get(15L, java.util.concurrent.TimeUnit.SECONDS);
+                            return image.fencedPrepared(objectId, expectedCreatedTimeMs);
+                        }
+                    );
+                } catch (Exception failure) {
+                    throw new CompletionException(failure);
+                }
+            }, lifecycleExecutor).thenCompose(offset -> {
+                if (offset.isEmpty()) {
+                    return CompletableFuture.completedFuture(false);
+                }
+                return awaitApplied(offset.getAsLong())
+                    .thenApply(ignored -> image.cleanupClaimed(objectId, expectedCreatedTimeMs));
+            }).whenComplete((ignored, failure) -> claimingFencedObjects.remove(objectId));
+        } catch (RuntimeException failure) {
+            claimingFencedObjects.remove(objectId);
+            return CompletableFuture.failedFuture(failure);
+        }
+    }
+
+    /**
+     * Experimental local catalog operation only. There is no production caller
+     * or Controller handoff. Payload v2 flags and this local replay cannot
+     * authenticate the writer, fence legacy writers, or authorize deletion.
+     * A failure after the Kafka transaction may mean the seal was committed.
+     * An existing seal, including one from a prior uncertain attempt, is
+     * rejected rather than returned as this attempt's successful append.
+     */
+    CompletableFuture<OptionalLong> sealCommittedForExperiment(
+        SharedObjectMetadata descriptor, long expectedCommitOffset, long retirementEpoch
+    ) {
+        Objects.requireNonNull(descriptor, "descriptor");
+        if (expectedCommitOffset < 0L || retirementEpoch <= 0L) {
+            return CompletableFuture.failedFuture(new IllegalArgumentException("Invalid experimental catalog seal"));
+        }
+        if (!configuration.fencedLifecycleEnabled() || closed.get() || !image.isReady()) {
+            return CompletableFuture.failedFuture(new IllegalStateException("Fenced catalog is not ready"));
+        }
+        if (initialCatalogTopicId == null || Uuid.ZERO_UUID.equals(initialCatalogTopicId)) {
+            return CompletableFuture.failedFuture(new IllegalStateException("Catalog Topic ID is unavailable"));
+        }
+        long objectId = descriptor.objectId();
+        if (!sealingFencedObjects.add(objectId)) {
+            return CompletableFuture.failedFuture(new IllegalStateException("Catalog seal already in progress"));
+        }
+        try {
+            CompletableFuture<OptionalLong> operation = CompletableFuture.supplyAsync(
+                () -> appendExperimentalCatalogSeal(descriptor, expectedCommitOffset, retirementEpoch),
+                lifecycleExecutor
+            ).thenCompose(offset -> confirmExperimentalCatalogSeal(
+                descriptor.objectId(), expectedCommitOffset, retirementEpoch, offset
+            )).whenComplete((ignored, failure) -> sealingFencedObjects.remove(objectId));
+            // A caller may cancel without stopping an in-flight Kafka transaction.
+            // Keep the single-flight admission until the underlying work ends.
+            return operation.thenApply(result -> result);
+        } catch (RuntimeException failure) {
+            sealingFencedObjects.remove(objectId);
+            return CompletableFuture.failedFuture(failure);
+        }
+    }
+
+    private OptionalLong appendExperimentalCatalogSeal(
+        SharedObjectMetadata descriptor, long expectedCommitOffset, long retirementEpoch
+    ) {
+        if (closed.get() || !image.isReady()) {
+            throw new IllegalStateException("Fenced catalog is no longer ready");
+        }
+        try {
+            return FencedObjectLifecycleArbiter.sealCommittedAfterFencing(
+                configuration.producerProperties(), SharedMetadataClientConfiguration.TOPIC_NAME,
+                configuration.clusterId(), descriptor, expectedCommitOffset, retirementEpoch,
+                () -> checkCatalogIdentityAroundReplay(initialCatalogTopicId, this::lookupCatalogTopicId,
+                    () -> awaitCatalogCandidateAfterFence(image, descriptor, expectedCommitOffset,
+                        this::captureReadCommittedReplayHorizon, 15L, TimeUnit.SECONDS)),
+                () -> !closed.get() && image.isReady()
+            );
+        } catch (InterruptedException failure) {
+            Thread.currentThread().interrupt();
+            throw new CompletionException(failure);
+        } catch (Exception failure) {
+            throw new CompletionException(failure);
+        }
+    }
+
+    private CompletableFuture<OptionalLong> confirmExperimentalCatalogSeal(
+        long objectId, long expectedCommitOffset, long retirementEpoch, OptionalLong offset
+    ) {
+        if (offset.isEmpty()) {
+            return CompletableFuture.completedFuture(offset);
+        }
+        return confirmExperimentalCatalogSeal(image, objectId, expectedCommitOffset, retirementEpoch,
+            offset.getAsLong(), captureReadCommittedReplayHorizon(), 15L, TimeUnit.SECONDS)
+            .thenCompose(result -> CompletableFuture.supplyAsync(() -> {
+                try {
+                    requireMatchingCatalogTopicId(initialCatalogTopicId, lookupCatalogTopicId());
+                    return result;
+                } catch (InterruptedException failure) {
+                    Thread.currentThread().interrupt();
+                    throw new CompletionException(failure);
+                } catch (Exception failure) {
+                    throw new CompletionException(failure);
+                }
+            }, lifecycleExecutor));
+    }
+
+    /**
+     * Best-effort identity observations around replay. These do not make a
+     * name-based Kafka produce atomic with topic deletion/recreation and are
+     * not producer authentication or Controller retirement authorization.
+     */
+    static boolean checkCatalogIdentityAroundReplay(
+        Uuid expected, Callable<Uuid> currentTopicId, Callable<Boolean> replayedCandidate
+    ) throws Exception {
+        Objects.requireNonNull(currentTopicId, "currentTopicId");
+        Objects.requireNonNull(replayedCandidate, "replayedCandidate");
+        requireMatchingCatalogTopicId(expected, currentTopicId.call());
+        boolean matched = Boolean.TRUE.equals(replayedCandidate.call());
+        requireMatchingCatalogTopicId(expected, currentTopicId.call());
+        return matched;
+    }
+
+    static void requireMatchingCatalogTopicId(Uuid expected, Uuid actual) {
+        if (expected == null || Uuid.ZERO_UUID.equals(expected) || actual == null
+            || Uuid.ZERO_UUID.equals(actual) || !expected.equals(actual)) {
+            throw new IllegalStateException("Catalog Topic ID is missing or changed");
+        }
+    }
+
+    private Uuid lookupCatalogTopicId() throws Exception {
+        var topics = admin.describeTopics(List.of(SharedMetadataClientConfiguration.TOPIC_NAME)).allTopicNames();
+        try {
+            TopicDescription current = topics.get(5L, TimeUnit.SECONDS)
+                .get(SharedMetadataClientConfiguration.TOPIC_NAME);
+            return current == null ? null : current.topicId();
+        } finally {
+            if (!topics.isDone()) {
+                topics.cancel(false);
+            }
+        }
+    }
+
+    static CompletableFuture<OptionalLong> confirmExperimentalCatalogSeal(
+        SharedMetadataImage image,
+        long objectId,
+        long expectedCommitOffset,
+        long retirementEpoch,
+        long sealOffset,
+        CompletableFuture<ReadCommittedReplayHorizon> horizon,
+        long timeout,
+        TimeUnit unit
+    ) {
+        Objects.requireNonNull(image, "image");
+        Objects.requireNonNull(horizon, "horizon");
+        Objects.requireNonNull(unit, "unit");
+        // A committed transaction can still be behind another open transaction
+        // at the LSO. A timeout or stale horizon is an uncertain outcome, not
+        // proof that Kafka did not commit the seal.
+        return horizon.orTimeout(timeout, unit).thenApply(captured -> {
+            if (captured.capturedStableEndExclusive() <= sealOffset
+                || captured.appliedPositionExclusive() <= sealOffset) {
+                throw new IllegalStateException("Catalog seal outcome is not yet visible at the stable horizon");
+            }
+            SharedMetadataImage.CatalogSealEvidence seal = image.catalogSeal(objectId).orElseThrow(
+                () -> new IllegalStateException("Committed catalog seal was not replayed"));
+            if (seal.sealRecordOffset() != sealOffset
+                || seal.seal().originalCommitOffset() != expectedCommitOffset
+                || seal.seal().retirementEpoch() != retirementEpoch) {
+                throw new IllegalStateException("Replayed catalog seal differs from the local append");
+            }
+            return OptionalLong.of(sealOffset);
+        });
+    }
+
+    static boolean awaitCatalogCandidateAfterFence(
+        SharedMetadataImage image,
+        SharedObjectMetadata descriptor,
+        long expectedCommitOffset,
+        Supplier<CompletableFuture<ReadCommittedReplayHorizon>> requestHorizon,
+        long timeout,
+        TimeUnit unit
+    ) throws Exception {
+        Objects.requireNonNull(image, "image");
+        Objects.requireNonNull(descriptor, "descriptor");
+        Objects.requireNonNull(requestHorizon, "requestHorizon");
+        Objects.requireNonNull(unit, "unit");
+        CompletableFuture<ReadCommittedReplayHorizon> pending =
+            Objects.requireNonNull(requestHorizon.get(), "horizon future");
+        try {
+            ReadCommittedReplayHorizon horizon = pending.get(timeout, unit);
+            return horizon.capturedStableEndExclusive() > expectedCommitOffset
+                && image.matchesUnsealedFencedCommit(descriptor, expectedCommitOffset);
+        } finally {
+            // Release the bounded mailbox slot on timeout or interruption.
+            if (!pending.isDone()) {
+                pending.cancel(false);
+            }
+        }
     }
 
     @Override
@@ -564,14 +918,19 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
 
     @Override
     public List<ObjectMetadataStore.PreparedObject> preparedObjects() {
-        return image.preparedObjects();
+        return configuration.fencedLifecycleEnabled()
+            ? image.fencedPreparedObjects() : image.preparedObjects();
     }
 
     @Override
     public List<ObjectMetadataStore.PreparedObject> cleanupClaimedObjects() {
-        // Historical CLAIMED records are equally unsafe to re-delete when
-        // their earlier COMMIT may have been removed by compaction.
-        throw unsafeOrphanClaim();
+        if (!configuration.fencedLifecycleEnabled()) {
+            // Legacy claims cannot prove compaction-stable arbitration.
+            throw unsafeOrphanClaim();
+        }
+        // Never re-delete old legacy CLAIMED records, only v2 claims whose
+        // upload producer was fenced before the transaction committed.
+        return image.fencedCleanupClaimedObjects();
     }
 
     public SharedMetadataImage.State state() {
@@ -687,6 +1046,9 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
         }
         IllegalStateException closedError = new IllegalStateException("Shared metadata store is closed");
         failAppliedOffsetWaiters(closedError);
+        // Allow already admitted lifecycle tasks to fail/finish while draining
+        // their consumers. Do not strand a queued uploader Future on shutdownNow.
+        lifecycleExecutor.shutdown();
         failReadCommittedHorizonRequests(closedError);
         consumer.wakeup();
         Thread thread = consumerThread;
@@ -695,6 +1057,17 @@ public final class KafkaObjectMetadataStore implements ObjectMetadataStore, Auto
             interrupted = awaitConsumerThreadStop(thread, consumer::wakeup, CLOSE_JOIN_TIMEOUT_MS);
         }
         RuntimeException closeFailure = null;
+        for (Long objectId : List.copyOf(fencedUploads.keySet())) {
+            try {
+                releaseUpload(objectId);
+            } catch (RuntimeException failure) {
+                if (closeFailure == null) {
+                    closeFailure = failure;
+                } else {
+                    closeFailure.addSuppressed(failure);
+                }
+            }
+        }
         closeFailure = closeResource(closeFailure, consumer);
         closeFailure = closeResource(closeFailure, producer);
         closeFailure = closeResource(closeFailure, sequenceProducer);

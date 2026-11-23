@@ -24,6 +24,10 @@ public interface ObjectMetadataStore extends AutoCloseable {
 
     CompletableFuture<Void> commit(SharedObjectMetadata metadata);
 
+    /** Release a per-object upload session after success or failure; legacy stores are no-op. */
+    default void releaseUpload(long objectId) {
+    }
+
     /**
      * Reserved for a future Controller/KRaft-authorized COMMITTED object
      * retirement transition. A broker-local read-index decision is never

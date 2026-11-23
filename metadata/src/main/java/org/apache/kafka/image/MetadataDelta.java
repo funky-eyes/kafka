@@ -196,6 +196,11 @@ public final class MetadataDelta {
         return partitionRetirementDelta;
     }
 
+    /** Null when the current KRaft update contains no COMMITTED object lifecycle changes. */
+    public CommittedObjectRetirementDelta committedObjectRetirementDelta() {
+        return committedObjectRetirementDelta;
+    }
+
     public CommittedObjectRetirementDelta getOrCreateCommittedObjectRetirementDelta() {
         if (committedObjectRetirementDelta == null) {
             committedObjectRetirementDelta =

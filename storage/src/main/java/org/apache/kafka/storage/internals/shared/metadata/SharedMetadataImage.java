@@ -20,6 +20,8 @@ import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCo
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.CleanupClaimedValue;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.CleanupDeletedValue;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.CommittedObjectValue;
+import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.FencedClaimedObjectValue;
+import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.FencedPreparedObjectValue;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.MetadataKey;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.ObjectCatalogSealValue;
 import org.apache.kafka.storage.internals.shared.metadata.SharedMetadataRecordCodec.MetadataValue;
@@ -35,6 +37,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 
 /**
@@ -51,16 +54,22 @@ import java.util.function.Consumer;
 public final class SharedMetadataImage {
     private static final long INITIAL_SEQUENCE = 1L;
 
-    private final Map<Long, PreparedObject> preparedObjects = new HashMap<>();
-    private final Map<Long, SharedObjectMetadata> committedObjects = new HashMap<>();
-    private final Map<Long, Long> committedObjectPositions = new HashMap<>();
-    private final Map<Long, CatalogSealEvidence> catalogSeals = new HashMap<>();
-    private final Map<Long, CleanupObject> cleanupObjects = new HashMap<>();
+    // Each object transition is still serialized by the single metadata
+    // replay writer. Concurrent maps allow O(1) lock-free read probes without
+    // contending with expensive catalog callbacks or whole-image snapshots.
+    private final Map<Long, PreparedObject> preparedObjects = new ConcurrentHashMap<>();
+    private final Map<Long, SharedObjectMetadata> committedObjects = new ConcurrentHashMap<>();
+    private final Map<Long, CommitProvenance> committedObjectPositions = new HashMap<>();
+
+    private record CommitProvenance(long offset, long latestOffset, boolean fenced) {
+    }
+    private final Map<Long, CatalogSealEvidence> catalogSeals = new ConcurrentHashMap<>();
+    private final Map<Long, CleanupObject> cleanupObjects = new ConcurrentHashMap<>();
     private final Map<Integer, Long> brokerSequenceWatermarks = new HashMap<>();
     private final Map<SharedPartitionId, Long> partitionLogStarts = new HashMap<>();
     private final Consumer<SharedObjectMetadata> committedObjectListener;
-    private State state = State.RECOVERING;
-    private Throwable failure;
+    private volatile State state = State.RECOVERING;
+    private volatile Throwable failure;
     private long lastConsumedMetadataOffset = -1L;
 
     public SharedMetadataImage() {
@@ -128,7 +137,15 @@ public final class SharedMetadataImage {
             return;
         }
         if (value instanceof PreparedObjectValue prepared) {
-            applyPreparedObject(objectId, prepared);
+            applyPreparedObject(objectId, prepared.createdTimeMs(), false);
+            return;
+        }
+        if (value instanceof FencedPreparedObjectValue prepared) {
+            applyPreparedObject(objectId, prepared.createdTimeMs(), true);
+            return;
+        }
+        if (value instanceof FencedClaimedObjectValue claimed) {
+            applyFencedClaim(objectId, claimed);
             return;
         }
         if (value instanceof CommittedObjectValue committed) {
@@ -156,25 +173,45 @@ public final class SharedMetadataImage {
         committedObjectPositions.remove(objectId);
     }
 
-    private void applyPreparedObject(long objectId, PreparedObjectValue prepared) {
+    private void applyPreparedObject(long objectId, long createdTimeMs, boolean fenced) {
         if (catalogSeals.containsKey(objectId)) {
-            // A prior seal in this authoritative metadata partition fences
-            // duplicate PREPAREs from an old owner, but cannot delete live data.
+            if (fenced) {
+                throw corruption("Fenced PREPARE attempted to reuse sealed object " + objectId);
+            }
             return;
         }
         CleanupObject cleanup = cleanupObjects.get(objectId);
         if (cleanup != null) {
-            validateCleanupTimestamp(objectId, cleanup.createdTimeMs, prepared.createdTimeMs());
+            if (fenced || cleanup.fenced) {
+                throw corruption("Fenced object " + objectId + " was prepared after its cleanup claim");
+            }
+            validateCleanupTimestamp(objectId, cleanup.createdTimeMs, createdTimeMs);
             return;
         }
         if (committedObjects.containsKey(objectId)) {
             throw corruption("object " + objectId + " regressed from COMMITTED to PREPARED");
         }
-        PreparedObject candidate = new PreparedObject(objectId, prepared.createdTimeMs());
+        PreparedObject candidate = new PreparedObject(objectId, createdTimeMs, fenced);
         PreparedObject existing = preparedObjects.putIfAbsent(objectId, candidate);
         if (existing != null && !existing.equals(candidate)) {
-            throw corruption("object " + objectId + " was prepared with conflicting timestamps");
+            throw corruption("object " + objectId + " was prepared with conflicting timestamps or protocol");
         }
+    }
+
+    private void applyFencedClaim(long objectId, FencedClaimedObjectValue claimed) {
+        if (committedObjects.containsKey(objectId) || catalogSeals.containsKey(objectId)) {
+            throw corruption("Fenced CLAIM after COMMIT for object " + objectId);
+        }
+        PreparedObject prepared = preparedObjects.get(objectId);
+        if (prepared != null && !prepared.fenced) {
+            throw corruption("Fenced CLAIM cannot retire a legacy PREPARED object " + objectId);
+        }
+        CleanupObject cleanup = cleanupObjects.get(objectId);
+        if (cleanup != null && !cleanup.fenced) {
+            throw corruption("Fenced CLAIM conflicts with legacy cleanup for object " + objectId);
+        }
+        validatePreparedCleanupTimestamp(objectId, claimed.createdTimeMs());
+        applyCleanupState(objectId, new CleanupRecord(claimed.createdTimeMs(), CleanupState.CLAIMED, true));
     }
 
     private void applyCommittedObject(long objectId, CommittedObjectValue committed, long recordOffset) {
@@ -185,36 +222,67 @@ public final class SharedMetadataImage {
         }
         CatalogSealEvidence seal = catalogSeals.get(objectId);
         if (seal != null) {
-            // A late or retried COMMIT cannot publish any new reference after
-            // its durable Kafka catalog seal. Identity mismatch means corrupt
-            // metadata; a matching duplicate loses to the earlier seal.
-            if (!metadata.equals(committedObjects.get(objectId))
-                || !seal.seal().descriptorSha256().equals(SharedMetadataRecordCodec.committedDescriptorSha256(metadata))) {
-                throw corruption("Post-seal object COMMIT has a conflicting descriptor: " + objectId);
-            }
+            validatePostSealCommit(objectId, committed, seal);
             return;
         }
-        if (cleanupObjects.containsKey(objectId)) {
-            if (state == State.RECOVERING) {
-                throw corruption("Ambiguous compacted COMMIT and cleanup fence for object " + objectId);
-            }
-            // The cleanup record has an earlier offset in the authoritative partition, so this is a losing delayed
-            // COMMIT. Keep the fence and ignore the object value; both keys remain available after compaction.
+        if (suppressCommitAfterCleanup(objectId)) {
             return;
         }
         SharedObjectMetadata existing = committedObjects.putIfAbsent(objectId, metadata);
-        if (existing != null && !existing.equals(metadata)) {
-            throw corruption("object " + objectId + " has conflicting COMMITTED metadata");
-        }
+        validateExistingCommit(objectId, existing, committed);
         preparedObjects.remove(objectId);
-        if (existing == null) {
-            committedObjectPositions.put(objectId, recordOffset);
-        }
+        CommitProvenance original = committedObjectPositions.get(objectId);
+        committedObjectPositions.put(objectId, new CommitProvenance(
+            original == null ? recordOffset : original.offset(), recordOffset, committed.fenced()));
         if (existing == null && state == State.READY) {
             // Historical replay must finish before publishing its final
             // COMMITTED winners into the broker's remote read index.
             committedObjectListener.accept(metadata);
         }
+    }
+
+    /**
+     * Post-seal identical retries must never replace the original COMMIT or
+     * downgrade its transactional v2 provenance after log compaction.
+     */
+    private void validatePostSealCommit(
+        long objectId, CommittedObjectValue committed, CatalogSealEvidence seal
+    ) {
+        SharedObjectMetadata metadata = committed.metadata();
+        if (!committed.fenced()
+            || !metadata.equals(committedObjects.get(objectId))
+            || !seal.seal().descriptorSha256().equals(SharedMetadataRecordCodec.committedDescriptorSha256(metadata))) {
+            throw corruption("Post-seal object COMMIT has a conflicting descriptor: " + objectId);
+        }
+    }
+
+    private void validateExistingCommit(long objectId, SharedObjectMetadata existing, CommittedObjectValue incoming) {
+        if (existing == null) {
+            return;
+        }
+        if (!existing.equals(incoming.metadata())) {
+            throw corruption("object " + objectId + " has conflicting COMMITTED metadata");
+        }
+        CommitProvenance original = committedObjectPositions.get(objectId);
+        if (original != null && original.fenced() != incoming.fenced()) {
+            throw corruption("COMMIT changed its original v2 fencing provenance: " + objectId);
+        }
+    }
+
+    private boolean suppressCommitAfterCleanup(long objectId) {
+        CleanupObject cleanup = cleanupObjects.get(objectId);
+        if (cleanup == null) {
+            return false;
+        }
+        if (cleanup.fenced) {
+            throw corruption("COMMIT after fenced CLAIM for object " + objectId);
+        }
+        if (state == State.RECOVERING) {
+            throw corruption("Ambiguous compacted COMMIT and cleanup fence for object " + objectId);
+        }
+        // Legacy different-key cleanup won the live append order. Keep its
+        // fence, but never let a late COMMIT publish new remote read references.
+        return true;
     }
 
     private void applyObjectCatalogSeal(long objectId, MetadataValue value, long recordOffset) {
@@ -224,19 +292,7 @@ public final class SharedMetadataImage {
         if (recordOffset < 0L || seal.originalCommitOffset() >= recordOffset) {
             throw corruption("Catalog seal requires a later, actual read-committed Kafka record offset");
         }
-        SharedObjectMetadata original = committedObjects.get(objectId);
-        Long committedPosition = committedObjectPositions.get(objectId);
-        if (original == null || committedPosition == null
-            || committedPosition != seal.originalCommitOffset()) {
-            // A compacted-away COMMIT, replay gap or forged position can
-            // never be substituted by a bare sampled LSO.
-            throw corruption("Catalog seal lacks the original replayed COMMITTED record: " + objectId);
-        }
-        if (original.objectSize() != seal.objectSize()
-            || original.objectChecksum() != seal.objectChecksum()
-            || !SharedMetadataRecordCodec.committedDescriptorSha256(original).equals(seal.descriptorSha256())) {
-            throw corruption("Catalog seal changed an immutable packed object descriptor: " + objectId);
-        }
+        validateOriginalCommitForSeal(objectId, seal);
         CatalogSealEvidence next = new CatalogSealEvidence(recordOffset, seal);
         CatalogSealEvidence prior = catalogSeals.get(objectId);
         if (prior != null && !prior.equals(next)) {
@@ -246,6 +302,51 @@ public final class SharedMetadataImage {
         // Keep existing COMMITTED references readable. This replay fact
         // DOES NOT retire primary/alternate indexes, drain readers, or
         // grant DELETE permission.
+    }
+
+    private void validateOriginalCommitForSeal(long objectId, ObjectCatalogSealValue seal) {
+        SharedObjectMetadata original = committedObjects.get(objectId);
+        CommitProvenance committedPosition = committedObjectPositions.get(objectId);
+        if (original == null || committedPosition == null
+            || committedPosition.offset() != seal.originalCommitOffset()) {
+            // A compacted-away COMMIT, replay gap or forged position can
+            // never be substituted by a bare sampled LSO.
+            throw corruption("Catalog seal lacks the original replayed COMMITTED record: " + objectId);
+        }
+        // A plain legacy COMMIT carries no v2 fencing provenance. The
+        // experimental catalog seal cannot certify it after compaction.
+        if (!committedPosition.fenced()) {
+            throw corruption("Catalog seal requires the original v2 fenced COMMIT: " + objectId);
+        }
+        if (original.objectSize() != seal.objectSize()
+            || original.objectChecksum() != seal.objectChecksum()
+            || !SharedMetadataRecordCodec.committedDescriptorSha256(original).equals(seal.descriptorSha256())) {
+            throw corruption("Catalog seal changed an immutable packed object descriptor: " + objectId);
+        }
+    }
+
+    /**
+     * Checks one candidate against this image at a single replay point. The caller
+     * must first fence the writer and replay a newly captured read-committed
+     * horizon. This is only a local necessary condition: the payload's v2 flag
+     * does not authenticate its producer, compaction can hide older records,
+     * and this check grants neither catalog-seal nor deletion authority.
+     *
+     * <p>Reject repeated COMMIT records because the original and the latest
+     * retained object record must both be the expected Kafka position. An image
+     * update without a Kafka offset cannot establish this condition.</p>
+     */
+    public synchronized boolean matchesUnsealedFencedCommit(SharedObjectMetadata descriptor, long expectedCommitOffset) {
+        requireReady();
+        Objects.requireNonNull(descriptor, "descriptor");
+        if (expectedCommitOffset < 0L) {
+            return false;
+        }
+        long objectId = descriptor.objectId();
+        CommitProvenance position = committedObjectPositions.get(objectId);
+        return position != null && position.fenced()
+            && position.offset() == expectedCommitOffset && position.latestOffset() == expectedCommitOffset
+            && descriptor.equals(committedObjects.get(objectId)) && !catalogSeals.containsKey(objectId);
     }
 
     /** Read-only exact COMMIT/seal evidence, not cross-log Controller authority. */
@@ -271,6 +372,10 @@ public final class SharedMetadataImage {
             }
             // COMMIT has the lower authoritative offset, therefore the cleanup attempt lost and must be a no-op.
             return;
+        }
+        PreparedObject prepared = preparedObjects.get(objectId);
+        if (prepared != null && prepared.fenced) {
+            throw corruption("Legacy cleanup cannot claim fenced PREPARED object " + objectId);
         }
         validatePreparedCleanupTimestamp(objectId, cleanup.createdTimeMs());
         applyCleanupState(objectId, cleanup);
@@ -300,12 +405,15 @@ public final class SharedMetadataImage {
         CleanupObject existing = cleanupObjects.get(objectId);
         if (existing != null) {
             validateCleanupTimestamp(objectId, existing.createdTimeMs, candidate.createdTimeMs());
+            if (existing.fenced != candidate.fenced()) {
+                throw corruption("Object " + objectId + " mixes fenced and legacy cleanup generations");
+            }
             if (existing.state == CleanupState.DELETED && candidate.state() == CleanupState.CLAIMED) {
                 // Duplicate/late claim cannot move a terminal fence backwards.
                 return;
             }
         }
-        cleanupObjects.put(objectId, new CleanupObject(candidate.createdTimeMs(), candidate.state()));
+        cleanupObjects.put(objectId, new CleanupObject(candidate.createdTimeMs(), candidate.state(), candidate.fenced()));
         preparedObjects.remove(objectId);
     }
 
@@ -400,6 +508,24 @@ public final class SharedMetadataImage {
         return Optional.ofNullable(committedObjects.get(objectId));
     }
 
+    /**
+     * Existing object identity check; call only after a new uploader fenced
+     * previous producer generations and caught up to post-fence Kafka LSO.
+     */
+    public boolean objectIdentityKnown(long objectId) {
+        requireReady();
+        if (objectId <= 0L) {
+            throw new IllegalArgumentException("objectId must be positive");
+        }
+        // PREPARED -> COMMITTED and PREPARED -> CLAIMED always install
+        // the successor BEFORE removing the former. Thus readers cannot
+        // observe an absent identity during either successful transition.
+        boolean known = preparedObjects.containsKey(objectId) || committedObjects.containsKey(objectId)
+            || cleanupObjects.containsKey(objectId) || catalogSeals.containsKey(objectId);
+        requireReady();
+        return known;
+    }
+
     public synchronized List<ObjectMetadataStore.PreparedObject> preparedObjects() {
         requireReady();
         List<ObjectMetadataStore.PreparedObject> result = preparedObjects.values().stream()
@@ -407,6 +533,38 @@ public final class SharedMetadataImage {
             .sorted(Comparator.comparingLong(ObjectMetadataStore.PreparedObject::objectId))
             .toList();
         return List.copyOf(result);
+    }
+
+    /** Only generation-fenced PREPARED objects can be considered for v2 arbitration. */
+    public synchronized List<ObjectMetadataStore.PreparedObject> fencedPreparedObjects() {
+        requireReady();
+        return preparedObjects.values().stream()
+            .filter(prepared -> prepared.fenced)
+            .map(prepared -> new ObjectMetadataStore.PreparedObject(prepared.objectId, prepared.createdTimeMs))
+            .sorted(Comparator.comparingLong(ObjectMetadataStore.PreparedObject::objectId))
+            .toList();
+    }
+
+    /** Durable v2 CLAIM records remain retryable after late S3 PUT completion. */
+    public synchronized List<ObjectMetadataStore.PreparedObject> fencedCleanupClaimedObjects() {
+        requireReady();
+        return cleanupObjects.entrySet().stream()
+            .filter(entry -> entry.getValue().fenced && entry.getValue().state == CleanupState.CLAIMED)
+            .map(entry -> new ObjectMetadataStore.PreparedObject(
+                entry.getKey(), entry.getValue().createdTimeMs))
+            .sorted(Comparator.comparingLong(ObjectMetadataStore.PreparedObject::objectId))
+            .toList();
+    }
+
+    /** Targeted O(1) check; call only after post-fencing LSO catch-up. */
+    public boolean fencedPrepared(long objectId, long expectedCreatedTimeMs) {
+        requireReady();
+        // The caller MUST first capture and apply a post-producer-fence
+        // read-committed LSO. An arbitrary live map read is not GC authority.
+        PreparedObject prepared = preparedObjects.get(objectId);
+        boolean matches = prepared != null && prepared.fenced && prepared.createdTimeMs == expectedCreatedTimeMs;
+        requireReady();
+        return matches;
     }
 
     public synchronized List<ObjectMetadataStore.PreparedObject> cleanupClaimedObjects() {
@@ -630,12 +788,15 @@ public final class SharedMetadataImage {
         DELETED
     }
 
-    private record PreparedObject(long objectId, long createdTimeMs) {
+    private record PreparedObject(long objectId, long createdTimeMs, boolean fenced) {
     }
 
-    private record CleanupObject(long createdTimeMs, CleanupState state) {
+    private record CleanupObject(long createdTimeMs, CleanupState state, boolean fenced) {
     }
 
-    private record CleanupRecord(long createdTimeMs, CleanupState state) {
+    private record CleanupRecord(long createdTimeMs, CleanupState state, boolean fenced) {
+        private CleanupRecord(long createdTimeMs, CleanupState state) {
+            this(createdTimeMs, state, false);
+        }
     }
 }

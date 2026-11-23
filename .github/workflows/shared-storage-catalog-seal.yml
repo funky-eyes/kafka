@@ -1,0 +1,118 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements. See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License. You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Shared Storage Catalog Seal Kafka Integration
+
+on:
+  pull_request:
+    paths:
+      - 'storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3/KafkaObjectMetadataStore.java'
+      - 'storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3/FencedObjectLifecycleArbiter.java'
+      - 'storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3/SharedMetadataClientConfiguration.java'
+      - 'storage/shared-storage-s3/src/test/java/org/apache/kafka/storage/internals/shared/s3/KafkaCatalogSealFencingIntegrationTest.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/metadata/SharedMetadataImage.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/metadata/SharedMetadataRecordCodec.java'
+      - '.github/actions/setup-gradle/**'
+      - '.github/workflows/shared-storage-catalog-seal.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kafka-catalog-seal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # A separate runner and separate Kafka cluster avoid the fixed catalog
+      # topic colliding with the orphan-compaction integration workflow.
+      - name: Start three dedicated Kafka brokers
+        shell: bash
+        run: |
+          set -euo pipefail
+          voters='1@127.0.0.1:19101,2@127.0.0.1:19102,3@127.0.0.1:19103'
+          for id in 1 2 3; do
+            port=$((19090 + id))
+            controller_port=$((19100 + id))
+            docker run -d --network host --name "seal-kafka-${id}" \
+              -e CLUSTER_ID=4L6g3nShT-eMCtK--X86sw \
+              -e KAFKA_NODE_ID="$id" \
+              -e KAFKA_PROCESS_ROLES=broker,controller \
+              -e KAFKA_CONTROLLER_QUORUM_VOTERS="$voters" \
+              -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
+              -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT \
+              -e KAFKA_LISTENERS="PLAINTEXT://127.0.0.1:${port},CONTROLLER://127.0.0.1:${controller_port}" \
+              -e KAFKA_ADVERTISED_LISTENERS="PLAINTEXT://127.0.0.1:${port}" \
+              -e KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT \
+              -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=3 \
+              -e KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=3 \
+              -e KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=2 \
+              -e KAFKA_AUTO_CREATE_TOPICS_ENABLE=false \
+              -e KAFKA_HEAP_OPTS='-Xms128m -Xmx512m' \
+              apache/kafka:4.3.1
+          done
+          for attempt in $(seq 1 90); do
+            if docker exec seal-kafka-1 /opt/kafka/bin/kafka-broker-api-versions.sh \
+                --bootstrap-server 127.0.0.1:19091 >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo 'Kafka did not become ready' >&2
+          exit 1
+
+      - name: Setup Gradle
+        uses: ./.github/actions/setup-gradle
+        with:
+          java-version: 25
+          gradle-cache-read-only: true
+
+      - name: Exercise the real metadata-store seal path
+        shell: bash
+        env:
+          SHARED_STORAGE_KAFKA_BOOTSTRAP_SERVERS: 127.0.0.1:19091,127.0.0.1:19092,127.0.0.1:19093
+          SHARED_STORAGE_ISOLATED_SEAL_TEST_CLUSTER: 'true'
+        run: |
+          set -euo pipefail
+          ./gradlew :storage:shared-storage-s3:test \
+            --tests 'org.apache.kafka.storage.internals.shared.s3.KafkaCatalogSealFencingIntegrationTest' \
+            -x :storage:shared-storage-s3:checkstyleMain -x :storage:shared-storage-s3:checkstyleTest \
+            -x :storage:shared-storage-s3:spotbugsMain -x :storage:shared-storage-s3:spotbugsTest \
+            -PmaxParallelForks=1 -Dorg.gradle.jvmargs=-Xmx2g --no-scan
+          report='storage/shared-storage-s3/build/test-results/test/TEST-org.apache.kafka.storage.internals.shared.s3.KafkaCatalogSealFencingIntegrationTest.xml'
+          python3 - "$report" <<'PY'
+          import sys
+          from xml.etree import ElementTree
+          report = ElementTree.parse(sys.argv[1]).getroot()
+          assert report.get('tests') == '1', 'expected one actual Kafka integration test'
+          assert report.get('skipped') == '0', 'integration test was skipped'
+          assert report.get('failures') == '0' and report.get('errors') == '0', 'integration test failed'
+          PY
+
+      - name: Capture Kafka logs on failure
+        if: failure()
+        shell: bash
+        run: |
+          for id in 1 2 3; do docker logs "seal-kafka-${id}" 2>&1 | tail -150 || true; done
+
+      - name: Stop dedicated brokers
+        if: always()
+        shell: bash
+        run: |
+          for id in 1 2 3; do docker rm -f "seal-kafka-${id}" || true; done

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-name: Shared Storage Orphan Compaction Recovery
+name: Shared Storage Orphan Compaction Recovery (Repository Broker)
 
 on:
   push:
@@ -23,7 +23,13 @@ on:
     paths:
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/metadata/SharedMetadataImage.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/metadata/SharedMetadataImageTest.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/object/ObjectStore.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/object/OrphanObjectCleaner.java'
+      - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/object/OrphanObjectCleanerTest.java'
       - 'storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3/KafkaObjectMetadataStore.java'
+      - 'storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3/FencedObjectLifecycleArbiter.java'
+      - 'storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3/S3ObjectStore.java'
+      - 'storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3/S3ObjectStoreConfig.java'
       - 'storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3/S3SharedStorageExtension.java'
       - 'storage/shared-storage-s3/src/test/java/org/apache/kafka/storage/internals/shared/s3/KafkaObjectMetadataStoreTest.java'
       - 'storage/shared-storage-s3/src/test/java/org/apache/kafka/storage/internals/shared/s3/KafkaOrphanCompactionMinioIntegrationTest.java'
@@ -31,10 +37,16 @@ on:
   pull_request:
     paths:
       - 'storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3/KafkaObjectMetadataStore.java'
+      - 'storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3/FencedObjectLifecycleArbiter.java'
+      - 'storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3/S3ObjectStore.java'
+      - 'storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3/S3ObjectStoreConfig.java'
       - 'storage/shared-storage-s3/src/main/java/org/apache/kafka/storage/internals/shared/s3/S3SharedStorageExtension.java'
       - 'storage/shared-storage-s3/src/test/java/org/apache/kafka/storage/internals/shared/s3/KafkaObjectMetadataStoreTest.java'
       - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/metadata/SharedMetadataImage.java'
       - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/metadata/SharedMetadataImageTest.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/object/ObjectStore.java'
+      - 'storage/src/main/java/org/apache/kafka/storage/internals/shared/object/OrphanObjectCleaner.java'
+      - 'storage/src/test/java/org/apache/kafka/storage/internals/shared/object/OrphanObjectCleanerTest.java'
       - 'storage/shared-storage-s3/src/test/java/org/apache/kafka/storage/internals/shared/s3/KafkaOrphanCompactionMinioIntegrationTest.java'
       - '.github/workflows/shared-storage-orphan-compaction.yml'
   workflow_dispatch:
@@ -45,7 +57,7 @@ permissions:
 jobs:
   compaction-recovery:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
         with:
@@ -56,6 +68,53 @@ jobs:
         with:
           bucket: kafka-orphan-compaction-test
 
+      - name: Setup Gradle
+        uses: ./.github/actions/setup-gradle
+        with:
+          java-version: 25
+          gradle-cache-read-only: true
+
+      - name: Build broker image from this checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew :core:releaseTarGz --no-scan
+          mapfile -t archives < <(find "$PWD/core/build/distributions" -maxdepth 1 -type f \
+            \( -name '*.tgz' -o -name '*.tar.gz' \) ! -name '*site-docs*' | sort)
+          test "${#archives[@]}" -eq 1
+          archive="${archives[0]}"
+          sha256sum "$archive"
+          echo "Broker checkout: $(git rev-parse HEAD)"
+          # Use the repository's Docker build context and the locally built
+          # archive. The runtime image uses JRE 21; release classes target 17.
+          # The Alpine build stage's process listing may truncate Kafka's
+          # command line, making kafka-server-stop.sh miss the build-only
+          # broker. Stop the exact child PID instead, in a temporary context.
+          PYTHONPATH="$PWD/docker" python3 - "$archive" <<'PY'
+          import pathlib
+          import shutil
+          import subprocess
+          import sys
+          import tempfile
+          with tempfile.TemporaryDirectory() as temporary:
+              context = pathlib.Path(temporary)
+              shutil.copytree('docker/jvm', context, dirs_exist_ok=True)
+              shutil.copytree('docker/resources', context / 'resources')
+              shutil.copy('docker/server.properties', context)
+              shutil.copy(sys.argv[1], context / 'kafka.tgz')
+              launcher = context / 'jsa_launch'
+              text = launcher.read_text()
+              start = 'opt/kafka/bin/kafka-server-start.sh opt/kafka/config/server.properties &'
+              stop = 'opt/kafka/bin/kafka-server-stop.sh'
+              assert text.count(start) == 1 and text.count(stop) == 1
+              launcher.write_text(text.replace(start, start + '\nKAFKA_BROKER_PID=$!')
+                                  .replace(stop, 'kill -TERM "$KAFKA_BROKER_PID"'))
+              subprocess.run(['docker', 'build', '-f', str(context / 'Dockerfile'),
+                              '-t', 'kafka-orphan-local:ci', '--build-arg', 'kafka_url=',
+                              '--progress=plain', str(context)], check=True)
+          PY
+          docker image inspect kafka-orphan-local:ci --format '{{.Id}}'
+
       - name: Start three isolated Kafka brokers
         shell: bash
         run: |
@@ -65,6 +124,7 @@ jobs:
             port=$((19090 + id))
             controller_port=$((19100 + id))
             docker run -d --network host --name "orphan-kafka-${id}" \
+              --label kafka.orphan.restart-test=true \
               -e CLUSTER_ID=4L6g3nShT-eMCtK--X86sw \
               -e KAFKA_NODE_ID="$id" \
               -e KAFKA_PROCESS_ROLES=broker,controller \
@@ -79,7 +139,7 @@ jobs:
               -e KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=2 \
               -e KAFKA_LOG_CLEANER_BACKOFF_MS=1000 \
               -e KAFKA_HEAP_OPTS='-Xms128m -Xmx512m' \
-              apache/kafka:4.3.1
+              kafka-orphan-local:ci
           done
           for attempt in $(seq 1 90); do
             if docker exec orphan-kafka-1 /opt/kafka/bin/kafka-broker-api-versions.sh \
@@ -91,12 +151,6 @@ jobs:
           echo 'Kafka did not become ready' >&2
           exit 1
 
-      - name: Setup Gradle
-        uses: ./.github/actions/setup-gradle
-        with:
-          java-version: 25
-          gradle-cache-read-only: true
-
       - name: Run metadata and real Kafka/MinIO recovery tests
         shell: bash
         env:
@@ -105,6 +159,8 @@ jobs:
           AWS_REGION: us-east-1
           SHARED_STORAGE_S3_ENDPOINT: http://127.0.0.1:9000
           SHARED_STORAGE_KAFKA_BOOTSTRAP_SERVERS: 127.0.0.1:19091,127.0.0.1:19092,127.0.0.1:19093
+          SHARED_STORAGE_ISOLATED_TEST_CLUSTER: 'true'
+          SHARED_STORAGE_BROKER_RESTART_TEST: 'true'
         run: |
           set -euo pipefail
           ./gradlew :storage:test \
@@ -122,6 +178,8 @@ jobs:
           grep -q 'failures="0"' "$result"
           grep -q 'errors="0"' "$result"
           grep -q 'skipped="0"' "$result"
+          grep -Fq 'name="productionCleanerRecoversClaimAndRetriesLatePutAcrossStoreRestart()"' "$result"
+          grep -q 'BROKER_RESTART_AND_CLAIM_RECOVERY_VERIFIED' "$result"
 
       - name: Capture Kafka logs on failure
         if: failure()

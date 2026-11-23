@@ -251,6 +251,8 @@ class BrokerServer(
         storageExtensionOpt = Some(storageExtension.get())
         logManager.setUnifiedLogFactory(storageExtension.get().unifiedLogFactory())
         logManager.setStoragePartitionRoleListener(storageExtension.get().partitionRoleListener())
+        logManager.setCommittedObjectRetirementFence(
+          (objectId: Long) => storageExtension.get().fenceCommittedObject(objectId))
       }
       brokerFeatures = BrokerFeatures.createDefault(config.unstableFeatureVersionsEnabled,
         storageExtensionOpt.exists(_.supportsTopicStorageConfiguration()))

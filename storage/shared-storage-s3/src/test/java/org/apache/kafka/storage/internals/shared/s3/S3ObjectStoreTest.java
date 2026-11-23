@@ -26,8 +26,11 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.S3Configuration;
 import software.amazon.awssdk.services.s3.model.CreateBucketRequest;
+import software.amazon.awssdk.services.s3.model.DeleteObjectsResponse;
+import software.amazon.awssdk.services.s3.model.S3Error;
 import software.amazon.awssdk.services.s3.model.S3Exception;
 
+import java.lang.reflect.Proxy;
 import java.net.URI;
 import java.nio.ByteBuffer;
 import java.util.HashMap;
@@ -302,6 +305,65 @@ class S3ObjectStoreTest {
     }
 
     @Test
+    void boundedS3IoExecutorRejectsBacklogInsteadOfGrowingWithoutLimit() throws Exception {
+        S3ObjectStoreConfig config = S3ObjectStoreConfig.from(Map.of(
+            S3ObjectStoreConfig.BUCKET_CONFIG, "s3-io-backpressure",
+            S3ObjectStoreConfig.IO_THREADS_CONFIG, 1
+        ));
+        ExecutorService io = S3ObjectStore.newIoExecutor(config);
+        CountDownLatch running = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        try {
+            io.submit(() -> {
+                running.countDown();
+                release.await();
+                return null;
+            });
+            assertTrue(running.await(10, TimeUnit.SECONDS));
+            for (int index = 0; index < 64; index++) {
+                io.execute(() -> { });
+            }
+            assertThrows(RejectedExecutionException.class, () -> io.execute(() -> { }));
+        } finally {
+            release.countDown();
+            io.shutdown();
+            assertTrue(io.awaitTermination(10, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    void deleteObjectsPerKeyErrorFailsTheWholeBatchForDurableRetry() throws Exception {
+        S3Client fake = (S3Client) Proxy.newProxyInstance(
+            S3Client.class.getClassLoader(),
+            new Class<?>[] {S3Client.class},
+            (proxy, method, arguments) -> {
+                if ("deleteObjects".equals(method.getName())) {
+                    return DeleteObjectsResponse.builder().errors(S3Error.builder()
+                        .key("objects/9001").code("AccessDenied").build()).build();
+                }
+                if ("close".equals(method.getName())) {
+                    return null;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+        S3ObjectStoreConfig config = S3ObjectStoreConfig.from(Map.of(
+            S3ObjectStoreConfig.BUCKET_CONFIG, "s3-bulk-errors",
+            S3ObjectStoreConfig.KEY_PREFIX_CONFIG, "objects"
+        ));
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try (S3ObjectStore store = new S3ObjectStore(config, fake, executor)) {
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                () -> store.deleteBatch(List.of(9_001L, 9_002L)).get(10, TimeUnit.SECONDS));
+            assertTrue(failure.getCause().getMessage().contains("per-object errors"));
+            ExecutionException oversized = assertThrows(ExecutionException.class,
+                () -> store.deleteBatch(java.util.Collections.nCopies(1_001, 9_001L))
+                    .get(10, TimeUnit.SECONDS));
+            assertInstanceOf(IllegalArgumentException.class, oversized.getCause());
+        }
+    }
+
+    @Test
     void roundTripsPutRangeReadAndDeleteAgainstConfiguredS3() throws Exception {
         String endpoint = System.getenv("SHARED_STORAGE_S3_ENDPOINT");
         assumeTrue(endpoint != null && !endpoint.isBlank(), "S3 integration endpoint is not configured");
@@ -346,6 +408,21 @@ class S3ObjectStoreTest {
             assertEquals(objectId, absent.objectId());
             S3Exception original = assertInstanceOf(S3Exception.class, absent.getCause());
             assertEquals(404, original.statusCode(), "Deleted MinIO object must no longer be readable");
+
+            // Exercise the real S3 DeleteObjects API (one request, two keys),
+            // including idempotent retry after some or all keys are missing.
+            long first = 9_011L;
+            long second = 9_012L;
+            store.put(first, ByteBuffer.wrap(payload)).get(10, TimeUnit.SECONDS);
+            store.put(second, ByteBuffer.wrap(payload)).get(10, TimeUnit.SECONDS);
+            store.deleteBatch(List.of(first, second)).get(10, TimeUnit.SECONDS);
+            store.deleteBatch(List.of(first, second)).get(10, TimeUnit.SECONDS);
+            for (long removed : List.of(first, second)) {
+                ExecutionException notFound = assertThrows(ExecutionException.class,
+                    () -> store.rangeRead(removed, 0L, 1).get(10, TimeUnit.SECONDS));
+                assertEquals(removed, assertInstanceOf(RemoteObjectMissingException.class,
+                    notFound.getCause()).objectId());
+            }
         }
     }
 

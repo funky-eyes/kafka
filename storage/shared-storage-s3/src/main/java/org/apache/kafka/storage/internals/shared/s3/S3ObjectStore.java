@@ -32,7 +32,11 @@ import software.amazon.awssdk.services.s3.model.CompleteMultipartUploadRequest;
 import software.amazon.awssdk.services.s3.model.CompletedMultipartUpload;
 import software.amazon.awssdk.services.s3.model.CompletedPart;
 import software.amazon.awssdk.services.s3.model.CreateMultipartUploadRequest;
+import software.amazon.awssdk.services.s3.model.Delete;
 import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
+import software.amazon.awssdk.services.s3.model.DeleteObjectsRequest;
+import software.amazon.awssdk.services.s3.model.DeleteObjectsResponse;
+import software.amazon.awssdk.services.s3.model.ObjectIdentifier;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
@@ -46,10 +50,11 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -420,6 +425,52 @@ public final class S3ObjectStore implements ObjectStore {
         ));
     }
 
+    /**
+     * Use one native S3 DeleteObjects call for up to 1,000 independently
+     * claimed orphan IDs. S3 bulk deletes are NOT atomic: the response may
+     * report individual failures despite HTTP success. Fail the whole batch
+     * and let durable CLAIM records retry any already-deleted keys safely.
+     */
+    @Override
+    public CompletableFuture<Void> deleteBatch(List<Long> objectIds) {
+        Objects.requireNonNull(objectIds, "objectIds");
+        if (objectIds.isEmpty()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        if (objectIds.size() > 1_000) {
+            return CompletableFuture.failedFuture(new IllegalArgumentException(
+                "S3 DeleteObjects supports at most 1000 keys per request"));
+        }
+        if (objectIds.size() == 1) {
+            // Avoid XML/checksum overhead when a sweep has only one key.
+            Long objectId = objectIds.get(0);
+            if (objectId == null) {
+                return CompletableFuture.failedFuture(new IllegalArgumentException("Object ID must not be null"));
+            }
+            return delete(objectId);
+        }
+        List<ObjectIdentifier> identifiers = new ArrayList<>(objectIds.size());
+        for (Long objectId : objectIds) {
+            if (objectId == null || objectId < 0L) {
+                return CompletableFuture.failedFuture(new IllegalArgumentException(
+                    "Object ID must be non-negative"));
+            }
+            identifiers.add(ObjectIdentifier.builder().key(config.objectKey(objectId)).build());
+        }
+        DeleteObjectsRequest request = DeleteObjectsRequest.builder()
+            .bucket(config.bucket())
+            .delete(Delete.builder().objects(identifiers).quiet(true).build())
+            .build();
+        return runAsync(() -> {
+            DeleteObjectsResponse response = client.deleteObjects(request);
+            if (!response.errors().isEmpty()) {
+                throw new IllegalStateException(
+                    "S3 DeleteObjects reported " + response.errors().size()
+                        + " per-object errors; all durable CLAIMs must be retried");
+            }
+        });
+    }
+
     private CompletableFuture<Void> runAsync(Runnable operation) {
         return submitAsync(() -> {
             operation.run();
@@ -480,13 +531,24 @@ public final class S3ObjectStore implements ObjectStore {
         return builder.build();
     }
 
-    private static ExecutorService newIoExecutor(S3ObjectStoreConfig config) {
+    /**
+     * A slow S3 endpoint must not accumulate an unbounded number of queued WAL
+     * uploads and GC requests. Existing submitAsync catches rejection and
+     * completes the request future exceptionally, preserving retryability.
+     */
+    static ExecutorService newIoExecutor(S3ObjectStoreConfig config) {
         AtomicInteger threadId = new AtomicInteger();
-        return Executors.newFixedThreadPool(config.ioThreads(), runnable -> {
-            Thread thread = new Thread(runnable, "kafka-shared-s3-io-" + threadId.incrementAndGet());
-            thread.setDaemon(true);
-            return thread;
-        });
+        int backlog = (int) Math.min(1024L, Math.max(32L, (long) config.ioThreads() * 64L));
+        return new ThreadPoolExecutor(
+            config.ioThreads(), config.ioThreads(), 0L, TimeUnit.MILLISECONDS,
+            new ArrayBlockingQueue<>(backlog),
+            runnable -> {
+                Thread thread = new Thread(runnable, "kafka-shared-s3-io-" + threadId.incrementAndGet());
+                thread.setDaemon(true);
+                return thread;
+            },
+            new ThreadPoolExecutor.AbortPolicy()
+        );
     }
 
     @Override

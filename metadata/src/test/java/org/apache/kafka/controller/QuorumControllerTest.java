@@ -54,6 +54,7 @@ import org.apache.kafka.common.metadata.BeginTransactionRecord;
 import org.apache.kafka.common.metadata.BrokerRegistrationChangeRecord;
 import org.apache.kafka.common.metadata.ConfigRecord;
 import org.apache.kafka.common.metadata.EndTransactionRecord;
+import org.apache.kafka.common.metadata.CommittedObjectRetirementRecord;
 import org.apache.kafka.common.metadata.FeatureLevelRecord;
 import org.apache.kafka.common.metadata.PartitionRetirementAuthorityRecord;
 import org.apache.kafka.common.metadata.PartitionRecord;
@@ -111,6 +112,7 @@ import org.apache.kafka.server.common.Feature;
 import org.apache.kafka.server.common.KRaftVersion;
 import org.apache.kafka.server.common.MetadataVersion;
 import org.apache.kafka.server.common.OffsetAndEpoch;
+import org.apache.kafka.server.common.PartitionRetirementAuthorityVersion;
 import org.apache.kafka.server.common.TopicIdPartition;
 import org.apache.kafka.snapshot.FileRawSnapshotReader;
 import org.apache.kafka.snapshot.Snapshots;
@@ -126,6 +128,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
@@ -194,6 +197,299 @@ public class QuorumControllerTest {
                     .get(10, TimeUnit.SECONDS)
             );
             assertEquals(recordCount, retirementAuthorityRecordCount(clientEnv));
+        }
+    }
+
+    @Test
+    public void testNegotiatedControllerAtomicallyAppendsOnlyRecordedTerminalBatch() throws Exception {
+        Uuid catalogTopicId = Uuid.randomUuid();
+        BootstrapMetadata experimental = BootstrapMetadata.fromVersion(
+            MetadataVersion.IBP_4_4_IV0, "experimental terminal retirement fixture"
+        ).copyWithFeatureRecord(PartitionRetirementAuthorityVersion.FEATURE_NAME, (short) 1);
+        try (MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build()) {
+            // These records are actual KRaft log entries, not injected into a
+            // local Controller manager or its read-only metadata snapshot.
+            // MockRaft elects the initial leader at offset 0 during setup.
+            // appendInitialRecords writes a second LeaderChange at offset 1
+            // before its records (offsets 2..9), followed by another leader
+            // change at offset 10. Both leader changes consume real offsets.
+            clientEnv.appendInitialRecords(List.of(
+                new ApiMessageAndVersion(new FeatureLevelRecord()
+                    .setName(MetadataVersion.FEATURE_NAME)
+                    .setFeatureLevel(MetadataVersion.IBP_4_4_IV0.featureLevel()), (short) 0),
+                new ApiMessageAndVersion(new FeatureLevelRecord()
+                    .setName(PartitionRetirementAuthorityVersion.FEATURE_NAME)
+                    .setFeatureLevel((short) 1), (short) 0),
+                new ApiMessageAndVersion(terminalFixtureRecord(501L, 4L, -1L, 1, catalogTopicId), (short) 0),
+                new ApiMessageAndVersion(terminalFixtureRecord(502L, 5L, -1L, 1, catalogTopicId), (short) 0),
+                new ApiMessageAndVersion(terminalFixtureRecord(501L, 6L, 4L, 2, catalogTopicId), (short) 0),
+                new ApiMessageAndVersion(terminalFixtureRecord(502L, 7L, 5L, 2, catalogTopicId), (short) 0),
+                new ApiMessageAndVersion(terminalFixtureRecord(501L, 8L, 6L, 3, catalogTopicId), (short) 0),
+                new ApiMessageAndVersion(terminalFixtureRecord(502L, 9L, 7L, 3, catalogTopicId), (short) 0)
+            ));
+            assertEquals(List.of(2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L), clientEnv.allRecordOffsets(),
+                "Synthetic retirement fixture offsets must include BOTH preceding LeaderChange batches");
+            try (QuorumControllerTestEnv env = new QuorumControllerTestEnv.Builder(clientEnv)
+                .setBootstrapMetadata(experimental).build()) {
+                // Wait for the leadership-activation event before testing the
+                // feature-gated Controller writer; an elected leader can still
+                // be processing replay/activation when activeController() returns.
+                QuorumController controller = env.activeController(true);
+                var candidates = List.of(
+                    new CommittedObjectRetirementControlManager.TerminalDeletion(501L, 8L),
+                    new CommittedObjectRetirementControlManager.TerminalDeletion(502L, 9L)
+                );
+                long before = committedRetirementRecordCount(clientEnv);
+                assertEquals(2, controller.finalizeRecordedCommittedObjectDeletionBatch(candidates)
+                    .get(10, TimeUnit.SECONDS));
+                assertEquals(before + 2, committedRetirementRecordCount(clientEnv));
+
+                // The expected generation equals the *actual* appended KRaft
+                // log offset for each record, including any activation records.
+                List<ApiMessageAndVersion> appended = clientEnv.allRecords();
+                int terminalCount = 0;
+                for (int offset = 0; offset < appended.size(); offset++) {
+                    if (appended.get(offset).message() instanceof CommittedObjectRetirementRecord retirement
+                        && retirement.stage() == 4) {
+                        assertEquals(clientEnv.allRecordOffsets().get(offset), retirement.acceptedKRaftOffset());
+                        assertEquals(retirement.objectId() == 501L ? 8L : 9L,
+                            retirement.previousKRaftOffset());
+                        terminalCount++;
+                    }
+                }
+                assertEquals(2, terminalCount);
+                // A stale second attempt cannot resurrect any physical ID or
+                // append duplicate terminal records after the first batch.
+                assertEquals(0, controller.finalizeRecordedCommittedObjectDeletionBatch(candidates)
+                    .get(10, TimeUnit.SECONDS));
+                assertEquals(before + 2, committedRetirementRecordCount(clientEnv));
+            }
+        }
+    }
+
+    private static CommittedObjectRetirementRecord terminalFixtureRecord(
+        long objectId, long acceptedOffset, long previousOffset, int stage, Uuid catalogTopicId
+    ) {
+        return new CommittedObjectRetirementRecord()
+            .setObjectId(objectId)
+            .setAcceptedKRaftOffset(acceptedOffset)
+            .setPreviousKRaftOffset(previousOffset)
+            .setRetirementEpoch(7L)
+            .setCatalogTopicId(catalogTopicId)
+            .setCatalogCommitOffset(1L)
+            .setSealedCatalogPositionExclusive(2L)
+            .setObjectSize(4_096L)
+            .setObjectChecksum(42L)
+            .setDescriptorSha256("0123456789abcdef".repeat(4))
+            .setStage((byte) stage)
+            .setSafeEpoch(stage == 1 ? -1L : 7L);
+    }
+
+    @Test
+    public void testNegotiatedControllerAppendsAtomicIntentBatchAtActualOffsets() throws Exception {
+        BootstrapMetadata experimental = BootstrapMetadata.fromVersion(
+            MetadataVersion.IBP_4_4_IV0, "experimental batch retirement intent fixture"
+        ).copyWithFeatureRecord(PartitionRetirementAuthorityVersion.FEATURE_NAME, (short) 1);
+        try (MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build()) {
+            clientEnv.appendInitialRecords(List.of(
+                new ApiMessageAndVersion(new FeatureLevelRecord()
+                    .setName(MetadataVersion.FEATURE_NAME)
+                    .setFeatureLevel(MetadataVersion.IBP_4_4_IV0.featureLevel()), (short) 0),
+                new ApiMessageAndVersion(new FeatureLevelRecord()
+                    .setName(PartitionRetirementAuthorityVersion.FEATURE_NAME)
+                    .setFeatureLevel((short) 1), (short) 0)
+            ));
+            try (QuorumControllerTestEnv env = new QuorumControllerTestEnv.Builder(clientEnv)
+                .setBootstrapMetadata(experimental).build()) {
+                QuorumController controller = env.activeController(true);
+                long before = committedRetirementRecordCount(clientEnv);
+                Uuid catalogTopicId = Uuid.randomUuid();
+                var first = terminalFixtureRecord(704L, 0L, -1L, 1, catalogTopicId);
+                var second = terminalFixtureRecord(705L, 0L, -1L, 1, catalogTopicId);
+                var candidates = new ArrayList<>(List.of(first, second));
+                CountDownLatch entered = new CountDownLatch(1);
+                CountDownLatch release = new CountDownLatch(1);
+                controller.appendControlEvent("holdBeforeIntentBatch", () -> {
+                    entered.countDown();
+                    try {
+                        if (!release.await(10, TimeUnit.SECONDS)) {
+                            throw new AssertionError("Intent batch event queue gate timed out");
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new RuntimeException(e);
+                    }
+                });
+                CompletableFuture<Integer> pending;
+                try {
+                    assertTrue(entered.await(10, TimeUnit.SECONDS));
+                    pending = controller.recordUnverifiedCommittedObjectRetirementIntentBatch(candidates);
+                    assertFalse(pending.isDone());
+                    first.setDescriptorSha256("f".repeat(64));
+                    candidates.clear();
+                } finally {
+                    release.countDown();
+                }
+                assertEquals(2, pending.get(10, TimeUnit.SECONDS));
+                assertEquals(before + 2, committedRetirementRecordCount(clientEnv));
+                List<ApiMessageAndVersion> records = clientEnv.allRecords();
+                List<Long> offsets = clientEnv.allRecordOffsets();
+                List<Long> accepted = new ArrayList<>();
+                for (int index = 0; index < records.size(); index++) {
+                    if (records.get(index).message() instanceof CommittedObjectRetirementRecord saved) {
+                        assertEquals(704L + accepted.size(), saved.objectId());
+                        assertEquals((byte) 1, saved.stage());
+                        assertEquals(-1L, saved.safeEpoch());
+                        assertEquals("0123456789abcdef".repeat(4), saved.descriptorSha256());
+                        assertEquals(offsets.get(index), saved.acceptedKRaftOffset());
+                        accepted.add(saved.acceptedKRaftOffset());
+                    }
+                }
+                assertEquals(2, accepted.size());
+                assertEquals(accepted.get(0) + 1L, accepted.get(1).longValue());
+
+                // An existing ID must reject the entire batch, including a new ID.
+                var newCandidate = terminalFixtureRecord(706L, 0L, -1L, 1, catalogTopicId);
+                assertEquals(0, controller.recordUnverifiedCommittedObjectRetirementIntentBatch(
+                    List.of(newCandidate, second)).get(10, TimeUnit.SECONDS));
+                assertEquals(before + 2, committedRetirementRecordCount(clientEnv));
+                assertEquals(true, controller.recordUnverifiedCommittedObjectRetirementIntent(newCandidate)
+                    .get(10, TimeUnit.SECONDS), "Rejected batch must not partially record the new object");
+            }
+        }
+    }
+
+    @Test
+    public void testCommittedObjectIntentBatchCannotBypassUnnegotiatedFeature() throws Exception {
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv env = new QuorumControllerTestEnv.Builder(clientEnv).build()
+        ) {
+            QuorumController controller = env.activeController(true);
+            long before = committedRetirementRecordCount(clientEnv);
+            var candidate = terminalFixtureRecord(703L, 0L, -1L, 1, Uuid.randomUuid());
+            assertEquals(0, controller.recordUnverifiedCommittedObjectRetirementIntentBatch(
+                List.of(candidate)).get(10, TimeUnit.SECONDS));
+            assertEquals(before, committedRetirementRecordCount(clientEnv));
+        }
+    }
+
+    @Test
+    public void testCommittedObjectIntentCannotBypassUnnegotiatedFeature() throws Exception {
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv env = new QuorumControllerTestEnv.Builder(clientEnv).build()
+        ) {
+            QuorumController controller = env.activeController(true);
+            long before = committedRetirementRecordCount(clientEnv);
+            CommittedObjectRetirementRecord candidate =
+                terminalFixtureRecord(701L, 0L, -1L, 1, Uuid.randomUuid());
+            assertEquals(false, controller.recordUnverifiedCommittedObjectRetirementIntent(candidate)
+                .get(10, TimeUnit.SECONDS));
+            assertEquals(before, committedRetirementRecordCount(clientEnv));
+        }
+    }
+
+    @Test
+    public void testNegotiatedControllerAppendsOnlyFirstNonAuthorizingIntent() throws Exception {
+        BootstrapMetadata experimental = BootstrapMetadata.fromVersion(
+            MetadataVersion.IBP_4_4_IV0, "experimental first retirement intent fixture"
+        ).copyWithFeatureRecord(PartitionRetirementAuthorityVersion.FEATURE_NAME, (short) 1);
+        try (MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build()) {
+            clientEnv.appendInitialRecords(List.of(
+                new ApiMessageAndVersion(new FeatureLevelRecord()
+                    .setName(MetadataVersion.FEATURE_NAME)
+                    .setFeatureLevel(MetadataVersion.IBP_4_4_IV0.featureLevel()), (short) 0),
+                new ApiMessageAndVersion(new FeatureLevelRecord()
+                    .setName(PartitionRetirementAuthorityVersion.FEATURE_NAME)
+                    .setFeatureLevel((short) 1), (short) 0)
+            ));
+            try (QuorumControllerTestEnv env = new QuorumControllerTestEnv.Builder(clientEnv)
+                .setBootstrapMetadata(experimental).build()) {
+                QuorumController controller = env.activeController(true);
+                long before = committedRetirementRecordCount(clientEnv);
+                CommittedObjectRetirementRecord candidate =
+                    terminalFixtureRecord(702L, 0L, -1L, 1, Uuid.randomUuid());
+                CountDownLatch entered = new CountDownLatch(1);
+                CountDownLatch release = new CountDownLatch(1);
+                controller.appendControlEvent("holdBeforeIntentCas", () -> {
+                    entered.countDown();
+                    try {
+                        if (!release.await(10, TimeUnit.SECONDS)) {
+                            throw new AssertionError("Intent event queue gate timed out");
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new RuntimeException(e);
+                    }
+                });
+                CompletableFuture<Boolean> pending;
+                try {
+                    assertTrue(entered.await(10, TimeUnit.SECONDS));
+                    pending = controller.recordUnverifiedCommittedObjectRetirementIntent(candidate);
+                    assertFalse(pending.isDone());
+                    // The caller may modify its mutable record after the
+                    // method returns; queued Controller state must be frozen.
+                    candidate.setDescriptorSha256("f".repeat(64));
+                } finally {
+                    release.countDown();
+                }
+                assertEquals(true, pending.get(10, TimeUnit.SECONDS));
+                assertEquals(before + 1L, committedRetirementRecordCount(clientEnv));
+                // KRaft log position, not the caller's claimed offset, is
+                // the accepted generation. No DELETE_READY is ever emitted.
+                List<ApiMessageAndVersion> records = clientEnv.allRecords();
+                List<Long> offsets = clientEnv.allRecordOffsets();
+                int intents = 0;
+                for (int index = 0; index < records.size(); index++) {
+                    if (records.get(index).message() instanceof CommittedObjectRetirementRecord saved) {
+                        intents++;
+                        assertEquals(702L, saved.objectId());
+                        assertEquals((byte) 1, saved.stage());
+                        assertEquals("0123456789abcdef".repeat(4), saved.descriptorSha256());
+                        assertEquals(-1L, saved.safeEpoch());
+                        assertEquals(offsets.get(index), saved.acceptedKRaftOffset());
+                    }
+                }
+                assertEquals(1, intents);
+                assertEquals(false, controller.recordUnverifiedCommittedObjectRetirementIntent(candidate)
+                    .get(10, TimeUnit.SECONDS));
+                assertEquals(before + 1L, committedRetirementRecordCount(clientEnv));
+            }
+        }
+    }
+
+    @Test
+    public void testTerminalBatchCannotBypassUnnegotiatedFeature() throws Exception {
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv).build()
+        ) {
+            QuorumController controller = controlEnv.activeController();
+            long before = committedRetirementRecordCount(clientEnv);
+            var candidates = java.util.List.of(
+                new CommittedObjectRetirementControlManager.TerminalDeletion(501L, 12L),
+                new CommittedObjectRetirementControlManager.TerminalDeletion(502L, 13L)
+            );
+            assertEquals(0, controller.finalizeRecordedCommittedObjectDeletionBatch(candidates)
+                .get(10, TimeUnit.SECONDS));
+            assertEquals(before, committedRetirementRecordCount(clientEnv));
+        }
+    }
+
+    @Test
+    public void testTerminalObjectRetirementWriterCannotBypassUnnegotiatedFeature() throws Exception {
+        try (
+            MockRaftClientTestEnv clientEnv = new MockRaftClientTestEnv.Builder(1).build();
+            QuorumControllerTestEnv controlEnv = new QuorumControllerTestEnv.Builder(clientEnv).build()
+        ) {
+            QuorumController controller = controlEnv.activeController();
+            long before = committedRetirementRecordCount(clientEnv);
+            assertEquals(false, controller.finalizeRecordedCommittedObjectDeletion(501L, 12L)
+                .get(10, TimeUnit.SECONDS));
+            // Controller bootstrap may legitimately append other metadata:
+            // only a COMMITTED physical-object retirement record is forbidden.
+            assertEquals(before, committedRetirementRecordCount(clientEnv));
         }
     }
 
@@ -632,6 +928,12 @@ public class QuorumControllerTest {
                 .setNativeLogEndOffset(10L)
                 .setWalMutationRevision(12L)
                 .setWalAdmissionRevision(13L));
+    }
+
+    private static long committedRetirementRecordCount(MockRaftClientTestEnv clientEnv) {
+        return clientEnv.allRecords().stream()
+            .filter(record -> record.message() instanceof CommittedObjectRetirementRecord)
+            .count();
     }
 
     private static long retirementAuthorityRecordCount(MockRaftClientTestEnv clientEnv) {

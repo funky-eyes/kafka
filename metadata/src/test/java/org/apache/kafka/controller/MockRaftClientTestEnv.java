@@ -158,6 +158,10 @@ public class MockRaftClientTestEnv implements AutoCloseable {
         return shared.allRecords();
     }
 
+    public List<Long> allRecordOffsets() {
+        return shared.allRecordOffsets();
+    }
+
     /**
      * Append some records to the log. This method is meant to be called before the
      * controllers are started, to simulate a pre-existing metadata log.

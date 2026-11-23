@@ -13,8 +13,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// EXPERIMENTAL / REPLAY ONLY. There is no production writer, catalog handoff
-// authority, distributed safe-epoch attestation, or physical DELETE grant.
+// EXPERIMENTAL / NO PHYSICAL GC AUTHORITY. A package-private Controller writer
+// may finalize already recorded physical deletion (DELETE_RECORDED -> DELETED).
+// There is no production RETIRE_INTENT/DELETE_READY writer, authenticated
+// cross-log catalog handoff, distributed safe-epoch attestation or S3 grant.
 {
   "apiKey": 32,
   "type": "metadata",

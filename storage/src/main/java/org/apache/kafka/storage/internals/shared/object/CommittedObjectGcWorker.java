@@ -18,6 +18,7 @@ package org.apache.kafka.storage.internals.shared.object;
 
 import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
 
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
@@ -57,8 +58,61 @@ final class CommittedObjectGcWorker {
         /** Validate immutable descriptor, generation, ownership and committed KRaft grant again. */
         CompletableFuture<Boolean> stillDeleteReady(DeleteReady candidate);
 
+        /**
+         * Verify an immutable bounded group. A production Controller adapter
+         * may override this with one KRaft snapshot / RPC. The default
+         * reuses independent per-object checks concurrently, with a maximum
+         * fan-out of MAX_DELETE_BATCH. Any failed Future aborts ALL deletes.
+         */
+        default CompletableFuture<List<DeleteReady>> stillDeleteReadyBatch(List<DeleteReady> candidates) {
+            Objects.requireNonNull(candidates, "candidates");
+            if (candidates.size() > MAX_DELETE_BATCH) {
+                return CompletableFuture.failedFuture(new IllegalArgumentException(
+                    "Too many KRaft object retirement candidates for one grant check"));
+            }
+            List<CompletableFuture<Boolean>> checks = new ArrayList<>(candidates.size());
+            for (DeleteReady candidate : candidates) {
+                checks.add(Objects.requireNonNull(stillDeleteReady(candidate), "stillDeleteReady future"));
+            }
+            return CompletableFuture.allOf(checks.toArray(CompletableFuture[]::new))
+                .thenApply(ignored -> {
+                    List<DeleteReady> approved = new ArrayList<>();
+                    for (int index = 0; index < candidates.size(); index++) {
+                        if (Boolean.TRUE.equals(checks.get(index).join())) {
+                            approved.add(candidates.get(index));
+                        }
+                    }
+                    return List.copyOf(approved);
+                });
+        }
+
         /** Complete only after the DELETE_RECORDED KRaft transition has committed. */
         CompletableFuture<Void> recordDeleted(DeleteReady candidate);
+
+        /**
+         * Durably acknowledge a bounded set only AFTER their physical DELETE
+         * batch succeeds. A Controller adapter may override this method with
+         * one atomic KRaft write; until then, preserve the original serial
+         * per-object completion and its retry semantics.
+         *
+         * <p>Failure or an uncertain commit must leave unacknowledged objects
+         * discoverable through durable DELETE_READY on retry. The default may
+         * have committed an earlier prefix; a future adapter must revalidate
+         * each candidate against current KRaft state before retrying.</p>
+         */
+        default CompletableFuture<Void> recordDeletedBatch(List<DeleteReady> candidates) {
+            List<DeleteReady> requested = List.copyOf(Objects.requireNonNull(candidates, "candidates"));
+            if (requested.size() > MAX_DELETE_BATCH) {
+                return CompletableFuture.failedFuture(
+                    new IllegalArgumentException("Unbounded KRaft physical delete completion batch"));
+            }
+            CompletableFuture<Void> recorded = CompletableFuture.completedFuture(null);
+            for (DeleteReady candidate : requested) {
+                recorded = recorded.thenCompose(ignored -> Objects.requireNonNull(
+                    recordDeleted(candidate), "recordDeleted future"));
+            }
+            return recorded;
+        }
     }
 
     record DeleteReady(SharedObjectMetadata descriptor, long retirementGeneration, long readyRecordOffset) {
@@ -116,14 +170,49 @@ final class CommittedObjectGcWorker {
         return pending.thenApply(stats -> stats);
     }
 
+    /**
+     * KRaft grants remain per-object and are revalidated independently.
+     * Only already-fenced, still-authorized objects enter a bulk S3 request.
+     * The KRaft completion records remain durable/retryable; a future
+     * Controller adapter can persist their completion as one atomic batch.
+     */
     private CompletableFuture<SweepStats> deleteCandidates(List<DeleteReady> ready) {
         verifyCandidateBatch(ready);
-        CompletableFuture<SweepStats> result =
-            CompletableFuture.completedFuture(new SweepStats(ready.size(), 0, 0));
-        for (DeleteReady candidate : ready) {
-            result = result.thenCompose(stats -> deleteOne(candidate, stats));
+        List<DeleteReady> locallyDrained = ready.stream()
+            // A local fence is necessary but NEVER a cross-Broker GC grant.
+            .filter(candidate -> localFence.locallyDrainedAfterFence(candidate.objectId()))
+            .toList();
+        return Objects.requireNonNull(
+            authority.stillDeleteReadyBatch(locallyDrained), "stillDeleteReadyBatch future"
+        ).thenCompose(approved -> {
+            // A buggy or stale Controller adapter must not inject a different
+            // descriptor, generation or object that was not locally drained.
+            verifyApprovedSubset(locallyDrained, approved);
+            return deleteApprovedBatch(ready.size(), approved);
+        });
+    }
+
+    static void verifyApprovedSubset(List<DeleteReady> candidates, List<DeleteReady> approved) {
+        Objects.requireNonNull(approved, "approved");
+        Set<DeleteReady> eligible = new HashSet<>(candidates);
+        Set<Long> unique = new HashSet<>();
+        for (DeleteReady candidate : approved) {
+            if (candidate == null || !eligible.contains(candidate) || !unique.add(candidate.objectId())) {
+                throw new IllegalStateException("KRaft authority returned an unverified GC candidate");
+            }
         }
-        return result;
+    }
+
+    private CompletableFuture<SweepStats> deleteApprovedBatch(int observed, List<DeleteReady> approved) {
+        if (approved.isEmpty()) {
+            return CompletableFuture.completedFuture(new SweepStats(observed, observed, 0));
+        }
+        List<Long> ids = approved.stream().map(DeleteReady::objectId).toList();
+        return Objects.requireNonNull(objects.deleteBatch(ids), "ObjectStore DELETE batch future")
+            .thenCompose(ignored -> Objects.requireNonNull(
+                authority.recordDeletedBatch(approved), "recordDeletedBatch future"
+            ).thenApply(done -> new SweepStats(
+                observed, observed - approved.size(), approved.size())));
     }
 
     private static void verifyCandidateBatch(List<DeleteReady> ready) {
@@ -140,27 +229,5 @@ final class CommittedObjectGcWorker {
         }
     }
 
-    private CompletableFuture<SweepStats> deleteOne(DeleteReady candidate, SweepStats stats) {
-        // A local fence is a necessary condition, NEVER a sufficient global
-        // proof of reader quiescence or the absence of late multipart uploads.
-        if (!localFence.locallyDrainedAfterFence(candidate.objectId())) {
-            return CompletableFuture.completedFuture(
-                new SweepStats(stats.observed(), stats.deferred() + 1, stats.deleted())
-            );
-        }
-        return Objects.requireNonNull(authority.stillDeleteReady(candidate), "stillDeleteReady future")
-            .thenCompose(ready -> {
-                if (!Boolean.TRUE.equals(ready)) {
-                    return CompletableFuture.completedFuture(
-                        new SweepStats(stats.observed(), stats.deferred() + 1, stats.deleted())
-                    );
-                }
-                return Objects.requireNonNull(objects.delete(candidate.objectId()), "ObjectStore DELETE future")
-                    .thenCompose(ignored ->
-                        Objects.requireNonNull(authority.recordDeleted(candidate), "recordDeleted future"))
-                    .thenApply(ignored -> new SweepStats(
-                        stats.observed(), stats.deferred(), stats.deleted() + 1
-                    ));
-            });
-    }
+
 }

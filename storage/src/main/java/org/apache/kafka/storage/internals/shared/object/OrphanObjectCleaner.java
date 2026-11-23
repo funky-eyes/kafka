@@ -19,10 +19,15 @@ package org.apache.kafka.storage.internals.shared.object;
 import org.apache.kafka.storage.internals.shared.metadata.ObjectMetadataStore;
 import org.apache.kafka.storage.internals.shared.metadata.RemoteObjectIndex;
 
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Deletes physical objects that are no longer needed by the logical remote read view.
@@ -45,6 +50,10 @@ import java.util.concurrent.CompletableFuture;
  * the authoritative metadata store.</p>
  */
 public final class OrphanObjectCleaner {
+    // Multiple objects are independent after durable per-object CLAIM. Limit
+    // concurrent S3 RPCs and avoid one serialized Future chain per physical ID.
+    private static final int MAX_PARALLEL_OBJECTS = 8;
+    private final Set<Long> inFlightObjects = ConcurrentHashMap.newKeySet();
     private final ObjectStore objectStore;
     private final ObjectMetadataStore metadataStore;
     private final ActiveObjectUploads activeUploads;
@@ -91,9 +100,8 @@ public final class OrphanObjectCleaner {
             preparedCleanupCandidates(cutoffCreatedTimeMs, alreadyClaimed);
 
         CompletableFuture<Integer> result = CompletableFuture.completedFuture(0);
-        result = deleteAlreadyClaimed(result, alreadyClaimed);
-        result = claimAndDeleteCandidates(result, candidates);
-        return result;
+        result = processBatches(result, alreadyClaimed.values(), false);
+        return processBatches(result, candidates.values(), true);
     }
 
     /**
@@ -104,7 +112,7 @@ public final class OrphanObjectCleaner {
      */
     CompletableFuture<Integer> cleanClaimedOnly() {
         Map<Long, ObjectMetadataStore.PreparedObject> alreadyClaimed = alreadyClaimedObjects();
-        return deleteAlreadyClaimed(CompletableFuture.completedFuture(0), alreadyClaimed);
+        return processBatches(CompletableFuture.completedFuture(0), alreadyClaimed.values(), false);
     }
 
     private Map<Long, ObjectMetadataStore.PreparedObject> alreadyClaimedObjects() {
@@ -132,38 +140,74 @@ public final class OrphanObjectCleaner {
         return candidates;
     }
 
-    private CompletableFuture<Integer> deleteAlreadyClaimed(
-        CompletableFuture<Integer> result,
-        Map<Long, ObjectMetadataStore.PreparedObject> alreadyClaimed
+    /**
+     * At most eight objects per pass have an outstanding CLAIM or S3 DELETE.
+     * Claims are independently fenced and async, then all successful claims
+     * are sent in one provider-native deleteBatch call when supported.
+     * A failed bulk response leaves EVERY CLAIM durable and retryable.
+     */
+    private CompletableFuture<Integer> processBatches(
+        CompletableFuture<Integer> previous,
+        Collection<ObjectMetadataStore.PreparedObject> objects,
+        boolean requireClaim
     ) {
-        for (ObjectMetadataStore.PreparedObject claimed : alreadyClaimed.values()) {
-            result = result.thenCompose(count -> deleteClaimed(claimed.objectId()).thenApply(ignored -> count + 1));
+        List<ObjectMetadataStore.PreparedObject> candidates = new ArrayList<>(objects);
+        for (int start = 0; start < candidates.size(); start += MAX_PARALLEL_OBJECTS) {
+            int until = Math.min(start + MAX_PARALLEL_OBJECTS, candidates.size());
+            List<ObjectMetadataStore.PreparedObject> batch = List.copyOf(candidates.subList(start, until));
+            previous = previous.thenCompose(completed -> processBatch(batch, requireClaim)
+                .thenApply(deleted -> completed + deleted));
         }
-        return result;
+        return previous;
     }
 
-    private CompletableFuture<Integer> claimAndDeleteCandidates(
-        CompletableFuture<Integer> result,
-        Map<Long, ObjectMetadataStore.PreparedObject> candidates
+    private CompletableFuture<Integer> processBatch(
+        List<ObjectMetadataStore.PreparedObject> batch, boolean requireClaim
     ) {
-        for (ObjectMetadataStore.PreparedObject candidate : candidates.values()) {
-            result = result.thenCompose(count -> claimAndDelete(candidate).thenApply(deleted -> count + (deleted ? 1 : 0)));
+        List<Long> admitted = new ArrayList<>(batch.size());
+        List<CompletableFuture<Boolean>> authorized = new ArrayList<>(batch.size());
+        for (ObjectMetadataStore.PreparedObject candidate : batch) {
+            if (inFlightObjects.add(candidate.objectId())) {
+                admitted.add(candidate.objectId());
+                authorized.add(authorizeDeletion(candidate, requireClaim));
+            }
         }
-        return result;
+        CompletableFuture<?>[] claims = authorized.toArray(CompletableFuture[]::new);
+        return CompletableFuture.allOf(claims)
+            .thenCompose(ignored -> deleteAuthorizedBatch(admitted, authorized))
+            .whenComplete((ignored, error) -> admitted.forEach(inFlightObjects::remove));
     }
 
-    private CompletableFuture<Boolean> claimAndDelete(ObjectMetadataStore.PreparedObject candidate) {
-        return metadataStore.claimCleanup(candidate.objectId(), candidate.createdTimeMs())
-            .thenCompose(claimed -> {
-                if (!claimed) {
-                    return CompletableFuture.completedFuture(false);
-                }
-                return deleteClaimed(candidate.objectId()).thenApply(ignored -> true);
-            });
+    private CompletableFuture<Boolean> authorizeDeletion(
+        ObjectMetadataStore.PreparedObject candidate, boolean requireClaim
+    ) {
+        if (!requireClaim) {
+            // A persistent, replay-confirmed CLAIM is the S3 delete grant.
+            return CompletableFuture.completedFuture(true);
+        }
+        try {
+            return Objects.requireNonNull(
+                metadataStore.claimCleanup(candidate.objectId(), candidate.createdTimeMs()),
+                "Object metadata claim returned null");
+        } catch (RuntimeException failure) {
+            return CompletableFuture.failedFuture(failure);
+        }
     }
 
-    private CompletableFuture<Void> deleteClaimed(long objectId) {
-        return objectStore.delete(objectId);
+    private CompletableFuture<Integer> deleteAuthorizedBatch(
+        List<Long> admitted, List<CompletableFuture<Boolean>> authorized
+    ) {
+        List<Long> winners = new ArrayList<>(admitted.size());
+        for (int index = 0; index < admitted.size(); index++) {
+            // The allOf barrier has already completed every CLAIM.
+            if (authorized.get(index).join()) {
+                winners.add(admitted.get(index));
+            }
+        }
+        if (winners.isEmpty()) {
+            return CompletableFuture.completedFuture(0);
+        }
+        return objectStore.deleteBatch(winners).thenApply(ignored -> winners.size());
     }
 
 }

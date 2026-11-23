@@ -46,6 +46,7 @@ import org.apache.kafka.storage.internals.shared.kafka.SharedStorageModeMarker
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats
 
 import java.util
+import java.util.function.LongConsumer
 import java.util.stream.Collectors
 
 /**
@@ -165,6 +166,7 @@ class LogManager(logDirs: Seq[File],
 
   @volatile private var unifiedLogFactory: UnifiedLogFactory = UnifiedLogFactory.DEFAULT
   @volatile private var storagePartitionRoleListener: StoragePartitionRoleListener = StoragePartitionRoleListener.NO_OP
+  @volatile private var committedObjectRetirementFence: LongConsumer = (_: Long) => ()
   @volatile private var unifiedLogFactoryFrozen = false
 
   /**
@@ -188,6 +190,21 @@ class LogManager(logDirs: Seq[File],
       throw new IllegalStateException("StoragePartitionRoleListener cannot be changed after log creation has started")
     storagePartitionRoleListener = listener
   }
+
+  /**
+   * Install before the first metadata publish, just like the storage log factory.
+   * The full initial KRaft image must fence retired objects BEFORE log recovery.
+   */
+  def setCommittedObjectRetirementFence(fence: LongConsumer): Unit = this.synchronized {
+    if (fence == null)
+      throw new NullPointerException("fence")
+    if (unifiedLogFactoryFrozen)
+      throw new IllegalStateException("Object retirement fence cannot be replaced after log recovery starts")
+    committedObjectRetirementFence = fence
+  }
+
+  /** Local non-authorizing admission fence; never a physical DELETE grant. */
+  def fenceCommittedObject(objectId: Long): Unit = committedObjectRetirementFence.accept(objectId)
 
   /** Reports completed local role transitions to the optional physical-storage observer. */
   def onLeadershipChange(leaders: util.Collection[TopicIdPartition], followers: util.Collection[TopicIdPartition]): Unit = {

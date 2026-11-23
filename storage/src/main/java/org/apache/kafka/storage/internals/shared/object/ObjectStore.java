@@ -121,6 +121,37 @@ public interface ObjectStore extends AutoCloseable {
 
     CompletableFuture<Void> delete(long objectId);
 
+    /**
+     * Idempotently remove a bounded set of independently cleanup-fenced objects.
+     *
+     * <p>Only the caller can grant deletion authority. The default retains
+     * compatibility with other storage providers by fanning out deletes;
+     * S3 implementations may use one native multi-object API call. A partial
+     * failure MUST fail the whole batch; durable claims let the caller retry
+     * all objects safely without assuming atomic deletion. On provider failure,
+     * the batch waits for all previously returned DELETE futures, including
+     * when a provider throws synchronously while starting a later DELETE.
+     * A provider must return a future for every operation it starts.</p>
+     */
+    default CompletableFuture<Void> deleteBatch(List<Long> objectIds) {
+        List<Long> requested = List.copyOf(Objects.requireNonNull(objectIds, "objectIds"));
+        if (requested.isEmpty()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        List<CompletableFuture<Void>> deletions = new ArrayList<>(requested.size());
+        for (long objectId : requested) {
+            try {
+                deletions.add(Objects.requireNonNull(delete(objectId), "DELETE future"));
+            } catch (RuntimeException failure) {
+                // Already-started operations can outlive a synchronous error.
+                // Wait for them before allowing the caller to retry the batch.
+                deletions.add(CompletableFuture.failedFuture(failure));
+                break;
+            }
+        }
+        return CompletableFuture.allOf(deletions.toArray(CompletableFuture[]::new));
+    }
+
     /** Pull-based ordered object byte source. {@code null} marks end-of-object. */
     interface PartSource extends AutoCloseable {
         ByteBuffer nextPart() throws IOException;

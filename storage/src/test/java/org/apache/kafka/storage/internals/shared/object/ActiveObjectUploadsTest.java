@@ -18,6 +18,8 @@ package org.apache.kafka.storage.internals.shared.object;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -78,6 +80,73 @@ class ActiveObjectUploadsTest {
         assertTrue(uploads.contains(602L));
         newLease.close();
         assertFalse(uploads.contains(602L));
+    }
+
+    @Test
+    void independentObjectIdsAdmitFenceAndDrainWithoutGlobalSerialization() throws Exception {
+        ActiveObjectUploads uploads = new ActiveObjectUploads();
+        int workersCount = 8;
+        int objectsPerWorker = 256;
+        ExecutorService workers = Executors.newFixedThreadPool(workersCount);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<?>> tasks = new ArrayList<>();
+        try {
+            for (int worker = 0; worker < workersCount; worker++) {
+                final int workerId = worker;
+                tasks.add(workers.submit(() -> {
+                    start.await();
+                    for (int index = 0; index < objectsPerWorker; index++) {
+                        long objectId = 10_000L + workerId * objectsPerWorker + index;
+                        ActiveObjectUploads.UploadLease lease = uploads.beginLease(objectId);
+                        assertTrue(uploads.contains(objectId));
+                        uploads.fence(objectId);
+                        assertFalse(uploads.locallyDrainedAfterFence(objectId));
+                        lease.close();
+                        assertFalse(uploads.contains(objectId));
+                        assertTrue(uploads.locallyDrainedAfterFence(objectId));
+                        assertThrows(IllegalStateException.class, () -> uploads.beginLease(objectId));
+                    }
+                    return null;
+                }));
+            }
+            start.countDown();
+            for (Future<?> task : tasks) {
+                task.get(20, TimeUnit.SECONDS);
+            }
+        } finally {
+            start.countDown();
+            workers.shutdownNow();
+        }
+    }
+
+    @Test
+    void legacyEndCannotEraseFenceWhenItRacesWithAdmission() throws Exception {
+        ActiveObjectUploads uploads = new ActiveObjectUploads();
+        long objectId = 20_001L;
+        uploads.begin(objectId);
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            Future<?> ending = workers.submit(() -> {
+                start.await();
+                uploads.end(objectId);
+                return null;
+            });
+            Future<?> fencing = workers.submit(() -> {
+                start.await();
+                uploads.fence(objectId);
+                return null;
+            });
+            start.countDown();
+            ending.get(10, TimeUnit.SECONDS);
+            fencing.get(10, TimeUnit.SECONDS);
+            assertTrue(uploads.locallyDrainedAfterFence(objectId));
+            assertThrows(IllegalStateException.class, () -> uploads.begin(objectId));
+            assertThrows(IllegalStateException.class, () -> uploads.beginLease(objectId));
+        } finally {
+            start.countDown();
+            workers.shutdownNow();
+        }
     }
 
     @Test

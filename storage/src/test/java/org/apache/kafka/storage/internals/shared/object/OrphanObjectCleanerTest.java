@@ -25,12 +25,16 @@ import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -38,6 +42,209 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class OrphanObjectCleanerTest {
+    @Test
+    void durableClaimsAreCombinedIntoS3BulkDeleteRequests() throws Exception {
+        InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
+        List<Integer> batchSizes = new ArrayList<>();
+        CompletableFuture<Void> firstBatch = new CompletableFuture<>();
+        ObjectStore store = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                return CompletableFuture.completedFuture(null);
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long offset, int length) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return CompletableFuture.failedFuture(new AssertionError("Must use batch delete"));
+            }
+
+            @Override
+            public CompletableFuture<Void> deleteBatch(List<Long> objectIds) {
+                batchSizes.add(objectIds.size());
+                return batchSizes.size() == 1 ? firstBatch : CompletableFuture.completedFuture(null);
+            }
+        };
+        for (long objectId = 70_001L; objectId <= 70_010L; objectId++) {
+            metadata.prepare(objectId, 100L).get();
+        }
+        OrphanObjectCleaner cleaner = new OrphanObjectCleaner(store, metadata);
+        CompletableFuture<Integer> cleaning = cleaner.clean(1_000L);
+        assertEquals(List.of(8), batchSizes);
+        assertFalse(cleaning.isDone());
+        firstBatch.complete(null);
+        assertEquals(10, cleaning.get(10, TimeUnit.SECONDS));
+        assertEquals(List.of(8, 2), batchSizes);
+        for (long objectId = 70_001L; objectId <= 70_010L; objectId++) {
+            assertTrue(metadata.isCleanupClaimed(objectId));
+        }
+    }
+
+    @Test
+    void partialS3BulkDeleteFailureRetainsAllClaimsForIdempotentRetry() throws Exception {
+        InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
+        AtomicInteger attempted = new AtomicInteger();
+        ObjectStore store = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                return CompletableFuture.completedFuture(null);
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long offset, int length) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                return CompletableFuture.failedFuture(new AssertionError("Must use batch delete"));
+            }
+
+            @Override
+            public CompletableFuture<Void> deleteBatch(List<Long> objectIds) {
+                assertEquals(2, objectIds.size());
+                if (attempted.incrementAndGet() == 1) {
+                    return CompletableFuture.failedFuture(
+                        new IllegalStateException("Some keys were not deleted"));
+                }
+                return CompletableFuture.completedFuture(null);
+            }
+        };
+        metadata.prepare(80_001L, 100L).get();
+        metadata.prepare(80_002L, 101L).get();
+        OrphanObjectCleaner cleaner = new OrphanObjectCleaner(store, metadata);
+        ExecutionException failed = assertThrows(ExecutionException.class,
+            () -> cleaner.clean(1_000L).get(10, TimeUnit.SECONDS));
+        assertTrue(failed.getCause().getMessage().contains("not deleted"));
+        assertTrue(metadata.isCleanupClaimed(80_001L));
+        assertTrue(metadata.isCleanupClaimed(80_002L));
+        assertEquals(2, cleaner.clean(1_000L).get(10, TimeUnit.SECONDS));
+        assertEquals(2, attempted.get());
+    }
+
+    @Test
+    void orphanGcRunsIndependentDeletesInBoundedParallelBatches() throws Exception {
+        InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
+        Map<Long, CompletableFuture<Void>> pending = new ConcurrentHashMap<>();
+        AtomicInteger active = new AtomicInteger();
+        AtomicInteger maximum = new AtomicInteger();
+        ObjectStore controlled = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long objectId, ByteBuffer data) {
+                return CompletableFuture.completedFuture(null);
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long objectId, long position, int length) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long objectId) {
+                CompletableFuture<Void> gate = new CompletableFuture<>();
+                maximum.accumulateAndGet(active.incrementAndGet(), Math::max);
+                pending.put(objectId, gate);
+                return gate.whenComplete((ignored, error) -> active.decrementAndGet());
+            }
+        };
+        for (int index = 1; index <= 12; index++) {
+            metadata.prepare(50_000L + index, 100L).get();
+        }
+        OrphanObjectCleaner cleaner = new OrphanObjectCleaner(controlled, metadata);
+        CompletableFuture<Integer> cleanup = cleaner.clean(1_000L);
+        assertEquals(8, pending.size(), "A large batch must not issue unbounded S3 deletes");
+        assertEquals(8, active.get());
+        assertFalse(cleanup.isDone());
+
+        List<CompletableFuture<Void>> firstBatch = List.copyOf(pending.values());
+        firstBatch.forEach(gate -> gate.complete(null));
+        assertEquals(12, pending.size(), "The next batch starts only after the first has drained");
+        assertTrue(maximum.get() <= 8);
+        for (CompletableFuture<Void> gate : pending.values()) {
+            gate.complete(null);
+        }
+        assertEquals(12, cleanup.get(10, TimeUnit.SECONDS));
+        assertEquals(0, active.get());
+    }
+
+    @Test
+    void overlappingCleanupPassesNeverDeleteSamePhysicalIdTwice() throws Exception {
+        InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
+        long objectId = 60_001L;
+        metadata.prepare(objectId, 50L).get();
+        AtomicInteger deletes = new AtomicInteger();
+        CompletableFuture<Void> gate = new CompletableFuture<>();
+        ObjectStore controlled = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long id, ByteBuffer data) {
+                return CompletableFuture.completedFuture(null);
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long id, long position, int length) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long id) {
+                deletes.incrementAndGet();
+                return gate;
+            }
+        };
+        OrphanObjectCleaner cleaner = new OrphanObjectCleaner(controlled, metadata);
+        CompletableFuture<Integer> first = cleaner.clean(1_000L);
+        CompletableFuture<Integer> overlapping = cleaner.clean(1_000L);
+        assertEquals(1, deletes.get());
+        assertEquals(0, overlapping.get(10, TimeUnit.SECONDS));
+        gate.complete(null);
+        assertEquals(1, first.get(10, TimeUnit.SECONDS));
+        assertEquals(1, deletes.get());
+    }
+
+    @Test
+    void synchronousBatchFailureKeepsOrphanIdsInFlightUntilEarlierDeleteCompletes() throws Exception {
+        InMemoryObjectMetadataStore metadata = new InMemoryObjectMetadataStore();
+        metadata.prepare(60_101L, 50L).get();
+        metadata.prepare(60_102L, 50L).get();
+        CompletableFuture<Void> firstDelete = new CompletableFuture<>();
+        AtomicBoolean failSecond = new AtomicBoolean(true);
+        AtomicInteger attempts = new AtomicInteger();
+        ObjectStore store = new ObjectStore() {
+            @Override
+            public CompletableFuture<Void> put(long id, ByteBuffer data) {
+                return CompletableFuture.completedFuture(null);
+            }
+
+            @Override
+            public CompletableFuture<ByteBuffer> rangeRead(long id, long position, int length) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletableFuture<Void> delete(long id) {
+                attempts.incrementAndGet();
+                if (id == 60_102L && failSecond.get()) {
+                    throw new IllegalStateException("injected synchronous DELETE failure");
+                }
+                return id == 60_101L ? firstDelete : CompletableFuture.completedFuture(null);
+            }
+        };
+        OrphanObjectCleaner cleaner = new OrphanObjectCleaner(store, metadata);
+        CompletableFuture<Integer> pending = cleaner.clean(1_000L);
+        assertFalse(pending.isDone());
+        assertEquals(0, cleaner.clean(1_000L).get(10, TimeUnit.SECONDS));
+        assertEquals(2, attempts.get());
+        failSecond.set(false);
+        firstDelete.complete(null);
+        assertThrows(ExecutionException.class, () -> pending.get(10, TimeUnit.SECONDS));
+        assertEquals(2, cleaner.clean(1_000L).get(10, TimeUnit.SECONDS));
+        assertEquals(4, attempts.get());
+    }
+
     @Test
     void committedObjectIsNeverClaimedOrDeleted() throws Exception {
         InMemoryObjectStore objects = new InMemoryObjectStore();
