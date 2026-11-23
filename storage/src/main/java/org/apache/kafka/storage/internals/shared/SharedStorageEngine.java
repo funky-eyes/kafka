@@ -428,18 +428,21 @@ public final class SharedStorageEngine implements AutoCloseable {
             local.reusableSingleBatch());
     }
 
-    private record StoredReadSelection(long firstOffset, List<StoredBatchMetadata> batches, int bytes,
+    private record SelectedBatch(long firstOffset, long lastOffset, int leaderEpoch, int payloadLength,
+                                 WalLocation local) { }
+
+    private record StoredReadSelection(long firstOffset, List<SelectedBatch> batches, int bytes,
                                        boolean firstBatchIncomplete) { }
 
     private StoredReadSelection selectStoredBatches(SharedPartitionId partition, long startOffset,
                                                      int maxBytes, boolean minOneBatch) {
         if (startOffset == Long.MAX_VALUE) return new StoredReadSelection(startOffset, List.of(), 0, false);
-        List<StoredBatchMetadata> selected = new ArrayList<>();
+        List<SelectedBatch> selected = new ArrayList<>();
         int selectedBytes = 0;
         long firstBatchOffset = startOffset;
         synchronized (walMaintenanceLock) {
             var cursor = new StoredBatchCursor(partition, startOffset);
-            StoredBatchMetadata metadata;
+            SelectedBatch metadata;
             while ((metadata = cursor.next()) != null) {
                 if (metadata.lastOffset() < startOffset) continue;
                 if (metadata.firstOffset() == Long.MAX_VALUE) break;
@@ -473,7 +476,7 @@ public final class SharedStorageEngine implements AutoCloseable {
             this.remote = nextRemote();
         }
 
-        StoredBatchMetadata next() {
+        SelectedBatch next() {
             if (local == null && remote == null) return null;
             long localStart = local == null ? Long.MAX_VALUE : local.firstOffset();
             long remoteStart = remote == null ? Long.MAX_VALUE : remote.range().offsets().startOffset();
@@ -482,14 +485,14 @@ public final class SharedStorageEngine implements AutoCloseable {
                 local = nextLocal();
                 if (remote != null && remoteStart == localStart)
                     remote = nextRemote();
-                return new StoredBatchMetadata(current.firstOffset(), current.lastOffset(),
-                    current.leaderEpoch(), current.payloadLength(), true);
+                return new SelectedBatch(current.firstOffset(), current.lastOffset(),
+                    current.leaderEpoch(), current.payloadLength(), current);
             }
             var current = remote;
             remote = nextRemote();
             var range = current.range();
-            return new StoredBatchMetadata(range.offsets().startOffset(), range.offsets().endOffset() - 1,
-                range.leaderEpoch(), range.objectLength(), false);
+            return new SelectedBatch(range.offsets().startOffset(), range.offsets().endOffset() - 1,
+                range.leaderEpoch(), range.objectLength(), null);
         }
 
         private WalLocation nextLocal() {
@@ -511,7 +514,7 @@ public final class SharedStorageEngine implements AutoCloseable {
 
     private record LocalBatchRead(List<ByteBuffer> payloads, boolean reusableSingleBatch) { }
 
-    private LocalBatchRead readSelectedLocalBatches(SharedPartitionId partition, List<StoredBatchMetadata> selected)
+    private LocalBatchRead readSelectedLocalBatches(SharedPartitionId partition, List<SelectedBatch> selected)
         throws IOException {
         List<ByteBuffer> payloads = new ArrayList<>(java.util.Collections.nCopies(selected.size(), null));
         List<WalLocation> locations = new ArrayList<>();
@@ -519,8 +522,14 @@ public final class SharedStorageEngine implements AutoCloseable {
         boolean reusableSingleBatch = false;
         synchronized (walMaintenanceLock) {
             for (int i = 0; i < selected.size(); i++) {
-                Optional<WalLocation> location = walIndex.find(walKey(partition), selected.get(i).firstOffset());
+                SelectedBatch metadata = selected.get(i);
+                if (metadata.local() == null) continue;
+                Optional<WalLocation> location = walIndex.find(walKey(partition), metadata.firstOffset());
                 if (location.isPresent()) {
+                    WalLocation current = location.get();
+                    if (!current.equals(metadata.local())) {
+                        throw new WalCorruptionException("Local batch changed after selection at offset " + metadata.firstOffset());
+                    }
                     locations.add(location.get());
                     localIndexes.add(i);
                 }
@@ -544,15 +553,16 @@ public final class SharedStorageEngine implements AutoCloseable {
         return new LocalBatchRead(payloads, reusableSingleBatch);
     }
 
-    private void resolveRemoteBatches(SharedPartitionId partition, List<StoredBatchMetadata> selected,
+    private void resolveRemoteBatches(SharedPartitionId partition, List<SelectedBatch> selected,
                                       List<ByteBuffer> payloads) throws IOException {
         try (SharedObjectReader.ReadSession session = payloads.contains(null) ? openReadSession() : null) {
             for (int i = 0; i < selected.size(); i++) {
-                StoredBatchMetadata metadata = selected.get(i);
+                SelectedBatch metadata = selected.get(i);
                 ByteBuffer bytes = payloads.get(i);
                 if (bytes == null) {
                     SharedObjectReader reader = remoteReader;
-                    bytes = reader == null ? null : awaitRemote(reader.read(partition, metadata.firstOffset(), session)).orElse(null);
+                    bytes = reader == null ? null : awaitRemote(reader.readExact(partition, metadata.firstOffset(),
+                        metadata.lastOffset(), metadata.leaderEpoch(), metadata.payloadLength(), session)).orElse(null);
                 }
                 if (bytes == null) {
                     throw new IOException("Shared batch payload is unavailable from both WAL and remote storage at offset " +

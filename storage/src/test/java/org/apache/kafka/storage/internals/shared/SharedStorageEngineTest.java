@@ -37,6 +37,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -549,6 +550,25 @@ class SharedStorageEngineTest {
             backend.afterNextRead(() -> engine.truncate(PARTITION, 8, 100).join());
             assertThrows(WalCorruptionException.class, () -> engine.readBatches(PARTITION, 100, 1024, true));
             assertTrue(engine.readLocal(PARTITION, 100).isEmpty());
+        }
+    }
+
+    @Test
+    void selectedLocalBatchCannotBeReplacedAtSameOffsetsEpochAndLength() throws Exception {
+        try (SharedStorageEngine engine = engine("selected-local-replaced")) {
+            append(engine, 100, 109, 1);
+            var select = SharedStorageEngine.class.getDeclaredMethod("selectStoredBatches",
+                SharedPartitionId.class, long.class, int.class, boolean.class);
+            select.setAccessible(true);
+            Object selection = select.invoke(engine, PARTITION, 100L, 1, false);
+            var batches = selection.getClass().getDeclaredMethod("batches");
+            batches.setAccessible(true);
+            List<?> selected = (List<?>) batches.invoke(selection);
+            append(engine, 100, 109, 2);
+            var read = SharedStorageEngine.class.getDeclaredMethod("readSelectedLocalBatches", SharedPartitionId.class, List.class);
+            read.setAccessible(true);
+            var failure = assertThrows(InvocationTargetException.class, () -> read.invoke(engine, PARTITION, selected));
+            assertTrue(failure.getCause() instanceof WalCorruptionException);
         }
     }
 

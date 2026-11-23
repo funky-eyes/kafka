@@ -209,8 +209,32 @@ public final class SharedObjectReader {
         if (reference.isEmpty()) {
             return CompletableFuture.completedFuture(Optional.empty());
         }
+        return readWithFallback(reference.get(), session);
+    }
 
-        RemoteObjectIndex.RangeReference ref = reference.get();
+    /** Read only the exact logical batch selected by the caller, including its epoch and byte length. */
+    public CompletableFuture<Optional<ByteBuffer>> readExact(SharedPartitionId partition, long firstOffset,
+        long lastOffset, int leaderEpoch, int payloadLength, ReadSession session) {
+        Objects.requireNonNull(partition, "partition");
+        if (session != null) {
+            try {
+                session.requireOpenOwner(this);
+            } catch (IllegalArgumentException | IllegalStateException failure) {
+                return CompletableFuture.failedFuture(failure);
+            }
+        }
+        Optional<RemoteObjectIndex.RangeReference> reference = remoteIndex.find(partition, firstOffset);
+        if (reference.isEmpty()) return CompletableFuture.completedFuture(Optional.empty());
+        SharedObjectRange range = reference.get().range();
+        if (range.offsets().startOffset() != firstOffset || range.offsets().endOffset() - 1 != lastOffset ||
+            range.leaderEpoch() != leaderEpoch || range.objectLength() != payloadLength) {
+            return CompletableFuture.failedFuture(new IOException("Remote batch changed after selection at offset " + firstOffset));
+        }
+        return readWithFallback(reference.get(), session);
+    }
+
+    private CompletableFuture<Optional<ByteBuffer>> readWithFallback(RemoteObjectIndex.RangeReference ref,
+                                                                     ReadSession session) {
         return readReference(ref, session).exceptionallyCompose(firstFailure -> {
             if (unwrapCompletion(firstFailure) instanceof CancellationException) {
                 // Cancellation is a caller/lifecycle signal, not evidence of

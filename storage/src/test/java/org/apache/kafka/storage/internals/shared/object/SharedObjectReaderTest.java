@@ -132,16 +132,34 @@ class SharedObjectReaderTest {
     }
 
     @Test
-    void fetchRejectsInconsistentOverlappingLocalAndRemoteRanges() throws Exception {
+    void fetchDoesNotSubstituteDifferentLocalRangeWithEqualLength() throws Exception {
         PackedObject packed = packObject(1978);
         RecordingObjectStore store = new RecordingObjectStore(packed.metadata().objectId(), packed.bytes());
         try (SharedStorageEngine engine = new SharedStorageEngine(
             new FileSharedWal(tempDir.resolve("overlap-remote-local-fetch"), 1024 * 1024, 4096))) {
             engine.commitRemoteObject(packed.metadata());
             engine.installRemoteReader(new SharedObjectReader(store, engine.remoteIndex(), 0, 0));
-            append(engine, 0, 2, new byte[] {9});
-            assertThrows(IOException.class, () -> engine.readBatches(PARTITION, 3, 5, false));
+            append(engine, 0, 2, new byte[] {9, 8, 7, 6, 5});
+            var result = engine.readBatches(PARTITION, 3, 5, false);
+            assertEquals(0, result.firstBatchOffset());
+            assertEquals(1, result.batches().size());
+            assertArrayEquals(new byte[] {1, 2, 3, 4, 5}, toArray(result.batches().get(0)));
         }
+    }
+
+    @Test
+    void exactRemoteReadRejectsDifferentRangeEpochOrLengthBeforeObjectIo() throws Exception {
+        PackedObject packed = packObject(1977);
+        RecordingObjectStore store = new RecordingObjectStore(packed.metadata().objectId(), packed.bytes());
+        RemoteObjectIndex index = new RemoteObjectIndex();
+        index.add(packed.metadata());
+        SharedObjectReader reader = new SharedObjectReader(store, index, 0, 0);
+        assertThrows(ExecutionException.class, () -> reader.readExact(PARTITION, 0, 3, 8, 5, null).get());
+        assertThrows(ExecutionException.class, () -> reader.readExact(PARTITION, 0, 4, 9, 5, null).get());
+        assertThrows(ExecutionException.class, () -> reader.readExact(PARTITION, 0, 4, 8, 4, null).get());
+        assertTrue(store.reads().isEmpty(), "mismatched metadata must fail before any object read");
+        var valid = reader.readExact(PARTITION, 0, 4, 8, 5, null).get().orElseThrow();
+        assertArrayEquals(new byte[] {1, 2, 3, 4, 5}, toArray(valid));
     }
 
     @Test
@@ -683,6 +701,8 @@ class SharedObjectReaderTest {
 
         assertArrayEquals(new byte[] {1, 2, 3, 4, 5},
             toArray(reader.read(PARTITION, 2L).get(10, TimeUnit.SECONDS).orElseThrow()));
+        assertArrayEquals(new byte[] {1, 2, 3, 4, 5},
+            toArray(reader.readExact(PARTITION, 0L, 4L, 8, 5, null).get(10, TimeUnit.SECONDS).orElseThrow()));
         assertTrue(store.contains(canonical.metadata().objectId()),
             "A corrupted object must not be deleted by read fallback");
     }
