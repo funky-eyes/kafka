@@ -261,24 +261,6 @@ public final class SharedObjectPacker {
             ByteBuffer part = ByteBuffer.allocate(partCapacity);
             while (part.hasRemaining()) {
                 if (currentChunk == null || !currentChunk.hasRemaining()) {
-                    if (stage == Stage.DATA_BLOCKS && nextBlock < plan.blocks.size()) {
-                        DataBlockPlan block = plan.blocks.get(nextBlock);
-                        if (block.serializedBytes() <= part.remaining()) {
-                            // Encode a complete block into the part that owns it.
-                            // Blocks crossing a part boundary use the chunk path below.
-                            ByteBuffer target = part.slice().order(ByteOrder.BIG_ENDIAN);
-                            target.limit(block.serializedBytes());
-                            nextBlock++;
-                            ByteBuffer serialized = serializeBlock(block, target);
-                            if (serialized.remaining() != block.serializedBytes()) {
-                                throw new IOException("KSO2 DataBlock size differs from its upload plan");
-                            }
-                            updateBodyAndObjectChecksums(serialized);
-                            part.position(part.position() + block.serializedBytes());
-                            currentChunk = null;
-                            continue;
-                        }
-                    }
                     currentChunk = nextChunk();
                     if (currentChunk == null) {
                         throw new IOException(
@@ -323,13 +305,12 @@ public final class SharedObjectPacker {
                 return nextChunk();
             }
             DataBlockPlan block = plan.blocks.get(nextBlock++);
-            ByteBuffer serialized = serializeBlock(block,
-                ByteBuffer.allocate(block.serializedBytes()).order(ByteOrder.BIG_ENDIAN));
+            ByteBuffer serialized = serializeBlock(block);
             updateBodyAndObjectChecksums(serialized);
             return serialized;
         }
 
-        private ByteBuffer serializeBlock(DataBlockPlan block, ByteBuffer serialized) throws IOException {
+        private ByteBuffer serializeBlock(DataBlockPlan block) throws IOException {
             List<WalLocation> locations = block.batches().stream()
                 .map(batch -> batch.candidate().location())
                 .toList();
@@ -338,6 +319,7 @@ public final class SharedObjectPacker {
                 throw new IOException("WAL DataBlock read returned an unexpected record count");
             }
 
+            ByteBuffer serialized = ByteBuffer.allocate(block.serializedBytes()).order(ByteOrder.BIG_ENDIAN);
             int dataPosition = StreamObjectFormat.DATA_BLOCK_HEADER_BYTES;
             serialized.position(dataPosition);
             for (int i = 0; i < block.batches().size(); i++) {
