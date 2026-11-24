@@ -17,6 +17,7 @@
 package org.apache.kafka.storage.internals.shared.object;
 
 import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
+import org.apache.kafka.storage.internals.shared.metadata.SharedObjectMetadata;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 import org.apache.kafka.storage.internals.shared.wal.FileSharedWal;
 import org.junit.jupiter.api.Test;
@@ -24,11 +25,14 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
+import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.CRC32C;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -83,6 +87,39 @@ class SharedObjectStreamingPackerTest {
             assertEquals(8, StreamObjectFormat.readIndex(object, footer).size());
             assertEquals(8, packed.metadata().ranges().size());
             assertEquals(packed.metadata().objectChecksum(), crc32c(object));
+        }
+    }
+
+    @Test
+    void objectBytesAndMetadataAreIndependentOfPartBoundaries() throws Exception {
+        try (SharedStorageEngine engine = new SharedStorageEngine(
+            new FileSharedWal(tempDir.resolve("part-boundary-golden"), 1024 * 1024, 4096))) {
+            for (int i = 0; i < 8; i++) {
+                byte[] payload = new byte[40];
+                for (int j = 0; j < payload.length; j++) payload[j] = (byte) (i * 41 + j);
+                engine.appendData(P0, 3, i * 10L, i * 10L + 9, ByteBuffer.wrap(payload))
+                    .get(10, TimeUnit.SECONDS);
+            }
+            var candidates = engine.uploadCandidates(P0, 0, 80);
+            byte[] expected = null;
+            SharedObjectMetadata expectedMetadata = null;
+            for (int partBytes : List.of(96, 128, 136, 256, 4096)) {
+                PackedObject packed = new SharedObjectPacker(80, partBytes).pack(8_001L, candidates, engine);
+                ByteBuffer object = packed.bytes();
+                byte[] bytes = new byte[object.remaining()];
+                object.get(bytes);
+                if (expected == null) {
+                    expected = bytes;
+                    expectedMetadata = packed.metadata();
+                } else {
+                    assertArrayEquals(expected, bytes);
+                    assertEquals(expectedMetadata, packed.metadata());
+                }
+                assertEquals(8, packed.metadata().ranges().size());
+                assertEquals(packed.metadata().objectChecksum(), crc32c(ByteBuffer.wrap(bytes)));
+            }
+            assertEquals("04a73d4ac5808063a3197297ca2136be9f47729b3d917b712ac5aa834122eaef",
+                HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(expected)));
         }
     }
 
