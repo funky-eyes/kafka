@@ -390,17 +390,20 @@ final class BlockRingCheckpoint {
     private State commit(State candidate) throws IOException {
         if (!valid(candidate)) throw new IOException("Invalid ring checkpoint transition");
         try {
+            // All copies describe the same state. Serialize and checksum it
+            // once, while retaining the original write and force ordering.
+            ByteBuffer encoded = encodeSlot(candidate);
             if (layout == Layout.LEGACY) {
                 int first = (int) (candidate.generation() % 3);
-                writeSlot(candidate, first);
+                writeSlot(encoded, first);
                 io.force();
-                writeSlot(candidate, (first + 1) % 3);
+                writeSlot(encoded, (first + 1) % 3);
                 io.force();
             } else {
                 // Leave all three copies of the current generation intact until
                 // every slot in the other bank is written and one force succeeds.
                 int first = bankStart(candidate);
-                for (int slot = first; slot < first + BANK_COPIES; slot++) writeSlot(candidate, slot);
+                for (int slot = first; slot < first + BANK_COPIES; slot++) writeSlot(encoded, slot);
                 io.force();
             }
             current = candidate;
@@ -436,12 +439,20 @@ final class BlockRingCheckpoint {
     }
 
     private void writeSlot(State state, int slot) throws IOException {
+        writeSlot(encodeSlot(state), slot);
+    }
+
+    private ByteBuffer encodeSlot(State state) {
         ByteBuffer data = ByteBuffer.allocate(alignment);
         data.putInt(MAGIC).putInt(layout.version).putInt(alignment).putInt(0).putLong(capacity)
             .putLong(state.generation()).putLong(state.head()).putLong(state.tail())
             .putLong(state.retiredLastGroup()).putLong(state.lastGroup()).putLong(high).putLong(low).putInt(0);
         if (layout == Layout.WINDOWED) data.putLong(state.scanCeiling());
         data.putInt(CRC_OFFSET, checksum(data));
+        return data;
+    }
+
+    private void writeSlot(ByteBuffer data, int slot) throws IOException {
         data.position(0);
         long offset = (long) slot * alignment;
         while (data.hasRemaining()) {

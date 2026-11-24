@@ -36,6 +36,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
@@ -128,6 +129,41 @@ class ParallelBlockWalCorrectnessTest {
         assertReplayByFileSize(path, aio, fileBytes, List.of(0L, 1L, 2L));
         corruptSlots(path, 1, 2);
         assertReplayByFileSize(path, aio, fileBytes, List.of(0L, 1L, 2L));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void checkpointCopiesRemainIdenticalWithPartialWrites(boolean aio) throws Exception {
+        for (var layout : List.of(BlockRingCheckpoint.Layout.LEGACY, BlockRingCheckpoint.Layout.BANKED)) {
+            Path path = dir.resolve("partial-checkpoint-" + layout + "-" + aio);
+            try (var backend = new CountingBackend(aio); var io = backend.create(path)) {
+                io.preallocate(CAPACITY + layout.metadataBytes(ALIGNMENT));
+                var checkpoint = BlockRingCheckpoint.initialize(io, ALIGNMENT, CAPACITY, 7, 8);
+                byte[] initial = Files.readAllBytes(path);
+                backend.maxWriteBytes = 113;
+                backend.countWrites.set(true);
+                backend.countForces.set(true);
+
+                checkpoint.advanceTail(ALIGNMENT, 0);
+
+                byte[] written = Files.readAllBytes(path);
+                int firstNew = layout == BlockRingCheckpoint.Layout.LEGACY ? 2 : 0;
+                int secondNew = layout == BlockRingCheckpoint.Layout.LEGACY ? 0 : 1;
+                int old = layout == BlockRingCheckpoint.Layout.LEGACY ? 1 : 3;
+                byte[] expected = Arrays.copyOfRange(written, firstNew * ALIGNMENT, (firstNew + 1) * ALIGNMENT);
+                assertArrayEquals(expected, Arrays.copyOfRange(written, secondNew * ALIGNMENT,
+                    (secondNew + 1) * ALIGNMENT));
+                if (layout == BlockRingCheckpoint.Layout.BANKED) {
+                    assertArrayEquals(expected, Arrays.copyOfRange(written, 2 * ALIGNMENT, 3 * ALIGNMENT));
+                }
+                assertArrayEquals(Arrays.copyOfRange(initial, old * ALIGNMENT, (old + 1) * ALIGNMENT),
+                    Arrays.copyOfRange(written, old * ALIGNMENT, (old + 1) * ALIGNMENT));
+                assertFalse(Arrays.equals(expected, Arrays.copyOfRange(initial, firstNew * ALIGNMENT,
+                    (firstNew + 1) * ALIGNMENT)));
+                assertTrue(backend.writes.get() > 3, "each copy must handle partial writes");
+                assertEquals(layout == BlockRingCheckpoint.Layout.LEGACY ? 2 : 1, backend.forces.get());
+            }
+        }
     }
 
     @ParameterizedTest
@@ -1971,6 +2007,7 @@ class ParallelBlockWalCorrectnessTest {
         private volatile int failAtRead;
         private volatile long failReadAtPosition = -1;
         private volatile int failAtForce;
+        private volatile int maxWriteBytes;
         private boolean holdFirstForce;
         private final CountDownLatch firstForceEntered = new CountDownLatch(1);
         private final CountDownLatch releaseFirstForce = new CountDownLatch(1);
@@ -2043,7 +2080,13 @@ class ParallelBlockWalCorrectnessTest {
                 public int write(ByteBuffer src, long position) throws IOException {
                     if (countWrites.get() && writes.incrementAndGet() == failAtWrite)
                         throw new IOException("injected WAL write failure");
-                    return handle.write(src, position);
+                    int originalLimit = src.limit();
+                    try {
+                        if (maxWriteBytes > 0) src.limit(Math.min(originalLimit, src.position() + maxWriteBytes));
+                        return handle.write(src, position);
+                    } finally {
+                        src.limit(originalLimit);
+                    }
                 }
 
                 @Override
