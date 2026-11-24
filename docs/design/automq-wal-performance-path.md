@@ -176,6 +176,21 @@ A separate diagnostic run repeated the Kafka workload with the same 2 CPU / 2 Gi
 
 The diagnostic JFR and its printed events are retained under `/home/tdops/kafka-ci-work/active-wal-compare.lCbsm9/rf1-2c2g-profile.k9wwfdp_/`; JFR SHA-256 is `bc910733abcd3c2352e6b622ff35952b34d12144c734d736b285fd002df397d1`. The diagnostic runner exited 0 and deleted its namespace.
 
+### First upload-cache reuse experiment
+
+An experimental change routed the object packer's WAL reads through the existing validated upload-candidate cache path. The focused engine, object-format, object-reader and upload-scheduler suites passed 85 tests, including cache-hit, WAL-fence and truncated-candidate cases. In a separate 2 CPU / 2 GiB single-Broker comparison, fresh runs were ordered baseline, experiment, experiment, baseline using the same workload and fixture described above. Each run validated all live and replayed records, uploaded objects and exercised the early-ACK path.
+
+| Run | Produce rounds (records/s) | Median produce (records/s) | Median round p99 ACK (ms) | Median round live-read p99 (ms) | Median replay (records/s) |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Baseline 1 | 54,888.36; 78,892.69; 83,713.86 | 78,892.69 | 1,859.902 | 17,800.427 | 36,765.12 |
+| Experiment 1 | 59,322.76; 75,652.70; 83,702.87 | 75,652.70 | 2,050.289 | 17,299.561 | 37,875.34 |
+| Experiment 2 | 53,034.24; 77,030.56; 85,309.41 | 77,030.56 | 1,996.435 | 17,382.484 | 37,599.27 |
+| Baseline 2 | 56,353.69; 80,547.90; 81,257.57 | 80,547.90 | 2,132.527 | 17,695.308 | 37,832.41 |
+
+The experiment's median Produce rates were 4.1% and 4.4% below the corresponding baseline medians. Replay changed by +3.0% and -0.6%; median round p99 ACK moved in opposite directions. This is not evidence of a stable speedup or proof of the regression's cause. Whole-run cache hits / misses / evictions were 265 / 226 / 19,240 and 190 / 256 / 19,170 for the baselines, versus 5,847 / 27,965 / 39,060 and 6,209 / 27,750 / 38,382 for the experiments. These counters cover the entire workload, not uploads alone. They show substantial extra cache activity, including cold-read insertion and eviction; they do not quantify each operation's cost. Given the user's performance-first requirement, the direct reuse change was withdrawn rather than accepted on the strength of a passing correctness suite.
+
+The tested baseline and experiment storage JAR SHA-256 values were `88922f645e69016ad0e21528e7eefd8b51205ec5d152e9f35b3343a316d3c2eb` and `a9e5c5045fbc8bc72be898b1d5e91a546a8c0d98c83b223a77a82b6d89800629`. Their contents differed in the changed packer class and generated Kafka version metadata. The remote directory `/home/tdops/kafka-ci-work/active-wal-compare.lCbsm9/rf1-upload-reuse.l8jwsah0/` retains the experimental patch, raw measurements, Pod manifests, checksums, resource observations and JMX counters; its runner exited 0 and removed the namespace.
+
 ## Streaming upload part serialization
 
 The previously captured RF1 JFR showed allocations for both `SharedObjectPacker` DataBlocks and the upload part that receives them. AutoMQ's `ObjectWriter` assembles already encoded DataBlocks as components of an upload part. Candidate `3a18ea55ad` adapted the idea to this implementation's contiguous `ByteBuffer` interface: when a complete DataBlock fit in the current part, it was serialized directly into a bounded slice of that part; a block crossing a part boundary retained the previous temporary-chunk path. WAL reads, object format, metadata and CRC calculation remained in place. This production change was subsequently withdrawn after the RF1 comparisons below.
