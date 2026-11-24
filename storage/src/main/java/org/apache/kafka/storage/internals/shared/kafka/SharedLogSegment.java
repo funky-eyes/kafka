@@ -42,6 +42,7 @@ import org.apache.kafka.storage.internals.log.TimestampOffset;
 import org.apache.kafka.storage.internals.log.TransactionIndex;
 import org.apache.kafka.storage.internals.shared.SharedStorageEngine;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
+import org.apache.kafka.storage.internals.shared.wal.WalCapacityExceededException;
 import org.apache.kafka.storage.internals.shared.wal.WalLocation;
 
 import java.io.File;
@@ -57,6 +58,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentNavigableMap;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.ExecutionException;
@@ -213,26 +215,29 @@ public final class SharedLogSegment extends LogSegment {
             tracker.reserve(generation, firstOffset, endOffset, records.sizeInBytes());
         storage.recordTrackedAppend();
         SharedAppendScope scope = SharedAppendScope.current();
-        if (scope != null) {
-            scope.markReserved();
-        }
         CompletableFuture<Void> materializedAndDurable = new CompletableFuture<>();
         CompletableFuture<Void> published = scope == null ? CompletableFuture.completedFuture(null) : scope.published();
         reservation.bind(materializedAndDurable, published);
         CompletableFuture<List<WalLocation>> walFuture = null;
+        boolean cancelledUnadmitted = false;
         try {
             var submission = group.isEmpty()
                 ? new SharedStorageEngine.OwnedBatchSubmission(CompletableFuture.completedFuture(null),
                     CompletableFuture.completedFuture(List.of()))
                 : storage.submitOwnedBatchGroup(partition, group);
             walFuture = submission.durable();
-            if (scope != null) scope.bindWalReservation(submission.reserved());
+            WalCapacityExceededException rejected = unadmittedCapacityFailure(submission.reserved());
+            if (rejected != null && tracker.cancelUnadmittedTail(reservation, rejected)) {
+                cancelledUnadmitted = true;
+                throw rejected;
+            }
+            markWalReservation(scope, submission.reserved());
             if (walFuture.isDone()) {
                 await(walFuture);
             }
             materializeLogicalMetadata(serialized);
         } catch (IOException | RuntimeException | Error failure) {
-            tracker.fence(failure);
+            if (!cancelledUnadmitted) tracker.fence(failure);
             if (walFuture == null) {
                 materializedAndDurable.completeExceptionally(failure);
             } else {
@@ -248,6 +253,25 @@ public final class SharedLogSegment extends LogSegment {
             }
         });
         return reservation.confirmed();
+    }
+
+    private static WalCapacityExceededException unadmittedCapacityFailure(CompletableFuture<Void> reserved) {
+        if (!reserved.isCompletedExceptionally()) return null;
+        try {
+            reserved.join();
+        } catch (CompletionException error) {
+            Throwable cause = error;
+            while (cause instanceof CompletionException && cause.getCause() != null) cause = cause.getCause();
+            if (cause instanceof WalCapacityExceededException capacity) return capacity;
+        }
+        return null;
+    }
+
+    private static void markWalReservation(SharedAppendScope scope, CompletableFuture<Void> reserved) {
+        if (scope != null) {
+            scope.markReserved();
+            scope.bindWalReservation(reserved);
+        }
     }
 
     private List<SharedStorageEngine.OwnedDataBatch> batchesRequiringWal(

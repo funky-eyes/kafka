@@ -75,13 +75,34 @@ final class PartitionDurableOffsetTracker {
             outstandingBytes > maxOutstandingBytes - admittedBytes) {
             throw new WalCapacityExceededException("partition durability admission limit reached");
         }
-        Reservation reservation = new Reservation(this, generation, endOffset, admittedBytes);
+        Reservation reservation = new Reservation(this, generation, firstOffset, endOffset, admittedBytes);
         outstandingGroups++;
         inFlightWrites++;
         outstandingBytes += admittedBytes;
         pending.addLast(reservation);
         reservedOffset = endOffset;
         return reservation;
+    }
+
+    /** Undo only an unadmitted tail while the caller still owns the Kafka log append lock. */
+    boolean cancelUnadmittedTail(Reservation reservation, Throwable reason) {
+        Objects.requireNonNull(reason, "reason");
+        synchronized (this) {
+            if (failure != null || reservation.owner != this || reservation.generation != generation ||
+                pending.peekLast() != reservation || !reservation.pending || reservation.walSettled) {
+                return false;
+            }
+            pending.removeLast();
+            reservation.pending = false;
+            reservation.walSettled = true;
+            reservedOffset = reservation.firstOffset;
+            inFlightWrites--;
+            outstandingGroups--;
+            outstandingBytes -= reservation.admittedBytes;
+            notifyAll();
+        }
+        reservation.confirmed.completeExceptionally(reason);
+        return true;
     }
 
     synchronized long confirmedOffset() {
@@ -297,6 +318,7 @@ final class PartitionDurableOffsetTracker {
     static final class Reservation {
         private final PartitionDurableOffsetTracker owner;
         private final long generation;
+        private final long firstOffset;
         private final long endOffset;
         private final long admittedBytes;
         private final AtomicBoolean bound = new AtomicBoolean();
@@ -306,9 +328,11 @@ final class PartitionDurableOffsetTracker {
         private boolean publicationSettled;
         private boolean pending = true;
 
-        private Reservation(PartitionDurableOffsetTracker owner, long generation, long endOffset, long admittedBytes) {
+        private Reservation(PartitionDurableOffsetTracker owner, long generation, long firstOffset,
+                            long endOffset, long admittedBytes) {
             this.owner = owner;
             this.generation = generation;
+            this.firstOffset = firstOffset;
             this.endOffset = endOffset;
             this.admittedBytes = admittedBytes;
         }

@@ -36,6 +36,34 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PartitionDurableOffsetTrackerTest {
     @Test
+    void cancellingOnlyTheUnadmittedTailPreservesPriorReservationsAndAccounting() {
+        var tracker = new PartitionDurableOffsetTracker(1L, 0L, Runnable::run, 2, 2L);
+        var first = tracker.reserve(1L, 0L, 1L, 1L);
+        var tail = tracker.reserve(1L, 1L, 2L, 1L);
+        var firstWal = new CompletableFuture<Void>();
+        var rejectedWal = new CompletableFuture<Void>();
+        first.bind(firstWal);
+        tail.bind(rejectedWal);
+        var rejection = new WalCapacityExceededException("busy");
+
+        assertFalse(tracker.cancelUnadmittedTail(first, rejection));
+        assertTrue(tracker.cancelUnadmittedTail(tail, rejection));
+        assertFalse(tracker.cancelUnadmittedTail(tail, rejection));
+        assertEquals(1, tracker.inFlightWrites());
+        assertThrows(CompletionException.class, () -> tail.confirmed().join());
+        var retry = tracker.reserve(1L, 1L, 2L, 1L);
+        var retryWal = new CompletableFuture<Void>();
+        retry.bind(retryWal);
+        rejectedWal.completeExceptionally(rejection);
+        retryWal.complete(null);
+        assertFalse(retry.confirmed().isDone());
+        firstWal.complete(null);
+        assertEquals(2L, tracker.confirmedOffset());
+        retry.confirmed().join();
+        assertEquals(0, tracker.inFlightWrites());
+    }
+
+    @Test
     void publishesOnlyTheContiguousDurableReservationPrefix() {
         PartitionDurableOffsetTracker tracker = new PartitionDurableOffsetTracker(1L, 10L, Runnable::run, 10, 100L);
         var first = tracker.reserve(1L, 10L, 12L, 1L);

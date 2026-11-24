@@ -38,12 +38,14 @@ import org.apache.kafka.storage.internals.shared.metadata.SharedObjectRange;
 import org.apache.kafka.storage.internals.shared.metadata.SharedPartitionId;
 import org.apache.kafka.storage.internals.shared.wal.CoordinatedRingWalAdapter;
 import org.apache.kafka.storage.internals.shared.wal.ParallelWalTestInspector;
+import org.apache.kafka.storage.internals.shared.wal.WalCapacityExceededException;
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.Properties;
@@ -55,6 +57,7 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -190,6 +193,108 @@ class SharedUnifiedLogTrackedAppendTest {
                 log.close();
             }
         } finally {
+            stats.close();
+        }
+    }
+
+    @Test
+    void rejectedWalAdmissionDoesNotFenceEarlierAcceptedAppend() throws Exception {
+        var backend = new TrackedWalTestBackend(false, 0);
+        Uuid topicId = Uuid.randomUuid();
+        var partition = new SharedPartitionId(topicId.getMostSignificantBits(), topicId.getLeastSignificantBits(), 0);
+        MockTime time = new MockTime();
+        BrokerTopicStats stats = new BrokerTopicStats(false);
+        var wal = CoordinatedRingWalAdapter.create(tempDir.resolve("admission-pressure-wal"), backend,
+            65536L, 4096, 1_000_000L, 1, 8192L);
+        try (SharedStorageEngine engine = new SharedStorageEngine(wal)) {
+            Path dir = tempDir.resolve("admission-pressure-0");
+            var failureChannel = new LogDirFailureChannel(10);
+            var context = new UnifiedLogCreationContext(dir.toFile(), new LogConfig(new Properties()), 0L, 0L,
+                time.scheduler, stats, time, 3600000, new ProducerStateManagerConfig(3600000, false),
+                600000, failureChannel, true, Optional.of(topicId), new ConcurrentHashMap<>(),
+                false, LogOffsetsListener.NO_OP_OFFSETS_LISTENER);
+            SharedUnifiedLog log = (SharedUnifiedLog) new SharedUnifiedLogFactory(engine).create(context);
+            log.enableExperimentalAsyncAppend(partition, 8, 8192L);
+            try {
+                backend.arm();
+                MemoryRecords records = MemoryRecords.withRecords(0L, Compression.NONE, 3,
+                    new SimpleRecord(1L, new byte[24]));
+                var first = log.submitAsLeader(records, 3, AppendOrigin.CLIENT, RequestLocal.noCaching(),
+                    VerificationGuard.SENTINEL, (short) 0);
+                first.admitted().get(10, TimeUnit.SECONDS);
+                assertTrue(backend.forceEntered.await(10, TimeUnit.SECONDS));
+                assertThrows(WalCapacityExceededException.class, () -> log.submitAsLeader(
+                    MemoryRecords.withRecords(0L, Compression.NONE, 3, new SimpleRecord(2L, new byte[24])),
+                    3, AppendOrigin.CLIENT, RequestLocal.noCaching(), VerificationGuard.SENTINEL, (short) 0));
+                assertFalse(first.confirmed().isDone(), "rejected admission must not fence an accepted append");
+                backend.forceRelease.countDown();
+                assertEquals(0L, first.confirmed().get(10, TimeUnit.SECONDS).firstOffset());
+                var retry = log.submitAsLeader(
+                    MemoryRecords.withRecords(0L, Compression.NONE, 3, new SimpleRecord(3L, new byte[24])),
+                    3, AppendOrigin.CLIENT, RequestLocal.noCaching(), VerificationGuard.SENTINEL, (short) 0);
+                assertEquals(1L, retry.confirmed().get(10, TimeUnit.SECONDS).firstOffset());
+                assertFalse(failureChannel.hasOfflineLogDir(log.parentDir()));
+            } finally {
+                backend.forceRelease.countDown();
+                log.close();
+            }
+        } finally {
+            backend.forceRelease.countDown();
+            stats.close();
+        }
+    }
+
+    @Test
+    void saturatedRingWriterRejectsOnlyTheNewAppendAndRecovers() throws Exception {
+        var backend = new TrackedWalTestBackend(false, 0);
+        Uuid topicId = Uuid.randomUuid();
+        var partition = new SharedPartitionId(topicId.getMostSignificantBits(), topicId.getLeastSignificantBits(), 0);
+        MockTime time = new MockTime();
+        BrokerTopicStats stats = new BrokerTopicStats(false);
+        var wal = CoordinatedRingWalAdapter.create(tempDir.resolve("writer-busy-wal"), backend,
+            2L * 1024 * 1024, 4096, 0, 256, 2L * 1024 * 1024);
+        try (SharedStorageEngine engine = new SharedStorageEngine(wal)) {
+            Path dir = tempDir.resolve("writer-busy-0");
+            var failureChannel = new LogDirFailureChannel(10);
+            var context = new UnifiedLogCreationContext(dir.toFile(), new LogConfig(new Properties()), 0L, 0L,
+                time.scheduler, stats, time, 3600000, new ProducerStateManagerConfig(3600000, false),
+                600000, failureChannel, true, Optional.of(topicId), new ConcurrentHashMap<>(),
+                false, LogOffsetsListener.NO_OP_OFFSETS_LISTENER);
+            SharedUnifiedLog log = (SharedUnifiedLog) new SharedUnifiedLogFactory(engine).create(context);
+            log.enableExperimentalAsyncAppend(partition, 256, 2L * 1024 * 1024);
+            try {
+                backend.arm();
+                var accepted = new ArrayList<SharedUnifiedLog.SubmittedAppend>();
+                WalCapacityExceededException rejection = null;
+                for (int i = 0; i < 140; i++) {
+                    try {
+                        var submitted = log.submitAsLeader(
+                            MemoryRecords.withRecords(0L, Compression.NONE, 3, new SimpleRecord(i, new byte[3000])),
+                            3, AppendOrigin.CLIENT, RequestLocal.noCaching(), VerificationGuard.SENTINEL, (short) 0);
+                        submitted.admitted().get(10, TimeUnit.SECONDS);
+                        accepted.add(submitted);
+                    } catch (WalCapacityExceededException busy) {
+                        rejection = busy;
+                        break;
+                    }
+                }
+                assertNotNull(rejection, "the bounded writer must reject while its force is held");
+                assertTrue(rejection.getMessage().contains("Ring writer busy"));
+                assertTrue(backend.forceEntered.await(10, TimeUnit.SECONDS));
+                assertFalse(accepted.get(0).confirmed().isDone());
+                backend.forceRelease.countDown();
+                for (var submitted : accepted) submitted.confirmed().get(30, TimeUnit.SECONDS);
+                var retry = log.submitAsLeader(
+                    MemoryRecords.withRecords(0L, Compression.NONE, 3, new SimpleRecord(999L, new byte[3000])),
+                    3, AppendOrigin.CLIENT, RequestLocal.noCaching(), VerificationGuard.SENTINEL, (short) 0);
+                assertEquals(accepted.size(), retry.confirmed().get(30, TimeUnit.SECONDS).firstOffset());
+                assertFalse(failureChannel.hasOfflineLogDir(log.parentDir()));
+            } finally {
+                backend.forceRelease.countDown();
+                log.close();
+            }
+        } finally {
+            backend.forceRelease.countDown();
             stats.close();
         }
     }
